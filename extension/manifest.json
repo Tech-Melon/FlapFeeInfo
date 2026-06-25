@@ -18,7 +18,6 @@
       "128": "icons/flap-128.png"
     }
   },
-  "permissions": ["storage"],
   "host_permissions": ["https://flap-fee-info.tech-melon.workers.dev/*"],
   "content_scripts": [
     {
@@ -27,6 +26,5 @@
       "css": ["style.css"],
       "run_at": "document_idle"
     }
-  ],
-  "options_page": "options.html"
+  ]
 }

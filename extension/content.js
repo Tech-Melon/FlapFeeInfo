@@ -31,7 +31,6 @@
   let batchActive = false;
   let scanScheduled = false;
   let lastScanAt = 0;
-  let apiBasePromise = null;
 
   function createSiteStrategy() {
     if (location.hostname.endsWith("gmgn.ai")) return createGmgnStrategy();
@@ -259,21 +258,6 @@
     scheduleBatchFlush();
   }
 
-  function getApiBase() {
-    if (!apiBasePromise) {
-      apiBasePromise = new Promise((resolve) => {
-        if (!chrome?.storage?.sync) {
-          resolve(DEFAULT_API_BASE);
-          return;
-        }
-        chrome.storage.sync.get({ flapFeeApiBase: DEFAULT_API_BASE }, (items) => {
-          resolve(String(items.flapFeeApiBase || DEFAULT_API_BASE).replace(/\/$/, ""));
-        });
-      });
-    }
-    return apiBasePromise;
-  }
-
   function scheduleBatchFlush() {
     if (batchTimer || batchActive) return;
     batchTimer = window.setTimeout(flushTokenBatch, BATCH_FLUSH_MS);
@@ -306,8 +290,7 @@
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const apiBase = await getApiBase();
-      const res = await fetch(`${apiBase}/modes`, {
+      const res = await fetch(`${DEFAULT_API_BASE}/modes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tokens }),
