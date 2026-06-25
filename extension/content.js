@@ -10,6 +10,8 @@
   const MAX_CARDS_PER_SCAN = 80;
   const MAX_BATCH_TOKENS = 120;
   const BATCH_FLUSH_MS = 350;
+  const PERSISTENT_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+  const PERSISTENT_CACHE_KEY = "flapFeeInfo.modeCache.v1";
   const DEBUG_PREFIX = "[FlapFeeInfo]";
   const CARD_MARK = "gmgnFeeModeCard";
   const ICON_MARK = "gmgnFeeModeIcon";
@@ -22,16 +24,22 @@
     creator: { icon: "🧑‍🍳创", title: "Fee mode: creator marketing", className: "creator" },
     unknown: { icon: "❓️未", title: "Fee mode: unknown", className: "unknown" }
   };
+  const confirmedModes = new Set(Object.keys(modeMeta));
 
   const siteStrategy = createSiteStrategy();
   if (!siteStrategy) return;
 
   const modeCache = new Map();
+  const persistentCache = new Map();
   const requestQueue = new Set();
   let batchTimer = null;
   let batchActive = false;
   let scanScheduled = false;
   let lastScanAt = 0;
+  let persistentCacheReady = false;
+  let persistentCacheReadyWaiters = [];
+
+  hydratePersistentCache();
 
   function createSiteStrategy() {
     if (location.hostname.endsWith("gmgn.ai")) return createGmgnStrategy();
@@ -104,6 +112,11 @@
   }
 
   function scanVisibleCards() {
+    if (!persistentCacheReady) {
+      scheduleScan(100);
+      return;
+    }
+
     const seenCards = new Set();
     const nodes = siteStrategy.getCandidateNodes();
     let touched = 0;
@@ -128,6 +141,10 @@
 
       if (modeCache.has(token)) {
         renderMode(card, token, modeCache.get(token));
+      } else if (isPersistentCacheHit(token)) {
+        const entry = persistentCache.get(token);
+        modeCache.set(token, entry.mode);
+        renderMode(card, token, entry.mode);
       } else {
         queueToken(token);
       }
@@ -261,7 +278,7 @@
   }
 
   function queueToken(token) {
-    if (modeCache.has(token) || requestQueue.has(token)) return;
+    if (modeCache.has(token) || isPersistentCacheHit(token) || requestQueue.has(token)) return;
     requestQueue.add(token);
     debugInfo("queue", { token });
     scheduleBatchFlush();
@@ -289,11 +306,16 @@
         missing: (data.missing || []).length,
         upstreamError: data.upstream_error || null
       });
+      const confirmed = [];
       Object.entries(data.results || {}).forEach(([token, result]) => {
-        if (!result || !modeMeta[result.mode]) return;
+        if (!result || !confirmedModes.has(result.mode)) return;
         modeCache.set(token, result.mode);
+        confirmed.push([token, result.mode, result.fetched_at]);
         applyModeToKnownCards(token, result.mode);
       });
+      if (confirmed.length > 0) {
+        persistConfirmedModes(confirmed);
+      }
     } catch (error) {
       debugWarn("request:failed", { tokens, error: normalizeError(error) });
       tokens.forEach((token) => requestQueue.add(token));
@@ -465,6 +487,86 @@
       name: "NonError",
       message: String(error)
     };
+  }
+
+  function hydratePersistentCache() {
+    if (!("storage" in chrome) || !chrome.storage?.local) {
+      persistentCacheReady = true;
+      return;
+    }
+
+    chrome.storage.local.get([PERSISTENT_CACHE_KEY], (items) => {
+      const entries = items?.[PERSISTENT_CACHE_KEY];
+      if (entries && typeof entries === "object") {
+        const now = Date.now();
+        Object.entries(entries).forEach(([token, value]) => {
+          if (
+            value &&
+            confirmedModes.has(value.mode) &&
+            typeof value.fetchedAt === "number" &&
+            now - value.fetchedAt <= PERSISTENT_CACHE_TTL_MS
+          ) {
+            persistentCache.set(token, {
+              mode: value.mode,
+              fetchedAt: value.fetchedAt
+            });
+          }
+        });
+      }
+      persistentCacheReady = true;
+      persistentCacheReadyWaiters.splice(0).forEach((resolve) => resolve());
+    });
+  }
+
+  function waitForPersistentCache() {
+    if (persistentCacheReady) return Promise.resolve();
+    return new Promise((resolve) => persistentCacheReadyWaiters.push(resolve));
+  }
+
+  function isPersistentCacheHit(token) {
+    const entry = persistentCache.get(token);
+    if (!entry) return false;
+    if (!confirmedModes.has(entry.mode)) {
+      persistentCache.delete(token);
+      return false;
+    }
+    if (Date.now() - entry.fetchedAt > PERSISTENT_CACHE_TTL_MS) {
+      persistentCache.delete(token);
+      persistCacheSoon();
+      return false;
+    }
+    return true;
+  }
+
+  function persistConfirmedModes(entries) {
+    for (const [token, mode, fetchedAt] of entries) {
+      if (!confirmedModes.has(mode)) continue;
+      persistentCache.set(token, {
+        mode,
+        fetchedAt: typeof fetchedAt === "number" ? fetchedAt * 1000 : Date.now()
+      });
+    }
+    persistCacheSoon();
+  }
+
+  let persistTimer = null;
+  function persistCacheSoon() {
+    if (persistTimer) return;
+    persistTimer = window.setTimeout(async () => {
+      persistTimer = null;
+      await waitForPersistentCache();
+      if (!("storage" in chrome) || !chrome.storage?.local) return;
+
+      const serialized = {};
+      const now = Date.now();
+      for (const [token, entry] of persistentCache.entries()) {
+        if (!confirmedModes.has(entry.mode)) continue;
+        if (now - entry.fetchedAt > PERSISTENT_CACHE_TTL_MS) continue;
+        serialized[token] = entry;
+      }
+
+      chrome.storage.local.set({ [PERSISTENT_CACHE_KEY]: serialized });
+    }, 500);
   }
 
   const observer = new MutationObserver(() => scheduleScan());

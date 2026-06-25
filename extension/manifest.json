@@ -19,6 +19,7 @@
     }
   },
   "host_permissions": ["https://flap-fee-info.tech-melon.workers.dev/*"],
+  "permissions": ["storage"],
   "content_scripts": [
     {
       "matches": ["https://gmgn.ai/*", "https://debot.ai/*"],
