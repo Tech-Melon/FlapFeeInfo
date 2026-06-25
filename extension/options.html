@@ -1,0 +1,22 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>技术瓜FlapFeeInfo 设置</title>
+    <style>
+      body { font-family: sans-serif; padding: 20px; max-width: 640px; }
+      input { width: 100%; padding: 8px; margin: 8px 0 12px; box-sizing: border-box; }
+      button { padding: 8px 14px; }
+      .hint { color: #666; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <h1>技术瓜FlapFeeInfo</h1>
+    <label for="apiBase">API 地址</label>
+    <input id="apiBase" placeholder="https://flap-fee-info.tech-melon.workers.dev" />
+    <div class="hint">默认指向 Cloudflare Worker 入口。</div>
+    <button id="save">保存</button>
+    <script src="options.js"></script>
+  </body>
+</html>

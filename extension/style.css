@@ -1,0 +1,58 @@
+.gmgn-fee-mode-icon {
+  align-items: center;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  box-sizing: border-box;
+  display: inline-flex;
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  gap: 1px;
+  height: 18px;
+  justify-content: center;
+  line-height: 1;
+  margin-right: 4px;
+  min-width: 30px;
+  padding: 0 4px;
+  pointer-events: auto;
+  white-space: nowrap;
+  vertical-align: -4px;
+}
+
+.gmgn-fee-mode-icon--debot {
+  margin-left: 8px;
+  margin-right: 0;
+  vertical-align: 0;
+}
+
+.gmgn-fee-mode-icon--gmgn {
+  margin-left: 0;
+}
+
+body .gmgn-fee-mode-icon {
+  flex: 0 0 auto;
+}
+
+.gmgn-fee-mode-icon--holder {
+  background: rgba(37, 211, 102, 0.2);
+  box-shadow: 0 0 0 1px rgba(37, 211, 102, 0.14), 0 0 8px rgba(37, 211, 102, 0.18);
+  color: #27e984;
+}
+
+.gmgn-fee-mode-icon--gift {
+  background: rgba(255, 184, 52, 0.22);
+  box-shadow: 0 0 0 1px rgba(255, 184, 52, 0.14), 0 0 8px rgba(255, 184, 52, 0.2);
+  color: #ffca45;
+}
+
+.gmgn-fee-mode-icon--creator {
+  background: rgba(74, 157, 255, 0.22);
+  box-shadow: 0 0 0 1px rgba(74, 157, 255, 0.14), 0 0 8px rgba(74, 157, 255, 0.2);
+  color: #62adff;
+}
+
+.gmgn-fee-mode-icon--unknown {
+  background: rgba(156, 163, 175, 0.22);
+  box-shadow: 0 0 0 1px rgba(156, 163, 175, 0.14), 0 0 8px rgba(156, 163, 175, 0.16);
+  color: #d0d5dd;
+}

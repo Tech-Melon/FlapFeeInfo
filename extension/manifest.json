@@ -1,0 +1,32 @@
+﻿{
+  "manifest_version": 3,
+  "name": "技术瓜FlapFeeInfo",
+  "version": "0.1.0",
+  "description": "Add lightweight fee-mode icons to GMGN and Debot token cards.",
+  "icons": {
+    "16": "icons/flap-16.png",
+    "32": "icons/flap-32.png",
+    "48": "icons/flap-48.png",
+    "128": "icons/flap-128.png"
+  },
+  "action": {
+    "default_title": "技术瓜FlapFeeInfo",
+    "default_icon": {
+      "16": "icons/flap-16.png",
+      "32": "icons/flap-32.png",
+      "48": "icons/flap-48.png",
+      "128": "icons/flap-128.png"
+    }
+  },
+  "permissions": ["storage"],
+  "host_permissions": ["https://flap-fee-info.tech-melon.workers.dev/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://gmgn.ai/*", "https://debot.ai/*"],
+      "js": ["content.js"],
+      "css": ["style.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html"
+}

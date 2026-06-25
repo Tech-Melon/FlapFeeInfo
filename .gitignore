@@ -1,0 +1,7 @@
+﻿# Ignore everything by default
+/*
+
+# Keep repo metadata and the publishable extension bundle
+!/.gitignore
+!/extension/
+!/extension/**
