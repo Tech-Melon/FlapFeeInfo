@@ -294,8 +294,8 @@
         modeCache.set(token, result.mode);
         applyModeToKnownCards(token, result.mode);
       });
-    } catch {
-      debugWarn("request:failed", { tokens });
+    } catch (error) {
+      debugWarn("request:failed", { tokens, error: normalizeError(error) });
       tokens.forEach((token) => requestQueue.add(token));
     } finally {
       batchActive = false;
@@ -324,9 +324,7 @@
       }
       return data;
     } catch (error) {
-      debugError("request:error", {
-        message: error instanceof Error ? error.message : String(error)
-      });
+      debugError("request:error", error);
       throw error;
     } finally {
       window.clearTimeout(timeout);
@@ -425,15 +423,48 @@
   }
 
   function debugInfo(event, payload) {
-    console.info(DEBUG_PREFIX, event, payload);
+    console.info(`${DEBUG_PREFIX} ${event} ${formatPayload(payload)}`);
   }
 
   function debugWarn(event, payload) {
-    console.warn(DEBUG_PREFIX, event, payload);
+    console.warn(`${DEBUG_PREFIX} ${event} ${formatPayload(payload)}`);
   }
 
   function debugError(event, payload) {
-    console.error(DEBUG_PREFIX, event, payload);
+    console.error(`${DEBUG_PREFIX} ${event} ${formatPayload(payload)}`);
+  }
+
+  function formatPayload(payload) {
+    try {
+      return JSON.stringify(normalizePayload(payload));
+    } catch {
+      return String(payload);
+    }
+  }
+
+  function normalizePayload(payload) {
+    if (payload instanceof Error) return normalizeError(payload);
+    if (Array.isArray(payload)) return payload.map(normalizePayload);
+    if (payload && typeof payload === "object") {
+      return Object.fromEntries(
+        Object.entries(payload).map(([key, value]) => [key, normalizePayload(value)])
+      );
+    }
+    return payload;
+  }
+
+  function normalizeError(error) {
+    if (error instanceof Error) {
+      return {
+        name: error.name,
+        message: error.message,
+        stack: error.stack
+      };
+    }
+    return {
+      name: "NonError",
+      message: String(error)
+    };
   }
 
   const observer = new MutationObserver(() => scheduleScan());
