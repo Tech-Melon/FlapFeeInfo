@@ -10,6 +10,7 @@
   const MAX_CARDS_PER_SCAN = 80;
   const MAX_BATCH_TOKENS = 120;
   const BATCH_FLUSH_MS = 350;
+  const DEBUG_PREFIX = "[FlapFeeInfo]";
   const CARD_MARK = "gmgnFeeModeCard";
   const ICON_MARK = "gmgnFeeModeIcon";
   const CARD_DATA = `data-${toKebab(CARD_MARK)}`;
@@ -131,6 +132,13 @@
         queueToken(token);
       }
     }
+
+    debugInfo("scan", {
+      site: siteStrategy.name,
+      candidates: nodes.length,
+      touched,
+      queued: requestQueue.size
+    });
   }
 
   function getCandidateNodes() {
@@ -255,6 +263,7 @@
   function queueToken(token) {
     if (modeCache.has(token) || requestQueue.has(token)) return;
     requestQueue.add(token);
+    debugInfo("queue", { token });
     scheduleBatchFlush();
   }
 
@@ -272,13 +281,21 @@
     batchActive = true;
 
     try {
+      debugInfo("request:start", { tokens });
       const data = await queryModes(tokens);
+      debugInfo("request:ok", {
+        requested: tokens.length,
+        returned: Object.keys(data.results || {}).length,
+        missing: (data.missing || []).length,
+        upstreamError: data.upstream_error || null
+      });
       Object.entries(data.results || {}).forEach(([token, result]) => {
         if (!result || !modeMeta[result.mode]) return;
         modeCache.set(token, result.mode);
         applyModeToKnownCards(token, result.mode);
       });
     } catch {
+      debugWarn("request:failed", { tokens });
       tokens.forEach((token) => requestQueue.add(token));
     } finally {
       batchActive = false;
@@ -297,9 +314,20 @@
         signal: controller.signal,
         cache: "no-store"
       });
-      const data = await res.json();
-      if (!res.ok || !data.ok) throw new Error("batch query failed");
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.ok) {
+        debugError("request:bad-response", {
+          status: res.status,
+          body: data
+        });
+        throw new Error("batch query failed");
+      }
       return data;
+    } catch (error) {
+      debugError("request:error", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
     } finally {
       window.clearTimeout(timeout);
     }
@@ -394,6 +422,18 @@
 
   function toKebab(value) {
     return value.replace(/[A-Z]/g, (char) => `-${char.toLowerCase()}`);
+  }
+
+  function debugInfo(event, payload) {
+    console.info(DEBUG_PREFIX, event, payload);
+  }
+
+  function debugWarn(event, payload) {
+    console.warn(DEBUG_PREFIX, event, payload);
+  }
+
+  function debugError(event, payload) {
+    console.error(DEBUG_PREFIX, event, payload);
   }
 
   const observer = new MutationObserver(() => scheduleScan());
