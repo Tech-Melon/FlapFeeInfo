@@ -1,9 +1,9 @@
-﻿(() => {
+(() => {
   const DEFAULT_API_BASE = "https://flap-fee-info.tech-melon.workers.dev";
   const TOKEN_RE = /0x[a-fA-F0-9]{40}/;
-  const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}8888$/;
+  const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
-  const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}8888/i;
+  const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
   const SCAN_INTERVAL_MS = 1200;
   const REQUEST_TIMEOUT_MS = 30000;
   const MAX_CANDIDATES_PER_SCAN = 180;
@@ -11,24 +11,32 @@
   const MAX_BATCH_TOKENS = 120;
   const BATCH_FLUSH_MS = 350;
   const PERSISTENT_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-  const PERSISTENT_CACHE_KEY = "flapFeeInfo.modeCache.v1";
+  const PERSISTENT_CACHE_KEY = "flapFeeInfo.modeCache.v2";
   const DEBUG_PREFIX = "[FlapFeeInfo]";
   const CARD_MARK = "gmgnFeeModeCard";
   const ICON_MARK = "gmgnFeeModeIcon";
   const CARD_DATA = `data-${toKebab(CARD_MARK)}`;
   const ICON_DATA = `data-${toKebab(ICON_MARK)}`;
+  const SUFFIX_SELECTORS =
+    "a[href*='8888'], a[href*='7777'], [title*='8888'], [title*='7777'], " +
+    "[aria-label*='8888'], [aria-label*='7777'], [data-token*='8888'], [data-token*='7777'], " +
+    "[data-address*='8888'], [data-address*='7777']";
 
   const modeMeta = {
-    holder: { icon: "💎钻", title: "Fee mode: holder dividend", className: "holder" },
-    gift: { icon: "🎁礼", title: "Fee mode: vault gift", className: "gift" },
-    creator: { icon: "🧑‍🍳创", title: "Fee mode: creator marketing", className: "creator" },
-    unknown: { icon: "❓️未", title: "Fee mode: unknown", className: "unknown" }
+    holder: { fallback: "💎", title: "Fee mode: holder dividend", className: "holder" },
+    gift: { fallback: "🎁", title: "Fee mode: vault gift", className: "gift" },
+    creator: { fallback: "👨‍🍳", title: "Fee mode: creator marketing", className: "creator" },
+    burn: { fallback: "🔥", title: "Fee mode: burn / deflation", className: "burn" },
+    lp: { fallback: "💧", title: "Fee mode: liquidity", className: "lp" },
+    hybrid: { fallback: "💎", title: "Fee mode: hybrid allocation", className: "hybrid" },
+    unknown: { fallback: "❓️未", title: "Fee mode: unknown", className: "unknown" }
   };
   const confirmedModes = new Set(Object.keys(modeMeta));
 
   const siteStrategy = createSiteStrategy();
   if (!siteStrategy) return;
 
+  // token -> full allocation result
   const modeCache = new Map();
   const persistentCache = new Map();
   const requestQueue = new Set();
@@ -60,8 +68,9 @@
       },
       extractToken: extractCardTokenFromAttrs,
       findIconTarget: findTaxTag,
+      // Put badge outside the narrow Tax chip / overflow:hidden wrappers.
       placeIcon(target, icon) {
-        target.prepend(icon);
+        placeBesideTaxChip(target, icon);
       }
     };
   }
@@ -143,8 +152,8 @@
         renderMode(card, token, modeCache.get(token));
       } else if (isPersistentCacheHit(token)) {
         const entry = persistentCache.get(token);
-        modeCache.set(token, entry.mode);
-        renderMode(card, token, entry.mode);
+        modeCache.set(token, entry);
+        renderMode(card, token, entry);
       } else {
         queueToken(token);
       }
@@ -168,24 +177,23 @@
       candidates.push(node);
     };
 
-    document
-      .querySelectorAll(
-        "a[href*='8888'], [title*='8888'], [aria-label*='8888'], [data-token*='8888'], [data-address*='8888']"
-      )
-      .forEach(addNode);
+    document.querySelectorAll(SUFFIX_SELECTORS).forEach(addNode);
 
-    const textNodes = document.evaluate(
-      "//*[contains(text(), '8888')]",
-      document.body,
-      null,
-      XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-      null
-    );
-
-    for (let index = 0; index < textNodes.snapshotLength; index += 1) {
+    for (const suffix of ["8888", "7777"]) {
       if (candidates.length >= MAX_CANDIDATES_PER_SCAN) break;
-      const node = textNodes.snapshotItem(index);
-      if (TARGET_SHORT_TOKEN_RE.test(node?.textContent || "")) addNode(node);
+      const textNodes = document.evaluate(
+        `//*[contains(text(), '${suffix}')]`,
+        document.body,
+        null,
+        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+        null
+      );
+
+      for (let index = 0; index < textNodes.snapshotLength; index += 1) {
+        if (candidates.length >= MAX_CANDIDATES_PER_SCAN) break;
+        const node = textNodes.snapshotItem(index);
+        if (TARGET_SHORT_TOKEN_RE.test(node?.textContent || "")) addNode(node);
+      }
     }
 
     return candidates.slice(0, MAX_CANDIDATES_PER_SCAN);
@@ -289,9 +297,24 @@
     batchTimer = window.setTimeout(flushTokenBatch, BATCH_FLUSH_MS);
   }
 
+  function isContextInvalidError(error) {
+    const message = String(error?.message || error || "");
+    return (
+      message.includes("Extension context invalidated") ||
+      message.includes("Extension context") ||
+      !isExtensionContextValid()
+    );
+  }
+
   async function flushTokenBatch() {
     batchTimer = null;
     if (batchActive || requestQueue.size === 0) return;
+
+    // Old content script after extension reload: stop all network work silently.
+    if (!isExtensionContextValid()) {
+      requestQueue.clear();
+      return;
+    }
 
     const tokens = Array.from(requestQueue).slice(0, MAX_BATCH_TOKENS);
     tokens.forEach((token) => requestQueue.delete(token));
@@ -308,24 +331,32 @@
       });
       const confirmed = [];
       Object.entries(data.results || {}).forEach(([token, result]) => {
-        if (!result || !confirmedModes.has(result.mode)) return;
-        modeCache.set(token, result.mode);
-        confirmed.push([token, result.mode, result.fetched_at]);
-        applyModeToKnownCards(token, result.mode);
+        const entry = normalizeResult(result);
+        if (!entry) return;
+        modeCache.set(token, entry);
+        confirmed.push([token, entry]);
+        applyModeToKnownCards(token, entry);
       });
       if (confirmed.length > 0) {
         persistConfirmedModes(confirmed);
       }
     } catch (error) {
+      if (isContextInvalidError(error)) {
+        requestQueue.clear();
+        return;
+      }
       debugWarn("request:failed", { tokens, error: normalizeError(error) });
       tokens.forEach((token) => requestQueue.add(token));
     } finally {
       batchActive = false;
-      if (requestQueue.size > 0) scheduleBatchFlush();
+      if (isExtensionContextValid() && requestQueue.size > 0) scheduleBatchFlush();
     }
   }
 
   async function queryModes(tokens) {
+    if (!isExtensionContextValid()) {
+      throw new Error("Extension context invalidated");
+    }
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
@@ -346,24 +377,76 @@
       }
       return data;
     } catch (error) {
-      debugError("request:error", error);
+      if (!isContextInvalidError(error)) {
+        debugError("request:error", error);
+      }
       throw error;
     } finally {
       window.clearTimeout(timeout);
     }
   }
 
-  function applyModeToKnownCards(token, mode) {
+  function normalizeResult(result) {
+    if (!result || !confirmedModes.has(result.mode)) return null;
+    const label =
+      typeof result.label === "string" && result.label
+        ? result.label
+        : modeMeta[result.mode]?.fallback || modeMeta.unknown.fallback;
+    const title =
+      typeof result.title === "string" && result.title
+        ? result.title
+        : modeMeta[result.mode]?.title || modeMeta.unknown.title;
+    return {
+      mode: result.mode,
+      label,
+      title,
+      dividend_bps: Number(result.dividend_bps) || 0,
+      market_bps: Number(result.market_bps) || 0,
+      deflation_bps: Number(result.deflation_bps) || 0,
+      lp_bps: Number(result.lp_bps) || 0,
+      is_vault: Boolean(result.is_vault),
+      buy_tax_bps: Number(result.buy_tax_bps) || 0,
+      sell_tax_bps: Number(result.sell_tax_bps) || 0,
+      fetched_at: typeof result.fetched_at === "number" ? result.fetched_at : null
+    };
+  }
+
+  function applyModeToKnownCards(token, entry) {
     document.querySelectorAll(`[${CARD_DATA}="${token}"]`).forEach((card) => {
       if (siteStrategy.extractToken(card) === token) {
-        renderMode(card, token, mode);
+        renderMode(card, token, entry);
       } else {
         clearCardIcon(card);
       }
     });
   }
 
-  function renderMode(card, token, mode) {
+  function bpsToPercentStr(bps) {
+    const value = Number(bps) || 0;
+    if (value % 100 === 0) return `${value / 100}%`;
+    const text = (value / 100).toFixed(1).replace(/\.0$/, "");
+    return `${text}%`;
+  }
+
+  /** Compact badge text from bps (no spaces) so GMGN chips do not clip mid-emoji. */
+  function buildDisplayLabel(entry) {
+    const parts = [];
+    if ((entry.dividend_bps || 0) > 0) parts.push(`💎${bpsToPercentStr(entry.dividend_bps)}`);
+    if ((entry.market_bps || 0) > 0) {
+      parts.push(
+        entry.is_vault
+          ? `🎁${bpsToPercentStr(entry.market_bps)}`
+          : `👨‍🍳${bpsToPercentStr(entry.market_bps)}`
+      );
+    }
+    if ((entry.deflation_bps || 0) > 0) parts.push(`🔥${bpsToPercentStr(entry.deflation_bps)}`);
+    if ((entry.lp_bps || 0) > 0) parts.push(`💧${bpsToPercentStr(entry.lp_bps)}`);
+    if (parts.length > 0) return parts.join("");
+    if (typeof entry.label === "string" && entry.label) return entry.label.replace(/\s+/g, "");
+    return modeMeta[entry.mode]?.fallback || modeMeta.unknown.fallback;
+  }
+
+  function renderMode(card, token, entry) {
     const target = siteStrategy.findIconTarget(card);
     if (!target) return;
 
@@ -371,13 +454,27 @@
 
     const icon = document.createElement("span");
     icon.dataset[ICON_MARK] = "1";
-    icon.className = "gmgn-fee-mode-icon";
     siteStrategy.placeIcon(target, icon);
 
-    const meta = modeMeta[mode] || modeMeta.unknown;
-    icon.textContent = meta.icon;
-    icon.title = `${meta.title}\n${token}`;
-    icon.className = `gmgn-fee-mode-icon gmgn-fee-mode-icon--${meta.className} gmgn-fee-mode-icon--${siteStrategy.name}`;
+    const meta = modeMeta[entry.mode] || modeMeta.unknown;
+    const label = buildDisplayLabel(entry);
+    const segmentCount =
+      Number((entry.dividend_bps || 0) > 0) +
+      Number((entry.market_bps || 0) > 0) +
+      Number((entry.deflation_bps || 0) > 0) +
+      Number((entry.lp_bps || 0) > 0);
+
+    icon.textContent = label;
+    icon.title = `${entry.title || meta.title}\n${token}`;
+    icon.className = [
+      "gmgn-fee-mode-icon",
+      `gmgn-fee-mode-icon--${meta.className}`,
+      `gmgn-fee-mode-icon--${siteStrategy.name}`,
+      segmentCount >= 3 ? "gmgn-fee-mode-icon--wide" : "",
+      segmentCount >= 2 ? "gmgn-fee-mode-icon--multi" : ""
+    ]
+      .filter(Boolean)
+      .join(" ");
   }
 
   function clearCardIcon(card) {
@@ -392,13 +489,60 @@
     });
   }
 
+  function placeBesideTaxChip(target, icon) {
+    let anchor = target;
+    let parent = target.parentElement;
+    for (let depth = 0; parent && depth < 4; depth += 1) {
+      const style = window.getComputedStyle(parent);
+      const overflowHidden =
+        style.overflow === "hidden" ||
+        style.overflowX === "hidden" ||
+        style.overflowY === "hidden";
+      const rect = parent.getBoundingClientRect();
+      // Climb out of clipping wrappers, but stop before jumping to the whole card row.
+      if (overflowHidden && rect.width < 360) {
+        anchor = parent;
+        parent = parent.parentElement;
+        continue;
+      }
+      break;
+    }
+    anchor.insertAdjacentElement("beforebegin", icon);
+  }
+
   function findTaxTag(card) {
-    const candidates = Array.from(card.querySelectorAll("span, div"));
-    return candidates.find((el) => {
-      const text = el.textContent?.trim() || "";
+    // Match Tax/fee chips; "Tax 0.25%/1.25%" is often wider than 110px so do not hard-cap tightly.
+    const candidates = Array.from(card.querySelectorAll("span, div")).filter((el) => {
+      if (el.matches(`[${ICON_DATA}="1"]`) || el.querySelector(`[${ICON_DATA}="1"]`)) return false;
+      const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+      if (!text || text.length > 48) return false;
+      if (!hasFeeTag(text)) return false;
+      // Prefer leaf-ish nodes (own short text), not whole rows.
+      const own = Array.from(el.childNodes)
+        .filter((n) => n.nodeType === Node.TEXT_NODE)
+        .map((n) => n.textContent || "")
+        .join("")
+        .trim();
+      if (own && !hasFeeTag(own) && el.querySelector("span, div")) {
+        // Nested structure is OK when child carries the tax text.
+      }
       const rect = el.getBoundingClientRect();
-      return hasFeeTag(text) && rect.width <= 110 && rect.height <= 30;
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      if (rect.width > 280 || rect.height > 40) return false;
+      return true;
     });
+
+    if (candidates.length === 0) return null;
+
+    // Smallest chip first (most specific Tax badge).
+    candidates.sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      const areaDiff = ar.width * ar.height - br.width * br.height;
+      if (areaDiff !== 0) return areaDiff;
+      return (a.textContent || "").length - (b.textContent || "").length;
+    });
+    return candidates[0];
   }
 
   function findDebotMetricRow(card) {
@@ -489,33 +633,78 @@
     };
   }
 
+  function isCompleteCacheEntry(value) {
+    return (
+      value &&
+      confirmedModes.has(value.mode) &&
+      typeof value.label === "string" &&
+      value.label &&
+      typeof value.fetchedAt === "number"
+    );
+  }
+
+  /** False after extension reload/update; old content scripts must stop using chrome.*. */
+  function isExtensionContextValid() {
+    try {
+      return Boolean(chrome?.runtime?.id);
+    } catch {
+      return false;
+    }
+  }
+
+  function markPersistentCacheReady() {
+    persistentCacheReady = true;
+    persistentCacheReadyWaiters.splice(0).forEach((resolve) => resolve());
+  }
+
   function hydratePersistentCache() {
-    if (!("storage" in chrome) || !chrome.storage?.local) {
-      persistentCacheReady = true;
+    if (!isExtensionContextValid() || !chrome.storage?.local) {
+      markPersistentCacheReady();
       return;
     }
 
-    chrome.storage.local.get([PERSISTENT_CACHE_KEY], (items) => {
-      const entries = items?.[PERSISTENT_CACHE_KEY];
-      if (entries && typeof entries === "object") {
-        const now = Date.now();
-        Object.entries(entries).forEach(([token, value]) => {
-          if (
-            value &&
-            confirmedModes.has(value.mode) &&
-            typeof value.fetchedAt === "number" &&
-            now - value.fetchedAt <= PERSISTENT_CACHE_TTL_MS
-          ) {
-            persistentCache.set(token, {
-              mode: value.mode,
-              fetchedAt: value.fetchedAt
+    try {
+      chrome.storage.local.get([PERSISTENT_CACHE_KEY], (items) => {
+        // Reload extension while this tab is open → context dies; callback must no-op.
+        if (!isExtensionContextValid() || chrome.runtime.lastError) {
+          markPersistentCacheReady();
+          return;
+        }
+        try {
+          const entries = items?.[PERSISTENT_CACHE_KEY];
+          if (entries && typeof entries === "object") {
+            const now = Date.now();
+            Object.entries(entries).forEach(([token, value]) => {
+              if (!isCompleteCacheEntry(value)) return;
+              if (now - value.fetchedAt > PERSISTENT_CACHE_TTL_MS) return;
+              persistentCache.set(token, {
+                mode: value.mode,
+                label: value.label,
+                title: value.title || modeMeta[value.mode]?.title || modeMeta.unknown.title,
+                dividend_bps: Number(value.dividend_bps) || 0,
+                market_bps: Number(value.market_bps) || 0,
+                deflation_bps: Number(value.deflation_bps) || 0,
+                lp_bps: Number(value.lp_bps) || 0,
+                is_vault: Boolean(value.is_vault),
+                buy_tax_bps: Number(value.buy_tax_bps) || 0,
+                sell_tax_bps: Number(value.sell_tax_bps) || 0,
+                fetched_at: Math.floor(value.fetchedAt / 1000)
+              });
             });
           }
-        });
+        } catch (error) {
+          if (!String(error?.message || error).includes("Extension context invalidated")) {
+            debugWarn("cache:hydrate-failed", normalizeError(error));
+          }
+        }
+        markPersistentCacheReady();
+      });
+    } catch (error) {
+      if (!String(error?.message || error).includes("Extension context invalidated")) {
+        debugWarn("cache:hydrate-start-failed", normalizeError(error));
       }
-      persistentCacheReady = true;
-      persistentCacheReadyWaiters.splice(0).forEach((resolve) => resolve());
-    });
+      markPersistentCacheReady();
+    }
   }
 
   function waitForPersistentCache() {
@@ -523,14 +712,21 @@
     return new Promise((resolve) => persistentCacheReadyWaiters.push(resolve));
   }
 
+  function cacheAgeMs(entry) {
+    if (typeof entry.fetchedAt === "number") return entry.fetchedAt;
+    if (typeof entry.fetched_at === "number") return entry.fetched_at * 1000;
+    return 0;
+  }
+
   function isPersistentCacheHit(token) {
     const entry = persistentCache.get(token);
     if (!entry) return false;
-    if (!confirmedModes.has(entry.mode)) {
+    if (!confirmedModes.has(entry.mode) || !entry.label) {
       persistentCache.delete(token);
       return false;
     }
-    if (Date.now() - entry.fetchedAt > PERSISTENT_CACHE_TTL_MS) {
+    const ageBase = cacheAgeMs(entry);
+    if (!ageBase || Date.now() - ageBase > PERSISTENT_CACHE_TTL_MS) {
       persistentCache.delete(token);
       persistCacheSoon();
       return false;
@@ -539,11 +735,21 @@
   }
 
   function persistConfirmedModes(entries) {
-    for (const [token, mode, fetchedAt] of entries) {
-      if (!confirmedModes.has(mode)) continue;
+    for (const [token, entry] of entries) {
+      if (!confirmedModes.has(entry.mode) || !entry.label) continue;
       persistentCache.set(token, {
-        mode,
-        fetchedAt: typeof fetchedAt === "number" ? fetchedAt * 1000 : Date.now()
+        mode: entry.mode,
+        label: entry.label,
+        title: entry.title,
+        dividend_bps: entry.dividend_bps,
+        market_bps: entry.market_bps,
+        deflation_bps: entry.deflation_bps,
+        lp_bps: entry.lp_bps,
+        is_vault: entry.is_vault,
+        buy_tax_bps: entry.buy_tax_bps,
+        sell_tax_bps: entry.sell_tax_bps,
+        fetchedAt:
+          typeof entry.fetched_at === "number" ? entry.fetched_at * 1000 : Date.now()
       });
     }
     persistCacheSoon();
@@ -555,17 +761,37 @@
     persistTimer = window.setTimeout(async () => {
       persistTimer = null;
       await waitForPersistentCache();
-      if (!("storage" in chrome) || !chrome.storage?.local) return;
+      if (!isExtensionContextValid() || !chrome.storage?.local) return;
 
       const serialized = {};
       const now = Date.now();
       for (const [token, entry] of persistentCache.entries()) {
-        if (!confirmedModes.has(entry.mode)) continue;
-        if (now - entry.fetchedAt > PERSISTENT_CACHE_TTL_MS) continue;
-        serialized[token] = entry;
+        if (!confirmedModes.has(entry.mode) || !entry.label) continue;
+        const fetchedAt = cacheAgeMs(entry) || now;
+        if (now - fetchedAt > PERSISTENT_CACHE_TTL_MS) continue;
+        serialized[token] = {
+          mode: entry.mode,
+          label: entry.label,
+          title: entry.title,
+          dividend_bps: entry.dividend_bps,
+          market_bps: entry.market_bps,
+          deflation_bps: entry.deflation_bps,
+          lp_bps: entry.lp_bps,
+          is_vault: entry.is_vault,
+          buy_tax_bps: entry.buy_tax_bps,
+          sell_tax_bps: entry.sell_tax_bps,
+          fetchedAt
+        };
       }
 
-      chrome.storage.local.set({ [PERSISTENT_CACHE_KEY]: serialized });
+      try {
+        chrome.storage.local.set({ [PERSISTENT_CACHE_KEY]: serialized }, () => {
+          // Ignore invalidated context after reload; nothing useful to log.
+          void chrome.runtime?.lastError;
+        });
+      } catch {
+        // Extension reloaded mid-flight.
+      }
     }, 500);
   }
 

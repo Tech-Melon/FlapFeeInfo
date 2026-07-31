@@ -4,19 +4,37 @@
   border-radius: 6px;
   box-sizing: border-box;
   display: inline-flex;
-  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  font-family:
+    "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "Segoe UI", system-ui, sans-serif;
   font-size: 11px;
   font-weight: 700;
-  gap: 1px;
+  gap: 0;
   height: 18px;
   justify-content: center;
+  letter-spacing: -0.2px;
   line-height: 1;
   margin-right: 4px;
-  min-width: 30px;
-  padding: 0 4px;
+  max-width: none;
+  min-width: 28px;
+  overflow: visible;
+  padding: 0 5px;
   pointer-events: auto;
+  position: relative;
+  vertical-align: middle;
   white-space: nowrap;
-  vertical-align: -4px;
+  z-index: 5;
+}
+
+.gmgn-fee-mode-icon--multi {
+  padding: 0 6px;
+}
+
+.gmgn-fee-mode-icon--wide {
+  font-size: 10px;
+  letter-spacing: -0.4px;
+  padding: 0 4px;
 }
 
 .gmgn-fee-mode-icon--debot {
@@ -27,32 +45,58 @@
 
 .gmgn-fee-mode-icon--gmgn {
   margin-left: 0;
+  margin-right: 6px;
 }
 
+/* Survive GMGN/Debot flex rows that shrink children */
 body .gmgn-fee-mode-icon {
-  flex: 0 0 auto;
+  flex: 0 0 auto !important;
+  min-width: max-content;
 }
 
 .gmgn-fee-mode-icon--holder {
-  background: rgba(37, 211, 102, 0.2);
-  box-shadow: 0 0 0 1px rgba(37, 211, 102, 0.14), 0 0 8px rgba(37, 211, 102, 0.18);
+  background: rgba(37, 211, 102, 0.22);
+  box-shadow: 0 0 0 1px rgba(37, 211, 102, 0.16), 0 0 8px rgba(37, 211, 102, 0.18);
   color: #27e984;
 }
 
 .gmgn-fee-mode-icon--gift {
-  background: rgba(255, 184, 52, 0.22);
-  box-shadow: 0 0 0 1px rgba(255, 184, 52, 0.14), 0 0 8px rgba(255, 184, 52, 0.2);
+  background: rgba(255, 184, 52, 0.24);
+  box-shadow: 0 0 0 1px rgba(255, 184, 52, 0.16), 0 0 8px rgba(255, 184, 52, 0.2);
   color: #ffca45;
 }
 
 .gmgn-fee-mode-icon--creator {
-  background: rgba(74, 157, 255, 0.22);
-  box-shadow: 0 0 0 1px rgba(74, 157, 255, 0.14), 0 0 8px rgba(74, 157, 255, 0.2);
+  background: rgba(74, 157, 255, 0.24);
+  box-shadow: 0 0 0 1px rgba(74, 157, 255, 0.16), 0 0 8px rgba(74, 157, 255, 0.2);
   color: #62adff;
 }
 
+.gmgn-fee-mode-icon--burn {
+  background: rgba(255, 99, 71, 0.22);
+  box-shadow: 0 0 0 1px rgba(255, 99, 71, 0.16), 0 0 8px rgba(255, 99, 71, 0.18);
+  color: #ff7a59;
+}
+
+.gmgn-fee-mode-icon--lp {
+  background: rgba(56, 189, 248, 0.22);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.16), 0 0 8px rgba(56, 189, 248, 0.18);
+  color: #38bdf8;
+}
+
+.gmgn-fee-mode-icon--hybrid {
+  background: linear-gradient(
+    90deg,
+    rgba(37, 211, 102, 0.2),
+    rgba(74, 157, 255, 0.2),
+    rgba(255, 184, 52, 0.2)
+  );
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14), 0 0 8px rgba(148, 163, 184, 0.22);
+  color: #f3f6fb;
+}
+
 .gmgn-fee-mode-icon--unknown {
-  background: rgba(156, 163, 175, 0.22);
-  box-shadow: 0 0 0 1px rgba(156, 163, 175, 0.14), 0 0 8px rgba(156, 163, 175, 0.16);
+  background: rgba(156, 163, 175, 0.24);
+  box-shadow: 0 0 0 1px rgba(156, 163, 175, 0.16), 0 0 8px rgba(156, 163, 175, 0.16);
   color: #d0d5dd;
 }
