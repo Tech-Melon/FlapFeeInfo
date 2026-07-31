@@ -6,6 +6,8 @@
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
   const SCAN_INTERVAL_MS = 1200;
   const REQUEST_TIMEOUT_MS = 30000;
+  // Background tabs freeze timers; if a batch never finishes, unblock after this wall time.
+  const BATCH_STUCK_MS = 45000;
   const MAX_CANDIDATES_PER_SCAN = 180;
   const MAX_CARDS_PER_SCAN = 80;
   const MAX_BATCH_TOKENS = 120;
@@ -42,10 +44,12 @@
   const requestQueue = new Set();
   let batchTimer = null;
   let batchActive = false;
+  let batchStartedAt = 0;
   let scanScheduled = false;
   let lastScanAt = 0;
   let persistentCacheReady = false;
   let persistentCacheReadyWaiters = [];
+  let lastResumeAt = 0;
 
   hydratePersistentCache();
 
@@ -99,28 +103,48 @@
     };
   }
 
-  function scheduleScan(delay = 250) {
-    if (scanScheduled) return;
+  function isTabVisible() {
+    return document.visibilityState === "visible";
+  }
+
+  function scheduleScan(delay = 250, options = {}) {
+    const force = options.force === true;
+    const immediate = options.immediate === true;
+    // Avoid burning CPU/network while the tab is fully hidden (timers are frozen anyway).
+    if (!isTabVisible() && !force) return;
+    if (scanScheduled && !force) return;
     scanScheduled = true;
 
     window.setTimeout(() => {
       scanScheduled = false;
+      if (!isTabVisible() && !force) return;
       const now = performance.now();
-      if (now - lastScanAt < SCAN_INTERVAL_MS) {
+      if (!force && now - lastScanAt < SCAN_INTERVAL_MS) {
         scheduleScan(SCAN_INTERVAL_MS - (now - lastScanAt));
         return;
       }
       lastScanAt = now;
-      runWhenIdle(scanVisibleCards);
+      runWhenIdle(scanVisibleCards, { immediate: immediate || force });
     }, delay);
   }
 
-  function runWhenIdle(fn) {
-    if ("requestIdleCallback" in window) {
-      window.requestIdleCallback(fn, { timeout: 800 });
+  function runWhenIdle(fn, options = {}) {
+    // After long background, requestIdleCallback can stay delayed; resume path wants setTimeout.
+    if (options.immediate || !("requestIdleCallback" in window)) {
+      window.setTimeout(fn, 0);
       return;
     }
-    window.setTimeout(fn, 0);
+    window.requestIdleCallback(fn, { timeout: 800 });
+  }
+
+  function resolveEntry(token) {
+    if (modeCache.has(token)) return modeCache.get(token);
+    if (isPersistentCacheHit(token)) {
+      const entry = persistentCache.get(token);
+      modeCache.set(token, entry);
+      return entry;
+    }
+    return null;
   }
 
   function scanVisibleCards() {
@@ -128,10 +152,15 @@
       scheduleScan(100);
       return;
     }
+    if (!isTabVisible()) return;
+
+    recoverStuckBatch();
 
     const seenCards = new Set();
     const nodes = siteStrategy.getCandidateNodes();
     let touched = 0;
+    let rendered = 0;
+    let queued = 0;
 
     cleanupMarkedCards();
 
@@ -151,14 +180,14 @@
       card.dataset[CARD_MARK] = token;
       touched += 1;
 
-      if (modeCache.has(token)) {
-        renderMode(card, token, modeCache.get(token));
-      } else if (isPersistentCacheHit(token)) {
-        const entry = persistentCache.get(token);
-        modeCache.set(token, entry);
+      const entry = resolveEntry(token);
+      if (entry) {
+        // SPA may drop our badge after virtualized re-render; always re-apply.
         renderMode(card, token, entry);
+        rendered += 1;
       } else {
         queueToken(token);
+        queued += 1;
       }
     }
 
@@ -166,8 +195,77 @@
       site: siteStrategy.name,
       candidates: nodes.length,
       touched,
-      queued: requestQueue.size
+      rendered,
+      queued,
+      queueSize: requestQueue.size,
+      batchActive
     });
+  }
+
+  /** Re-paint badges from memory after tab wake (DOM often recycled). */
+  function reapplyCachedIconsOnPage() {
+    let applied = 0;
+    let missing = 0;
+    document.querySelectorAll(`[${CARD_DATA}]`).forEach((card) => {
+      if (!(card instanceof HTMLElement)) return;
+      const token = card.dataset[CARD_MARK];
+      if (!token) return;
+      const liveToken = siteStrategy.extractToken(card);
+      if (liveToken && liveToken !== token) {
+        clearCardIcon(card);
+        return;
+      }
+      const entry = resolveEntry(token);
+      if (entry) {
+        renderMode(card, token, entry);
+        applied += 1;
+      } else {
+        queueToken(token);
+        missing += 1;
+      }
+    });
+    debugInfo("icons:reapply", { applied, missing });
+  }
+
+  /**
+   * Tab left in background freezes timers/fetch; coming back must unstick pipeline
+   * and repaint without requiring a full page reload.
+   */
+  function onTabResume(reason) {
+    if (!isExtensionContextValid() || !isTabVisible()) return;
+    const now = Date.now();
+    // Debounce focus+visibility double fire.
+    if (now - lastResumeAt < 400) return;
+    lastResumeAt = now;
+
+    debugInfo("tab:resume", { reason, queued: requestQueue.size, batchActive });
+
+    recoverStuckBatch(true);
+    lastScanAt = 0;
+    scanScheduled = false;
+    if (batchTimer) {
+      window.clearTimeout(batchTimer);
+      batchTimer = null;
+    }
+
+    reapplyCachedIconsOnPage();
+    scheduleBatchFlush({ immediate: true });
+    // Virtualized lists reflow over a few frames after focus.
+    scheduleScan(0, { force: true, immediate: true });
+    scheduleScan(350, { force: true, immediate: true });
+    scheduleScan(1000, { force: true, immediate: true });
+    scheduleScan(2500, { force: true, immediate: true });
+  }
+
+  function recoverStuckBatch(force = false) {
+    if (!batchActive) return;
+    if (!force && batchStartedAt > 0 && Date.now() - batchStartedAt < BATCH_STUCK_MS) return;
+    debugWarn("batch:recover-stuck", {
+      force,
+      ageMs: batchStartedAt ? Date.now() - batchStartedAt : null
+    });
+    batchActive = false;
+    batchStartedAt = 0;
   }
 
   function getCandidateNodes() {
@@ -295,9 +393,16 @@
     scheduleBatchFlush();
   }
 
-  function scheduleBatchFlush() {
-    if (batchTimer || batchActive) return;
-    batchTimer = window.setTimeout(flushTokenBatch, BATCH_FLUSH_MS);
+  function scheduleBatchFlush(options = {}) {
+    const immediate = options.immediate === true;
+    recoverStuckBatch();
+    if (batchActive) return;
+    if (batchTimer) {
+      if (!immediate) return;
+      window.clearTimeout(batchTimer);
+      batchTimer = null;
+    }
+    batchTimer = window.setTimeout(flushTokenBatch, immediate ? 0 : BATCH_FLUSH_MS);
   }
 
   function isContextInvalidError(error) {
@@ -311,6 +416,8 @@
 
   async function flushTokenBatch() {
     batchTimer = null;
+    if (!isTabVisible()) return;
+    recoverStuckBatch();
     if (batchActive || requestQueue.size === 0) return;
 
     // Old content script after extension reload: stop all network work silently.
@@ -322,6 +429,7 @@
     const tokens = Array.from(requestQueue).slice(0, MAX_BATCH_TOKENS);
     tokens.forEach((token) => requestQueue.delete(token));
     batchActive = true;
+    batchStartedAt = Date.now();
 
     try {
       debugInfo("request:start", { tokens });
@@ -343,6 +451,10 @@
       if (confirmed.length > 0) {
         persistConfirmedModes(confirmed);
       }
+      // Soft-miss: put back so later scans / resume can retry without full reload.
+      (data.missing || []).forEach((token) => {
+        if (!modeCache.has(token)) requestQueue.add(String(token).toLowerCase());
+      });
     } catch (error) {
       if (isContextInvalidError(error)) {
         requestQueue.clear();
@@ -352,7 +464,10 @@
       tokens.forEach((token) => requestQueue.add(token));
     } finally {
       batchActive = false;
-      if (isExtensionContextValid() && requestQueue.size > 0) scheduleBatchFlush();
+      batchStartedAt = 0;
+      if (isExtensionContextValid() && isTabVisible() && requestQueue.size > 0) {
+        scheduleBatchFlush({ immediate: true });
+      }
     }
   }
 
@@ -451,9 +566,15 @@
 
   function renderMode(card, token, entry) {
     const target = siteStrategy.findIconTarget(card);
-    if (!target) return;
+    if (!target) {
+      // Layout may not be ready right after tab resume; keep mark so next scan retries.
+      return false;
+    }
 
+    // Remove previous badge near this card (icon may sit as sibling, not only descendant).
     card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((oldIcon) => oldIcon.remove());
+    const prev = card.previousElementSibling;
+    if (prev && prev.dataset && prev.dataset[ICON_MARK] === "1") prev.remove();
 
     const icon = document.createElement("span");
     icon.dataset[ICON_MARK] = "1";
@@ -478,11 +599,14 @@
     ]
       .filter(Boolean)
       .join(" ");
+    return true;
   }
 
   function clearCardIcon(card) {
     delete card.dataset[CARD_MARK];
     card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => icon.remove());
+    const prev = card.previousElementSibling;
+    if (prev && prev.dataset && prev.dataset[ICON_MARK] === "1") prev.remove();
   }
 
   function cleanupMarkedCards() {
@@ -798,10 +922,31 @@
     }, 500);
   }
 
-  const observer = new MutationObserver(() => scheduleScan());
+  const observer = new MutationObserver(() => {
+    if (!isTabVisible()) return;
+    scheduleScan();
+  });
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
-  window.addEventListener("scroll", () => scheduleScan(100), { passive: true });
-  window.addEventListener("hashchange", () => scheduleScan(100), { passive: true });
-  scheduleScan(100);
+  window.addEventListener(
+    "scroll",
+    () => {
+      if (!isTabVisible()) return;
+      scheduleScan(100);
+    },
+    { passive: true }
+  );
+  window.addEventListener("hashchange", () => scheduleScan(100, { force: true }), { passive: true });
+  window.addEventListener("popstate", () => scheduleScan(100, { force: true }));
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") onTabResume("visibilitychange");
+  });
+  window.addEventListener("pageshow", (event) => {
+    // bfcache restore or normal show
+    if (document.visibilityState === "visible") onTabResume(event.persisted ? "pageshow-bfcache" : "pageshow");
+  });
+  window.addEventListener("focus", () => onTabResume("focus"));
+
+  scheduleScan(100, { force: true, immediate: true });
 })();

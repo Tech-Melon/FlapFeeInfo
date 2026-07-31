@@ -1,8 +1,10 @@
 ﻿# Ignore everything by default
 /*
 
-# Keep repo metadata and the publishable extension bundle
+# Keep repo metadata, developer docs, and the publishable extension bundle
 !/.gitignore
 !/README.md
+!/CLAUDE.md
+!/AGENTS.md
 !/extension/
 !/extension/**
