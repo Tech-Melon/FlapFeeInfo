@@ -1,8 +1,8 @@
 ﻿{
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.2.3",
-  "description": "Show Flap tax allocation (dividend/creator/burn/LP) on GMGN and Debot cards.",
+  "version": "0.2.4",
+  "description": "Show Flap tax allocation (dividend/creator/burn/LP) on GMGN, Debot and Gungnir cards.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",
@@ -22,7 +22,13 @@
   "permissions": ["storage"],
   "content_scripts": [
     {
-      "matches": ["https://gmgn.ai/*", "https://debot.ai/*"],
+      "matches": [
+        "https://gmgn.ai/*",
+        "https://debot.ai/*",
+        "https://*.debot.ai/*",
+        "https://gungnir.bot/*",
+        "https://*.gungnir.bot/*"
+      ],
       "js": ["content.js"],
       "css": ["style.css"],
       "run_at": "document_idle"

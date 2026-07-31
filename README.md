@@ -60,8 +60,9 @@ git clone https://github.com/Tech-Melon/FlapFeeInfo.git
 
 1. 打开 GMGN：
    `https://gmgn.ai/?chain=bsc`
-2. 或者打开 Debot：
+2. 或者打开 Debot / Gungnir（同一前端的不同域名）：
    `https://debot.ai/meme?chain=bsc`
+   `https://gungnir.bot/meme?chain=bsc`
 3. 插件会自动扫描页面里的 token 卡片。
 4. 如果 token 命中你的规则，就会显示对应图标。
 

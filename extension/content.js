@@ -51,7 +51,10 @@
 
   function createSiteStrategy() {
     if (location.hostname.endsWith("gmgn.ai")) return createGmgnStrategy();
-    if (location.hostname.endsWith("debot.ai")) return createDebotStrategy();
+    // debot.ai / gungnir.bot share the same Vite+MUI frontend (same asset hashes & APIs).
+    if (location.hostname.endsWith("debot.ai") || location.hostname.endsWith("gungnir.bot")) {
+      return createDebotStrategy();
+    }
     return null;
   }
 
