@@ -364,6 +364,14 @@ python tools/ctl.py watchdog-run
   - `0.3.8`：Debot 挂载改为底部指标行优先（抗自定义买按钮尺寸跳变）；忽略侧栏；token 页挂 stats  
   - `0.3.9`：GMGN 代币详情页 `/…/token/0x…` 在「总税率」旁展示徽章（URL 抽 CA）  
   - `0.4.0`：后台久置后整管线假死修复（hardReset + batchActive 僵尸 + 12s 看门狗）  
+  - `0.4.1`：降 0.4.0 卡顿（看门狗仅异常时扫；resume 少扫；idle hard-reset 不 warn）  
+  - `0.4.2`：宿主性能：扫描 1s/48 卡、弱化 XPath、CA/挂载缓存、mutation 400ms、storage LRU  
+  - `0.4.3`：GMGN SPA token↔home 轻量路由（安静窗吞 mutation、分片扫、禁 force remount 风暴）  
+  - `0.4.4`：js-mcp 根因优化 — 扫描/Observer 限定列表列/Card；href 优先；稳态 1.2s/28 卡  
+  - `0.4.5`：稳态流畅（去 scroll 扫、稳定徽章不重算、短 blur 不 remount）  
+  - `0.4.6`：稳定卡不占 budget（Debot 右列饿死修复）；未画优先；即时性参数回调  
+  - `0.4.7`：SPA 渐进补扫 + 禁 height>200 误清列表卡  
+  - `0.4.8`：js-mcp 复现 token→home 0 徽章 — 独立路由轮询、Observer 永挂 documentElement、禁 body mark、token 链优先  
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`
