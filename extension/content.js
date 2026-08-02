@@ -4,8 +4,9 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
-  // 0.4.10: pool quote prefer API quote_symbol (fix 币安人生≠BNB default).
-  // 0.4.9: token-page side list + open search dialog; no full-document XPath.
+  // 0.4.11: SPA progressive scans cut to ~1.3–2s (was 6× up to 3s) — fix home→K-line jank.
+  // Debot/GMGN list boards still get 4 light passes; token pages 3 + early-stop when badge exists.
+  // 0.4.10: pool quote prefer API quote_symbol.
   const SCAN_INTERVAL_MS = 900;
   const REQUEST_TIMEOUT_MS = 28000;
   // Background tabs freeze timers; if a batch never finishes, unblock after this wall time.
@@ -34,13 +35,16 @@
   const PERSIST_MIN_INTERVAL_MS = 10000;
   const PERSISTENT_CACHE_MAX_ENTRIES = 800;
   // Mutation → scan debounce (ms). Snappy enough for list refresh, still coalesces thrash.
-  const MUTATION_SCAN_DEBOUNCE_MS = 350;
-  // SPA: short quiet only (block mutation flood). Progressive scans handle late paint.
-  const SPA_NAV_QUIET_MS = 200;
+  const MUTATION_SCAN_DEBOUNCE_MS = 400;
+  // SPA: swallow mutation flood while host rebuilds (chart/list); progressive scans fill holes.
+  const SPA_NAV_QUIET_MS = 650;
   // Coalesce multi pushState/replaceState during one navigation.
   const SPA_NAV_COALESCE_MS = 40;
-  // Progressive hole-fill after route settle (ms offsets from quiet end).
-  const SPA_NAV_SCAN_OFFSETS_MS = [0, 120, 350, 700, 1400, 2800];
+  // Progressive hole-fill offsets from quiet end (ms). Shorter than 0.4.10's 6×/2800ms.
+  // List/meme boards (Debot 3-col + GMGN home): 4 passes, last ~2s.
+  const SPA_NAV_SCAN_OFFSETS_LIST_MS = [0, 400, 1100, 2000];
+  // Token / K-line page: fewer passes, early-stop when header badge exists.
+  const SPA_NAV_SCAN_OFFSETS_TOKEN_MS = [0, 500, 1300];
   // Independent route poll — sites often capture native history before our wrap.
   const ROUTE_POLL_MS = 500;
   // Expensive mark cleanup only every N scans (0.3.4 never re-extracted every tick).
@@ -650,9 +654,30 @@
     }, SPA_NAV_COALESCE_MS);
   }
 
+  /** Token detail / K-line routes need fewer progressive scans than meme boards. */
+  function isTokenDetailRoute() {
+    return isGmgnTokenPage() || isDebotTokenPage();
+  }
+
+  function getSpaScanOffsets() {
+    // Route key already updated before settle — use current location.
+    return isTokenDetailRoute() ? SPA_NAV_SCAN_OFFSETS_TOKEN_MS : SPA_NAV_SCAN_OFFSETS_LIST_MS;
+  }
+
+  /** Token page: stop further SPA force-scans once any badge is painted (header enough). */
+  function shouldCancelSpaProgressive() {
+    if (!isTokenDetailRoute()) return false;
+    try {
+      return !!document.querySelector(`[${ICON_DATA}="1"]`);
+    } catch (_err) {
+      return false;
+    }
+  }
+
   /**
    * After route key stabilizes: clear old marks cheaply, rebind roots, progressive scans.
    * Must NOT run heavy DOM walks synchronously inside history hooks (was main SPA jank).
+   * 0.4.11: fewer passes + only first immediate; token early-stop — fixes ~3s K-line jank.
    */
   function beginSpaRouteSettle(_prevKey, _nextKey) {
     if (!isExtensionContextValid() || !isTabVisible()) return;
@@ -668,16 +693,25 @@
     // ALWAYS observe documentElement — list roots detach on SPA and go silent (js-mcp).
     ensureDocumentObserver();
 
-    // Progressive hole-fill: list columns paint over several frames after SPA.
+    // Progressive hole-fill: list boards get more passes; token/K-line fewer.
     const base = SPA_NAV_QUIET_MS;
-    SPA_NAV_SCAN_OFFSETS_MS.forEach((offset, index) => {
+    const offsets = getSpaScanOffsets();
+    offsets.forEach((offset, index) => {
       const timerId = window.setTimeout(() => {
         spaNavScanTimers = spaNavScanTimers.filter((id) => id !== timerId);
         if (!isTabVisible() || !isExtensionContextValid()) return;
+
+        // Token page already has a badge from an earlier pass — skip remaining force work.
+        if (index > 0 && shouldCancelSpaProgressive()) {
+          clearSpaNavScanTimers();
+          spaQuietUntil = 0;
+          return;
+        }
+
         // Drop quiet so this scan and mutations can run.
         if (Date.now() < spaQuietUntil) spaQuietUntil = 0;
         spaDomDirty = false;
-        // Refresh roots each pass (home columns vs token header).
+        // Refresh roots each pass (home columns vs token header / Debot cards).
         scanRootsCache = { at: 0, roots: [] };
         try {
           getScanRoots(true);
@@ -686,7 +720,17 @@
         }
         ensureDocumentObserver();
         lastScanAt = 0;
-        scheduleScan(0, { force: true, immediate: index < 3 });
+        // Only first pass immediate — later passes yield to host chart/list paint (js-mcp).
+        scheduleScan(0, { force: true, immediate: index === 0 });
+
+        // After first paint on token page, cancel pending progressive timers soon.
+        if (index === 0 && isTokenDetailRoute()) {
+          const checkId = window.setTimeout(() => {
+            spaNavScanTimers = spaNavScanTimers.filter((id) => id !== checkId);
+            if (shouldCancelSpaProgressive()) clearSpaNavScanTimers();
+          }, 80);
+          spaNavScanTimers.push(checkId);
+        }
       }, base + offset);
       spaNavScanTimers.push(timerId);
     });
