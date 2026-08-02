@@ -1,3 +1,9 @@
+/*
+ * Cross-platform chip typography:
+ * - Text/Latin fonts FIRST (system-ui / Segoe / Helvetica)
+ * - Color emoji fonts LAST (fallback only for 💎🪙 etc.)
+ * Putting Segoe UI Emoji first makes digits use emoji metrics on macOS → uneven gaps.
+ */
 .gmgn-fee-mode-icon {
   align-items: center;
   border: 1px solid currentColor;
@@ -7,47 +13,66 @@
   flex: 0 0 auto;
   flex-shrink: 0;
   font-family:
-    "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "Segoe UI", system-ui, sans-serif;
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    "Helvetica Neue",
+    Arial,
+    "Apple Color Emoji",
+    "Segoe UI Emoji",
+    "Noto Color Emoji",
+    sans-serif;
   font-size: 11px;
-  font-weight: 700;
+  /* 700 + Apple emoji looks overly heavy; 600 is closer on Win/Mac */
+  font-weight: 600;
+  font-synthesis: none;
   gap: 0;
-  height: 18px;
+  /* Fixed 18px clips Apple Color Emoji; min-height + auto height keeps baseline */
+  height: auto;
+  min-height: 18px;
+  max-height: 22px;
   justify-content: center;
-  letter-spacing: -0.2px;
-  line-height: 1;
+  letter-spacing: 0;
+  line-height: 1.2;
   margin-right: 4px;
   max-width: none;
   min-width: 28px;
   overflow: visible;
-  padding: 0 5px;
+  padding: 1px 6px;
   pointer-events: auto;
   position: relative;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   vertical-align: middle;
   white-space: nowrap;
   z-index: 5;
+  /* Prefer color emoji where supported; ignore if unknown */
+  font-variant-emoji: emoji;
 }
 
 .gmgn-fee-mode-icon--multi {
-  padding: 0 6px;
+  padding: 1px 7px;
 }
 
 .gmgn-fee-mode-icon--wide {
   font-size: 10px;
-  letter-spacing: -0.4px;
-  padding: 0 4px;
+  letter-spacing: 0;
+  padding: 1px 5px;
 }
 
-/* Pool quote + fee: 🪙BNB | 💎90% — slightly tighter to fit chips */
+/* Pool quote + fee: 🪙BNB | 💎90% */
 .gmgn-fee-mode-icon--with-pool {
   font-size: 10px;
-  letter-spacing: -0.3px;
-  padding: 0 5px;
+  letter-spacing: 0;
+  padding: 1px 6px;
 }
 
 .gmgn-fee-mode-icon--with-pool.gmgn-fee-mode-icon--wide {
-  font-size: 9px;
-  letter-spacing: -0.45px;
-  padding: 0 4px;
+  font-size: 10px;
+  letter-spacing: 0;
+  padding: 1px 5px;
 }
 
 .gmgn-fee-mode-icon--debot {
@@ -66,43 +91,51 @@
   margin-right: 6px;
 }
 
+/* Token detail: sit after 总税率 cell in header metrics strip */
+.gmgn-fee-mode-icon--gmgn[data-fee-token] {
+  margin-left: 8px;
+  margin-right: 4px;
+  align-self: center;
+}
+
 /* Survive GMGN/Debot flex rows that shrink children */
 body .gmgn-fee-mode-icon {
   flex: 0 0 auto !important;
   min-width: max-content;
 }
 
-.gmgn-fee-mode-icon--holder {
+/* ---------- Theme: dark (default) — translucent chips for dark sites ---------- */
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--holder {
   background: rgba(37, 211, 102, 0.22);
   box-shadow: 0 0 0 1px rgba(37, 211, 102, 0.16), 0 0 8px rgba(37, 211, 102, 0.18);
   color: #27e984;
 }
 
-.gmgn-fee-mode-icon--gift {
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--gift {
   background: rgba(255, 184, 52, 0.24);
   box-shadow: 0 0 0 1px rgba(255, 184, 52, 0.16), 0 0 8px rgba(255, 184, 52, 0.2);
   color: #ffca45;
 }
 
-.gmgn-fee-mode-icon--creator {
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--creator {
   background: rgba(74, 157, 255, 0.24);
   box-shadow: 0 0 0 1px rgba(74, 157, 255, 0.16), 0 0 8px rgba(74, 157, 255, 0.2);
   color: #62adff;
 }
 
-.gmgn-fee-mode-icon--burn {
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--burn {
   background: rgba(255, 99, 71, 0.22);
   box-shadow: 0 0 0 1px rgba(255, 99, 71, 0.16), 0 0 8px rgba(255, 99, 71, 0.18);
   color: #ff7a59;
 }
 
-.gmgn-fee-mode-icon--lp {
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--lp {
   background: rgba(56, 189, 248, 0.22);
   box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.16), 0 0 8px rgba(56, 189, 248, 0.18);
   color: #38bdf8;
 }
 
-.gmgn-fee-mode-icon--hybrid {
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--hybrid {
   background: linear-gradient(
     90deg,
     rgba(37, 211, 102, 0.2),
@@ -113,7 +146,110 @@ body .gmgn-fee-mode-icon {
   color: #f3f6fb;
 }
 
-.gmgn-fee-mode-icon--unknown {
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--unknown {
+  background: rgba(156, 163, 175, 0.24);
+  box-shadow: 0 0 0 1px rgba(156, 163, 175, 0.16), 0 0 8px rgba(156, 163, 175, 0.16);
+  color: #d0d5dd;
+}
+
+/* ---------- Theme: light — solid soft chips, higher contrast on dark pages ---------- */
+.gmgn-fee-mode-icon--theme-light {
+  border-width: 1px;
+  border-style: solid;
+}
+
+.gmgn-fee-mode-icon--theme-light.gmgn-fee-mode-icon--holder {
+  background: linear-gradient(180deg, #f0fdf6 0%, #dcfce7 100%);
+  border-color: rgba(5, 150, 105, 0.35);
+  box-shadow: 0 1px 2px rgba(6, 95, 70, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.6) inset;
+  color: #047857;
+}
+
+.gmgn-fee-mode-icon--theme-light.gmgn-fee-mode-icon--gift {
+  background: linear-gradient(180deg, #fffbeb 0%, #fef3c7 100%);
+  border-color: rgba(217, 119, 6, 0.35);
+  box-shadow: 0 1px 2px rgba(146, 64, 14, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.65) inset;
+  color: #b45309;
+}
+
+.gmgn-fee-mode-icon--theme-light.gmgn-fee-mode-icon--creator {
+  background: linear-gradient(180deg, #eff6ff 0%, #dbeafe 100%);
+  border-color: rgba(37, 99, 235, 0.35);
+  box-shadow: 0 1px 2px rgba(30, 64, 175, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.65) inset;
+  color: #1d4ed8;
+}
+
+.gmgn-fee-mode-icon--theme-light.gmgn-fee-mode-icon--burn {
+  background: linear-gradient(180deg, #fff7ed 0%, #ffedd5 100%);
+  border-color: rgba(234, 88, 12, 0.35);
+  box-shadow: 0 1px 2px rgba(154, 52, 18, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.65) inset;
+  color: #c2410c;
+}
+
+.gmgn-fee-mode-icon--theme-light.gmgn-fee-mode-icon--lp {
+  background: linear-gradient(180deg, #f0f9ff 0%, #e0f2fe 100%);
+  border-color: rgba(14, 165, 233, 0.4);
+  box-shadow: 0 1px 2px rgba(7, 89, 133, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.65) inset;
+  color: #0369a1;
+}
+
+.gmgn-fee-mode-icon--theme-light.gmgn-fee-mode-icon--hybrid {
+  background: linear-gradient(90deg, #ecfdf5 0%, #eff6ff 50%, #fffbeb 100%);
+  border-color: rgba(100, 116, 139, 0.35);
+  box-shadow: 0 1px 2px rgba(51, 65, 85, 0.1), 0 0 0 1px rgba(255, 255, 255, 0.7) inset;
+  color: #334155;
+}
+
+.gmgn-fee-mode-icon--theme-light.gmgn-fee-mode-icon--unknown {
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+  border-color: rgba(100, 116, 139, 0.35);
+  box-shadow: 0 1px 2px rgba(51, 65, 85, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.7) inset;
+  color: #64748b;
+}
+
+/* Legacy badges without theme class → treat as dark */
+.gmgn-fee-mode-icon--holder:not([class*="theme-"]) {
+  background: rgba(37, 211, 102, 0.22);
+  box-shadow: 0 0 0 1px rgba(37, 211, 102, 0.16), 0 0 8px rgba(37, 211, 102, 0.18);
+  color: #27e984;
+}
+
+.gmgn-fee-mode-icon--gift:not([class*="theme-"]) {
+  background: rgba(255, 184, 52, 0.24);
+  box-shadow: 0 0 0 1px rgba(255, 184, 52, 0.16), 0 0 8px rgba(255, 184, 52, 0.2);
+  color: #ffca45;
+}
+
+.gmgn-fee-mode-icon--creator:not([class*="theme-"]) {
+  background: rgba(74, 157, 255, 0.24);
+  box-shadow: 0 0 0 1px rgba(74, 157, 255, 0.16), 0 0 8px rgba(74, 157, 255, 0.2);
+  color: #62adff;
+}
+
+.gmgn-fee-mode-icon--burn:not([class*="theme-"]) {
+  background: rgba(255, 99, 71, 0.22);
+  box-shadow: 0 0 0 1px rgba(255, 99, 71, 0.16), 0 0 8px rgba(255, 99, 71, 0.18);
+  color: #ff7a59;
+}
+
+.gmgn-fee-mode-icon--lp:not([class*="theme-"]) {
+  background: rgba(56, 189, 248, 0.22);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.16), 0 0 8px rgba(56, 189, 248, 0.18);
+  color: #38bdf8;
+}
+
+.gmgn-fee-mode-icon--hybrid:not([class*="theme-"]) {
+  background: linear-gradient(
+    90deg,
+    rgba(37, 211, 102, 0.2),
+    rgba(74, 157, 255, 0.2),
+    rgba(255, 184, 52, 0.2)
+  );
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14), 0 0 8px rgba(148, 163, 184, 0.22);
+  color: #f3f6fb;
+}
+
+.gmgn-fee-mode-icon--unknown:not([class*="theme-"]) {
   background: rgba(156, 163, 175, 0.24);
   box-shadow: 0 0 0 1px rgba(156, 163, 175, 0.16), 0 0 8px rgba(156, 163, 175, 0.16);
   color: #d0d5dd;

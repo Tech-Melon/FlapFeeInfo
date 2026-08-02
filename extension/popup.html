@@ -9,10 +9,29 @@
   <body>
     <header class="head">
       <div class="title">技术瓜FlapFeeInfo</div>
-      <div class="sub">徽章显示项（默认全部开启）</div>
+      <div class="sub">徽章显示与主题（即时生效）</div>
     </header>
 
-    <section class="list" id="prefList"></section>
+    <section class="section">
+      <div class="section-title">颜色主题</div>
+      <div class="theme-seg" role="group" aria-label="徽章颜色主题">
+        <button type="button" class="theme-btn" data-theme="dark" id="themeDark">
+          <span class="theme-dot theme-dot-dark"></span>
+          深色
+          <span class="theme-tag">默认</span>
+        </button>
+        <button type="button" class="theme-btn" data-theme="light" id="themeLight">
+          <span class="theme-dot theme-dot-light"></span>
+          浅色
+        </button>
+      </div>
+      <p class="theme-hint">深色适配 GMGN/Debot 黑底；浅色为实心浅底，对比更强。</p>
+    </section>
+
+    <section class="section">
+      <div class="section-title">显示项（默认全部开启）</div>
+      <div class="list" id="prefList"></div>
+    </section>
 
     <footer class="foot">
       <button type="button" id="btnAllOn" class="btn">全部开启</button>

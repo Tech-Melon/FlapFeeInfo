@@ -8,8 +8,12 @@
   const REQUEST_TIMEOUT_MS = 28000;
   // Background tabs freeze timers; if a batch never finishes, unblock after this wall time.
   const BATCH_STUCK_MS = 45000;
-  // On tab resume, only force-kill in-flight fetch if older than this (avoid Abort cascade).
-  const RESUME_FORCE_MIN_AGE_MS = 12000;
+  // On tab resume, force-kill in-flight fetch if older than this (avoid Abort cascade on short blurs).
+  const RESUME_FORCE_MIN_AGE_MS = 8000;
+  // After long background, force full badge remount for this window (GMGN recycles DOM silently).
+  const RESUME_FORCE_REMOUNT_MS = 12000;
+  // Hidden longer than this → treat as long freeze (timers/fetch may be dead).
+  const RESUME_LONG_HIDDEN_MS = 5000;
   // Debot three-column meme boards can expose 100+ 7777 cards in view.
   const MAX_CANDIDATES_PER_SCAN = 240;
   const MAX_CARDS_PER_SCAN = 120;
@@ -32,6 +36,9 @@
     payoutArrow: true,
     unknown: true
   };
+  // Badge color theme: dark (default, for dark sites) | light (solid soft chips for contrast).
+  const BADGE_THEME_KEY = "flapFeeInfo.badgeTheme.v1";
+  const DEFAULT_BADGE_THEME = "dark";
   const DEBUG_PREFIX = "[FlapFeeInfo]";
   const CARD_MARK = "gmgnFeeModeCard";
   const ICON_MARK = "gmgnFeeModeIcon";
@@ -94,11 +101,18 @@
   let persistentCacheReady = false;
   let persistentCacheReadyWaiters = [];
   let lastResumeAt = 0;
+  /** performance.now() / Date when tab became hidden (0 if visible). */
+  let hiddenSinceMs = 0;
+  /** Until this timestamp, always remount badges (skip idempotent short-circuit). */
+  let resumeForceRemountUntil = 0;
   /** Live display toggles from popup (chrome.storage). */
   let displayPrefs = { ...DEFAULT_DISPLAY_PREFS };
+  /** dark | light — badge chrome colors */
+  let badgeTheme = DEFAULT_BADGE_THEME;
 
   hydratePersistentCache();
   hydrateDisplayPrefs();
+  hydrateBadgeTheme();
   watchDisplayPrefs();
 
   function createSiteStrategy() {
@@ -113,18 +127,41 @@
   function createGmgnStrategy() {
     return {
       name: "gmgn",
-      getCandidateNodes,
+      getCandidateNodes: getGmgnCandidateNodes,
       findCard(node) {
+        // Token detail: single header "card" (no list Tax chip).
+        if (isGmgnTokenPage()) {
+          const root = findGmgnTokenPageRoot();
+          if (root && (node === root || root.contains(node) || (node.contains && node.contains(root)))) {
+            return root;
+          }
+          return root;
+        }
         return climbToCard(node, {
-          maxDepth: 8,
-          maxHeight: 180,
+          maxDepth: 9,
+          maxHeight: 240,
+          minWidth: 220,
           requireFeeTag: true
         });
       },
-      extractToken: extractCardTokenFromAttrs,
-      findIconTarget: findTaxTag,
-      // Put badge outside the narrow Tax chip / overflow:hidden wrappers.
+      extractToken(card) {
+        if (isGmgnTokenPage()) {
+          return extractTokenFromUrl() || extractCardTokenFromAttrs(card);
+        }
+        return extractCardTokenFromAttrs(card);
+      },
+      findIconTarget(card) {
+        if (isGmgnTokenPage()) {
+          return findGmgnTokenPageMount() || findTaxTag(card);
+        }
+        return findTaxTag(card);
+      },
       placeIcon(target, icon) {
+        if (isGmgnTokenPage()) {
+          placeGmgnTokenIcon(target, icon);
+          return;
+        }
+        // Put badge outside the narrow Tax chip / overflow:hidden wrappers.
         placeBesideTaxChip(target, icon);
       }
     };
@@ -136,15 +173,22 @@
       getCandidateNodes,
       findCard(node) {
         // "即将打满" cards with progress rings are taller than plain new-token cards.
-        return climbToCard(node, {
+        const card = climbToCard(node, {
           maxDepth: 9,
-          maxHeight: 280,
-          minWidth: 200,
+          maxHeight: 320,
+          minWidth: 220,
           requireFeeTag: false
         });
+        // Skip left/right watchlist rails (js-mcp: ~168px DOGI/TSLAB false cards).
+        if (card && isDebotSideRailCard(card)) return null;
+        return card;
       },
-      extractToken: extractCardTokenFromAttrs,
-      // Prefer the stable 买-button flex row (js-mcp: MuiBox flex-end holding 买).
+      extractToken(card) {
+        if (isDebotTokenPage()) {
+          return extractTokenFromUrl() || extractCardTokenFromAttrs(card);
+        }
+        return extractCardTokenFromAttrs(card);
+      },
       findIconTarget(card) {
         return findDebotIconTarget(card);
       },
@@ -152,6 +196,173 @@
         placeDebotIcon(target, icon);
       }
     };
+  }
+
+  /** e.g. /bsc/token/0x… or /token/bsc/0x… */
+  function isGmgnTokenPage() {
+    return /\/token\//i.test(location.pathname || "") && location.hostname.endsWith("gmgn.ai");
+  }
+
+  function isDebotTokenPage() {
+    return /\/token\//i.test(location.pathname || "");
+  }
+
+  /** CA from URL path (GMGN/Debot token detail). Only 8888/7777 tax tokens. */
+  function extractTokenFromUrl() {
+    const m = String(location.pathname || "").match(/0x[a-fA-F0-9]{40}/i);
+    if (!m) return null;
+    const token = m[0].toLowerCase();
+    return TARGET_TOKEN_RE.test(token) ? token : null;
+  }
+
+  /**
+   * GMGN token detail: ensure scan sees the page even without list Tax chips.
+   * js-mcp: header has short CA + 总税率 metrics strip, no `Tax N%` chip.
+   */
+  function getGmgnCandidateNodes() {
+    const nodes = getCandidateNodes();
+    if (!isGmgnTokenPage()) return nodes;
+    const root = findGmgnTokenPageRoot();
+    if (root && !nodes.includes(root)) nodes.unshift(root);
+    // Also seed short-address nodes in header so climb is not required.
+    const ca = extractTokenFromUrl();
+    if (ca) {
+      document.querySelectorAll("span, a, div").forEach((el) => {
+        const t = (el.textContent || "").trim();
+        if (TARGET_SHORT_TOKEN_RE.test(t) && t.length < 22 && !nodes.includes(el)) {
+          nodes.push(el);
+        }
+      });
+    }
+    return nodes.slice(0, MAX_CANDIDATES_PER_SCAN);
+  }
+
+  /** Header bar ~h-[70px] containing token metrics (价格/池子/总税率). */
+  function findGmgnTokenPageRoot() {
+    const taxLab = findGmgnTaxRateLabel();
+    if (taxLab) {
+      let p = taxLab;
+      for (let i = 0; i < 10 && p; i += 1) {
+        if (!(p instanceof HTMLElement)) break;
+        const r = p.getBoundingClientRect();
+        // Header strip (js-mcp: ~2240×70)
+        if (r.width > 500 && r.height >= 48 && r.height <= 120 && r.top < 200) {
+          return p;
+        }
+        p = p.parentElement;
+      }
+    }
+    const short = Array.from(document.querySelectorAll("span, a, div")).find((el) => {
+      const t = (el.textContent || "").trim();
+      return TARGET_SHORT_TOKEN_RE.test(t) && t.length < 22;
+    });
+    if (short) {
+      let p = short;
+      for (let i = 0; i < 10 && p; i += 1) {
+        const r = p.getBoundingClientRect();
+        if (r.width > 500 && r.height >= 48 && r.height <= 140 && r.top < 220) return p;
+        p = p.parentElement;
+      }
+    }
+    return document.body;
+  }
+
+  function findGmgnTaxRateLabel() {
+    const nodes = document.querySelectorAll("span, div");
+    for (let i = 0; i < nodes.length; i += 1) {
+      const el = nodes[i];
+      const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+      // Prefer exact title leaf "总税率" (not long sentences).
+      if (t === "总税率") return el;
+    }
+    for (let i = 0; i < nodes.length; i += 1) {
+      const el = nodes[i];
+      const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+      if (t.startsWith("总税率") && t.length <= 16) return el;
+    }
+    return null;
+  }
+
+  /**
+   * Mount next to 总税率 metric (user arrow on header right).
+   * js-mcp: parent strip `flex items-center gap-[16px]` with 8 metric cells.
+   */
+  function findGmgnTokenPageMount() {
+    const taxLab = findGmgnTaxRateLabel();
+    if (!taxLab) return null;
+
+    // Climb to the metric column cell (text-left 52×37) then to the gap-[16px] row.
+    let cell = taxLab;
+    for (let i = 0; i < 5 && cell; i += 1) {
+      const r = cell.getBoundingClientRect();
+      if (r.width >= 40 && r.width <= 120 && r.height >= 28 && r.height <= 48) {
+        // column cell
+        break;
+      }
+      cell = cell.parentElement;
+    }
+    if (!(cell instanceof HTMLElement)) cell = taxLab.parentElement;
+
+    let strip = cell;
+    for (let i = 0; i < 5 && strip; i += 1) {
+      const st = window.getComputedStyle(strip);
+      const r = strip.getBoundingClientRect();
+      const cls = (strip.className || "").toString();
+      if (
+        st.display === "flex" &&
+        (st.flexDirection === "row" || cls.includes("gap-[16px]")) &&
+        r.width > 280 &&
+        r.height >= 24 &&
+        r.height <= 56 &&
+        strip.children.length >= 3
+      ) {
+        strip.dataset.flapMount = "gmgn-header-metrics";
+        if (cell instanceof HTMLElement) cell.dataset.flapTaxCell = "1";
+        return strip;
+      }
+      strip = strip.parentElement;
+    }
+
+    if (cell instanceof HTMLElement) {
+      cell.dataset.flapMount = "gmgn-tax-cell";
+      return cell;
+    }
+    return null;
+  }
+
+  function placeGmgnTokenIcon(target, icon) {
+    const kind = target?.dataset?.flapMount || "";
+    if (kind === "gmgn-header-metrics") {
+      const taxCell =
+        target.querySelector("[data-flap-tax-cell='1']") ||
+        Array.from(target.children).find((c) => (c.textContent || "").includes("总税率"));
+      if (taxCell) {
+        // Sit immediately to the right of 总税率 column (screenshot arrow).
+        taxCell.insertAdjacentElement("afterend", icon);
+        return;
+      }
+      target.append(icon);
+      return;
+    }
+    if (kind === "gmgn-tax-cell") {
+      target.insertAdjacentElement("afterend", icon);
+      return;
+    }
+    placeBesideTaxChip(target, icon);
+  }
+
+  /** Narrow side panels (钱包追踪 / 持仓) — not meme board cards. */
+  function isDebotSideRailCard(card) {
+    if (!(card instanceof HTMLElement)) return false;
+    const r = card.getBoundingClientRect();
+    if (r.width > 0 && r.width < 210) return true;
+    // Far-left rail
+    if (r.left >= 0 && r.left < 100 && r.width < 300) return true;
+    // Far-right rail (持仓)
+    if (r.right > window.innerWidth - 40 && r.width < 360) return true;
+    const t = (card.textContent || "").replace(/\s+/g, " ");
+    if (/AI报告/.test(t) && !/MC|市值|Tax\s*\d/i.test(t)) return true;
+    return false;
   }
 
   function isTabVisible() {
@@ -233,9 +444,9 @@
 
       const entry = resolveEntry(token);
       if (entry) {
-        // Idempotent: skip full remount when label/token/parent still correct (stops Debot flicker).
+        // Idempotent normally; after tab resume always remount (see resumeForceRemountUntil).
         if (badgeNeedsUpdate(card, token, entry)) {
-          renderMode(card, token, entry);
+          renderMode(card, token, entry, { forceRemount: isResumeForceRemount() });
         }
         rendered += 1;
       } else {
@@ -255,31 +466,37 @@
     });
   }
 
-  /** Re-paint badges from memory after tab wake (DOM often recycled). */
+  function isResumeForceRemount() {
+    return Date.now() < resumeForceRemountUntil;
+  }
+
+  /** Re-paint badges from memory after tab wake (DOM often recycled). Always remount. */
   function reapplyCachedIconsOnPage() {
     let applied = 0;
     let missing = 0;
+    let failedMount = 0;
     document.querySelectorAll(`[${CARD_DATA}]`).forEach((card) => {
       if (!(card instanceof HTMLElement)) return;
       const token = card.dataset[CARD_MARK];
       if (!token) return;
       const liveToken = siteStrategy.extractToken(card);
+      // Soft: live extract miss after wake ≠ wrong token (attrs may lag).
       if (liveToken && liveToken !== token) {
         clearCardIcon(card);
         return;
       }
       const entry = resolveEntry(token);
       if (entry) {
-        if (badgeNeedsUpdate(card, token, entry)) {
-          renderMode(card, token, entry);
-        }
-        applied += 1;
+        // Force remount: SPA may keep an invisible/orphaned badge node after freeze.
+        const ok = renderMode(card, token, entry, { forceRemount: true });
+        if (ok) applied += 1;
+        else failedMount += 1;
       } else {
         queueToken(token);
         missing += 1;
       }
     });
-    debugInfo("icons:reapply", { applied, missing });
+    debugInfo("icons:reapply", { applied, missing, failedMount });
   }
 
   /**
@@ -293,20 +510,30 @@
     if (now - lastResumeAt < 600) return;
     lastResumeAt = now;
 
+    const hiddenMs = hiddenSinceMs > 0 ? now - hiddenSinceMs : 0;
+    hiddenSinceMs = 0;
     const ageMs = batchStartedAt ? now - batchStartedAt : 0;
+    const longHidden = hiddenMs >= RESUME_LONG_HIDDEN_MS;
+
     debugInfo("tab:resume", {
       reason,
       queued: requestQueue.size,
       batchActive,
-      batchAgeMs: ageMs || null
+      batchAgeMs: ageMs || null,
+      hiddenMs: hiddenMs || null,
+      longHidden
     });
 
-    // Only force-kill old batches. Young in-flight fetches must not be aborted on every focus
-    // (that caused AbortError spam + recover-stuck ageMs=100~5s loops in 0.2.5).
-    if (batchActive && ageMs >= RESUME_FORCE_MIN_AGE_MS) {
-      recoverStuckBatch(true, "resume-old-batch");
+    // Kill frozen batches after long background (Chrome freezes fetch + timers).
+    if (
+      batchActive &&
+      (longHidden || ageMs >= RESUME_FORCE_MIN_AGE_MS || ageMs >= BATCH_STUCK_MS)
+    ) {
+      recoverStuckBatch(true, longHidden ? "resume-long-hidden" : "resume-old-batch");
     }
 
+    // Force remount window: GMGN/Debot virtual lists recycle; idempotent path hides "ghost" badges.
+    resumeForceRemountUntil = now + RESUME_FORCE_REMOUNT_MS;
     lastScanAt = 0;
     scanScheduled = false;
 
@@ -314,10 +541,10 @@
     if (!batchActive) {
       scheduleBatchFlush({ immediate: true });
     }
-    // Virtualized lists reflow over a few frames after focus (fewer than before).
-    scheduleScan(0, { force: true, immediate: true });
-    scheduleScan(500, { force: true, immediate: true });
-    scheduleScan(1600, { force: true, immediate: true });
+    // Staggered scans: Tax chips / virtual rows often appear over several seconds after focus.
+    [0, 400, 1000, 2200, 4500, 8000].forEach((ms) => {
+      scheduleScan(ms, { force: true, immediate: true });
+    });
   }
 
   function abortActiveRequest(reason) {
@@ -917,6 +1144,10 @@
     return out;
   }
 
+  function normalizeBadgeTheme(raw) {
+    return raw === "light" ? "light" : DEFAULT_BADGE_THEME;
+  }
+
   function hydrateDisplayPrefs() {
     if (!isExtensionContextValid() || !chrome.storage?.local) return;
     try {
@@ -930,13 +1161,34 @@
     }
   }
 
+  function hydrateBadgeTheme() {
+    if (!isExtensionContextValid() || !chrome.storage?.local) return;
+    try {
+      chrome.storage.local.get([BADGE_THEME_KEY], (items) => {
+        if (!isExtensionContextValid() || chrome.runtime.lastError) return;
+        badgeTheme = normalizeBadgeTheme(items?.[BADGE_THEME_KEY]);
+        rerenderAllBadges();
+      });
+    } catch {
+      // ignore
+    }
+  }
+
   function watchDisplayPrefs() {
     if (!isExtensionContextValid() || !chrome.storage?.onChanged) return;
     try {
       chrome.storage.onChanged.addListener((changes, area) => {
-        if (area !== "local" || !changes[DISPLAY_PREFS_KEY]) return;
-        displayPrefs = normalizeDisplayPrefs(changes[DISPLAY_PREFS_KEY].newValue);
-        rerenderAllBadges();
+        if (area !== "local") return;
+        let dirty = false;
+        if (changes[DISPLAY_PREFS_KEY]) {
+          displayPrefs = normalizeDisplayPrefs(changes[DISPLAY_PREFS_KEY].newValue);
+          dirty = true;
+        }
+        if (changes[BADGE_THEME_KEY]) {
+          badgeTheme = normalizeBadgeTheme(changes[BADGE_THEME_KEY].newValue);
+          dirty = true;
+        }
+        if (dirty) rerenderAllBadges();
       });
     } catch {
       // ignore
@@ -1044,8 +1296,10 @@
       Number((entry.lp_bps || 0) > 0);
     const poolLine = quoteSymbol ? `底池: ${quoteSymbol}\n` : "";
     const title = `${poolLine}${entry.title || meta.title}\n`;
+    const theme = badgeTheme === "light" ? "light" : "dark";
     const className = [
       "gmgn-fee-mode-icon",
+      `gmgn-fee-mode-icon--theme-${theme}`,
       `gmgn-fee-mode-icon--${meta.className}`,
       `gmgn-fee-mode-icon--${siteStrategy.name}`,
       segmentCount >= 3 ? "gmgn-fee-mode-icon--wide" : "",
@@ -1059,9 +1313,16 @@
 
   /** True when badge is missing, wrong token/label, or detached from preferred Debot mount. */
   function badgeNeedsUpdate(card, token, entry) {
+    // After long background, always remount (ghost nodes / wrong parent / display:none wrappers).
+    if (isResumeForceRemount()) return true;
+
     const existing = card.querySelector(`[${ICON_DATA}="1"]`);
     if (!existing || !document.contains(existing)) return true;
     if (existing.dataset.feeToken !== token) return true;
+
+    // Not actually painted (0×0 or off-layout) → remount.
+    const er = existing.getBoundingClientRect();
+    if (er.width < 2 || er.height < 2) return true;
 
     const quoteSymbol = extractQuoteSymbol(card);
     const { label, className, title } = computeBadgePresentation(entry, quoteSymbol);
@@ -1071,13 +1332,22 @@
     if (existing.title !== `${title}${token}`) return true;
 
     if (siteStrategy.name === "debot") {
-      const buyMount = findDebotBuyMount(card);
-      if (buyMount && existing.parentElement !== buyMount.row) return true;
+      const preferred = findDebotIconTarget(card);
+      if (preferred && existing.parentElement !== preferred) return true;
+    }
+    // GMGN: badge should sit near Tax chip; if Tax moved and badge is an orphan sibling far away, remount.
+    if (siteStrategy.name === "gmgn") {
+      const tax = findTaxTag(card);
+      if (tax && existing.parentElement && !tax.parentElement?.contains(existing) && !existing.parentElement.contains(tax)) {
+        const tr = tax.getBoundingClientRect();
+        if (Math.abs(er.top - tr.top) > 40 || Math.abs(er.left - tr.left) > 200) return true;
+      }
     }
     return false;
   }
 
-  function renderMode(card, token, entry) {
+  function renderMode(card, token, entry, options = {}) {
+    const forceRemount = options.forceRemount === true || isResumeForceRemount();
     const quoteSymbol = extractQuoteSymbol(card);
     const { label, title, className } = computeBadgePresentation(entry, quoteSymbol);
 
@@ -1091,11 +1361,18 @@
 
     // In-place update when node still valid (avoids remove/append flicker every scan).
     const existing = card.querySelector(`[${ICON_DATA}="1"]`);
-    if (existing && document.contains(existing) && existing.dataset.feeToken === token) {
+    if (
+      !forceRemount &&
+      existing &&
+      document.contains(existing) &&
+      existing.dataset.feeToken === token
+    ) {
       let stay = true;
+      const er = existing.getBoundingClientRect();
+      if (er.width < 2 || er.height < 2) stay = false;
       if (siteStrategy.name === "debot") {
-        const buyMount = findDebotBuyMount(card);
-        if (buyMount && existing.parentElement !== buyMount.row) stay = false;
+        const preferred = findDebotIconTarget(card);
+        if (preferred && existing.parentElement !== preferred) stay = false;
       }
       if (stay) {
         existing.textContent = label;
@@ -1138,7 +1415,14 @@
   function cleanupMarkedCards() {
     document.querySelectorAll(`[${CARD_DATA}]`).forEach((card) => {
       const token = card.dataset[CARD_MARK];
-      if (!token || siteStrategy.extractToken(card) !== token) clearCardIcon(card);
+      if (!token) {
+        clearCardIcon(card);
+        return;
+      }
+      const live = siteStrategy.extractToken(card);
+      // Soft after wake: attrs may lag — do NOT wipe mark/icon on temporary null extract.
+      if (live == null) return;
+      if (live !== token) clearCardIcon(card);
     });
   }
 
@@ -1199,120 +1483,147 @@
   }
 
   /**
-   * Debot/Gungnir mount points.
-   * js-mcp (debot.ai/meme): stable home is the flex-end row that holds the 买 button
-   * (MuiBox-root, children [买, badge]). Prefer that over metric/% rows which reflow.
+   * Debot/Gungnir mount points (js-mcp 2026-08 research):
+   *
+   * List cards: Debot allows custom 买 button size (up to ~140×100). Mounting on the
+   * buy row caused jumpiness because row height/layout changes and our old
+   * height≤48 gate failed → fell back to random metric/sidebar nodes.
+   *
+   * Stable primary: bottom **metrics bar** (flex row with ≥2 `%` chips, h≤40).
+   * Secondary: leaf 买 button row (size-tolerant).
+   * Token page: stats stack containing 价格+流动性 (right panel).
    */
   function findDebotIconTarget(card) {
+    if (isDebotTokenPage()) {
+      const tokenMount = findDebotTokenPageMount(card);
+      if (tokenMount) return markDebotMount(tokenMount, "token-stats");
+    }
+
+    const metrics = findDebotMetricsBar(card);
+    if (metrics) return markDebotMount(metrics, "metrics");
+
     const buyMount = findDebotBuyMount(card);
-    if (buyMount) return buyMount.row;
-    return (
-      findDebotMetricRow(card, { loose: false }) ||
-      findDebotMetricRow(card, { loose: true }) ||
-      findDebotShortAddressRow(card) ||
-      findDebotShortAddressNode(card)
-    );
+    if (buyMount) return markDebotMount(buyMount.row, "buy", buyMount.buyWrap);
+
+    const shortRow = findDebotShortAddressRow(card);
+    if (shortRow) return markDebotMount(shortRow, "short");
+
+    const shortNode = findDebotShortAddressNode(card);
+    if (shortNode) return markDebotMount(shortNode, "short-leaf");
+
+    return null;
+  }
+
+  function markDebotMount(el, kind, buyWrap) {
+    if (!(el instanceof HTMLElement)) return el;
+    el.dataset.flapMount = kind;
+    if (buyWrap instanceof HTMLElement) {
+      el.dataset.flapBuyId = "1";
+      buyWrap.dataset.flapBuyWrap = "1";
+    }
+    return el;
+  }
+
+  /** Bottom stats strip: e.g. 3% | Run | 1% | 0% | 0% — independent of 买 size. */
+  function findDebotMetricsBar(card) {
+    const rows = Array.from(card.querySelectorAll("div")).filter((el) => {
+      if (el.matches(`[${ICON_DATA}="1"]`)) return false;
+      const st = window.getComputedStyle(el);
+      if (st.display !== "flex") return false;
+      if (st.flexDirection !== "row" && st.flexDirection !== "row-reverse") return false;
+      const r = el.getBoundingClientRect();
+      if (r.width < 160 || r.height < 14 || r.height > 42) return false;
+      const text = (el.textContent || "").replace(/\s+/g, " ");
+      const pct = (text.match(/%/g) || []).length;
+      if (pct < 2) return false;
+      // Exclude giant blocks that merely contain nested metrics.
+      if (text.length > 80) return false;
+      // Prefer bars in lower half of card.
+      const cr = card.getBoundingClientRect();
+      if (r.top < cr.top + cr.height * 0.25) return false;
+      return true;
+    });
+    if (!rows.length) return null;
+    // Bottom-most bar wins (closest to 买).
+    rows.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+    return rows[0];
   }
 
   /**
-   * Locate the 买-button flex row (justify flex-end) used as badge mount.
+   * Leaf 买 control only (not 464px-wide wrappers). Custom size 5 ≈ 139×100 allowed.
    * @returns {{ row: HTMLElement, buyWrap: HTMLElement } | null}
    */
   function findDebotBuyMount(card) {
-    const nodes = card.querySelectorAll("button, div, span, a");
+    const leaves = [];
+    const nodes = card.querySelectorAll("button, [class*='cursor-pointer'], div, span, a");
     for (let i = 0; i < nodes.length; i += 1) {
       const el = nodes[i];
-      if (el.matches(`[${ICON_DATA}="1"]`) || el.closest(`[${ICON_DATA}="1"]`)) continue;
-      const tx = (el.textContent || "").replace(/\s+/g, " ").trim();
-      // Leaf-ish "买 0" / "买 12" chip — not long sentences containing 买.
-      if (!/^买\s*\d*$/u.test(tx) && !/^Buy\s*\d*$/i.test(tx)) continue;
-      if (tx.length > 10) continue;
+      if (el.matches(`[${ICON_DATA}="1"]`) || el.querySelector(`[${ICON_DATA}="1"]`)) continue;
+      const full = (el.textContent || "").replace(/\s+/g, " ").trim();
+      if (!/^买\s*\d*$/u.test(full) && !/^Buy\s*\d*$/i.test(full)) continue;
+      if (full.length > 10) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      // Drop full-width layout shells; keep leaf/custom chips (js-mcp: ~139×100 max custom).
+      if (r.width > 220) continue;
+      if (r.height > 120) continue;
+      leaves.push({ el, area: r.width * r.height });
+    }
+    if (!leaves.length) return null;
+    leaves.sort((a, b) => a.area - b.area);
+    const buyLeaf = leaves[0].el;
 
-      let buyWrap = el;
-      // Prefer the direct box wrapping the buy control.
-      if (el.parentElement && el.parentElement !== card) {
-        const pr = el.parentElement.getBoundingClientRect();
-        if (pr.width > 0 && pr.width <= 120 && pr.height > 0 && pr.height <= 40) {
-          buyWrap = el.parentElement;
-        }
+    let buyWrap = buyLeaf;
+    if (buyLeaf.parentElement && buyLeaf.parentElement !== card) {
+      const pr = buyLeaf.parentElement.getBoundingClientRect();
+      // Wrap box roughly same size as leaf (not a huge row).
+      if (pr.width > 0 && pr.width <= 240 && pr.height > 0 && pr.height <= 130) {
+        buyWrap = buyLeaf.parentElement;
       }
+    }
 
-      let row = buyWrap.parentElement;
-      for (let depth = 0; row && depth < 5; depth += 1) {
-        if (!(row instanceof HTMLElement)) break;
-        const st = window.getComputedStyle(row);
-        const isRowFlex =
-          st.display === "flex" &&
-          (st.flexDirection === "row" || st.flexDirection === "row-reverse");
-        const rect = row.getBoundingClientRect();
-        if (
-          isRowFlex &&
-          rect.width >= 80 &&
-          rect.height >= 16 &&
-          rect.height <= 48 &&
-          row.contains(buyWrap)
-        ) {
-          return { row, buyWrap };
-        }
-        row = row.parentElement;
+    let row = buyWrap.parentElement;
+    for (let depth = 0; row && depth < 6; depth += 1) {
+      if (!(row instanceof HTMLElement)) break;
+      const st = window.getComputedStyle(row);
+      const isRowFlex =
+        st.display === "flex" &&
+        (st.flexDirection === "row" || st.flexDirection === "row-reverse");
+      const rect = row.getBoundingClientRect();
+      // Allow tall custom-buy rows (was ≤48 → missed size 5).
+      if (isRowFlex && rect.width >= 80 && rect.height >= 16 && rect.height <= 140 && row.contains(buyWrap)) {
+        return { row, buyWrap };
       }
+      row = row.parentElement;
+    }
+    if (buyWrap.parentElement instanceof HTMLElement) {
+      return { row: buyWrap.parentElement, buyWrap };
     }
     return null;
   }
 
-  function findDebotMetricRow(card, options = {}) {
-    const loose = options.loose === true;
-    const shortNode = findDebotShortAddressNode(card);
-    const shortRect = shortNode ? shortNode.getBoundingClientRect() : null;
-
-    const candidates = Array.from(card.querySelectorAll("div, span")).filter((el) => {
-      if (shortNode && el.contains(shortNode)) return false;
-      if (el.matches(`[${ICON_DATA}="1"]`) || el.querySelector(`[${ICON_DATA}="1"]`)) return false;
-
-      const rect = el.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) return false;
-
-      const text = (el.textContent || "").replace(/\s+/g, " ").trim();
-      if (!text || text.length > 120) return false;
-      // Metric chips: percents, Run countdown, USD notionals, or 买 button rows.
-      if (!/%|Run|USD|\$|买/i.test(text)) return false;
-
-      if (loose) {
-        if (rect.width < 64 || rect.height < 12 || rect.height > 56) return false;
-        if (shortRect) {
-          // Same vertical band as address, or slightly below (wrapped metrics).
-          if (rect.bottom < shortRect.top - 24) return false;
-          if (rect.top > shortRect.bottom + 40) return false;
-        }
-        return true;
-      }
-
-      if (!shortRect) return false;
-      return (
-        rect.top >= shortRect.top - 16 &&
-        rect.left > shortRect.right + 4 &&
-        rect.width >= 80 &&
-        rect.height >= 12 &&
-        rect.height <= 48
-      );
+  /** Token detail: right-side stats (价格 / 流动性 / 交易费…). */
+  function findDebotTokenPageMount(card) {
+    const scope = card && card.querySelectorAll ? card : document;
+    const nodes = scope.querySelectorAll ? scope.querySelectorAll("div") : [];
+    const list = Array.from(nodes).filter((el) => {
+      const t = (el.textContent || "").replace(/\s+/g, " ");
+      if (!t.includes("价格") || !t.includes("流动性")) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width < 140 || r.width > 520) return false;
+      if (r.height < 48 || r.height > 420) return false;
+      if (r.top > window.innerHeight * 0.75) return false;
+      // Prefer compact stats column, not whole page.
+      if (t.length > 400) return false;
+      return true;
     });
-
-    if (candidates.length === 0) return null;
-
-    candidates.sort((a, b) => {
+    if (!list.length) return null;
+    list.sort((a, b) => {
       const ar = a.getBoundingClientRect();
       const br = b.getBoundingClientRect();
-      if (shortRect) {
-        const aDy = Math.abs(ar.top - shortRect.top);
-        const bDy = Math.abs(br.top - shortRect.top);
-        if (aDy !== bDy) return aDy - bDy;
-        return ar.left - br.left;
-      }
-      // Prefer narrower leaf rows (more specific chip strip).
       return ar.width * ar.height - br.width * br.height;
     });
-
-    return candidates[0];
+    return list[0];
   }
 
   function findDebotShortAddressRow(card) {
@@ -1322,7 +1633,6 @@
     for (let depth = 0; parent && depth < 5; depth += 1) {
       if (!(parent instanceof HTMLElement)) break;
       const rect = parent.getBoundingClientRect();
-      // Horizontal row that holds address + metrics.
       if (rect.width >= 140 && rect.height >= 14 && rect.height <= 64) {
         return parent;
       }
@@ -1336,11 +1646,9 @@
     const matched = candidates.filter((el) => {
       if (!TARGET_SHORT_TOKEN_RE.test(el.textContent || "")) return false;
       const rect = el.getBoundingClientRect();
-      // Slightly looser: Debot may wrap address in wider flex children.
       return rect.width > 0 && rect.width <= 160 && rect.height > 0 && rect.height <= 36;
     });
     if (matched.length === 0) return null;
-    // Prefer the smallest node (leaf address chip).
     matched.sort((a, b) => {
       const ar = a.getBoundingClientRect();
       const br = b.getBoundingClientRect();
@@ -1350,65 +1658,59 @@
   }
 
   /**
-   * Place badge on Debot card.
-   * Preferred: inside 买 flex-end row, *before* the 买 wrapper → visual [badge][买]
-   * (row uses justify-content:flex-end so 买 stays at the right edge).
+   * Place badge:
+   * - metrics / token-stats: append (stable end of row)
+   * - buy: before 买 wrap
+   * - short: afterend
    */
   function placeDebotIcon(target, icon) {
-    // target may already be the buy row from findDebotBuyMount
-    const buyInTarget = findBuyWrapInRow(target);
-    if (buyInTarget) {
-      buyInTarget.insertAdjacentElement("beforebegin", icon);
+    const kind = target?.dataset?.flapMount || "";
+
+    if (kind === "buy") {
+      const buyWrap =
+        target.querySelector?.("[data-flap-buy-wrap='1']") || findBuyWrapInRow(target);
+      if (buyWrap) {
+        buyWrap.insertAdjacentElement("beforebegin", icon);
+        return;
+      }
+    }
+
+    if (kind === "short-leaf" || (kind === "short" && TARGET_SHORT_TOKEN_RE.test((target.textContent || "").trim()) && (target.textContent || "").trim().length <= 24)) {
+      target.insertAdjacentElement("afterend", icon);
       return;
     }
 
-    // Card-level mount result passed as row
-    const card = target.closest?.(`[${CARD_DATA}]`) || target;
-    const buyMount = card instanceof HTMLElement ? findDebotBuyMount(card) : null;
-    if (buyMount) {
-      buyMount.buyWrap.insertAdjacentElement("beforebegin", icon);
-      return;
-    }
-
+    // metrics / token-stats / default: append to stable container
     let anchor = target;
     let parent = target.parentElement;
-    for (let depth = 0; parent && depth < 5; depth += 1) {
+    for (let depth = 0; parent && depth < 4; depth += 1) {
       const style = window.getComputedStyle(parent);
       const overflowHidden =
         style.overflow === "hidden" ||
         style.overflowX === "hidden" ||
         style.overflowY === "hidden";
       const rect = parent.getBoundingClientRect();
-      if (overflowHidden && rect.width > 0 && rect.width < 420) {
+      if (overflowHidden && rect.width > 0 && rect.width < 420 && kind !== "metrics" && kind !== "token-stats") {
         anchor = parent;
         parent = parent.parentElement;
         continue;
       }
       break;
     }
-
-    const text = (target.textContent || "").trim();
-    if (TARGET_SHORT_TOKEN_RE.test(text) && text.length <= 24) {
-      target.insertAdjacentElement("afterend", icon);
-      return;
-    }
     anchor.append(icon);
   }
 
   function findBuyWrapInRow(row) {
     if (!(row instanceof HTMLElement)) return null;
+    const marked = row.querySelector("[data-flap-buy-wrap='1']");
+    if (marked) return marked;
     const kids = Array.from(row.children);
     for (let i = 0; i < kids.length; i += 1) {
       const kid = kids[i];
       if (kid.matches?.(`[${ICON_DATA}="1"]`)) continue;
       const tx = (kid.textContent || "").replace(/\s+/g, " ").trim();
       if (/^买\s*\d*$/u.test(tx) || /^Buy\s*\d*$/i.test(tx)) return kid;
-      // Nested: MuiBox > "买 0"
-      const inner = kid.querySelector?.("button, div, span, a");
-      if (inner) {
-        const itx = (inner.textContent || "").replace(/\s+/g, " ").trim();
-        if (/^买\s*\d*$/u.test(itx) || /^Buy\s*\d*$/i.test(itx)) return kid;
-      }
+      if (tx.length <= 10 && (/买\s*\d/.test(tx) || /Buy\s*\d/i.test(tx))) return kid;
     }
     return null;
   }
@@ -1656,13 +1958,23 @@
   window.addEventListener("popstate", () => scheduleScan(100, { force: true }));
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") onTabResume("visibilitychange");
+    if (document.visibilityState === "hidden") {
+      hiddenSinceMs = Date.now();
+      return;
+    }
+    onTabResume("visibilitychange");
   });
   window.addEventListener("pageshow", (event) => {
     // bfcache restore or normal show
-    if (document.visibilityState === "visible") onTabResume(event.persisted ? "pageshow-bfcache" : "pageshow");
+    if (document.visibilityState === "visible") {
+      onTabResume(event.persisted ? "pageshow-bfcache" : "pageshow");
+    }
   });
   window.addEventListener("focus", () => onTabResume("focus"));
+  // Chromium: tab discarded for memory then restored — same as long background freeze.
+  if ("wasDiscarded" in document && document.wasDiscarded) {
+    resumeForceRemountUntil = Date.now() + RESUME_FORCE_REMOUNT_MS;
+  }
 
   scheduleScan(100, { force: true, immediate: true });
 })();

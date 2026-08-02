@@ -358,8 +358,14 @@ python tools/ctl.py watchdog-run
   - `0.3.2`：Debot「即将打满」等卡片徽章漏挂修复（更高卡片、放宽 metric 挂载、完整 CA 深扫）  
   - `0.3.3`：Debot 徽章挂到「买」按钮 flex 行 + 幂等更新，消除 500ms 扫描跳闪  
   - `0.3.4`：多分类 label 按 bps 从高到低排序（最高份额在最左）  
+  - `0.3.5`：GMGN 后台久置切回徽章丢失 — resume 强制重挂 + 软 cleanup + 错峰扫描  
+  - `0.3.6`：徽章字体跨平台统一（拉丁优先 + emoji 回退，修 macOS 字距/裁切）  
+  - `0.3.7`：徽章深色/浅色主题切换（默认 dark；storage `flapFeeInfo.badgeTheme.v1`）  
+  - `0.3.8`：Debot 挂载改为底部指标行优先（抗自定义买按钮尺寸跳变）；忽略侧栏；token 页挂 stats  
+  - `0.3.9`：GMGN 代币详情页 `/…/token/0x…` 在「总税率」旁展示徽章（URL 抽 CA）  
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
-- 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）
+- 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
+- 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`
 
 ---
 

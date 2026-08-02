@@ -1,5 +1,7 @@
 (() => {
   const PREFS_KEY = "flapFeeInfo.displayPrefs.v1";
+  const THEME_KEY = "flapFeeInfo.badgeTheme.v1";
+  const DEFAULT_THEME = "dark";
 
   /** @type {Array<{ key: string, emoji: string, title: string, desc: string }>} */
   const PREF_DEFS = [
@@ -18,6 +20,8 @@
   const listEl = document.getElementById("prefList");
   const btnAllOn = document.getElementById("btnAllOn");
   const btnAllOff = document.getElementById("btnAllOff");
+  const themeDark = document.getElementById("themeDark");
+  const themeLight = document.getElementById("themeLight");
 
   function normalizePrefs(raw) {
     const out = { ...DEFAULT_PREFS };
@@ -29,18 +33,25 @@
     return out;
   }
 
-  function loadPrefs() {
+  function normalizeTheme(raw) {
+    return raw === "light" ? "light" : DEFAULT_THEME;
+  }
+
+  function loadAll() {
     return new Promise((resolve) => {
       try {
-        chrome.storage.local.get([PREFS_KEY], (items) => {
+        chrome.storage.local.get([PREFS_KEY, THEME_KEY], (items) => {
           if (chrome.runtime.lastError) {
-            resolve({ ...DEFAULT_PREFS });
+            resolve({ prefs: { ...DEFAULT_PREFS }, theme: DEFAULT_THEME });
             return;
           }
-          resolve(normalizePrefs(items?.[PREFS_KEY]));
+          resolve({
+            prefs: normalizePrefs(items?.[PREFS_KEY]),
+            theme: normalizeTheme(items?.[THEME_KEY])
+          });
         });
       } catch {
-        resolve({ ...DEFAULT_PREFS });
+        resolve({ prefs: { ...DEFAULT_PREFS }, theme: DEFAULT_THEME });
       }
     });
   }
@@ -58,7 +69,28 @@
     });
   }
 
-  function render(prefs) {
+  function saveTheme(theme) {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.set({ [THEME_KEY]: normalizeTheme(theme) }, () => {
+          void chrome.runtime?.lastError;
+          resolve();
+        });
+      } catch {
+        resolve();
+      }
+    });
+  }
+
+  function renderTheme(theme) {
+    const t = normalizeTheme(theme);
+    themeDark.classList.toggle("is-active", t === "dark");
+    themeLight.classList.toggle("is-active", t === "light");
+    themeDark.setAttribute("aria-pressed", t === "dark" ? "true" : "false");
+    themeLight.setAttribute("aria-pressed", t === "light" ? "true" : "false");
+  }
+
+  function renderPrefs(prefs) {
     listEl.innerHTML = "";
     for (const def of PREF_DEFS) {
       const row = document.createElement("label");
@@ -83,9 +115,9 @@
       listEl.appendChild(row);
 
       input.addEventListener("change", async () => {
-        const next = await loadPrefs();
-        next[def.key] = input.checked;
-        await savePrefs(next);
+        const { prefs: cur } = await loadAll();
+        cur[def.key] = input.checked;
+        await savePrefs(cur);
       });
     }
   }
@@ -93,11 +125,23 @@
   async function setAll(value) {
     const next = Object.fromEntries(PREF_DEFS.map((d) => [d.key, value]));
     await savePrefs(next);
-    render(next);
+    renderPrefs(next);
   }
+
+  themeDark.addEventListener("click", async () => {
+    await saveTheme("dark");
+    renderTheme("dark");
+  });
+  themeLight.addEventListener("click", async () => {
+    await saveTheme("light");
+    renderTheme("light");
+  });
 
   btnAllOn.addEventListener("click", () => setAll(true));
   btnAllOff.addEventListener("click", () => setAll(false));
 
-  loadPrefs().then(render);
+  loadAll().then(({ prefs, theme }) => {
+    renderTheme(theme);
+    renderPrefs(prefs);
+  });
 })();
