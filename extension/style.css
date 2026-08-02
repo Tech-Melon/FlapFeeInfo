@@ -51,9 +51,14 @@
 }
 
 .gmgn-fee-mode-icon--debot {
-  margin-left: 8px;
-  margin-right: 0;
+  margin-left: 0;
+  margin-right: 8px;
   vertical-align: 0;
+  /* Sit in 买 flex-end row; keep chip fully visible and non-shrinking. */
+  overflow: visible !important;
+  max-width: none !important;
+  flex: 0 0 auto !important;
+  flex-shrink: 0 !important;
 }
 
 .gmgn-fee-mode-icon--gmgn {

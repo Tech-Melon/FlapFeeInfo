@@ -22,7 +22,7 @@
 | ❓️未 | 无有效分配 | 全 0 |
 | 🪙`QUOTE` | 底池报价符号（BNB / USD1 / NVDAB…） | **页面 DOM**（不查链） |
 
-- **有值才出**；多项非零 → `mode=hybrid`，fee 段如 `💎90%👨‍🍳10%`  
+- **有值才出**；多项非零 → `mode=hybrid`，fee 段**按 bps 从高到低**（最高在左），如 `💎90%→SPCXB👨‍🍳10%`  
 - **合成徽章**（有报价时）：`🪙QUOTE | fee`，如 `🪙BNB | 💎90%`、`🪙USD1 | 💎100%`（`|` 两侧有空格）  
 - **买卖税率**只进 tooltip（`title`），不进主文案  
 - **不隐藏**站点原有底池小图标  
@@ -355,6 +355,9 @@ python tools/ctl.py watchdog-run
   - `0.2.9`：`|` 两侧空格；GMGN USD1 icon + BSC 默认 BNB  
   - `0.3.0`：最大份额段始终 `→SYMBOL`（与池子 quote 相同也不省略）  
   - `0.3.1`：点击扩展图标可勾选显示项（底池/💎/👨‍🍳/🎁/🔥/💧/→/未知，默认全开）  
+  - `0.3.2`：Debot「即将打满」等卡片徽章漏挂修复（更高卡片、放宽 metric 挂载、完整 CA 深扫）  
+  - `0.3.3`：Debot 徽章挂到「买」按钮 flex 行 + 幂等更新，消除 500ms 扫描跳闪  
+  - `0.3.4`：多分类 label 按 bps 从高到低排序（最高份额在最左）  
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）
 

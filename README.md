@@ -39,7 +39,7 @@
 1. 打开 Releases 页面：  
    [https://github.com/Tech-Melon/FlapFeeInfo/releases](https://github.com/Tech-Melon/FlapFeeInfo/releases)
 2. 在最新版本下找到资源文件，例如：  
-   `FlapFeeInfo-extension-v0.3.1.zip`（版本号以页面上最新为准）
+   `FlapFeeInfo-extension-v0.3.4.zip`（版本号以页面上最新为准）
 3. 下载 ZIP，解压到任意文件夹，例如：  
    `D:\FlapFeeInfo-extension`
 4. 解压后目录里应直接能看到 `manifest.json`（或再进一层同名文件夹）。  

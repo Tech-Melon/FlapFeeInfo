@@ -10,8 +10,9 @@
   const BATCH_STUCK_MS = 45000;
   // On tab resume, only force-kill in-flight fetch if older than this (avoid Abort cascade).
   const RESUME_FORCE_MIN_AGE_MS = 12000;
-  const MAX_CANDIDATES_PER_SCAN = 180;
-  const MAX_CARDS_PER_SCAN = 80;
+  // Debot three-column meme boards can expose 100+ 7777 cards in view.
+  const MAX_CANDIDATES_PER_SCAN = 240;
+  const MAX_CARDS_PER_SCAN = 120;
   const MAX_BATCH_TOKENS = 120;
   const BATCH_FLUSH_MS = 350;
   const RETRY_BASE_MS = 900;
@@ -134,18 +135,21 @@
       name: "debot",
       getCandidateNodes,
       findCard(node) {
+        // "即将打满" cards with progress rings are taller than plain new-token cards.
         return climbToCard(node, {
-          maxDepth: 7,
-          maxHeight: 180,
+          maxDepth: 9,
+          maxHeight: 280,
+          minWidth: 200,
           requireFeeTag: false
         });
       },
       extractToken: extractCardTokenFromAttrs,
+      // Prefer the stable 买-button flex row (js-mcp: MuiBox flex-end holding 买).
       findIconTarget(card) {
-        return findDebotMetricRow(card);
+        return findDebotIconTarget(card);
       },
       placeIcon(target, icon) {
-        target.append(icon);
+        placeDebotIcon(target, icon);
       }
     };
   }
@@ -229,8 +233,10 @@
 
       const entry = resolveEntry(token);
       if (entry) {
-        // SPA may drop our badge after virtualized re-render; always re-apply.
-        renderMode(card, token, entry);
+        // Idempotent: skip full remount when label/token/parent still correct (stops Debot flicker).
+        if (badgeNeedsUpdate(card, token, entry)) {
+          renderMode(card, token, entry);
+        }
         rendered += 1;
       } else {
         queueToken(token);
@@ -264,7 +270,9 @@
       }
       const entry = resolveEntry(token);
       if (entry) {
-        renderMode(card, token, entry);
+        if (badgeNeedsUpdate(card, token, entry)) {
+          renderMode(card, token, entry);
+        }
         applied += 1;
       } else {
         queueToken(token);
@@ -399,6 +407,7 @@
   }
 
   function climbToCard(node, options) {
+    const minWidth = typeof options.minWidth === "number" ? options.minWidth : 260;
     let current = node;
     for (let depth = 0; current && depth < options.maxDepth; depth += 1) {
       if (!(current instanceof HTMLElement)) break;
@@ -406,7 +415,7 @@
       const text = current.textContent || "";
 
       if (
-        rect.width >= 260 &&
+        rect.width >= minWidth &&
         rect.height >= 58 &&
         rect.height <= options.maxHeight &&
         hasShortAddress(current) &&
@@ -419,34 +428,83 @@
     return null;
   }
 
+  /** Match full CA against truncated UI form like 0x65...7777 */
+  function tokenMatchesShort(fullToken, shortAddress) {
+    if (!shortAddress) return true;
+    const short = String(shortAddress).toLowerCase();
+    const full = String(fullToken).toLowerCase();
+    const parts = short.split(/\.{2,}/);
+    if (parts.length < 2) return full.includes(short.replace(/\./g, ""));
+    const head = parts[0].replace(/^0x/, "");
+    const tail = parts[parts.length - 1];
+    return full.startsWith(`0x${head}`) && full.endsWith(tail);
+  }
+
   function extractCardTokenFromAttrs(card) {
     const shortAddress = findTargetShortAddress(card);
-    if (!shortAddress) return null;
+    // Prefer short 8888/7777 presence; still allow pure full-CA cards without short UI.
+
+    const accept = (token) => {
+      if (!token) return null;
+      if (shortAddress && !tokenMatchesShort(token, shortAddress)) return null;
+      return token;
+    };
 
     const direct = [
       card.getAttribute("href"),
       card.getAttribute("title"),
       card.getAttribute("aria-label"),
       card.getAttribute("data-token"),
-      card.getAttribute("data-address")
+      card.getAttribute("data-address"),
+      card.getAttribute("data-ca"),
+      card.getAttribute("data-contract")
     ];
 
     for (const value of direct) {
-      const token = normalizeToken(value);
+      const token = accept(normalizeToken(value));
       if (token) return token;
     }
 
     const tokenNodes = card.querySelectorAll(
-      "a[href*='0x'], [title*='0x'], [aria-label*='0x'], [data-token*='0x'], [data-address*='0x']"
+      "a[href*='0x'], [title*='0x'], [aria-label*='0x'], [data-token*='0x'], [data-address*='0x'], [data-ca*='0x'], [data-contract*='0x'], [href*='token'], [href*='address']"
     );
     for (const node of tokenNodes) {
-      const token =
-        normalizeToken(node.getAttribute("href")) ||
-        normalizeToken(node.getAttribute("title")) ||
-        normalizeToken(node.getAttribute("aria-label")) ||
-        normalizeToken(node.getAttribute("data-token")) ||
-        normalizeToken(node.getAttribute("data-address"));
+      const attrs = [
+        node.getAttribute("href"),
+        node.getAttribute("title"),
+        node.getAttribute("aria-label"),
+        node.getAttribute("data-token"),
+        node.getAttribute("data-address"),
+        node.getAttribute("data-ca"),
+        node.getAttribute("data-contract")
+      ];
+      for (const value of attrs) {
+        const token = accept(normalizeToken(value));
+        if (token) return token;
+      }
+    }
+
+    // Deep scan: any attribute value on card subtree (Debot often buries CA in data-*).
+    const all = card.querySelectorAll("*");
+    for (let i = 0; i < all.length; i += 1) {
+      const el = all[i];
+      if (!el.attributes || el.attributes.length === 0) continue;
+      for (let j = 0; j < el.attributes.length; j += 1) {
+        const value = el.attributes[j].value;
+        if (!value || value.length < 42 || value.indexOf("0x") === -1) continue;
+        const token = accept(normalizeToken(value));
+        if (token) return token;
+      }
+    }
+
+    // Last resort: full 40-hex in HTML/text (links, JSON blobs in attributes already tried).
+    const blob = `${card.innerHTML || ""}\n${card.textContent || ""}`;
+    const re = /0x[a-fA-F0-9]{36}(8888|7777)/gi;
+    let match = re.exec(blob);
+    while (match) {
+      const token = accept(match[0].toLowerCase());
       if (token) return token;
+      match = re.exec(blob);
     }
 
     return null;
@@ -952,9 +1010,8 @@
       // burn: tax symbol not always cached client-side — omit arrow if unknown
     }
 
-    // Keep chain order: holder → market/gift → burn → lp
-    const order = { holder: 0, gift: 1, creator: 2, burn: 3, lp: 4 };
-    candidates.sort((a, b) => (order[a.kind] ?? 9) - (order[b.kind] ?? 9));
+    // Highest share first (leftmost); tie-break matches server SEGMENT_PRIORITY.
+    candidates.sort((a, b) => b.bps - a.bps || a.pri - b.pri);
 
     const parts = candidates.map((c) => {
       const base = `${c.emoji}${bpsToPercentStr(c.bps)}`;
@@ -977,7 +1034,78 @@
     return fee;
   }
 
+  function computeBadgePresentation(entry, quoteSymbol) {
+    const meta = modeMeta[entry.mode] || modeMeta.unknown;
+    const label = buildDisplayLabel(entry, quoteSymbol);
+    const segmentCount =
+      Number((entry.dividend_bps || 0) > 0) +
+      Number((entry.market_bps || 0) > 0) +
+      Number((entry.deflation_bps || 0) > 0) +
+      Number((entry.lp_bps || 0) > 0);
+    const poolLine = quoteSymbol ? `底池: ${quoteSymbol}\n` : "";
+    const title = `${poolLine}${entry.title || meta.title}\n`;
+    const className = [
+      "gmgn-fee-mode-icon",
+      `gmgn-fee-mode-icon--${meta.className}`,
+      `gmgn-fee-mode-icon--${siteStrategy.name}`,
+      segmentCount >= 3 ? "gmgn-fee-mode-icon--wide" : "",
+      segmentCount >= 2 ? "gmgn-fee-mode-icon--multi" : "",
+      quoteSymbol && displayPrefs.pool !== false ? "gmgn-fee-mode-icon--with-pool" : ""
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return { label, title, className, meta };
+  }
+
+  /** True when badge is missing, wrong token/label, or detached from preferred Debot mount. */
+  function badgeNeedsUpdate(card, token, entry) {
+    const existing = card.querySelector(`[${ICON_DATA}="1"]`);
+    if (!existing || !document.contains(existing)) return true;
+    if (existing.dataset.feeToken !== token) return true;
+
+    const quoteSymbol = extractQuoteSymbol(card);
+    const { label, className, title } = computeBadgePresentation(entry, quoteSymbol);
+    if (!label) return true;
+    if (existing.textContent !== label) return true;
+    if (existing.className !== className) return true;
+    if (existing.title !== `${title}${token}`) return true;
+
+    if (siteStrategy.name === "debot") {
+      const buyMount = findDebotBuyMount(card);
+      if (buyMount && existing.parentElement !== buyMount.row) return true;
+    }
+    return false;
+  }
+
   function renderMode(card, token, entry) {
+    const quoteSymbol = extractQuoteSymbol(card);
+    const { label, title, className } = computeBadgePresentation(entry, quoteSymbol);
+
+    // All toggles off or nothing to show → clear badge.
+    if (!label) {
+      card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((oldIcon) => oldIcon.remove());
+      const prevEmpty = card.previousElementSibling;
+      if (prevEmpty && prevEmpty.dataset && prevEmpty.dataset[ICON_MARK] === "1") prevEmpty.remove();
+      return true;
+    }
+
+    // In-place update when node still valid (avoids remove/append flicker every scan).
+    const existing = card.querySelector(`[${ICON_DATA}="1"]`);
+    if (existing && document.contains(existing) && existing.dataset.feeToken === token) {
+      let stay = true;
+      if (siteStrategy.name === "debot") {
+        const buyMount = findDebotBuyMount(card);
+        if (buyMount && existing.parentElement !== buyMount.row) stay = false;
+      }
+      if (stay) {
+        existing.textContent = label;
+        existing.title = `${title}${token}`;
+        existing.className = className;
+        existing.dataset.feeToken = token;
+        return true;
+      }
+    }
+
     const target = siteStrategy.findIconTarget(card);
     if (!target) {
       // Layout may not be ready right after tab resume; keep mark so next scan retries.
@@ -989,38 +1117,14 @@
     const prev = card.previousElementSibling;
     if (prev && prev.dataset && prev.dataset[ICON_MARK] === "1") prev.remove();
 
-    const meta = modeMeta[entry.mode] || modeMeta.unknown;
-    const quoteSymbol = extractQuoteSymbol(card);
-    const label = buildDisplayLabel(entry, quoteSymbol);
-
-    // All toggles off or nothing to show → leave card without badge.
-    if (!label) {
-      return true;
-    }
-
     const icon = document.createElement("span");
     icon.dataset[ICON_MARK] = "1";
+    icon.dataset.feeToken = token;
     siteStrategy.placeIcon(target, icon);
 
-    const segmentCount =
-      Number((entry.dividend_bps || 0) > 0) +
-      Number((entry.market_bps || 0) > 0) +
-      Number((entry.deflation_bps || 0) > 0) +
-      Number((entry.lp_bps || 0) > 0);
-
     icon.textContent = label;
-    const poolLine = quoteSymbol ? `底池: ${quoteSymbol}\n` : "";
-    icon.title = `${poolLine}${entry.title || meta.title}\n${token}`;
-    icon.className = [
-      "gmgn-fee-mode-icon",
-      `gmgn-fee-mode-icon--${meta.className}`,
-      `gmgn-fee-mode-icon--${siteStrategy.name}`,
-      segmentCount >= 3 ? "gmgn-fee-mode-icon--wide" : "",
-      segmentCount >= 2 ? "gmgn-fee-mode-icon--multi" : "",
-      quoteSymbol && displayPrefs.pool !== false ? "gmgn-fee-mode-icon--with-pool" : ""
-    ]
-      .filter(Boolean)
-      .join(" ");
+    icon.title = `${title}${token}`;
+    icon.className = className;
     return true;
   }
 
@@ -1094,43 +1198,219 @@
     return candidates[0];
   }
 
-  function findDebotMetricRow(card) {
-    const shortNode = findDebotShortAddressNode(card);
-    if (!shortNode) return null;
+  /**
+   * Debot/Gungnir mount points.
+   * js-mcp (debot.ai/meme): stable home is the flex-end row that holds the 买 button
+   * (MuiBox-root, children [买, badge]). Prefer that over metric/% rows which reflow.
+   */
+  function findDebotIconTarget(card) {
+    const buyMount = findDebotBuyMount(card);
+    if (buyMount) return buyMount.row;
+    return (
+      findDebotMetricRow(card, { loose: false }) ||
+      findDebotMetricRow(card, { loose: true }) ||
+      findDebotShortAddressRow(card) ||
+      findDebotShortAddressNode(card)
+    );
+  }
 
-    const shortRect = shortNode.getBoundingClientRect();
+  /**
+   * Locate the 买-button flex row (justify flex-end) used as badge mount.
+   * @returns {{ row: HTMLElement, buyWrap: HTMLElement } | null}
+   */
+  function findDebotBuyMount(card) {
+    const nodes = card.querySelectorAll("button, div, span, a");
+    for (let i = 0; i < nodes.length; i += 1) {
+      const el = nodes[i];
+      if (el.matches(`[${ICON_DATA}="1"]`) || el.closest(`[${ICON_DATA}="1"]`)) continue;
+      const tx = (el.textContent || "").replace(/\s+/g, " ").trim();
+      // Leaf-ish "买 0" / "买 12" chip — not long sentences containing 买.
+      if (!/^买\s*\d*$/u.test(tx) && !/^Buy\s*\d*$/i.test(tx)) continue;
+      if (tx.length > 10) continue;
+
+      let buyWrap = el;
+      // Prefer the direct box wrapping the buy control.
+      if (el.parentElement && el.parentElement !== card) {
+        const pr = el.parentElement.getBoundingClientRect();
+        if (pr.width > 0 && pr.width <= 120 && pr.height > 0 && pr.height <= 40) {
+          buyWrap = el.parentElement;
+        }
+      }
+
+      let row = buyWrap.parentElement;
+      for (let depth = 0; row && depth < 5; depth += 1) {
+        if (!(row instanceof HTMLElement)) break;
+        const st = window.getComputedStyle(row);
+        const isRowFlex =
+          st.display === "flex" &&
+          (st.flexDirection === "row" || st.flexDirection === "row-reverse");
+        const rect = row.getBoundingClientRect();
+        if (
+          isRowFlex &&
+          rect.width >= 80 &&
+          rect.height >= 16 &&
+          rect.height <= 48 &&
+          row.contains(buyWrap)
+        ) {
+          return { row, buyWrap };
+        }
+        row = row.parentElement;
+      }
+    }
+    return null;
+  }
+
+  function findDebotMetricRow(card, options = {}) {
+    const loose = options.loose === true;
+    const shortNode = findDebotShortAddressNode(card);
+    const shortRect = shortNode ? shortNode.getBoundingClientRect() : null;
+
     const candidates = Array.from(card.querySelectorAll("div, span")).filter((el) => {
-      if (el.contains(shortNode)) return false;
-      if (el.querySelector(`[${ICON_DATA}="1"]`)) return false;
+      if (shortNode && el.contains(shortNode)) return false;
+      if (el.matches(`[${ICON_DATA}="1"]`) || el.querySelector(`[${ICON_DATA}="1"]`)) return false;
 
       const rect = el.getBoundingClientRect();
-      const text = el.textContent || "";
+      if (rect.width <= 0 || rect.height <= 0) return false;
+
+      const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+      if (!text || text.length > 120) return false;
+      // Metric chips: percents, Run countdown, USD notionals, or 买 button rows.
+      if (!/%|Run|USD|\$|买/i.test(text)) return false;
+
+      if (loose) {
+        if (rect.width < 64 || rect.height < 12 || rect.height > 56) return false;
+        if (shortRect) {
+          // Same vertical band as address, or slightly below (wrapped metrics).
+          if (rect.bottom < shortRect.top - 24) return false;
+          if (rect.top > shortRect.bottom + 40) return false;
+        }
+        return true;
+      }
+
+      if (!shortRect) return false;
       return (
-        rect.top >= shortRect.top - 10 &&
-        rect.left > shortRect.right + 8 &&
-        rect.width >= 130 &&
-        rect.height >= 16 &&
-        rect.height <= 34 &&
-        /%|Run|USD/i.test(text)
+        rect.top >= shortRect.top - 16 &&
+        rect.left > shortRect.right + 4 &&
+        rect.width >= 80 &&
+        rect.height >= 12 &&
+        rect.height <= 48
       );
     });
+
+    if (candidates.length === 0) return null;
 
     candidates.sort((a, b) => {
       const ar = a.getBoundingClientRect();
       const br = b.getBoundingClientRect();
-      return Math.abs(ar.top - shortRect.top) - Math.abs(br.top - shortRect.top) || ar.left - br.left;
+      if (shortRect) {
+        const aDy = Math.abs(ar.top - shortRect.top);
+        const bDy = Math.abs(br.top - shortRect.top);
+        if (aDy !== bDy) return aDy - bDy;
+        return ar.left - br.left;
+      }
+      // Prefer narrower leaf rows (more specific chip strip).
+      return ar.width * ar.height - br.width * br.height;
     });
 
-    return candidates[0] || null;
+    return candidates[0];
+  }
+
+  function findDebotShortAddressRow(card) {
+    const shortNode = findDebotShortAddressNode(card);
+    if (!shortNode) return null;
+    let parent = shortNode.parentElement;
+    for (let depth = 0; parent && depth < 5; depth += 1) {
+      if (!(parent instanceof HTMLElement)) break;
+      const rect = parent.getBoundingClientRect();
+      // Horizontal row that holds address + metrics.
+      if (rect.width >= 140 && rect.height >= 14 && rect.height <= 64) {
+        return parent;
+      }
+      parent = parent.parentElement;
+    }
+    return shortNode.parentElement instanceof HTMLElement ? shortNode.parentElement : shortNode;
   }
 
   function findDebotShortAddressNode(card) {
-    const candidates = Array.from(card.querySelectorAll("span, div, a"));
-    return candidates.find((el) => {
+    const candidates = Array.from(card.querySelectorAll("span, div, a, p, button"));
+    const matched = candidates.filter((el) => {
       if (!TARGET_SHORT_TOKEN_RE.test(el.textContent || "")) return false;
       const rect = el.getBoundingClientRect();
-      return rect.width <= 120 && rect.height <= 28;
+      // Slightly looser: Debot may wrap address in wider flex children.
+      return rect.width > 0 && rect.width <= 160 && rect.height > 0 && rect.height <= 36;
     });
+    if (matched.length === 0) return null;
+    // Prefer the smallest node (leaf address chip).
+    matched.sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      return ar.width * ar.height - br.width * br.height;
+    });
+    return matched[0];
+  }
+
+  /**
+   * Place badge on Debot card.
+   * Preferred: inside 买 flex-end row, *before* the 买 wrapper → visual [badge][买]
+   * (row uses justify-content:flex-end so 买 stays at the right edge).
+   */
+  function placeDebotIcon(target, icon) {
+    // target may already be the buy row from findDebotBuyMount
+    const buyInTarget = findBuyWrapInRow(target);
+    if (buyInTarget) {
+      buyInTarget.insertAdjacentElement("beforebegin", icon);
+      return;
+    }
+
+    // Card-level mount result passed as row
+    const card = target.closest?.(`[${CARD_DATA}]`) || target;
+    const buyMount = card instanceof HTMLElement ? findDebotBuyMount(card) : null;
+    if (buyMount) {
+      buyMount.buyWrap.insertAdjacentElement("beforebegin", icon);
+      return;
+    }
+
+    let anchor = target;
+    let parent = target.parentElement;
+    for (let depth = 0; parent && depth < 5; depth += 1) {
+      const style = window.getComputedStyle(parent);
+      const overflowHidden =
+        style.overflow === "hidden" ||
+        style.overflowX === "hidden" ||
+        style.overflowY === "hidden";
+      const rect = parent.getBoundingClientRect();
+      if (overflowHidden && rect.width > 0 && rect.width < 420) {
+        anchor = parent;
+        parent = parent.parentElement;
+        continue;
+      }
+      break;
+    }
+
+    const text = (target.textContent || "").trim();
+    if (TARGET_SHORT_TOKEN_RE.test(text) && text.length <= 24) {
+      target.insertAdjacentElement("afterend", icon);
+      return;
+    }
+    anchor.append(icon);
+  }
+
+  function findBuyWrapInRow(row) {
+    if (!(row instanceof HTMLElement)) return null;
+    const kids = Array.from(row.children);
+    for (let i = 0; i < kids.length; i += 1) {
+      const kid = kids[i];
+      if (kid.matches?.(`[${ICON_DATA}="1"]`)) continue;
+      const tx = (kid.textContent || "").replace(/\s+/g, " ").trim();
+      if (/^买\s*\d*$/u.test(tx) || /^Buy\s*\d*$/i.test(tx)) return kid;
+      // Nested: MuiBox > "买 0"
+      const inner = kid.querySelector?.("button, div, span, a");
+      if (inner) {
+        const itx = (inner.textContent || "").replace(/\s+/g, " ").trim();
+        if (/^买\s*\d*$/u.test(itx) || /^Buy\s*\d*$/i.test(itx)) return kid;
+      }
+    }
+    return null;
   }
 
   function toKebab(value) {
