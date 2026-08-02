@@ -11,14 +11,22 @@
 - 💧`N%`：回流流动性
 - ❓️未：未知 / 链上查不到有效分配
 
-多项非零时显示完整串，例如：`💎90% 👨‍🍳10%`。悬停可看买卖税率。
+多项非零时显示完整串，例如：`💎90%→SPCXB👨‍🍳10%`。悬停可看买卖税率。
+
+**最大份额段会始终标注 `→SYMBOL`**（分红/营销/金库/销毁/LP 中 bps 最高的那一项），即使与底池 quote 相同也不省略，便于一眼确认分发币种：
+
+- 💎 对应 `dividendToken`（空则回退 quote / BNB）
+- 👨‍🍳🎁💧 对应池子 `quoteToken`（空则 BNB）
+- 🔥 对应税代币自身
 
 若卡片上已有底池/报价信息（BNB、USDT、NVDAB 等），徽章会合成：
 
-- 🪙`QUOTE` | `fee`，例如 `🪙BNB | 💎90%`、`🪙USD1 | 💎100%`、`🪙NVDAB | 💎100%`
+- 🪙`QUOTE` | `fee`，例如 `🪙BNB | 💎90%→BNB`、`🪙SPCXB | 💎90%→SPCXB👨‍🍳10%`、`🪙USD1 | 💎100%→USD1`
 - 不隐藏原网站的底池小图标；读不到报价时仍只显示 fee
 
 支持尾号 `8888`（fee）与 `7777`（tax）代币。
+
+**点击浏览器工具栏的插件图标**，可勾选徽章里显示哪些内容（底池 🪙、💎/👨‍🍳/🎁/🔥/💧、→分发币种、未知）。**默认全部开启**；改完后当前页会即时刷新。
 
 这是一个浏览器插件，用来在 GMGN、Debot、Gungnir 页面上，自动给符合条件的 token 卡片显示税收分配与底池报价信息。
 
@@ -31,7 +39,7 @@
 1. 打开 Releases 页面：  
    [https://github.com/Tech-Melon/FlapFeeInfo/releases](https://github.com/Tech-Melon/FlapFeeInfo/releases)
 2. 在最新版本下找到资源文件，例如：  
-   `FlapFeeInfo-extension-v0.2.9.zip`（版本号以页面上最新为准）
+   `FlapFeeInfo-extension-v0.3.1.zip`（版本号以页面上最新为准）
 3. 下载 ZIP，解压到任意文件夹，例如：  
    `D:\FlapFeeInfo-extension`
 4. 解压后目录里应直接能看到 `manifest.json`（或再进一层同名文件夹）。  
@@ -134,6 +142,11 @@ FlapFeeInfo\extension
 
 - 请使用 **0.2.9+**（GMGN 默认 BNB 池、USD1 特殊图标）  
 - Debot 侧依赖站点的「流动池」标签；站点未渲染时插件也读不到  
+
+### 3b. 没有 `→SYMBOL`（如 💎90%→BNB）
+
+- 请使用 **0.3.0+**，并重新加载扩展 + 刷新页面  
+- 后端/Worker 需已部署带 `top_payout_symbol` 的版本；旧缓存会自动 miss 重查
 
 ### 4. 右上角没看到插件图标
 

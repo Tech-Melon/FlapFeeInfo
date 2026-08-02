@@ -17,7 +17,20 @@
   const RETRY_BASE_MS = 900;
   const RETRY_MAX_MS = 12000;
   const PERSISTENT_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-  const PERSISTENT_CACHE_KEY = "flapFeeInfo.modeCache.v2";
+  // v3: top_payout_symbol always annotated on largest tax segment (→SYM never omitted).
+  const PERSISTENT_CACHE_KEY = "flapFeeInfo.modeCache.v3";
+  // Popup toggles: which badge parts to show (default all true).
+  const DISPLAY_PREFS_KEY = "flapFeeInfo.displayPrefs.v1";
+  const DEFAULT_DISPLAY_PREFS = {
+    pool: true,
+    holder: true,
+    creator: true,
+    gift: true,
+    burn: true,
+    lp: true,
+    payoutArrow: true,
+    unknown: true
+  };
   const DEBUG_PREFIX = "[FlapFeeInfo]";
   const CARD_MARK = "gmgnFeeModeCard";
   const ICON_MARK = "gmgnFeeModeIcon";
@@ -80,8 +93,12 @@
   let persistentCacheReady = false;
   let persistentCacheReadyWaiters = [];
   let lastResumeAt = 0;
+  /** Live display toggles from popup (chrome.storage). */
+  let displayPrefs = { ...DEFAULT_DISPLAY_PREFS };
 
   hydratePersistentCache();
+  hydrateDisplayPrefs();
+  watchDisplayPrefs();
 
   function createSiteStrategy() {
     if (location.hostname.endsWith("gmgn.ai")) return createGmgnStrategy();
@@ -673,6 +690,12 @@
       typeof result.title === "string" && result.title
         ? result.title
         : modeMeta[result.mode]?.title || modeMeta.unknown.title;
+    const topSegment =
+      typeof result.top_segment === "string" && result.top_segment
+        ? result.top_segment
+        : "unknown";
+    const topPayoutSymbol =
+      typeof result.top_payout_symbol === "string" ? result.top_payout_symbol.trim() : "";
     return {
       mode: result.mode,
       label,
@@ -684,6 +707,11 @@
       is_vault: Boolean(result.is_vault),
       buy_tax_bps: Number(result.buy_tax_bps) || 0,
       sell_tax_bps: Number(result.sell_tax_bps) || 0,
+      top_segment: topSegment,
+      top_payout_symbol: topPayoutSymbol,
+      dividend_symbol:
+        typeof result.dividend_symbol === "string" ? result.dividend_symbol : "",
+      quote_symbol: typeof result.quote_symbol === "string" ? result.quote_symbol : "",
       fetched_at: typeof result.fetched_at === "number" ? result.fetched_at : null
     };
   }
@@ -821,31 +849,131 @@
     return "";
   }
 
-  /** Compact fee allocation text from bps (no spaces). */
-  function buildFeeLabel(entry) {
-    const parts = [];
-    if ((entry.dividend_bps || 0) > 0) parts.push(`💎${bpsToPercentStr(entry.dividend_bps)}`);
-    if ((entry.market_bps || 0) > 0) {
-      parts.push(
-        entry.is_vault
-          ? `🎁${bpsToPercentStr(entry.market_bps)}`
-          : `👨‍🍳${bpsToPercentStr(entry.market_bps)}`
-      );
+  function normalizeDisplayPrefs(raw) {
+    const out = { ...DEFAULT_DISPLAY_PREFS };
+    if (raw && typeof raw === "object") {
+      for (const key of Object.keys(DEFAULT_DISPLAY_PREFS)) {
+        if (typeof raw[key] === "boolean") out[key] = raw[key];
+      }
     }
-    if ((entry.deflation_bps || 0) > 0) parts.push(`🔥${bpsToPercentStr(entry.deflation_bps)}`);
-    if ((entry.lp_bps || 0) > 0) parts.push(`💧${bpsToPercentStr(entry.lp_bps)}`);
-    if (parts.length > 0) return parts.join("");
-    if (typeof entry.label === "string" && entry.label) return entry.label.replace(/\s+/g, "");
-    return modeMeta[entry.mode]?.fallback || modeMeta.unknown.fallback;
+    return out;
+  }
+
+  function hydrateDisplayPrefs() {
+    if (!isExtensionContextValid() || !chrome.storage?.local) return;
+    try {
+      chrome.storage.local.get([DISPLAY_PREFS_KEY], (items) => {
+        if (!isExtensionContextValid() || chrome.runtime.lastError) return;
+        displayPrefs = normalizeDisplayPrefs(items?.[DISPLAY_PREFS_KEY]);
+        rerenderAllBadges();
+      });
+    } catch {
+      // Extension reloaded mid-flight.
+    }
+  }
+
+  function watchDisplayPrefs() {
+    if (!isExtensionContextValid() || !chrome.storage?.onChanged) return;
+    try {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== "local" || !changes[DISPLAY_PREFS_KEY]) return;
+        displayPrefs = normalizeDisplayPrefs(changes[DISPLAY_PREFS_KEY].newValue);
+        rerenderAllBadges();
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  /** Re-apply badge text after popup toggles change. */
+  function rerenderAllBadges() {
+    document.querySelectorAll(`[${CARD_DATA}]`).forEach((card) => {
+      const token = card.getAttribute(CARD_DATA) || "";
+      if (!token) return;
+      const entry =
+        modeCache.get(token) ||
+        (isPersistentCacheHit(token) ? persistentCache.get(token) : null);
+      if (!entry) return;
+      renderMode(card, token, entry);
+    });
   }
 
   /**
-   * Badge text: 🪙QUOTE | fee (spaces around |).
-   * When quote missing, fee only.
+   * Compact fee allocation from bps, filtered by displayPrefs.
+   * When payoutArrow is on, annotate the single largest *visible* segment with →SYMBOL
+   * (never omit when equals pool quote — user wants explicit payout).
+   */
+  function buildFeeLabel(entry) {
+    const prefs = displayPrefs || DEFAULT_DISPLAY_PREFS;
+    const candidates = [];
+    if ((entry.dividend_bps || 0) > 0 && prefs.holder !== false) {
+      candidates.push({ kind: "holder", emoji: "💎", bps: entry.dividend_bps, pri: 0 });
+    }
+    if ((entry.market_bps || 0) > 0) {
+      if (entry.is_vault && prefs.gift !== false) {
+        candidates.push({ kind: "gift", emoji: "🎁", bps: entry.market_bps, pri: 1 });
+      } else if (!entry.is_vault && prefs.creator !== false) {
+        candidates.push({ kind: "creator", emoji: "👨‍🍳", bps: entry.market_bps, pri: 2 });
+      }
+    }
+    if ((entry.deflation_bps || 0) > 0 && prefs.burn !== false) {
+      candidates.push({ kind: "burn", emoji: "🔥", bps: entry.deflation_bps, pri: 3 });
+    }
+    if ((entry.lp_bps || 0) > 0 && prefs.lp !== false) {
+      candidates.push({ kind: "lp", emoji: "💧", bps: entry.lp_bps, pri: 4 });
+    }
+
+    if (!candidates.length) {
+      if (entry.mode === "unknown" && prefs.unknown !== false) {
+        return modeMeta.unknown.fallback;
+      }
+      // All segments hidden by prefs — empty fee part.
+      return "";
+    }
+
+    // Prefer API top_segment if still visible; else re-pick among visible.
+    let top =
+      entry.top_segment && entry.top_segment !== "unknown" ? entry.top_segment : null;
+    if (!top || !candidates.some((c) => c.kind === top)) {
+      const sorted = [...candidates].sort((a, b) => b.bps - a.bps || a.pri - b.pri);
+      top = sorted[0].kind;
+    }
+
+    // Resolve →SYMBOL for the *visible* top only (don't reuse API top symbol on another kind).
+    let topSym = "";
+    if (prefs.payoutArrow !== false && top) {
+      if (top === entry.top_segment) {
+        topSym = String(entry.top_payout_symbol || "").trim();
+      } else if (top === "holder") {
+        topSym = String(entry.dividend_symbol || entry.top_payout_symbol || "").trim();
+      } else if (top === "creator" || top === "gift" || top === "lp") {
+        topSym = String(entry.quote_symbol || "").trim();
+      }
+      // burn: tax symbol not always cached client-side — omit arrow if unknown
+    }
+
+    // Keep chain order: holder → market/gift → burn → lp
+    const order = { holder: 0, gift: 1, creator: 2, burn: 3, lp: 4 };
+    candidates.sort((a, b) => (order[a.kind] ?? 9) - (order[b.kind] ?? 9));
+
+    const parts = candidates.map((c) => {
+      const base = `${c.emoji}${bpsToPercentStr(c.bps)}`;
+      if (c.kind === top && topSym) return `${base}→${topSym}`;
+      return base;
+    });
+    return parts.join("");
+  }
+
+  /**
+   * Badge text: 🪙QUOTE | fee (spaces around |), honor displayPrefs.
+   * Returns empty string when everything is toggled off.
    */
   function buildDisplayLabel(entry, quoteSymbol) {
+    const prefs = displayPrefs || DEFAULT_DISPLAY_PREFS;
     const fee = buildFeeLabel(entry);
-    if (quoteSymbol) return `${POOL_PREFIX}${quoteSymbol} | ${fee}`;
+    const showPool = prefs.pool !== false && Boolean(quoteSymbol);
+    if (showPool && fee) return `${POOL_PREFIX}${quoteSymbol} | ${fee}`;
+    if (showPool) return `${POOL_PREFIX}${quoteSymbol}`;
     return fee;
   }
 
@@ -861,13 +989,19 @@
     const prev = card.previousElementSibling;
     if (prev && prev.dataset && prev.dataset[ICON_MARK] === "1") prev.remove();
 
+    const meta = modeMeta[entry.mode] || modeMeta.unknown;
+    const quoteSymbol = extractQuoteSymbol(card);
+    const label = buildDisplayLabel(entry, quoteSymbol);
+
+    // All toggles off or nothing to show → leave card without badge.
+    if (!label) {
+      return true;
+    }
+
     const icon = document.createElement("span");
     icon.dataset[ICON_MARK] = "1";
     siteStrategy.placeIcon(target, icon);
 
-    const meta = modeMeta[entry.mode] || modeMeta.unknown;
-    const quoteSymbol = extractQuoteSymbol(card);
-    const label = buildDisplayLabel(entry, quoteSymbol);
     const segmentCount =
       Number((entry.dividend_bps || 0) > 0) +
       Number((entry.market_bps || 0) > 0) +
@@ -883,7 +1017,7 @@
       `gmgn-fee-mode-icon--${siteStrategy.name}`,
       segmentCount >= 3 ? "gmgn-fee-mode-icon--wide" : "",
       segmentCount >= 2 ? "gmgn-fee-mode-icon--multi" : "",
-      quoteSymbol ? "gmgn-fee-mode-icon--with-pool" : ""
+      quoteSymbol && displayPrefs.pool !== false ? "gmgn-fee-mode-icon--with-pool" : ""
     ]
       .filter(Boolean)
       .join(" ");
@@ -1103,6 +1237,12 @@
                 is_vault: Boolean(value.is_vault),
                 buy_tax_bps: Number(value.buy_tax_bps) || 0,
                 sell_tax_bps: Number(value.sell_tax_bps) || 0,
+                top_segment: typeof value.top_segment === "string" ? value.top_segment : "unknown",
+                top_payout_symbol:
+                  typeof value.top_payout_symbol === "string" ? value.top_payout_symbol : "",
+                dividend_symbol:
+                  typeof value.dividend_symbol === "string" ? value.dividend_symbol : "",
+                quote_symbol: typeof value.quote_symbol === "string" ? value.quote_symbol : "",
                 fetched_at: Math.floor(value.fetchedAt / 1000)
               });
             });
@@ -1163,6 +1303,10 @@
         is_vault: entry.is_vault,
         buy_tax_bps: entry.buy_tax_bps,
         sell_tax_bps: entry.sell_tax_bps,
+        top_segment: entry.top_segment || "unknown",
+        top_payout_symbol: entry.top_payout_symbol || "",
+        dividend_symbol: entry.dividend_symbol || "",
+        quote_symbol: entry.quote_symbol || "",
         fetchedAt:
           typeof entry.fetched_at === "number" ? entry.fetched_at * 1000 : Date.now()
       });
@@ -1195,6 +1339,10 @@
           is_vault: entry.is_vault,
           buy_tax_bps: entry.buy_tax_bps,
           sell_tax_bps: entry.sell_tax_bps,
+          top_segment: entry.top_segment || "unknown",
+          top_payout_symbol: entry.top_payout_symbol || "",
+          dividend_symbol: entry.dividend_symbol || "",
+          quote_symbol: entry.quote_symbol || "",
           fetchedAt
         };
       }

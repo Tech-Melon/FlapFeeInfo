@@ -121,9 +121,15 @@ if lpBps > 0:        💧
 0 段 → unknown
 1 段 → 单标签 mode（holder/creator/gift/burn/lp）
 多段 → mode=hybrid
+
+最大份额段始终标注 →SYMBOL（与池子 quote 相同也不省略）
+  holder → dividendToken（空则 quote/WBNB）
+  creator/gift/lp → quoteToken（空则 WBNB）
+  burn → taxToken 自身
+  并列 bps 时优先级: holder > gift > creator > burn > lp
 ```
 
-插件侧可用 bps **本地再拼紧凑 label**（去空格），后端 `label`/`title` 仍以 API 为准。
+插件侧可用 bps **本地再拼紧凑 label**（去空格）+ `top_payout_symbol` 补 `→`；后端 `label`/`title` 仍以 API 为准。
 
 ### 4.3 API 响应（`POST /modes`）
 
@@ -133,8 +139,8 @@ if lpBps > 0:        💧
   "results": {
     "0x...7777": {
       "mode": "hybrid",
-      "label": "💎90% 👨‍🍳10%",
-      "title": "税收分配: ...\n买税 1% | 卖税 1%",
+      "label": "💎90%→SPCXB 👨‍🍳10%",
+      "title": "税收分配: ...\n买税 1% | 卖税 1%\n最大份额(持有人分红): →SPCXB (...)",
       "dividend_bps": 9000,
       "market_bps": 1000,
       "deflation_bps": 0,
@@ -142,6 +148,14 @@ if lpBps > 0:        💧
       "is_vault": false,
       "buy_tax_bps": 100,
       "sell_tax_bps": 100,
+      "dividend_token": "0x...",
+      "quote_token": "0x...",
+      "dividend_symbol": "SPCXB",
+      "quote_symbol": "SPCXB",
+      "tax_symbol": "...",
+      "top_segment": "holder",
+      "top_payout_token": "0x...",
+      "top_payout_symbol": "SPCXB",
       "fetched_at": 1730000000,
       "source": "chain|memory|sqlite|cf-memory|cf-kv"
     }
@@ -154,8 +168,8 @@ if lpBps > 0:        💧
 缓存：
 
 - 后端：内存 + SQLite `payload` JSON；**无完整 payload 的旧行当 miss**  
-- Worker：内存 + KV；**缺 label/bps 的旧条目当 miss**  
-- 插件：`chrome.storage` key `flapFeeInfo.modeCache.v2`
+- Worker：内存 + KV；**缺 label/bps/top_payout_* 的旧条目当 miss**  
+- 插件：`chrome.storage` key `flapFeeInfo.modeCache.v3`
 
 ### 4.4 插件站点策略
 
@@ -215,7 +229,8 @@ uv run flap-fee-server
 | 变量 | 含义 |
 |------|------|
 | `FLAP_FEE_HOST` / `PORT` | 默认 `127.0.0.1:8765` |
-| `FLAP_FEE_BSC_RPC` | BSC RPC |
+| `FLAP_FEE_BSC_RPC_QN` | QuickNode 主 RPC（优先） |
+| `FLAP_FEE_BSC_RPC` | 备用 / 公共 seed（QN 未设时用） |
 | `FLAP_FEE_RPC_RPS_LIMIT` | RPC 限速 |
 | `FLAP_FEE_MAX_FETCH_WORKERS` | 并发 |
 | `FLAP_FEE_API_TOKEN` | Bearer；生产必开 |
@@ -336,11 +351,12 @@ python tools/ctl.py watchdog-run
 - 插件版本：`extension/manifest.json` → `version`（发布前递增）  
 - 近期能力：  
   - `0.2.x`：结构化分配 + 7777 + hybrid + Gungnir  
-  - `0.2.6+`：底池报价合成 `🪙QUOTE|fee`  
-  - `0.2.7+`：resume/fetch 抗 Abort 风暴  
-  - `0.2.8`：扫描 500ms  
+  - `0.2.6+`：底池报价合成 `🪙QUOTE | fee`  
   - `0.2.9`：`|` 两侧空格；GMGN USD1 icon + BSC 默认 BNB  
-- 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`
+  - `0.3.0`：最大份额段始终 `→SYMBOL`（与池子 quote 相同也不省略）  
+  - `0.3.1`：点击扩展图标可勾选显示项（底池/💎/👨‍🍳/🎁/🔥/💧/→/未知，默认全开）  
+- 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
+- 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）
 
 ---
 
