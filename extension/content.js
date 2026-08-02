@@ -7,13 +7,15 @@
   const SCAN_INTERVAL_MS = 500;
   const REQUEST_TIMEOUT_MS = 28000;
   // Background tabs freeze timers; if a batch never finishes, unblock after this wall time.
-  const BATCH_STUCK_MS = 45000;
+  const BATCH_STUCK_MS = 30000;
   // On tab resume, force-kill in-flight fetch if older than this (avoid Abort cascade on short blurs).
-  const RESUME_FORCE_MIN_AGE_MS = 8000;
+  const RESUME_FORCE_MIN_AGE_MS = 5000;
   // After long background, force full badge remount for this window (GMGN recycles DOM silently).
-  const RESUME_FORCE_REMOUNT_MS = 12000;
-  // Hidden longer than this → treat as long freeze (timers/fetch may be dead).
-  const RESUME_LONG_HIDDEN_MS = 5000;
+  const RESUME_FORCE_REMOUNT_MS = 20000;
+  // Hidden longer than this → full pipeline hard-reset (batchActive zombies kill new tokens).
+  const RESUME_LONG_HIDDEN_MS = 3000;
+  // While tab is visible, periodic self-heal if scan/batch stuck.
+  const PIPELINE_WATCHDOG_MS = 12000;
   // Debot three-column meme boards can expose 100+ 7777 cards in view.
   const MAX_CANDIDATES_PER_SCAN = 240;
   const MAX_CARDS_PER_SCAN = 120;
@@ -109,11 +111,15 @@
   let displayPrefs = { ...DEFAULT_DISPLAY_PREFS };
   /** dark | light — badge chrome colors */
   let badgeTheme = DEFAULT_BADGE_THEME;
+  let pipelineWatchdogId = null;
+  /** Scan timers scheduled with force (must not leave scanScheduled stuck). */
+  let scanTimerIds = [];
 
   hydratePersistentCache();
   hydrateDisplayPrefs();
   hydrateBadgeTheme();
   watchDisplayPrefs();
+  startPipelineWatchdog();
 
   function createSiteStrategy() {
     if (location.hostname.endsWith("gmgn.ai")) return createGmgnStrategy();
@@ -374,12 +380,19 @@
     const immediate = options.immediate === true;
     // Avoid burning CPU/network while the tab is fully hidden (timers are frozen anyway).
     if (!isTabVisible() && !force) return;
+    // Non-force coalesces; force always schedules (but clear stuck flag first).
     if (scanScheduled && !force) return;
+    if (force) {
+      // Drop stale "scanScheduled" lock from timers that never ran while frozen.
+      scanScheduled = false;
+    }
     scanScheduled = true;
 
-    window.setTimeout(() => {
+    const timerId = window.setTimeout(() => {
+      scanTimerIds = scanTimerIds.filter((id) => id !== timerId);
       scanScheduled = false;
       if (!isTabVisible() && !force) return;
+      if (!isExtensionContextValid()) return;
       const now = performance.now();
       if (!force && now - lastScanAt < SCAN_INTERVAL_MS) {
         scheduleScan(SCAN_INTERVAL_MS - (now - lastScanAt));
@@ -388,6 +401,12 @@
       lastScanAt = now;
       runWhenIdle(scanVisibleCards, { immediate: immediate || force });
     }, delay);
+    scanTimerIds.push(timerId);
+    // Bound list
+    if (scanTimerIds.length > 24) {
+      const old = scanTimerIds.shift();
+      if (old) window.clearTimeout(old);
+    }
   }
 
   function runWhenIdle(fn, options = {}) {
@@ -500,36 +519,113 @@
   }
 
   /**
+   * Full pipeline revive after long tab freeze.
+   * batchActive zombies prevent scheduleBatchFlush → new tokens never show (user: must refresh).
+   */
+  function hardResetPipeline(reason) {
+    const requeue = activeBatchTokens.slice();
+    debugWarn("pipeline:hard-reset", {
+      reason,
+      batchActive,
+      batchAgeMs: batchStartedAt ? Date.now() - batchStartedAt : 0,
+      queueSize: requestQueue.size,
+      requeue: requeue.length,
+      consecutiveFails
+    });
+
+    batchGeneration += 1;
+    abortActiveRequest(reason);
+    activeBatchTokens.forEach((token) => requestQueue.add(token));
+    activeBatchTokens = [];
+    batchActive = false;
+    batchStartedAt = 0;
+    consecutiveFails = 0;
+
+    if (batchTimer) {
+      window.clearTimeout(batchTimer);
+      batchTimer = null;
+    }
+    scanTimerIds.forEach((id) => window.clearTimeout(id));
+    scanTimerIds = [];
+    scanScheduled = false;
+    lastScanAt = 0;
+
+    // MutationObserver can go silent after SPA document swaps / freeze.
+    try {
+      if (typeof mutationObserver !== "undefined" && mutationObserver) {
+        mutationObserver.disconnect();
+        mutationObserver.observe(document.documentElement, {
+          childList: true,
+          subtree: true
+        });
+      }
+    } catch (_err) {
+      // ignore
+    }
+  }
+
+  function startPipelineWatchdog() {
+    if (pipelineWatchdogId) return;
+    pipelineWatchdogId = window.setInterval(() => {
+      if (!isExtensionContextValid()) return;
+      if (!isTabVisible()) return;
+
+      // Heal stuck batch without waiting for user resume.
+      if (batchActive) {
+        const ageMs = batchStartedAt ? Date.now() - batchStartedAt : BATCH_STUCK_MS + 1;
+        if (ageMs >= BATCH_STUCK_MS || !batchStartedAt) {
+          recoverStuckBatch(true, "watchdog-batch");
+        }
+      }
+
+      // Queue has work but nothing is pumping.
+      if (!batchActive && requestQueue.size > 0 && !batchTimer) {
+        scheduleBatchFlush({ immediate: true });
+      }
+
+      // Ensure DOM scan still runs (scanScheduled lock recovery).
+      if (scanScheduled && scanTimerIds.length === 0) {
+        scanScheduled = false;
+      }
+      scheduleScan(0, { force: true, immediate: true });
+    }, PIPELINE_WATCHDOG_MS);
+  }
+
+  /**
    * Tab left in background freezes timers/fetch; coming back must unstick pipeline
    * and repaint without requiring a full page reload.
    */
   function onTabResume(reason) {
     if (!isExtensionContextValid() || !isTabVisible()) return;
     const now = Date.now();
-    // Debounce focus+visibility double fire.
-    if (now - lastResumeAt < 600) return;
+    // Debounce focus+visibility double fire (short).
+    if (now - lastResumeAt < 400) return;
     lastResumeAt = now;
 
     const hiddenMs = hiddenSinceMs > 0 ? now - hiddenSinceMs : 0;
+    // If we never saw "hidden" but focus returned, still treat as possible freeze.
+    const inferredHidden = hiddenMs > 0 ? hiddenMs : 0;
     hiddenSinceMs = 0;
     const ageMs = batchStartedAt ? now - batchStartedAt : 0;
-    const longHidden = hiddenMs >= RESUME_LONG_HIDDEN_MS;
+    const longHidden = inferredHidden >= RESUME_LONG_HIDDEN_MS;
 
     debugInfo("tab:resume", {
       reason,
       queued: requestQueue.size,
       batchActive,
       batchAgeMs: ageMs || null,
-      hiddenMs: hiddenMs || null,
+      hiddenMs: inferredHidden || null,
       longHidden
     });
 
-    // Kill frozen batches after long background (Chrome freezes fetch + timers).
-    if (
+    // Long freeze: always hard-reset (not only when batchActive — scan lock / timer death too).
+    if (longHidden || document.wasDiscarded) {
+      hardResetPipeline(longHidden ? "resume-long-hidden" : "resume-was-discarded");
+    } else if (
       batchActive &&
-      (longHidden || ageMs >= RESUME_FORCE_MIN_AGE_MS || ageMs >= BATCH_STUCK_MS)
+      (ageMs >= RESUME_FORCE_MIN_AGE_MS || ageMs >= BATCH_STUCK_MS || !batchStartedAt)
     ) {
-      recoverStuckBatch(true, longHidden ? "resume-long-hidden" : "resume-old-batch");
+      recoverStuckBatch(true, "resume-old-batch");
     }
 
     // Force remount window: GMGN/Debot virtual lists recycle; idempotent path hides "ghost" badges.
@@ -537,12 +633,11 @@
     lastScanAt = 0;
     scanScheduled = false;
 
+    startPipelineWatchdog();
     reapplyCachedIconsOnPage();
-    if (!batchActive) {
-      scheduleBatchFlush({ immediate: true });
-    }
+    scheduleBatchFlush({ immediate: true });
     // Staggered scans: Tax chips / virtual rows often appear over several seconds after focus.
-    [0, 400, 1000, 2200, 4500, 8000].forEach((ms) => {
+    [0, 300, 800, 1600, 3200, 6000, 10000, 16000].forEach((ms) => {
       scheduleScan(ms, { force: true, immediate: true });
     });
   }
@@ -560,7 +655,11 @@
   function recoverStuckBatch(force = false, reason = "timeout") {
     if (!batchActive) return;
     const ageMs = batchStartedAt ? Date.now() - batchStartedAt : 0;
-    if (!force && ageMs < BATCH_STUCK_MS) return;
+    // Treat missing startedAt as already stuck.
+    if (!force && batchStartedAt && ageMs < BATCH_STUCK_MS) return;
+    if (!force && !batchStartedAt) {
+      // fall through
+    }
     // Prefer quiet log for forced recover; warn only for true long stuck.
     const payload = {
       force,
@@ -785,6 +884,15 @@
           ? 0
           : BATCH_FLUSH_MS;
     recoverStuckBatch(false);
+    // If still active but timer-less and over budget, force recover (zombie batchActive).
+    if (batchActive) {
+      const ageMs = batchStartedAt ? Date.now() - batchStartedAt : BATCH_STUCK_MS + 1;
+      if (ageMs >= BATCH_STUCK_MS || !batchStartedAt) {
+        recoverStuckBatch(true, "flush-zombie-batch");
+      } else {
+        return;
+      }
+    }
     if (batchActive) return;
     if (batchTimer) {
       if (!immediate && delayMs >= BATCH_FLUSH_MS) return;
@@ -807,11 +915,22 @@
     batchTimer = null;
     if (!isTabVisible()) return;
     recoverStuckBatch(false);
+    if (batchActive) {
+      const ageMs = batchStartedAt ? Date.now() - batchStartedAt : BATCH_STUCK_MS + 1;
+      if (ageMs >= BATCH_STUCK_MS || !batchStartedAt) {
+        recoverStuckBatch(true, "flush-start-zombie");
+      } else {
+        return;
+      }
+    }
     if (batchActive || requestQueue.size === 0) return;
 
     // Old content script after extension reload: stop all network work silently.
     if (!isExtensionContextValid()) {
       requestQueue.clear();
+      batchActive = false;
+      batchStartedAt = 0;
+      activeBatchTokens = [];
       return;
     }
 
@@ -860,6 +979,8 @@
       if (isContextInvalidError(error)) {
         activeBatchTokens = [];
         requestQueue.clear();
+        batchActive = false;
+        batchStartedAt = 0;
         return;
       }
 
@@ -1940,11 +2061,16 @@
     }, 500);
   }
 
-  const observer = new MutationObserver(() => {
+  const mutationObserver = new MutationObserver(() => {
     if (!isTabVisible()) return;
+    if (!isExtensionContextValid()) return;
     scheduleScan();
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
+  try {
+    mutationObserver.observe(document.documentElement, { childList: true, subtree: true });
+  } catch (_err) {
+    // ignore
+  }
 
   window.addEventListener(
     "scroll",
@@ -1971,9 +2097,17 @@
     }
   });
   window.addEventListener("focus", () => onTabResume("focus"));
+  // Page Lifecycle API (Chrome): freeze/resume while backgrounded.
+  document.addEventListener("freeze", () => {
+    hiddenSinceMs = Date.now();
+  });
+  document.addEventListener("resume", () => {
+    onTabResume("document-resume");
+  });
   // Chromium: tab discarded for memory then restored — same as long background freeze.
   if ("wasDiscarded" in document && document.wasDiscarded) {
     resumeForceRemountUntil = Date.now() + RESUME_FORCE_REMOUNT_MS;
+    hardResetPipeline("init-was-discarded");
   }
 
   scheduleScan(100, { force: true, immediate: true });
