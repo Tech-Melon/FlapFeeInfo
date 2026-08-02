@@ -4,9 +4,8 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
-  // 0.4.8: SPA token→home must work even when site captures native history
-  // (js-mcp: after logo click, observer on detached roots + no path-poll → 0 badges).
-  // Independent route poll + always observe documentElement. Debot/Gungnir share path.
+  // 0.4.10: pool quote prefer API quote_symbol (fix 币安人生≠BNB default).
+  // 0.4.9: token-page side list + open search dialog; no full-document XPath.
   const SCAN_INTERVAL_MS = 900;
   const REQUEST_TIMEOUT_MS = 28000;
   // Background tabs freeze timers; if a batch never finishes, unblock after this wall time.
@@ -186,46 +185,32 @@
       name: "gmgn",
       getCandidateNodes: getGmgnCandidateNodes,
       findCard(node) {
-        // Token detail: single header "card" (no list Tax chip).
+        // Token detail header only when the candidate sits inside the metrics strip.
+        // Side board / 新创建 list on the same URL must still climb (0.4.9).
         if (isGmgnTokenPage()) {
           const root = findGmgnTokenPageRoot();
-          if (root && (node === root || root.contains(node) || (node.contains && node.contains(root)))) {
+          if (root && (node === root || root.contains(node))) {
             return root;
           }
-          return root;
         }
-        // List/home: prefer Tax chip cards; fallback without fee tag (SPA late paint).
-        // js-mcp: list rows ~834×124; keep maxHeight generous for multi-line rows.
-        return (
-          climbToCard(node, {
-            maxDepth: 10,
-            maxHeight: 280,
-            minWidth: 200,
-            requireFeeTag: true
-          }) ||
-          climbToCard(node, {
-            maxDepth: 10,
-            maxHeight: 280,
-            minWidth: 200,
-            requireFeeTag: false
-          })
-        );
+        return climbGmgnListCard(node);
       },
       extractToken(card) {
-        if (isGmgnTokenPage()) {
+        // URL CA only for the token-page header root — never paint list rows with page CA.
+        if (isGmgnTokenPage() && isGmgnTokenHeaderCard(card)) {
           return extractTokenFromUrl() || extractCardTokenFromAttrs(card);
         }
-        // Never use URL CA on list/home (stale token mark after SPA).
         return extractCardTokenFromAttrs(card);
       },
       findIconTarget(card) {
-        if (isGmgnTokenPage()) {
+        if (isGmgnTokenPage() && isGmgnTokenHeaderCard(card)) {
           return findGmgnTokenPageMount() || findTaxTag(card);
         }
-        return findTaxTag(card);
+        // List / search dialog: Tax chip first; compact row fallback (no Tax in history modal).
+        return findTaxTag(card) || findCompactRowMount(card);
       },
       placeIcon(target, icon) {
-        if (isGmgnTokenPage()) {
+        if (isGmgnTokenPage() && target?.dataset?.flapMount) {
           placeGmgnTokenIcon(target, icon);
           return;
         }
@@ -233,6 +218,46 @@
         placeBesideTaxChip(target, icon);
       }
     };
+  }
+
+  /** GMGN list / dialog row card (scoped climb — not full-page walk). */
+  function climbGmgnListCard(node) {
+    const inDialog = isInsideOverlayDialog(node);
+    // History/search rows are short (~44–56px); list cards ~124px.
+    const minHeight = inDialog ? 40 : 58;
+    const maxHeight = inDialog ? 120 : 280;
+    const minWidth = inDialog ? 180 : 200;
+    return (
+      climbToCard(node, {
+        maxDepth: 10,
+        maxHeight,
+        minWidth,
+        minHeight,
+        requireFeeTag: true
+      }) ||
+      climbToCard(node, {
+        maxDepth: 10,
+        maxHeight,
+        minWidth,
+        minHeight,
+        requireFeeTag: false
+      })
+    );
+  }
+
+  function isGmgnTokenHeaderCard(card) {
+    if (!(card instanceof HTMLElement) || !isGmgnTokenPage()) return false;
+    const root = findGmgnTokenPageRoot();
+    return !!(root && card === root);
+  }
+
+  function isInsideOverlayDialog(node) {
+    if (!(node instanceof HTMLElement)) return false;
+    try {
+      return !!node.closest?.('[role="dialog"], [role="alertdialog"]');
+    } catch (_err) {
+      return false;
+    }
   }
 
   function createDebotStrategy() {
@@ -797,8 +822,16 @@
     const needWork = [];
     for (const card of allCards) {
       if (isStablePaintedCard(card, forceRemount)) {
-        skippedCached += 1;
-        // Stable cards do NOT consume budget — left/mid columns must not starve 已开盘.
+        // 0.4.10: stale feeSig may keep wrong 🪙BNB after API has 币安人生 — cheap recheck.
+        const marked = card.dataset[CARD_MARK];
+        const existing = marked ? card.querySelector(`[${ICON_DATA}="1"]`) : null;
+        const entry = marked ? resolveEntry(marked) : null;
+        if (existing && entry && poolBadgeNeedsQuoteRefresh(existing, entry)) {
+          needWork.push(card);
+        } else {
+          skippedCached += 1;
+          // Stable cards do NOT consume budget — left/mid columns must not starve 已开盘.
+        }
       } else {
         needWork.push(card);
       }
@@ -835,7 +868,7 @@
             rendered += 1;
             continue;
           }
-          const quoteSymbol = extractQuoteSymbol(card);
+          const quoteSymbol = resolveQuoteSymbol(card, entry);
           const { label, className, title } = computeBadgePresentation(entry, quoteSymbol);
           if (label && existing.textContent === label && existing.className === className) {
             existing.dataset.feeSig = label;
@@ -1165,6 +1198,15 @@
    */
   function getScanRoots(forceRefresh = false) {
     const now = Date.now();
+    // Dialog just opened: don't wait for roots TTL (search modal must appear in same second).
+    if (
+      !forceRefresh &&
+      document.querySelector?.('[role="dialog"], [role="alertdialog"]') &&
+      scanRootsCache.roots.length > 0 &&
+      !scanRootsCache.roots.some((r) => r.isConnected && isDialogRoot(r))
+    ) {
+      forceRefresh = true;
+    }
     if (
       !forceRefresh &&
       scanRootsCache.roots.length > 0 &&
@@ -1185,25 +1227,24 @@
       if (isGmgnTokenPage()) {
         const root = findGmgnTokenPageRoot();
         if (root && root !== document.body) roots.push(root);
-      } else {
-        // Column boards on home / war room lists
-        document
-          .querySelectorAll(
-            "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
-          )
-          .forEach((el) => {
-            if (!(el instanceof HTMLElement)) return;
-            const r = el.getBoundingClientRect();
-            if (r.width >= 240 && r.height >= 200) roots.push(el);
-          });
-        // Fallback: largest overflow-auto main pane
-        if (!roots.length) {
-          document.querySelectorAll("div.overflow-auto, div.overflow-hidden").forEach((el) => {
-            if (!(el instanceof HTMLElement)) return;
-            const r = el.getBoundingClientRect();
-            if (r.width >= 400 && r.height >= 400 && r.top < window.innerHeight) roots.push(el);
-          });
-        }
+      }
+      // Home / war room / token-page side boards (always — not only when path is /).
+      document
+        .querySelectorAll(
+          "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
+        )
+        .forEach((el) => {
+          if (!(el instanceof HTMLElement)) return;
+          const r = el.getBoundingClientRect();
+          if (r.width >= 240 && r.height >= 200) roots.push(el);
+        });
+      // Fallback: largest overflow pane when no columns matched
+      if (!roots.length) {
+        document.querySelectorAll("div.overflow-auto, div.overflow-hidden").forEach((el) => {
+          if (!(el instanceof HTMLElement)) return;
+          const r = el.getBoundingClientRect();
+          if (r.width >= 400 && r.height >= 400 && r.top < window.innerHeight) roots.push(el);
+        });
       }
     } else if (host.endsWith("debot.ai") || host.endsWith("gungnir.bot")) {
       if (isDebotTokenPage()) {
@@ -1223,6 +1264,9 @@
       }
     }
 
+    // Open overlays only (search / history). Zero cost when closed — not full-page walk.
+    collectOpenDialogRoots(roots);
+
     // Dedup nested roots (keep outermost-ish by area sort then filter contained)
     const uniq = [];
     roots.sort((a, b) => {
@@ -1232,18 +1276,45 @@
     });
     for (const r of roots) {
       if (uniq.some((u) => u.contains(r) || r.contains(u))) {
-        // Prefer medium columns over full-viewport wrappers
+        // Prefer medium columns over full-viewport wrappers; always keep dialogs.
         const rr = r.getBoundingClientRect();
-        if (rr.width > window.innerWidth * 0.85) continue;
+        const isDlg = isDialogRoot(r);
+        if (!isDlg && rr.width > window.innerWidth * 0.85) continue;
       }
       if (!uniq.includes(r)) uniq.push(r);
-      if (uniq.length >= 6) break;
+      if (uniq.length >= 8) break;
     }
 
     scanRootsCache = { at: now, roots: uniq.length ? uniq : [document.body].filter(Boolean) };
     // Observer stays on documentElement (rebindMutationObserver is a no-op keep-alive).
     ensureDocumentObserver();
     return scanRootsCache.roots;
+  }
+
+  function isDialogRoot(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    const role = (el.getAttribute("role") || "").toLowerCase();
+    return role === "dialog" || role === "alertdialog";
+  }
+
+  /**
+   * Only visible open dialogs (GMGN search/history). Cap 2 — never whole document.
+   */
+  function collectOpenDialogRoots(roots) {
+    if (!document.querySelectorAll) return;
+    let added = 0;
+    document.querySelectorAll('[role="dialog"], [role="alertdialog"]').forEach((el) => {
+      if (added >= 2) return;
+      if (!(el instanceof HTMLElement) || !el.isConnected) return;
+      const r = el.getBoundingClientRect();
+      // Visible mid-size modal (not full-viewport shell, not tiny toast).
+      if (r.width < 280 || r.height < 120) return;
+      if (r.width > window.innerWidth * 0.98 && r.height > window.innerHeight * 0.92) return;
+      if (r.bottom < 0 || r.top > window.innerHeight) return;
+      if (r.right < 0 || r.left > window.innerWidth) return;
+      roots.push(el);
+      added += 1;
+    });
   }
 
   function getCandidateNodes() {
@@ -1309,15 +1380,18 @@
 
   function climbToCard(node, options) {
     const minWidth = typeof options.minWidth === "number" ? options.minWidth : 260;
+    const minHeight = typeof options.minHeight === "number" ? options.minHeight : 58;
     let current = node;
     for (let depth = 0; current && depth < options.maxDepth; depth += 1) {
       if (!(current instanceof HTMLElement)) break;
+      // Do not climb out of a dialog into the blurred page behind it.
+      if (depth > 0 && isInsideOverlayDialog(node) && !isInsideOverlayDialog(current)) break;
       const rect = current.getBoundingClientRect();
       const text = current.textContent || "";
 
       if (
         rect.width >= minWidth &&
-        rect.height >= 58 &&
+        rect.height >= minHeight &&
         rect.height <= options.maxHeight &&
         hasShortAddress(current) &&
         (!options.requireFeeTag || hasFeeTag(text))
@@ -1325,6 +1399,36 @@
         return current;
       }
       current = current.parentElement;
+    }
+    return null;
+  }
+
+  /**
+   * Mount when there is no Tax chip (GMGN search/history rows show Fees, not Tax).
+   * Prefer short-CA leaf or a compact metrics row — never whole card.
+   */
+  function findCompactRowMount(card) {
+    if (!(card instanceof HTMLElement) || !card.querySelectorAll) return null;
+    const leaves = card.querySelectorAll("span, a, div, p");
+    const max = Math.min(leaves.length, 40);
+    let shortLeaf = null;
+    for (let i = 0; i < max; i += 1) {
+      const el = leaves[i];
+      const t = (el.textContent || "").trim();
+      if (!TARGET_SHORT_TOKEN_RE.test(t) || t.length > 22) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.width <= 160 && r.height > 0 && r.height <= 36) {
+        shortLeaf = el;
+        break;
+      }
+    }
+    if (shortLeaf) {
+      const parent = shortLeaf.parentElement;
+      if (parent instanceof HTMLElement) {
+        const pr = parent.getBoundingClientRect();
+        if (pr.width > 0 && pr.width < 420 && pr.height > 0 && pr.height <= 48) return parent;
+      }
+      return shortLeaf;
     }
     return null;
   }
@@ -1781,16 +1885,33 @@
     return `${text}%`;
   }
 
-  function normalizeQuoteSymbol(raw) {
-    let symbol = String(raw || "")
-      .trim()
-      .toUpperCase()
-      .replace(/[^A-Z0-9]/g, "");
+  /**
+   * Normalize pool/quote display symbol.
+   * allowCjk: keep Chinese names (API 币安人生); latin path uppercases A-Z0-9 only.
+   */
+  function normalizeQuoteSymbol(raw, options = {}) {
+    const allowCjk = options.allowCjk === true;
+    let symbol = String(raw || "").trim();
+    if (!symbol) return "";
+
+    if (allowCjk) {
+      // Letters, digits, CJK — drop spaces/punctuation (流动池 suffix stripped by caller).
+      symbol = symbol.replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "");
+      if (!symbol) return "";
+      if (symbol.length > MAX_QUOTE_SYMBOL_LEN) {
+        symbol = symbol.slice(0, MAX_QUOTE_SYMBOL_LEN);
+      }
+      // Pure latin → uppercase for consistency (BNB, BTCB).
+      if (/^[A-Za-z0-9]+$/.test(symbol)) symbol = symbol.toUpperCase();
+      if (symbol === "BSC" || symbol === "LOGO") return "";
+      return symbol;
+    }
+
+    symbol = symbol.toUpperCase().replace(/[^A-Z0-9]/g, "");
     if (!symbol) return "";
     if (symbol.length > MAX_QUOTE_SYMBOL_LEN) {
       symbol = symbol.slice(0, MAX_QUOTE_SYMBOL_LEN);
     }
-    // Avoid common false positives from logos / chain badges.
     if (symbol === "BSC" || symbol === "LOGO") return "";
     return symbol;
   }
@@ -1820,11 +1941,50 @@
   }
 
   /**
-   * Read quote/pool symbol from site DOM (do not hide native icons).
-   * Debot: aria-label "BNB 流动池" / img alt.
-   * GMGN: RWA "/static/quotes/xxx.png", special icons (USD1/USDT), else native BNB on BSC.
+   * True when painted pool segment disagrees with API quote_symbol (stale 🪙BNB feeSig).
    */
-  function extractQuoteSymbol(card) {
+  function poolBadgeNeedsQuoteRefresh(icon, entry) {
+    if (!(icon instanceof HTMLElement) || !entry) return false;
+    if (displayPrefs && displayPrefs.pool === false) return false;
+    const apiQ = normalizeQuoteSymbol(entry.quote_symbol || "", { allowCjk: true });
+    if (!apiQ) return false;
+    const text = icon.textContent || "";
+    const pipe = text.indexOf(" | ");
+    const poolPart =
+      pipe >= 0 ? text.slice(0, pipe) : text.startsWith(POOL_PREFIX) ? text : "";
+    if (!poolPart) return true;
+    return !poolPart.includes(apiQ);
+  }
+
+  /**
+   * Pool/quote for badge: API first (chain truth), then DOM chips, then GMGN native default.
+   * Fixes meme quote pools (e.g. 币安人生) mislabeled as BNB when no /static/quotes icon.
+   */
+  function resolveQuoteSymbol(card, entry) {
+    const apiRaw =
+      entry && typeof entry.quote_symbol === "string" ? entry.quote_symbol.trim() : "";
+    if (apiRaw) {
+      const fromApi = normalizeQuoteSymbol(apiRaw, { allowCjk: true });
+      if (fromApi) return fromApi;
+    }
+
+    const fromDom = extractQuoteSymbolFromDom(card);
+    if (fromDom) return fromDom;
+
+    // Only when API empty AND no DOM chip — typical WBNB pair on GMGN has no quote icon.
+    if (siteStrategy.name === "gmgn") {
+      const native = GMGN_CHAIN_NATIVE_QUOTE[getGmgnChainKey()];
+      if (native) return native;
+    }
+    return "";
+  }
+
+  /**
+   * Read quote/pool symbol from site DOM only (no chain-native default).
+   * Debot: aria-label "BNB 流动池" / "币安人生 流动池" / img alt.
+   * GMGN: RWA "/static/quotes/xxx.png", special icons (USD1/USDT).
+   */
+  function extractQuoteSymbolFromDom(card) {
     if (!card || !card.querySelector) return "";
 
     // Debot / Gungnir pool chip
@@ -1834,14 +1994,23 @@
     if (poolEl) {
       const img = poolEl.querySelector("img[alt]");
       if (img) {
-        const fromAlt = normalizeQuoteSymbol(img.alt);
+        const fromAlt = normalizeQuoteSymbol(img.alt, { allowCjk: true });
         if (fromAlt) return fromAlt;
       }
       const aria = poolEl.getAttribute("aria-label") || "";
+      // "BNB 流动池" / "币安人生 流动池" / "xxx 池子"
+      const namePart = aria
+        .replace(/\s*(流动池|池子)\s*$/u, "")
+        .replace(/\s*池子\s*$/u, "")
+        .trim();
+      if (namePart) {
+        const fromAria = normalizeQuoteSymbol(namePart, { allowCjk: true });
+        if (fromAria) return fromAria;
+      }
       const latin = aria.match(/[A-Za-z0-9]{1,12}/);
       if (latin) {
-        const fromAria = normalizeQuoteSymbol(latin[0]);
-        if (fromAria) return fromAria;
+        const fromLatin = normalizeQuoteSymbol(latin[0]);
+        if (fromLatin) return fromLatin;
       }
     }
 
@@ -1851,18 +2020,19 @@
     );
     if (quoteImg) {
       const alt = quoteImg.getAttribute("alt") || "";
-      const fromAlt = normalizeQuoteSymbol(alt.replace(/\s*quote\s*icon\s*$/i, ""));
+      const fromAlt = normalizeQuoteSymbol(alt.replace(/\s*quote\s*icon\s*$/i, ""), {
+        allowCjk: true
+      });
       if (fromAlt) return fromAlt;
       const src = quoteImg.currentSrc || quoteImg.getAttribute("src") || "";
       const fromSrc = src.match(/\/quotes\/([^./?#]+)/i);
       if (fromSrc) {
-        const sym = normalizeQuoteSymbol(fromSrc[1]);
+        const sym = normalizeQuoteSymbol(fromSrc[1], { allowCjk: true });
         if (sym) return sym;
       }
     }
 
     // GMGN special base quotes: USD1 / USDT / WETH (not under /static/quotes/)
-    // e.g. data-icon="IconUsd116pxS" src=".../icon_usd1_16px_s....webp" → tooltip "USD1池子"
     const specialImgs = card.querySelectorAll(
       'img[data-icon], img[src*="/static/icons/icon_usd"], img[src*="/static/icons/icon_usdt"], img[src*="/static/icons/icon_usdc"], img[src*="/static/icons/icon_weth"]'
     );
@@ -1877,24 +2047,22 @@
     );
     for (let i = 0; i < coinImgs.length; i += 1) {
       const img = coinImgs[i];
-      const fromAlt = normalizeQuoteSymbol(img.getAttribute("alt") || "");
+      const fromAlt = normalizeQuoteSymbol(img.getAttribute("alt") || "", { allowCjk: true });
       if (fromAlt) return fromAlt;
       const src = img.currentSrc || img.getAttribute("src") || "";
       const fromPath = src.match(/\/(?:coin|bstocks)\/([^./?#]+)/i);
       if (fromPath) {
-        const sym = normalizeQuoteSymbol(fromPath[1]);
+        const sym = normalizeQuoteSymbol(fromPath[1], { allowCjk: true });
         if (sym) return sym;
       }
     }
 
-    // GMGN: standard BNB (WBNB) pairs usually render NO quote chip — default native quote.
-    if (siteStrategy.name === "gmgn") {
-      const chain = getGmgnChainKey();
-      const native = GMGN_CHAIN_NATIVE_QUOTE[chain];
-      if (native) return native;
-    }
-
     return "";
+  }
+
+  /** @deprecated use resolveQuoteSymbol — kept name for any leftover refs */
+  function extractQuoteSymbol(card, entry) {
+    return resolveQuoteSymbol(card, entry || null);
   }
 
   function normalizeDisplayPrefs(raw) {
@@ -2085,7 +2253,7 @@
     if (existing.dataset.feeToken !== token) return true;
 
     // Cheap text/class check first (avoid layout + mount search every scan).
-    const quoteSymbol = extractQuoteSymbol(card);
+    const quoteSymbol = resolveQuoteSymbol(card, entry);
     const { label, className, title } = computeBadgePresentation(entry, quoteSymbol);
     if (!label) return true;
     if (existing.textContent !== label) return true;
@@ -2103,7 +2271,7 @@
 
   function renderMode(card, token, entry, options = {}) {
     const forceRemount = options.forceRemount === true || isResumeForceRemount();
-    const quoteSymbol = extractQuoteSymbol(card);
+    const quoteSymbol = resolveQuoteSymbol(card, entry);
     const { label, title, className } = computeBadgePresentation(entry, quoteSymbol);
 
     // All toggles off or nothing to show → clear badge.
