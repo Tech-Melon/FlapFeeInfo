@@ -15,7 +15,7 @@
 
 若卡片上已有底池/报价信息（BNB、USDT、NVDAB 等），徽章会合成：
 
-- 🪙`QUOTE`|`fee`，例如 `🪙BNB|💎90%`、`🪙NVDAB|💎100%`
+- 🪙`QUOTE` | `fee`，例如 `🪙BNB | 💎90%`、`🪙USD1 | 💎100%`、`🪙NVDAB | 💎100%`
 - 不隐藏原网站的底池小图标；读不到报价时仍只显示 fee
 
 支持尾号 `8888`（fee）与 `7777`（tax）代币。
@@ -68,28 +68,34 @@ git clone https://github.com/Tech-Melon/FlapFeeInfo.git
 2. 或者打开 Debot / Gungnir（同一前端的不同域名）：
    `https://debot.ai/meme?chain=bsc`
    `https://gungnir.bot/meme?chain=bsc`
-3. 插件会自动扫描页面里的 token 卡片。
-4. 如果 token 命中你的规则，就会显示对应图标。
+3. 插件会自动扫描页面里的 token 卡片（约每 500ms）。
+4. 尾号 `8888` / `7777` 的 Flap 税币会显示徽章，例如：
+   - `🪙BNB | 💎90%`
+   - `🪙USD1 | 💎100%`
+   - 无底池信息时仅显示 fee：`💎90%👨‍🍳10%`
 
 ## 插件工作方式
 
 插件只做展示，不需要你手动配置接口。
-它会默认请求 Cloudflare Worker，再由 Worker 去访问后端服务。
-
-流程大致如下：
+- **税收分配**：请求 Cloudflare Worker → 后端查链  
+- **底池报价符号**：直接读当前网页 DOM（不额外请求）
 
 ```text
-浏览器插件 -> Cloudflare Worker -> hk0 VPS -> BSC RPC / QuickNode
+浏览器插件
+  ├─ fee:  Cloudflare Worker -> VPS API -> BSC RPC
+  └─ quote: 页面上的底池/报价图标与 aria-label
 ```
 
 ## 重新安装 / 更新
 
 如果仓库有新版本，你只要：
 
-1. 下载最新代码。
-2. 替换本地旧文件夹。
-3. 打开 `chrome://extensions/`。
-4. 点一下当前插件的 `重新加载` 按钮。
+1. 下载最新代码，或下载 Release 里的 `FlapFeeInfo-extension-vX.Y.Z.zip` 并解压。
+2. 打开 `chrome://extensions/`。
+3. 点当前插件的 `重新加载`（或重新「加载已解压」指向 `extension/`）。
+4. **硬刷新** GMGN / Debot 目标页（否则可能仍是旧 content script）。
+
+当前插件版本见 `extension/manifest.json` 的 `version` 字段。
 
 ## 常见问题
 
@@ -97,15 +103,22 @@ git clone https://github.com/Tech-Melon/FlapFeeInfo.git
 
 检查你选择的是 `extension` 文件夹，不是仓库根目录。
 
-### 2. 页面没有图标
+### 2. 页面没有徽章
 
-可能是页面还没加载完，等几秒或者刷新页面。
+- 等列表加载完或刷新页面  
+- 确认 token 尾号是 `8888` 或 `7777`  
+- 扩展已重新加载，且页面已硬刷新  
 
-### 3. 右上角没看到插件图标
+### 3. 有 fee 但没有 🪙BNB / 🪙USD1
+
+- 请使用 **0.2.9+**（GMGN 默认 BNB 池、USD1 特殊图标）  
+- Debot 侧依赖站点的「流动池」标签；站点未渲染时插件也读不到  
+
+### 4. 右上角没看到插件图标
 
 去浏览器扩展菜单里，把它固定到工具栏。
 
-### 4. Windows 提示权限或路径错误
+### 5. Windows 提示权限或路径错误
 
 建议把仓库放到一个简单路径，例如：
 `D:\FlapFeeInfo`
@@ -114,5 +127,5 @@ git clone https://github.com/Tech-Melon/FlapFeeInfo.git
 
 ## 注意
 
-这个仓库对外只需要 `extension` 目录。
+这个仓库对外只需要 `extension` 目录（及 README 等说明）。
 后端服务不需要用户自己部署。

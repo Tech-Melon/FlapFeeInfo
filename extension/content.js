@@ -26,6 +26,24 @@
   // Pool/quote prefix (coin) — do not hide site pool icons; show all quotes including BNB.
   const POOL_PREFIX = "🪙";
   const MAX_QUOTE_SYMBOL_LEN = 8;
+  // GMGN special quote icons (not in /static/quotes/*.png RWA list).
+  const GMGN_ICON_QUOTE_RULES = [
+    [/usd1/i, "USD1"],
+    [/usdt/i, "USDT"],
+    [/usdc/i, "USDC"],
+    [/weth/i, "WETH"],
+    [/wbnb|bnbball|\bbnb\b/i, "BNB"]
+  ];
+  // Native default quote when GMGN shows no quote chip (standard BNB pair has no icon).
+  const GMGN_CHAIN_NATIVE_QUOTE = {
+    bsc: "BNB",
+    eth: "WETH",
+    base: "WETH",
+    blast: "WETH",
+    arbitrum: "WETH",
+    sol: "SOL",
+    tron: "TRX"
+  };
   const SUFFIX_SELECTORS =
     "a[href*='8888'], a[href*='7777'], [title*='8888'], [title*='7777'], " +
     "[aria-label*='8888'], [aria-label*='7777'], [data-token*='8888'], [data-token*='7777'], " +
@@ -701,9 +719,34 @@
     return symbol;
   }
 
+  function getGmgnChainKey() {
+    try {
+      const chain = new URL(location.href).searchParams.get("chain");
+      if (chain) return String(chain).toLowerCase();
+    } catch (_err) {
+      // ignore
+    }
+    // Host-only path may still be BSC home.
+    if (location.hostname.endsWith("gmgn.ai")) return "bsc";
+    return "";
+  }
+
+  function matchGmgnSpecialQuoteIcon(img) {
+    if (!(img instanceof HTMLElement)) return "";
+    const dataIcon = img.getAttribute("data-icon") || "";
+    const src = img.currentSrc || img.getAttribute("src") || "";
+    const hay = `${dataIcon} ${src}`;
+    for (let i = 0; i < GMGN_ICON_QUOTE_RULES.length; i += 1) {
+      const [re, symbol] = GMGN_ICON_QUOTE_RULES[i];
+      if (re.test(hay)) return symbol;
+    }
+    return "";
+  }
+
   /**
    * Read quote/pool symbol from site DOM (do not hide native icons).
-   * Debot: aria-label "BNB 流动池" / img alt; GMGN: "NVDAB quote icon" /static/quotes/.
+   * Debot: aria-label "BNB 流动池" / img alt.
+   * GMGN: RWA "/static/quotes/xxx.png", special icons (USD1/USDT), else native BNB on BSC.
    */
   function extractQuoteSymbol(card) {
     if (!card || !card.querySelector) return "";
@@ -726,7 +769,7 @@
       }
     }
 
-    // GMGN quote icon
+    // GMGN RWA / stock quote icon: alt="NVDAB quote icon", src=/static/quotes/...
     const quoteImg = card.querySelector(
       'img[alt$=" quote icon"], img[alt*=" quote icon"], img[src*="/static/quotes/"]'
     );
@@ -740,6 +783,16 @@
         const sym = normalizeQuoteSymbol(fromSrc[1]);
         if (sym) return sym;
       }
+    }
+
+    // GMGN special base quotes: USD1 / USDT / WETH (not under /static/quotes/)
+    // e.g. data-icon="IconUsd116pxS" src=".../icon_usd1_16px_s....webp" → tooltip "USD1池子"
+    const specialImgs = card.querySelectorAll(
+      'img[data-icon], img[src*="/static/icons/icon_usd"], img[src*="/static/icons/icon_usdt"], img[src*="/static/icons/icon_usdc"], img[src*="/static/icons/icon_weth"]'
+    );
+    for (let i = 0; i < specialImgs.length; i += 1) {
+      const special = matchGmgnSpecialQuoteIcon(specialImgs[i]);
+      if (special) return special;
     }
 
     // Debot coin / bstocks images (fallback when aria missing)
@@ -756,6 +809,13 @@
         const sym = normalizeQuoteSymbol(fromPath[1]);
         if (sym) return sym;
       }
+    }
+
+    // GMGN: standard BNB (WBNB) pairs usually render NO quote chip — default native quote.
+    if (siteStrategy.name === "gmgn") {
+      const chain = getGmgnChainKey();
+      const native = GMGN_CHAIN_NATIVE_QUOTE[chain];
+      if (native) return native;
     }
 
     return "";
@@ -780,12 +840,12 @@
   }
 
   /**
-   * Badge text: 🪙QUOTE|fee (pool prefix coin + quote symbol + fee).
+   * Badge text: 🪙QUOTE | fee (spaces around |).
    * When quote missing, fee only.
    */
   function buildDisplayLabel(entry, quoteSymbol) {
     const fee = buildFeeLabel(entry);
-    if (quoteSymbol) return `${POOL_PREFIX}${quoteSymbol}|${fee}`;
+    if (quoteSymbol) return `${POOL_PREFIX}${quoteSymbol} | ${fee}`;
     return fee;
   }
 

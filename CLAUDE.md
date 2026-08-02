@@ -10,19 +10,22 @@
 
 ## 1. 项目目标
 
-在 **GMGN / Debot / Gungnir** 等 meme 列表页上，给 BSC 上 Flap 税收代币（地址尾号 **`8888` 或 `7777`**）展示 **税收分配徽章**。
+在 **GMGN / Debot / Gungnir** 等 meme 列表页上，给 BSC 上 Flap 税收代币（地址尾号 **`8888` 或 `7777`**）展示 **税收分配徽章**，并尽量附带 **底池/报价** 文字。
 
-| 展示 | 含义 | 链上字段 |
+| 展示 | 含义 | 数据来源 |
 |------|------|----------|
-| 💎`N%` | 持有人分红 | `dividendBps` |
+| 💎`N%` | 持有人分红 | 链上 `dividendBps` |
 | 👨‍🍳`N%` | 创作者/营销（非 vault） | `marketBps` 且 `!isVault` |
 | 🎁`N%` | vault gift（含币股等金库） | `marketBps` 且 `isVault` |
 | 🔥`N%` | 销毁 | `deflationBps` |
 | 💧`N%` | 回流 LP | `lpBps` |
 | ❓️未 | 无有效分配 | 全 0 |
+| 🪙`QUOTE` | 底池报价符号（BNB / USD1 / NVDAB…） | **页面 DOM**（不查链） |
 
-- **有值才出**；多项非零 → `mode=hybrid`，label 如 `💎90%👨‍🍳10%`  
+- **有值才出**；多项非零 → `mode=hybrid`，fee 段如 `💎90%👨‍🍳10%`  
+- **合成徽章**（有报价时）：`🪙QUOTE | fee`，如 `🪙BNB | 💎90%`、`🪙USD1 | 💎100%`（`|` 两侧有空格）  
 - **买卖税率**只进 tooltip（`title`），不进主文案  
+- **不隐藏**站点原有底池小图标  
 - Flap 官网：`8888` → `/feeinfo`，`7777` → `/taxinfo`；查询合约 **同一 Helper**
 
 ---
@@ -47,7 +50,7 @@ BSC RPC / QuickNode
 
 | 层 | 目录 | 职责 | 禁止 |
 |----|------|------|------|
-| 插件 | `extension/` | 扫卡、抽地址、批量请求、画徽章、chrome.storage | 不直连 VPS、不查链 |
+| 插件 | `extension/` | 扫卡、抽地址、底池 quote 文案、批量请求、画徽章、chrome.storage | 不直连 VPS、不查链 |
 | Worker | `cloudflare/` | 公网入口、CORS、缓存、鉴权回源 | 不算 mode |
 | 后端 | `server/` | 校验 token、限流 RPC、分类、持久化 | 不碰 DOM |
 
@@ -170,12 +173,27 @@ if lpBps > 0:        💧
 
 注意：`Extension context invalidated` 出现在「重载扩展但未刷新页面」；`content.js` 已做 context 校验，仍应提示用户刷新页。
 
+#### 底池 / 报价文案（`extractQuoteSymbol`，纯 DOM）
+
+| 站点 | 识别方式 |
+|------|----------|
+| Debot / Gungnir | `[aria-label*="流动池"]` / `img[alt]`（如 `BNB 流动池`） |
+| GMGN RWA/美股 | `img[alt$=" quote icon"]` 或 `/static/quotes/{sym}.png` |
+| GMGN 特殊报价 | `data-icon` / `/static/icons/icon_usd1_*` 等 → `USD1` / `USDT` / `USDC` / `WETH` |
+| GMGN 默认 BNB 池 | **常无图标**；BSC 上无特殊报价时默认 `BNB` |
+
+- 扫卡间隔：`SCAN_INTERVAL_MS = 500`  
+- Tab 恢复：仅 in-flight ≥12s 才 force recover，避免 Abort 风暴（`0.2.7+`）  
+- 强制 recover 时用 `activeBatchTokens` 回填队列，防止丢 token  
+
 ### 4.5 验收样本
 
-| CA | 期望 |
-|----|------|
-| `0x556f0944357fb9a789c4a374095d3ce9ffba7777` | `💎90%👨‍🍳10%` hybrid |
+| CA / 场景 | 期望 |
+|-----------|------|
+| `0x556f0944357fb9a789c4a374095d3ce9ffba7777` | fee `💎90%👨‍🍳10%` hybrid；有报价时 `🪙… \| 💎90%👨‍🍳10%` |
 | `0x789476401ce0df8805f6e8a9a1e7439aac117777` | `🎁100%` gift（币股 vault） |
+| GMGN BSC 默认 BNB 池 7777/8888 | `🪙BNB \| …` |
+| GMGN USD1 池（`IconUsd116pxS`） | `🪙USD1 \| …` |
 
 ---
 
@@ -303,9 +321,11 @@ python tools/ctl.py watchdog-run
 | 现象 | 原因 | 处理 |
 |------|------|------|
 | `Extension context invalidated` | 重载扩展未刷页面 | 刷新 Debot/GMGN/Gungnir |
-| 后台久置再切回徽章消失 | 定时器/fetch 被冻结、`batchActive` 卡住、DOM 回收 | `0.2.5+` 监听 visibility/focus 强制 resume；仍异常再刷新 |
+| 后台久置再切回徽章消失 | 定时器/fetch 被冻结、`batchActive` 卡住、DOM 回收 | `0.2.7+` resume 不乱杀年轻请求 + reapply 缓存；仍异常再刷新 |
+| 控制台 AbortError / recover-stuck 刷屏 | 旧版 focus 强制 abort in-flight | 升到 `0.2.7+` |
 | 徽章被裁半截 | 挂在 Tax 芯片内 / overflow | 外侧挂载 + CSS `min-width:max-content`（已做） |
 | 只有 mode 无比例 | 命中旧缓存 | 清 storage 或等 miss；schema 已强制完整 payload |
+| GMGN 无 🪙BNB / 🪙USD1 | 未识别特殊 icon / 默认 BNB | 升到 `0.2.9+`；确认 `chain=bsc` |
 | Worker 403 | 无 UA / 边缘防护 | 浏览器正常；脚本请求带浏览器 UA |
 | 7777 无图标 | 未重载 0.2.x 插件 | 确认 manifest version |
 
@@ -314,7 +334,12 @@ python tools/ctl.py watchdog-run
 ## 10. 版本与变更提示
 
 - 插件版本：`extension/manifest.json` → `version`（发布前递增）  
-- 近期能力：`0.2.x` = 结构化分配 + 7777 + hybrid 展示 + Gungnir  
+- 近期能力：  
+  - `0.2.x`：结构化分配 + 7777 + hybrid + Gungnir  
+  - `0.2.6+`：底池报价合成 `🪙QUOTE|fee`  
+  - `0.2.7+`：resume/fetch 抗 Abort 风暴  
+  - `0.2.8`：扫描 500ms  
+  - `0.2.9`：`|` 两侧空格；GMGN USD1 icon + BSC 默认 BNB  
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`
 
 ---
