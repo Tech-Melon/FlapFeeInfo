@@ -24,23 +24,44 @@
 
 ## 下载安装
 
-### 方式一：直接下载仓库代码
+**推荐普通用户用方式一（Release）**，体积小、只含插件，不用下整仓。
 
-1. 打开这个仓库主页。
+### 方式一：从 GitHub Release 下载（推荐）
+
+1. 打开 Releases 页面：  
+   [https://github.com/Tech-Melon/FlapFeeInfo/releases](https://github.com/Tech-Melon/FlapFeeInfo/releases)
+2. 在最新版本下找到资源文件，例如：  
+   `FlapFeeInfo-extension-v0.2.9.zip`（版本号以页面上最新为准）
+3. 下载 ZIP，解压到任意文件夹，例如：  
+   `D:\FlapFeeInfo-extension`
+4. 解压后目录里应直接能看到 `manifest.json`（或再进一层同名文件夹）。  
+   安装时选**含有 `manifest.json` 的那一层**。
+
+若还没有 Release，请用下面「方式二 / 三」，或等维护者发布后再下。
+
+### 方式二：直接下载仓库代码
+
+1. 打开仓库主页：  
+   [https://github.com/Tech-Melon/FlapFeeInfo](https://github.com/Tech-Melon/FlapFeeInfo)
 2. 点击右上角绿色的 `Code` 按钮。
 3. 选择 `Download ZIP`。
-4. 下载完成后，把 ZIP 解压到电脑任意文件夹，比如：
+4. 下载完成后解压，例如：  
    `D:\FlapFeeInfo`
+5. 安装时选择其中的 `extension` 目录（不是仓库根目录）。
 
-### 方式二：使用 Git 克隆
+### 方式三：使用 Git 克隆
 
-如果你的电脑已经安装了 Git，也可以执行：
+若已安装 Git：
 
 ```powershell
 git clone https://github.com/Tech-Melon/FlapFeeInfo.git
 ```
 
-克隆完成后，仓库目录就是插件文件。
+克隆完成后，安装时选择：
+
+```text
+FlapFeeInfo\extension
+```
 
 ## 安装到浏览器
 
@@ -51,9 +72,9 @@ git clone https://github.com/Tech-Melon/FlapFeeInfo.git
    `chrome://extensions/`
 3. 打开右上角的 `开发者模式`。
 4. 点击左上角的 `加载已解压的扩展程序`。
-5. 选择你刚才解压出来的这个文件夹里的 `extension` 目录。
-   例如：
-   `D:\FlapFeeInfo\extension`
+5. 按下载方式选择目录：
+   - **Release zip**：选解压后**含有 `manifest.json` 的文件夹**
+   - **仓库 / Git**：选 `...\FlapFeeInfo\extension`
 6. 等待几秒，插件就会安装完成。
 
 ### 安装后确认
