@@ -4,14 +4,18 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
-  const SCAN_INTERVAL_MS = 1200;
-  const REQUEST_TIMEOUT_MS = 30000;
+  const SCAN_INTERVAL_MS = 500;
+  const REQUEST_TIMEOUT_MS = 28000;
   // Background tabs freeze timers; if a batch never finishes, unblock after this wall time.
   const BATCH_STUCK_MS = 45000;
+  // On tab resume, only force-kill in-flight fetch if older than this (avoid Abort cascade).
+  const RESUME_FORCE_MIN_AGE_MS = 12000;
   const MAX_CANDIDATES_PER_SCAN = 180;
   const MAX_CARDS_PER_SCAN = 80;
   const MAX_BATCH_TOKENS = 120;
   const BATCH_FLUSH_MS = 350;
+  const RETRY_BASE_MS = 900;
+  const RETRY_MAX_MS = 12000;
   const PERSISTENT_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
   const PERSISTENT_CACHE_KEY = "flapFeeInfo.modeCache.v2";
   const DEBUG_PREFIX = "[FlapFeeInfo]";
@@ -19,6 +23,9 @@
   const ICON_MARK = "gmgnFeeModeIcon";
   const CARD_DATA = `data-${toKebab(CARD_MARK)}`;
   const ICON_DATA = `data-${toKebab(ICON_MARK)}`;
+  // Pool/quote prefix (coin) — do not hide site pool icons; show all quotes including BNB.
+  const POOL_PREFIX = "🪙";
+  const MAX_QUOTE_SYMBOL_LEN = 8;
   const SUFFIX_SELECTORS =
     "a[href*='8888'], a[href*='7777'], [title*='8888'], [title*='7777'], " +
     "[aria-label*='8888'], [aria-label*='7777'], [data-token*='8888'], [data-token*='7777'], " +
@@ -45,6 +52,11 @@
   let batchTimer = null;
   let batchActive = false;
   let batchStartedAt = 0;
+  let batchGeneration = 0;
+  let activeAbortController = null;
+  /** Tokens currently inside an in-flight /modes request (re-queue on force recover). */
+  let activeBatchTokens = [];
+  let consecutiveFails = 0;
   let scanScheduled = false;
   let lastScanAt = 0;
   let persistentCacheReady = false;
@@ -235,37 +247,88 @@
     if (!isExtensionContextValid() || !isTabVisible()) return;
     const now = Date.now();
     // Debounce focus+visibility double fire.
-    if (now - lastResumeAt < 400) return;
+    if (now - lastResumeAt < 600) return;
     lastResumeAt = now;
 
-    debugInfo("tab:resume", { reason, queued: requestQueue.size, batchActive });
+    const ageMs = batchStartedAt ? now - batchStartedAt : 0;
+    debugInfo("tab:resume", {
+      reason,
+      queued: requestQueue.size,
+      batchActive,
+      batchAgeMs: ageMs || null
+    });
 
-    recoverStuckBatch(true);
-    lastScanAt = 0;
-    scanScheduled = false;
-    if (batchTimer) {
-      window.clearTimeout(batchTimer);
-      batchTimer = null;
+    // Only force-kill old batches. Young in-flight fetches must not be aborted on every focus
+    // (that caused AbortError spam + recover-stuck ageMs=100~5s loops in 0.2.5).
+    if (batchActive && ageMs >= RESUME_FORCE_MIN_AGE_MS) {
+      recoverStuckBatch(true, "resume-old-batch");
     }
 
+    lastScanAt = 0;
+    scanScheduled = false;
+
     reapplyCachedIconsOnPage();
-    scheduleBatchFlush({ immediate: true });
-    // Virtualized lists reflow over a few frames after focus.
+    if (!batchActive) {
+      scheduleBatchFlush({ immediate: true });
+    }
+    // Virtualized lists reflow over a few frames after focus (fewer than before).
     scheduleScan(0, { force: true, immediate: true });
-    scheduleScan(350, { force: true, immediate: true });
-    scheduleScan(1000, { force: true, immediate: true });
-    scheduleScan(2500, { force: true, immediate: true });
+    scheduleScan(500, { force: true, immediate: true });
+    scheduleScan(1600, { force: true, immediate: true });
   }
 
-  function recoverStuckBatch(force = false) {
+  function abortActiveRequest(reason) {
+    if (!activeAbortController) return;
+    try {
+      activeAbortController.abort(reason || "aborted");
+    } catch (_err) {
+      // ignore
+    }
+    activeAbortController = null;
+  }
+
+  function recoverStuckBatch(force = false, reason = "timeout") {
     if (!batchActive) return;
-    if (!force && batchStartedAt > 0 && Date.now() - batchStartedAt < BATCH_STUCK_MS) return;
-    debugWarn("batch:recover-stuck", {
+    const ageMs = batchStartedAt ? Date.now() - batchStartedAt : 0;
+    if (!force && ageMs < BATCH_STUCK_MS) return;
+    // Prefer quiet log for forced recover; warn only for true long stuck.
+    const payload = {
       force,
-      ageMs: batchStartedAt ? Date.now() - batchStartedAt : null
-    });
+      reason,
+      ageMs: ageMs || null,
+      requeue: activeBatchTokens.length
+    };
+    if (force && ageMs < BATCH_STUCK_MS) {
+      debugInfo("batch:recover-stuck", payload);
+    } else {
+      debugWarn("batch:recover-stuck", payload);
+    }
+    // Bump generation first so in-flight catch/finally ignore stale completion.
+    batchGeneration += 1;
+    abortActiveRequest(reason);
+    // Tokens already removed from queue for this batch — put them back.
+    activeBatchTokens.forEach((token) => requestQueue.add(token));
+    activeBatchTokens = [];
     batchActive = false;
     batchStartedAt = 0;
+  }
+
+  function isAbortError(error) {
+    if (!error) return false;
+    if (error.name === "AbortError") return true;
+    const message = String(error.message || error || "");
+    return /aborted|AbortError/i.test(message);
+  }
+
+  function isTransientNetworkError(error) {
+    if (isAbortError(error)) return true;
+    const message = String(error?.message || error || "");
+    return /Failed to fetch|NetworkError|network error|Load failed|fetch/i.test(message);
+  }
+
+  function nextRetryDelayMs() {
+    const exp = Math.min(consecutiveFails, 4);
+    return Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** exp);
   }
 
   function getCandidateNodes() {
@@ -395,14 +458,20 @@
 
   function scheduleBatchFlush(options = {}) {
     const immediate = options.immediate === true;
-    recoverStuckBatch();
+    const delayMs =
+      typeof options.delayMs === "number" && options.delayMs >= 0
+        ? options.delayMs
+        : immediate
+          ? 0
+          : BATCH_FLUSH_MS;
+    recoverStuckBatch(false);
     if (batchActive) return;
     if (batchTimer) {
-      if (!immediate) return;
+      if (!immediate && delayMs >= BATCH_FLUSH_MS) return;
       window.clearTimeout(batchTimer);
       batchTimer = null;
     }
-    batchTimer = window.setTimeout(flushTokenBatch, immediate ? 0 : BATCH_FLUSH_MS);
+    batchTimer = window.setTimeout(flushTokenBatch, delayMs);
   }
 
   function isContextInvalidError(error) {
@@ -417,7 +486,7 @@
   async function flushTokenBatch() {
     batchTimer = null;
     if (!isTabVisible()) return;
-    recoverStuckBatch();
+    recoverStuckBatch(false);
     if (batchActive || requestQueue.size === 0) return;
 
     // Old content script after extension reload: stop all network work silently.
@@ -428,12 +497,23 @@
 
     const tokens = Array.from(requestQueue).slice(0, MAX_BATCH_TOKENS);
     tokens.forEach((token) => requestQueue.delete(token));
+
+    // Supersede any zombie controller (should be rare after recoverStuckBatch).
+    abortActiveRequest("superseded");
+    const controller = new AbortController();
+    activeAbortController = controller;
+    const generation = (batchGeneration += 1);
+    activeBatchTokens = tokens.slice();
     batchActive = true;
     batchStartedAt = Date.now();
 
     try {
-      debugInfo("request:start", { tokens });
-      const data = await queryModes(tokens);
+      debugInfo("request:start", { tokens, generation });
+      const data = await queryModes(tokens, controller.signal);
+      if (generation !== batchGeneration) return;
+
+      consecutiveFails = 0;
+      activeBatchTokens = [];
       debugInfo("request:ok", {
         requested: tokens.length,
         returned: Object.keys(data.results || {}).length,
@@ -456,27 +536,84 @@
         if (!modeCache.has(token)) requestQueue.add(String(token).toLowerCase());
       });
     } catch (error) {
+      if (generation !== batchGeneration) return;
       if (isContextInvalidError(error)) {
+        activeBatchTokens = [];
         requestQueue.clear();
         return;
       }
-      debugWarn("request:failed", { tokens, error: normalizeError(error) });
+
+      // Re-queue for retry; do not scream AbortError (normal when timeout/supersede).
       tokens.forEach((token) => requestQueue.add(token));
+      activeBatchTokens = [];
+
+      if (isAbortError(error)) {
+        debugInfo("request:aborted", {
+          tokens,
+          error: normalizeError(error)
+        });
+      } else if (isTransientNetworkError(error)) {
+        consecutiveFails += 1;
+        debugWarn("request:failed-transient", {
+          tokens,
+          fails: consecutiveFails,
+          error: normalizeError(error)
+        });
+      } else {
+        consecutiveFails += 1;
+        debugWarn("request:failed", {
+          tokens,
+          fails: consecutiveFails,
+          error: normalizeError(error)
+        });
+      }
     } finally {
-      batchActive = false;
-      batchStartedAt = 0;
-      if (isExtensionContextValid() && isTabVisible() && requestQueue.size > 0) {
-        scheduleBatchFlush({ immediate: true });
+      if (generation === batchGeneration) {
+        if (activeAbortController === controller) activeAbortController = null;
+        activeBatchTokens = [];
+        batchActive = false;
+        batchStartedAt = 0;
+        if (isExtensionContextValid() && isTabVisible() && requestQueue.size > 0) {
+          const delayMs = consecutiveFails > 0 ? nextRetryDelayMs() : 0;
+          scheduleBatchFlush({
+            immediate: delayMs === 0,
+            delayMs
+          });
+        }
       }
     }
   }
 
-  async function queryModes(tokens) {
+  async function queryModes(tokens, externalSignal) {
     if (!isExtensionContextValid()) {
       throw new Error("Extension context invalidated");
     }
+    if (externalSignal?.aborted) {
+      const err = new Error("signal is aborted");
+      err.name = "AbortError";
+      throw err;
+    }
+
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const onParentAbort = () => {
+      try {
+        controller.abort(externalSignal?.reason || "parent-abort");
+      } catch (_err) {
+        // ignore
+      }
+    };
+    if (externalSignal) {
+      externalSignal.addEventListener("abort", onParentAbort, { once: true });
+    }
+
+    const timeout = window.setTimeout(() => {
+      try {
+        controller.abort("timeout");
+      } catch (_err) {
+        // ignore
+      }
+    }, REQUEST_TIMEOUT_MS);
+
     try {
       const res = await fetch(`${DEFAULT_API_BASE}/modes`, {
         method: "POST",
@@ -487,20 +624,24 @@
       });
       const data = await res.json().catch(() => null);
       if (!res.ok || !data?.ok) {
-        debugError("request:bad-response", {
+        debugWarn("request:bad-response", {
           status: res.status,
           body: data
         });
-        throw new Error("batch query failed");
+        throw new Error(`batch query failed status=${res.status}`);
       }
       return data;
     } catch (error) {
-      if (!isContextInvalidError(error)) {
+      // Abort/network are expected under tab freeze; only hard errors at error level.
+      if (!isContextInvalidError(error) && !isAbortError(error) && !isTransientNetworkError(error)) {
         debugError("request:error", error);
       }
       throw error;
     } finally {
       window.clearTimeout(timeout);
+      if (externalSignal) {
+        externalSignal.removeEventListener("abort", onParentAbort);
+      }
     }
   }
 
@@ -546,8 +687,82 @@
     return `${text}%`;
   }
 
-  /** Compact badge text from bps (no spaces) so GMGN chips do not clip mid-emoji. */
-  function buildDisplayLabel(entry) {
+  function normalizeQuoteSymbol(raw) {
+    let symbol = String(raw || "")
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "");
+    if (!symbol) return "";
+    if (symbol.length > MAX_QUOTE_SYMBOL_LEN) {
+      symbol = symbol.slice(0, MAX_QUOTE_SYMBOL_LEN);
+    }
+    // Avoid common false positives from logos / chain badges.
+    if (symbol === "BSC" || symbol === "LOGO") return "";
+    return symbol;
+  }
+
+  /**
+   * Read quote/pool symbol from site DOM (do not hide native icons).
+   * Debot: aria-label "BNB 流动池" / img alt; GMGN: "NVDAB quote icon" /static/quotes/.
+   */
+  function extractQuoteSymbol(card) {
+    if (!card || !card.querySelector) return "";
+
+    // Debot / Gungnir pool chip
+    const poolEl = card.querySelector(
+      '[aria-label$="流动池"], [aria-label*=" 流动池"], [aria-label*="池子"]'
+    );
+    if (poolEl) {
+      const img = poolEl.querySelector("img[alt]");
+      if (img) {
+        const fromAlt = normalizeQuoteSymbol(img.alt);
+        if (fromAlt) return fromAlt;
+      }
+      const aria = poolEl.getAttribute("aria-label") || "";
+      const latin = aria.match(/[A-Za-z0-9]{1,12}/);
+      if (latin) {
+        const fromAria = normalizeQuoteSymbol(latin[0]);
+        if (fromAria) return fromAria;
+      }
+    }
+
+    // GMGN quote icon
+    const quoteImg = card.querySelector(
+      'img[alt$=" quote icon"], img[alt*=" quote icon"], img[src*="/static/quotes/"]'
+    );
+    if (quoteImg) {
+      const alt = quoteImg.getAttribute("alt") || "";
+      const fromAlt = normalizeQuoteSymbol(alt.replace(/\s*quote\s*icon\s*$/i, ""));
+      if (fromAlt) return fromAlt;
+      const src = quoteImg.currentSrc || quoteImg.getAttribute("src") || "";
+      const fromSrc = src.match(/\/quotes\/([^./?#]+)/i);
+      if (fromSrc) {
+        const sym = normalizeQuoteSymbol(fromSrc[1]);
+        if (sym) return sym;
+      }
+    }
+
+    // Debot coin / bstocks images (fallback when aria missing)
+    const coinImgs = card.querySelectorAll(
+      'img[src*="/images/chain/designer-icons/coin/"], img[src*="/images/share/bstocks/"], img[src*="/images/share/usdt"]'
+    );
+    for (let i = 0; i < coinImgs.length; i += 1) {
+      const img = coinImgs[i];
+      const fromAlt = normalizeQuoteSymbol(img.getAttribute("alt") || "");
+      if (fromAlt) return fromAlt;
+      const src = img.currentSrc || img.getAttribute("src") || "";
+      const fromPath = src.match(/\/(?:coin|bstocks)\/([^./?#]+)/i);
+      if (fromPath) {
+        const sym = normalizeQuoteSymbol(fromPath[1]);
+        if (sym) return sym;
+      }
+    }
+
+    return "";
+  }
+
+  /** Compact fee allocation text from bps (no spaces). */
+  function buildFeeLabel(entry) {
     const parts = [];
     if ((entry.dividend_bps || 0) > 0) parts.push(`💎${bpsToPercentStr(entry.dividend_bps)}`);
     if ((entry.market_bps || 0) > 0) {
@@ -562,6 +777,16 @@
     if (parts.length > 0) return parts.join("");
     if (typeof entry.label === "string" && entry.label) return entry.label.replace(/\s+/g, "");
     return modeMeta[entry.mode]?.fallback || modeMeta.unknown.fallback;
+  }
+
+  /**
+   * Badge text: 🪙QUOTE|fee (pool prefix coin + quote symbol + fee).
+   * When quote missing, fee only.
+   */
+  function buildDisplayLabel(entry, quoteSymbol) {
+    const fee = buildFeeLabel(entry);
+    if (quoteSymbol) return `${POOL_PREFIX}${quoteSymbol}|${fee}`;
+    return fee;
   }
 
   function renderMode(card, token, entry) {
@@ -581,7 +806,8 @@
     siteStrategy.placeIcon(target, icon);
 
     const meta = modeMeta[entry.mode] || modeMeta.unknown;
-    const label = buildDisplayLabel(entry);
+    const quoteSymbol = extractQuoteSymbol(card);
+    const label = buildDisplayLabel(entry, quoteSymbol);
     const segmentCount =
       Number((entry.dividend_bps || 0) > 0) +
       Number((entry.market_bps || 0) > 0) +
@@ -589,13 +815,15 @@
       Number((entry.lp_bps || 0) > 0);
 
     icon.textContent = label;
-    icon.title = `${entry.title || meta.title}\n${token}`;
+    const poolLine = quoteSymbol ? `底池: ${quoteSymbol}\n` : "";
+    icon.title = `${poolLine}${entry.title || meta.title}\n${token}`;
     icon.className = [
       "gmgn-fee-mode-icon",
       `gmgn-fee-mode-icon--${meta.className}`,
       `gmgn-fee-mode-icon--${siteStrategy.name}`,
       segmentCount >= 3 ? "gmgn-fee-mode-icon--wide" : "",
-      segmentCount >= 2 ? "gmgn-fee-mode-icon--multi" : ""
+      segmentCount >= 2 ? "gmgn-fee-mode-icon--multi" : "",
+      quoteSymbol ? "gmgn-fee-mode-icon--with-pool" : ""
     ]
       .filter(Boolean)
       .join(" ");

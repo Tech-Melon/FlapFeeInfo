@@ -240,7 +240,19 @@ python tools/ctl.py status|health|test|deploy|logs|restart ...
 # 交互菜单：python tools/ctl.py
 ```
 
-`deploy`：scp 核心 py 文件 + `uv sync` + systemd restart。
+`deploy`：scp 核心 py 文件 + watchdog 单元 + `uv sync` + systemd restart/enable。
+
+**抗挂死：**
+
+| 单元 | 作用 |
+|------|------|
+| `flap-fee-info.service` | `Restart=always`、`StartLimitIntervalSec=0`、开机自启 |
+| `flap-fee-info-watchdog.timer` | 每 30s curl 本机 `/health`，失败则 restart 主服务 |
+
+```powershell
+python tools/ctl.py watchdog-status
+python tools/ctl.py watchdog-run
+```
 
 ---
 

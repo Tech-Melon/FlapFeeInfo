@@ -37,6 +37,19 @@
   padding: 0 4px;
 }
 
+/* Pool quote + fee: 🪙BNB|💎90% — slightly tighter to fit chips */
+.gmgn-fee-mode-icon--with-pool {
+  font-size: 10px;
+  letter-spacing: -0.3px;
+  padding: 0 5px;
+}
+
+.gmgn-fee-mode-icon--with-pool.gmgn-fee-mode-icon--wide {
+  font-size: 9px;
+  letter-spacing: -0.45px;
+  padding: 0 4px;
+}
+
 .gmgn-fee-mode-icon--debot {
   margin-left: 8px;
   margin-right: 0;
