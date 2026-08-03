@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.25: Debot SPA meme->token header badge (debot.ai + gungnir.bot).
   // 0.4.24: dedupe per card only — 三栏同 CA 各显徽章 (fix按 token 全页只留 1 个).
   // 0.4.23: popup EN/ZH + display prefs collapsed by default.
   // 0.4.22: K-line side 战壕 rows share home trench absolute coords (header stays Tax).
@@ -70,6 +71,8 @@
   const SPA_NAV_SCAN_OFFSETS_LIST_MS = [0, 400, 1100, 2000];
   // Token / K-line page: fewer passes, early-stop when header badge exists.
   const SPA_NAV_SCAN_OFFSETS_TOKEN_MS = [0, 500, 1300];
+  // Debot SPA token detail mounts slowly — extra late passes (meme→token).
+  const SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS = [0, 400, 900, 1800, 3200, 5000];
   // Independent route poll — sites often capture native history before our wrap.
   const ROUTE_POLL_MS = 500;
   // Expensive mark cleanup only every N scans (0.3.4 never re-extracted every tick).
@@ -330,8 +333,15 @@
   function createDebotStrategy() {
     return {
       name: "debot",
-      getCandidateNodes,
+      getCandidateNodes: getDebotCandidateNodes,
       findCard(node) {
+        // Token detail header: map nodes in top header strip to a stable header card.
+        if (isDebotTokenPage()) {
+          const header = findDebotTokenHeaderCard();
+          if (header && (node === header || header.contains(node))) {
+            return header;
+          }
+        }
         // "即将打满" cards with progress rings are taller than plain new-token cards.
         const card = climbToCard(node, {
           maxDepth: 9,
@@ -341,11 +351,16 @@
         });
         // Skip left/right watchlist rails (js-mcp: ~168px DOGI/TSLAB false cards).
         if (card && isDebotSideRailCard(card)) return null;
+        // Token page: do not paint URL token onto residual meme list rows still in DOM.
+        if (isDebotTokenPage() && card && !isDebotTokenHeaderCard(card)) {
+          // Allow list-style rows only if their own attrs match (side boards if any).
+          return card;
+        }
         return card;
       },
       extractToken(card) {
         if (isDebotTokenPage()) {
-          return extractTokenFromUrl() || extractCardTokenFromAttrs(card);
+          return extractDebotTokenPageToken(card);
         }
         return extractCardTokenFromAttrs(card);
       },
@@ -363,8 +378,133 @@
     return /\/token\//i.test(location.pathname || "") && location.hostname.endsWith("gmgn.ai");
   }
 
+  /** Debot / Gungnir token detail only (host-scoped). */
   function isDebotTokenPage() {
+    const host = location.hostname || "";
+    if (!host.endsWith("debot.ai") && !host.endsWith("gungnir.bot")) return false;
     return /\/token\//i.test(location.pathname || "");
+  }
+
+  /**
+   * Debot token page: never force URL CA onto every climbed card (SPA meme leftovers).
+   * URL CA only for header card / when short CA matches URL.
+   */
+  function extractDebotTokenPageToken(card) {
+    const urlTok = extractTokenFromUrl();
+    const fromAttrs = extractCardTokenFromAttrs(card);
+    if (fromAttrs) {
+      // Prefer DOM when present and consistent with URL (or no URL).
+      if (!urlTok || fromAttrs === urlTok) return fromAttrs;
+      // Different CA on a list row while on token page — use row CA (side boards).
+      if (!isDebotTokenHeaderCard(card)) return fromAttrs;
+    }
+    if (urlTok && isDebotTokenHeaderCard(card)) return urlTok;
+    if (urlTok && cardStillMatchesToken(card, urlTok)) return urlTok;
+    return fromAttrs || null;
+  }
+
+  /** Inject header mount as candidate after SPA (DOM late). */
+  function getDebotCandidateNodes() {
+    const light = pendingLightScan;
+    const nodes = getCandidateNodes();
+    if (!isDebotTokenPage() || light) return nodes;
+    const header = findDebotTokenHeaderCard();
+    if (header) {
+      // Prefer a short-CA / title leaf inside header as candidate seed.
+      const seed =
+        findDebotShortAddressNode(header) ||
+        header.querySelector?.("a[href*='0x'], h1, h2, h3, [class*='title']") ||
+        header;
+      if (seed instanceof HTMLElement && !nodes.includes(seed)) {
+        nodes.unshift(seed);
+      }
+      if (!nodes.includes(header)) nodes.unshift(header);
+    }
+    return nodes.slice(0, MAX_CANDIDATES_PER_SCAN);
+  }
+
+  /**
+   * Stable top header strip on Debot/Gungnir token page (name + short CA + badge row).
+   * Cached per route via scanGeneration of roots — recompute each call (SPA safe).
+   */
+  function findDebotTokenHeaderCard() {
+    const urlTok = extractTokenFromUrl();
+    // 1) Short CA near top of viewport
+    try {
+      const body = document.body;
+      if (!body) return null;
+      const shorts = body.querySelectorAll("span, a, div, p, button");
+      const topShorts = [];
+      const max = Math.min(shorts.length, 250);
+      for (let i = 0; i < max; i += 1) {
+        const el = shorts[i];
+        const t = (el.textContent || "").trim();
+        if (!TARGET_SHORT_TOKEN_RE.test(t) || t.length > 22) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0 || r.height > 40) continue;
+        if (r.top < 0 || r.top > 160) continue;
+        // Prefer short CA that matches URL token when known.
+        if (urlTok && !tokenMatchesShort(urlTok, t)) continue;
+        topShorts.push(el);
+      }
+      if (topShorts.length) {
+        topShorts.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+        const short = topShorts[0];
+        let p = short;
+        for (let d = 0; p && d < 8; d += 1) {
+          if (!(p instanceof HTMLElement)) break;
+          if (p === document.body || p === document.documentElement) break;
+          const r = p.getBoundingClientRect();
+          // Header bar: wide, short, near top
+          if (
+            r.width >= 280 &&
+            r.width < window.innerWidth * 0.98 &&
+            r.height >= 28 &&
+            r.height <= 100 &&
+            r.top >= 0 &&
+            r.top < 180
+          ) {
+            return p;
+          }
+          p = p.parentElement;
+        }
+        return short.parentElement instanceof HTMLElement ? short.parentElement : short;
+      }
+    } catch (_err) {
+      // fall through
+    }
+    // 2) Stats panel with 价格+流动性
+    const stats = findDebotTokenPageMount(document);
+    if (stats) {
+      let p = stats;
+      for (let d = 0; p && d < 6; d += 1) {
+        if (!(p instanceof HTMLElement)) break;
+        const r = p.getBoundingClientRect();
+        if (r.width >= 200 && r.height <= 200 && r.top < 220) return p;
+        p = p.parentElement;
+      }
+      return stats;
+    }
+    return null;
+  }
+
+  function isDebotTokenHeaderCard(card) {
+    if (!(card instanceof HTMLElement) || !isDebotTokenPage()) return false;
+    const header = findDebotTokenHeaderCard();
+    if (header && (card === header || header.contains(card) || card.contains(header))) {
+      return true;
+    }
+    // Large shell near top with URL short match
+    try {
+      const r = card.getBoundingClientRect();
+      if (r.top >= 0 && r.top < 180 && r.width > 300 && r.height < 140) {
+        const urlTok = extractTokenFromUrl();
+        if (urlTok && cardStillMatchesToken(card, urlTok)) return true;
+      }
+    } catch (_err) {
+      return false;
+    }
+    return false;
   }
 
   /** URL ?chain= (gmgn/debot/gungnir). Empty → treat as unknown. */
@@ -429,6 +569,7 @@
   /** Oversized "card" on Debot token page = page shell, not a meme list row. */
   function isDebotTokenHeaderLike(card) {
     if (!(card instanceof HTMLElement) || !isDebotTokenPage()) return false;
+    if (isDebotTokenHeaderCard(card)) return true;
     try {
       const r = card.getBoundingClientRect();
       if (r.width > window.innerWidth * 0.55 && r.height > window.innerHeight * 0.35) {
@@ -618,20 +759,18 @@
 
   /**
    * Token/K-line header already has badge (chart can thrash freely).
-   * Do NOT use "any badge on page" — side-board badges must not silence dialog scans.
+   * Do NOT use "any badge on page" — side-board / ghost list badges must not silence header scans.
    */
   function isTokenPageSettledWithBadge() {
     if (!isTokenDetailRoute()) return false;
     try {
+      const urlTok = extractTokenFromUrl();
       if (isGmgnTokenPage()) {
         const root = findGmgnTokenPageRoot();
         if (root && root.querySelector(`[${ICON_DATA}="1"]`)) return true;
-        // Header root missing but URL is 8888/7777 and any header-area badge
-        const urlTok = extractTokenFromUrl();
         if (urlTok) {
           const hit = document.querySelector(`[${ICON_DATA}="1"][data-fee-token="${urlTok}"]`);
           if (hit && !hit.closest?.('[role="dialog"], [role="alertdialog"]')) {
-            // Prefer treat as settled only if not inside a list column board
             const col = hit.closest?.(
               "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
             );
@@ -640,8 +779,25 @@
         }
         return false;
       }
-      // Debot token: settled if any badge on token stats, not only list
-      return !!document.querySelector(`[${ICON_DATA}="1"]`);
+      if (isDebotTokenPage()) {
+        // Must be header strip (top of viewport), not a residual meme card still in DOM.
+        const header = findDebotTokenHeaderCard();
+        if (header && header.querySelector(`[${ICON_DATA}="1"]`)) return true;
+        if (urlTok) {
+          const icons = document.querySelectorAll(
+            `[${ICON_DATA}="1"][data-fee-token="${urlTok}"]`
+          );
+          for (let i = 0; i < icons.length; i += 1) {
+            const ir = icons[i].getBoundingClientRect();
+            if (ir.width >= 2 && ir.height >= 2 && ir.top >= 0 && ir.top < 200) {
+              // Exclude badges deep inside scrollable meme columns
+              if (ir.left < window.innerWidth * 0.92) return true;
+            }
+          }
+        }
+        return false;
+      }
+      return false;
     } catch (_err) {
       return false;
     }
@@ -942,7 +1098,9 @@
 
   function getSpaScanOffsets() {
     // Route key already updated before settle — use current location.
-    return isTokenDetailRoute() ? SPA_NAV_SCAN_OFFSETS_TOKEN_MS : SPA_NAV_SCAN_OFFSETS_LIST_MS;
+    if (isDebotTokenPage()) return SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS;
+    if (isTokenDetailRoute()) return SPA_NAV_SCAN_OFFSETS_TOKEN_MS;
+    return SPA_NAV_SCAN_OFFSETS_LIST_MS;
   }
 
   /** Token page: stop further SPA force-scans once any badge is painted (header enough). */
@@ -1008,8 +1166,9 @@
         // Only first pass immediate — later passes yield to host chart/list paint (js-mcp).
         scheduleScan(0, { force: true, immediate: index === 0 });
 
-        // After first paint on token page, cancel pending progressive timers soon.
-        if (index === 0 && isTokenDetailRoute()) {
+        // After first paint on token page, cancel pending progressive only if header settled.
+        // Debot SPA: DOM late — do not cancel after 80ms (was killing remaining passes).
+        if (index === 0 && isTokenDetailRoute() && !isDebotTokenPage()) {
           const checkId = window.setTimeout(() => {
             spaNavScanTimers = spaNavScanTimers.filter((id) => id !== checkId);
             if (shouldCancelSpaProgressive()) clearSpaNavScanTimers();
@@ -3670,7 +3829,24 @@
     }
 
     let el = null;
-    if (isDebotTokenPage()) {
+    if (isDebotTokenPage() && isDebotTokenHeaderCard(card)) {
+      // Prefer top header row (title + short CA) — matches user arrow near name.
+      const short =
+        findDebotShortAddressNode(card) ||
+        (findDebotTokenHeaderCard() &&
+          findDebotShortAddressNode(findDebotTokenHeaderCard()));
+      if (short) {
+        const row =
+          findDebotShortAddressRow(card) ||
+          short.parentElement ||
+          short;
+        el = markDebotMount(row instanceof HTMLElement ? row : short, "token-header");
+      }
+      if (!el) {
+        const tokenMount = findDebotTokenPageMount(card) || findDebotTokenPageMount(document);
+        if (tokenMount) el = markDebotMount(tokenMount, "token-stats");
+      }
+    } else if (isDebotTokenPage()) {
       const tokenMount = findDebotTokenPageMount(card);
       if (tokenMount) el = markDebotMount(tokenMount, "token-stats");
     }
@@ -3861,6 +4037,12 @@
           }
         }
       });
+    }
+
+    // Token header / stats: append to the right of the title row.
+    if (kind === "token-header" || kind === "token-stats") {
+      target.append(icon);
+      return;
     }
 
     if (kind === "buy") {
