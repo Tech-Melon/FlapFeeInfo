@@ -5,6 +5,7 @@
   // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
+  // 0.4.37: GMGN 进出 K 线减负 + 回战壕加速（header-only token scan + list-return DOM watch）.
   // 0.4.36: list-return 三栏轮询（已迁移/右列不再饿死）+ GMGN 同策略.
   // 0.4.35: Debot SPA meme→K 线激活链加固 + 回战壕加速 + token 页减负.
   // 0.4.34: Debot「使用卡片坐标」时 K 线顶栏仍强制贴合（不走 absolute，修登录无徽章）.
@@ -84,21 +85,20 @@
   // Progressive hole-fill offsets from quiet end (ms).
   // List/meme boards (cold / generic): 3 passes — 0.4.30 cut 4th to save main thread.
   const SPA_NAV_SCAN_OFFSETS_LIST_MS = [0, 400, 1100];
-  // token→list return: many tiny slices (js-mcp 0.4.31 still had ~0.8s single longtask).
-  const SPA_NAV_SCAN_OFFSETS_LIST_RETURN_MS = [0, 120, 280, 500, 900, 1500];
-  // Token / K-line page (GMGN): few passes, early-stop when header badge exists.
-  const SPA_NAV_SCAN_OFFSETS_TOKEN_MS = [0, 500, 1300];
+  // token→list return: dense early slices (GMGN 回战壕要快).
+  const SPA_NAV_SCAN_OFFSETS_LIST_RETURN_MS = [0, 60, 160, 320, 550, 900];
+  // Token / K-line page (GMGN): header paint only — fewer full scans (0.4.37 jank fix).
+  const SPA_NAV_SCAN_OFFSETS_TOKEN_MS = [0, 350, 900];
   // Debot SPA token: prefer tryPaint; at most 2 progressive full scans.
   const SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS = [0, 900, 2500];
   // Quiet shorter when returning to list — user expects badges ASAP (immediacy).
-  // 0.4.35: 0ms — paint as soon as settle starts (战壕徽章太慢).
   const SPA_NAV_QUIET_LIST_RETURN_MS = 0;
   // After token→list: viewport-first soft window (ms).
-  const SPA_LIST_RETURN_SOFT_MS = 3200;
+  const SPA_LIST_RETURN_SOFT_MS = 2800;
   // First wave: only paint cards with fee already in modeCache (no network, no deep extract).
-  const SPA_LIST_RETURN_CACHE_ONLY_MS = 500;
+  const SPA_LIST_RETURN_CACHE_ONLY_MS = 400;
   // Cards per slice during list-return (keep small for jank; more slices cover 3 cols).
-  const SPA_LIST_RETURN_CARDS = 9;
+  const SPA_LIST_RETURN_CARDS = 10;
   // Candidates cap — must cover 3 columns × ~8–10 tax rows.
   const SPA_LIST_RETURN_CANDIDATES = 48;
   // Soft cancel: need badges across columns, not just left-col total (0.4.36).
@@ -107,14 +107,18 @@
   const SPA_LIST_RETURN_MIN_PER_COL = 2;
   // Soft scan time budget per frame (ms) — hard stop mid-loop.
   const SPA_LIST_RETURN_SLICE_MS = 8;
-  // Fast-paint burst: more cards, column-round-robin (was left-first starve 已迁移).
-  const SPA_LIST_RETURN_FAST_MS = 14;
-  const SPA_LIST_RETURN_FAST_CARDS = 18;
+  // Fast-paint burst: column-round-robin.
+  const SPA_LIST_RETURN_FAST_MS = 12;
+  const SPA_LIST_RETURN_FAST_CARDS = 16;
   // Dedicated header paint watch after meme→token SPA (ms). Logged-in DOM is slower.
   const DEBOT_TOKEN_HEADER_WATCH_MS = 20000;
   const DEBOT_TOKEN_HEADER_TICK_MS = 400;
   // Debot token SPA quiet (shorter than generic — paint sooner without waiting 800ms).
   const SPA_NAV_QUIET_DEBOT_TOKEN_MS = 280;
+  // GMGN token SPA quiet — was 800ms then force-scan storm (user: 战壕↔K线很卡).
+  const SPA_NAV_QUIET_GMGN_TOKEN_MS = 220;
+  // List-return DOM watch: re-fastPaint when columns mount late (ms).
+  const LIST_RETURN_DOM_WATCH_MS = 2500;
   // Always-on guardian base interval; backs off while header missing (0.4.31).
   const DEBOT_TOKEN_GUARDIAN_MS = 1200;
   // After user clicks a /token/ link, keep header tryPaint this long (ms).
@@ -287,6 +291,10 @@
   /** MutationObserver until Debot token header badge appears (SPA activation). */
   let debotHeaderDomObs = null;
   let debotHeaderDomObsLastPaintAt = 0;
+  /** MutationObserver for list-return when columns mount late (GMGN/Debot). */
+  let listReturnDomObs = null;
+  let listReturnDomObsLastAt = 0;
+  let listReturnDomObsUntil = 0;
   /** Always-on while Debot/Gungnir tab lives — does not depend on SPA detect. */
   let debotTokenGuardianId = null;
   /** Quiet-end flush timer (spaDomDirty → one full scan). */
@@ -331,6 +339,7 @@
   installHistoryHooks();
   installPageWorldSpaHook();
   installDebotTokenClickArm();
+  installGmgnSpaClickArm();
   startRoutePoller();
   startDebotTokenGuardian();
 
@@ -778,6 +787,25 @@
 
     // Light scan (dialog/side boards): do NOT inject K-line header walks.
     const light = pendingLightScan;
+    // Unsettled token: header-only seeds — avoid war-room column walks during chart mount (0.4.37).
+    if (!light && !isTokenPageSettledWithBadge()) {
+      const nodes = [];
+      const root = findGmgnTokenPageRoot();
+      if (root && root !== document.body) {
+        nodes.push(root);
+        const leaves = root.querySelectorAll("a, span");
+        const max = Math.min(leaves.length, 40);
+        for (let i = 0; i < max; i += 1) {
+          const el = leaves[i];
+          const t = (el.textContent || "").trim();
+          if (TARGET_SHORT_TOKEN_RE.test(t) && t.length < 22 && !nodes.includes(el)) {
+            nodes.push(el);
+          }
+        }
+      }
+      return nodes.slice(0, 24);
+    }
+
     const nodes = getCandidateNodes();
     if (light) return nodes.slice(0, LIGHT_MAX_CANDIDATES);
 
@@ -922,21 +950,7 @@
   function isTokenPageSettledWithBadge() {
     if (!isTokenDetailRoute()) return false;
     try {
-      const urlTok = extractTokenFromUrl();
-      if (isGmgnTokenPage()) {
-        const root = findGmgnTokenPageRoot();
-        if (root && root.querySelector(`[${ICON_DATA}="1"]`)) return true;
-        if (urlTok) {
-          const hit = document.querySelector(`[${ICON_DATA}="1"][data-fee-token="${urlTok}"]`);
-          if (hit && !hit.closest?.('[role="dialog"], [role="alertdialog"]')) {
-            const col = hit.closest?.(
-              "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
-            );
-            if (!col) return true;
-          }
-        }
-        return false;
-      }
+      if (isGmgnTokenPage()) return hasGmgnTokenHeaderBadge();
       if (isDebotTokenPage()) {
         // STRICT: only a badge inside the header strip counts as settled.
         // Ghost meme-list cards of the same CA must NOT cancel SPA progressive.
@@ -946,6 +960,79 @@
     } catch (_err) {
       return false;
     }
+  }
+
+  /** True if badge sits on GMGN token header (not war-room residual). */
+  function hasGmgnTokenHeaderBadge() {
+    try {
+      const urlTok = extractTokenFromUrl();
+      const root = findGmgnTokenPageRoot();
+      if (root) {
+        const icon = root.querySelector(`[${ICON_DATA}="1"]`);
+        if (icon) {
+          const r = icon.getBoundingClientRect();
+          if (r.width >= 2 && r.height >= 2 && r.top >= 0 && r.top < 200) return true;
+        }
+      }
+      if (urlTok) {
+        const hit = document.querySelector(`[${ICON_DATA}="1"][data-fee-token="${urlTok}"]`);
+        if (hit && !hit.closest?.('[role="dialog"], [role="alertdialog"]')) {
+          const r = hit.getBoundingClientRect();
+          if (r.width < 2 || r.height < 2 || r.top < 0 || r.top >= 200) return false;
+          // War-room column residual must not count as header settled.
+          const col = hit.closest?.(
+            "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
+          );
+          if (!col) return true;
+        }
+      }
+    } catch (_err) {
+      return false;
+    }
+    return false;
+  }
+
+  /**
+   * Direct paint for GMGN K-line header (bypasses candidate/column walks).
+   * @returns {boolean}
+   */
+  function tryPaintGmgnTokenHeader(reason) {
+    if (!isGmgnTokenPage() || !isExtensionContextValid()) return false;
+    const urlTok = extractTokenFromUrl();
+    if (!urlTok) return false;
+    if (hasGmgnTokenHeaderBadge()) return true;
+
+    queueToken(urlTok);
+
+    const root = findGmgnTokenPageRoot();
+    if (!(root instanceof HTMLElement)) {
+      recoverStuckBatch(false);
+      scheduleBatchFlush({ immediate: true, delayMs: 0 });
+      return false;
+    }
+
+    root.dataset[CARD_MARK] = urlTok;
+    try {
+      root.setAttribute(CARD_DATA, urlTok);
+    } catch (_err) {
+      // ignore
+    }
+
+    const entry = resolveEntry(urlTok);
+    if (entry) {
+      const ok = renderMode(root, urlTok, entry, { forceRemount: true });
+      if (ok || hasGmgnTokenHeaderBadge()) {
+        debugInfo("gmgn:header-paint", {
+          reason,
+          token: urlTok.slice(0, 12),
+          settled: hasGmgnTokenHeaderBadge()
+        });
+      }
+      return hasGmgnTokenHeaderBadge() || !!ok;
+    }
+    recoverStuckBatch(false);
+    scheduleBatchFlush({ immediate: true, delayMs: 0 });
+    return false;
   }
 
   /** Cheap: open modal / search history panel needs light scan. */
@@ -1684,34 +1771,7 @@
     };
 
     const armListReturnPaint = () => {
-      // Accelerate 战壕 repaint (user: 回战壕太慢).
-      spaListReturnUntil = Date.now() + SPA_LIST_RETURN_SOFT_MS;
-      spaListReturnCacheOnlyUntil = Date.now() + SPA_LIST_RETURN_CACHE_ONLY_MS;
-      spaQuietUntil = 0;
-      const kick = (ms) => {
-        window.setTimeout(() => {
-          if (!isExtensionContextValid() || !isTabVisible()) return;
-          if (isTokenDetailRoute()) return;
-          try {
-            onSpaRouteChange("list-return-click");
-          } catch (_err) {
-            // ignore
-          }
-          spaQuietUntil = 0;
-          spaListReturnUntil = Date.now() + SPA_LIST_RETURN_SOFT_MS;
-          fastPaintListReturnViewport();
-          scheduleScan(0, {
-            force: true,
-            immediate: true,
-            light: false,
-            bypassForceGap: true
-          });
-        }, ms);
-      };
-      kick(0);
-      kick(100);
-      kick(350);
-      kick(800);
+      armListReturnSoftWindow("debot-list-return-click");
     };
 
     document.addEventListener(
@@ -1758,6 +1818,206 @@
           const m = href.match(/0x[a-fA-F0-9]{40}/i);
           if (m && !TARGET_TOKEN_RE.test(m[0].toLowerCase())) return;
           armTokenPaint("click-arm");
+        } catch (_err) {
+          // ignore
+        }
+      },
+      true
+    );
+  }
+
+  /**
+   * Shared list-return kick: soft window + dense fastPaint + DOM watch.
+   * Used by Debot + GMGN click-arm (0.4.37 GMGN 回战壕加速).
+   */
+  function armListReturnSoftWindow(reason) {
+    spaListReturnUntil = Date.now() + SPA_LIST_RETURN_SOFT_MS;
+    spaListReturnCacheOnlyUntil = Date.now() + SPA_LIST_RETURN_CACHE_ONLY_MS;
+    spaQuietUntil = 0;
+    spaSettleFromToken = true;
+    armListReturnDomWatch();
+    const kick = (ms) => {
+      window.setTimeout(() => {
+        if (!isExtensionContextValid() || !isTabVisible()) return;
+        if (isTokenDetailRoute()) return;
+        try {
+          onSpaRouteChange(reason);
+        } catch (_err) {
+          // ignore
+        }
+        spaQuietUntil = 0;
+        spaListReturnUntil = Date.now() + SPA_LIST_RETURN_SOFT_MS;
+        try {
+          fastPaintListReturnViewport();
+        } catch (_err) {
+          // ignore
+        }
+        // First kick: fastPaint only. Later: idle micro full scan (avoid stacked longtask).
+        if (ms > 0) {
+          scheduleScan(0, {
+            force: true,
+            immediate: false,
+            light: false,
+            bypassForceGap: true
+          });
+        }
+      }, ms);
+    };
+    kick(0);
+    kick(80);
+    kick(220);
+    kick(500);
+    kick(1000);
+  }
+
+  /** When war-room columns mount late after token→list, re-fastPaint (throttled). */
+  function armListReturnDomWatch() {
+    stopListReturnDomWatch();
+    listReturnDomObsUntil = Date.now() + LIST_RETURN_DOM_WATCH_MS;
+    listReturnDomObsLastAt = 0;
+    try {
+      listReturnDomObs = new MutationObserver(() => {
+        if (!isExtensionContextValid()) {
+          stopListReturnDomWatch();
+          return;
+        }
+        if (Date.now() > listReturnDomObsUntil || isTokenDetailRoute()) {
+          stopListReturnDomWatch();
+          return;
+        }
+        const now = Date.now();
+        if (now - listReturnDomObsLastAt < 160) return;
+        listReturnDomObsLastAt = now;
+        spaListReturnUntil = Math.max(spaListReturnUntil, now + 900);
+        spaQuietUntil = 0;
+        try {
+          fastPaintListReturnViewport();
+        } catch (_err) {
+          // ignore
+        }
+        if (shouldCancelSpaListProgressive()) stopListReturnDomWatch();
+      });
+      listReturnDomObs.observe(document.documentElement, {
+        childList: true,
+        subtree: true
+      });
+      window.setTimeout(() => stopListReturnDomWatch(), LIST_RETURN_DOM_WATCH_MS + 80);
+    } catch (_err) {
+      listReturnDomObs = null;
+    }
+  }
+
+  function stopListReturnDomWatch() {
+    if (listReturnDomObs) {
+      try {
+        listReturnDomObs.disconnect();
+      } catch (_err) {
+        // ignore
+      }
+      listReturnDomObs = null;
+    }
+    listReturnDomObsLastAt = 0;
+    listReturnDomObsUntil = 0;
+  }
+
+  /**
+   * GMGN SPA: click-arm for token enter (header-only) + 战壕/home return.
+   * GMGN often rewrites URL without our history wrap seeing it first.
+   */
+  function installGmgnSpaClickArm() {
+    const host = location.hostname || "";
+    if (!host.endsWith("gmgn.ai")) return;
+
+    const armTokenPaint = (reasonPrefix) => {
+      const kick = (ms, fullScan) => {
+        window.setTimeout(() => {
+          if (!isExtensionContextValid() || !isTabVisible()) return;
+          try {
+            onSpaRouteChange(`${reasonPrefix}:${ms}`);
+          } catch (_err) {
+            // ignore
+          }
+          if (!isGmgnTokenPage()) return;
+          const urlTok = extractTokenFromUrl();
+          if (!urlTok) return;
+          if (hasGmgnTokenHeaderBadge()) return;
+          tryPaintGmgnTokenHeader(`${reasonPrefix}:${ms}`);
+          // At most one delayed header-only force scan (not war-room columns).
+          if (fullScan && !hasGmgnTokenHeaderBadge()) {
+            pendingLightScan = false;
+            scheduleScan(0, {
+              force: true,
+              immediate: false,
+              light: false,
+              bypassForceGap: true
+            });
+          }
+        }, ms);
+      };
+      kick(0, false);
+      kick(120, false);
+      kick(350, true);
+      kick(900, false);
+    };
+
+    document.addEventListener(
+      "click",
+      (event) => {
+        try {
+          if (!isExtensionContextValid()) return;
+          const t = event.target;
+          if (!(t instanceof Element)) return;
+
+          // --- Return to 战壕 / home ---
+          const homeA =
+            t.closest?.('a[href="/"]') ||
+            t.closest?.('a[href^="/?"]') ||
+            t.closest?.('a[href*="tab=home"]') ||
+            t.closest?.('a[href*="/meme"]');
+          const homeText =
+            t.closest?.("a,button,[role='tab'],[role='button']") &&
+            /战壕|trench|home|新创建|即将打满|已迁移/i.test(
+              (t.closest("a,button,[role='tab'],[role='button']")?.textContent || "").trim().slice(0, 40)
+            );
+          // Logo often wraps img without text
+          const logo =
+            t.closest?.("a[href='/'], a[href^='/?chain']") ||
+            (t.closest?.("header a, nav a") &&
+              /gmgn|logo/i.test(
+                (
+                  t.closest("a")?.getAttribute?.("aria-label") ||
+                  t.closest("a")?.className ||
+                  ""
+                ).toString()
+              ));
+          if (homeA || homeText || logo) {
+            if (isGmgnTokenPage() || routeKeyWasTokenDetail(lastRouteKey)) {
+              armListReturnSoftWindow("gmgn-list-return-click");
+            }
+            return;
+          }
+
+          // --- Enter token K-line ---
+          let href = "";
+          const a = t.closest?.('a[href*="/token/"], a[href*="0x"]');
+          if (a instanceof HTMLAnchorElement) {
+            href = a.getAttribute("href") || a.href || "";
+          } else {
+            const card = t.closest?.(
+              "div.flex.flex-col, li, article, [class*='cursor-pointer']"
+            );
+            if (card) {
+              const inner = card.querySelector?.(
+                'a[href*="/token/"][href*="7777"], a[href*="/token/"][href*="8888"], a[href*="0x"][href*="7777"], a[href*="0x"][href*="8888"]'
+              );
+              if (inner) href = inner.getAttribute("href") || inner.href || "";
+            }
+          }
+          if (!href) return;
+          if (!/\/token\//i.test(href) && !/0x[a-fA-F0-9]{40}/i.test(href)) return;
+          const m = href.match(/0x[a-fA-F0-9]{40}/i);
+          if (m && !TARGET_TOKEN_RE.test(m[0].toLowerCase())) return;
+          armTokenPaint("gmgn-click-arm");
         } catch (_err) {
           // ignore
         }
@@ -1829,11 +2089,8 @@
 
     // SPA nav is not tab-background freeze.
     resumeForceRemountUntil = 0;
-    // Debot token: shorter quiet so header paint starts sooner (0.4.35).
-    // List return quiet applied later in beginSpaRouteSettle.
-    const quietMs = isDebotTokenPage()
-      ? SPA_NAV_QUIET_DEBOT_TOKEN_MS
-      : SPA_NAV_QUIET_MS;
+    // Site-specific quiet: Debot/GMGN token short; list return applied in settle.
+    const quietMs = spaNavQuietMs();
     spaQuietUntil = Date.now() + quietMs;
     spaDomDirty = false;
 
@@ -1870,14 +2127,26 @@
       if (!isExtensionContextValid() || !isTabVisible()) return;
       if (getRouteKey() !== lastRouteKey) return;
       spaQuietUntil = 0;
-      if (spaDomDirty || (isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge())) {
+      const debotMiss =
+        isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge();
+      const gmgnMiss =
+        isGmgnTokenPage() && extractTokenFromUrl() && !hasGmgnTokenHeaderBadge();
+      if (spaDomDirty || debotMiss || gmgnMiss) {
         spaDomDirty = false;
         pendingLightScan = false;
         if (isDebotTokenPage()) tryPaintDebotTokenHeader("quiet-flush");
-        // Idle full scan once — not immediate (chart still settling).
+        if (isGmgnTokenPage()) tryPaintGmgnTokenHeader("quiet-flush");
+        // Idle full scan once — not immediate (chart still settling). Header-only roots while unsettled.
         scheduleScan(0, { force: true, immediate: false, light: false, bypassForceGap: true });
       }
-    }, SPA_NAV_QUIET_MS + 80);
+    }, quietMs + 80);
+  }
+
+  /** Quiet window length for current route (ms). */
+  function spaNavQuietMs() {
+    if (isDebotTokenPage()) return SPA_NAV_QUIET_DEBOT_TOKEN_MS;
+    if (isGmgnTokenPage()) return SPA_NAV_QUIET_GMGN_TOKEN_MS;
+    return SPA_NAV_QUIET_MS;
   }
 
   /** Token detail / K-line routes need fewer progressive scans than meme boards. */
@@ -1950,9 +2219,11 @@
       spaListReturnCacheOnlyUntil = Date.now() + SPA_LIST_RETURN_CACHE_ONLY_MS;
       // List return quiet shorter — first badge paint feels instant.
       spaQuietUntil = Date.now() + SPA_NAV_QUIET_LIST_RETURN_MS;
+      armListReturnDomWatch();
     } else if (!softSameToken) {
       spaListReturnUntil = 0;
       spaListReturnCacheOnlyUntil = 0;
+      stopListReturnDomWatch();
     }
 
     // ALWAYS observe documentElement — list roots detach on SPA and go silent (js-mcp).
@@ -1983,6 +2254,25 @@
       stopDebotHeaderDomWatch();
     }
 
+    // Entering GMGN token: header-only prime (0.4.37 — no war-room column storm).
+    if (isGmgnTokenPage()) {
+      const enterTok = extractTokenFromUrl();
+      if (enterTok) {
+        recoverStuckBatch(false);
+        queueToken(enterTok);
+        scheduleBatchFlush({ immediate: true, delayMs: 0 });
+        tryPaintGmgnTokenHeader("settle-enter");
+        // One delayed header-scoped scan if mount not ready yet.
+        pendingLightScan = false;
+        scheduleScan(60, {
+          force: true,
+          immediate: false,
+          light: false,
+          bypassForceGap: true
+        });
+      }
+    }
+
     // Soft same-token: header already painted → skip progressive storm.
     if (softSameToken && hasDebotTokenHeaderBadge()) {
       spaQuietUntil = 0;
@@ -1996,7 +2286,9 @@
         ? SPA_NAV_QUIET_LIST_RETURN_MS
         : isDebotTokenPage()
           ? SPA_NAV_QUIET_DEBOT_TOKEN_MS
-          : SPA_NAV_QUIET_MS;
+          : isGmgnTokenPage()
+            ? SPA_NAV_QUIET_GMGN_TOKEN_MS
+            : SPA_NAV_QUIET_MS;
     const offsets = getSpaScanOffsets(listReturn);
 
     // List-return: paint immediately (even before progressive timers).
@@ -2042,6 +2334,16 @@
           pendingLightScan = false;
         }
 
+        // GMGN: header tryPaint first; cancel progressive once header settled.
+        if (isGmgnTokenPage()) {
+          tryPaintGmgnTokenHeader("spa-progressive");
+          if (hasGmgnTokenHeaderBadge() && index > 0) {
+            clearSpaNavScanTimers();
+            return;
+          }
+          pendingLightScan = false;
+        }
+
         // List-return: cache-first burst with correct site mounts.
         if (listReturn || isSpaListReturnSoft()) {
           fastPaintListReturnViewport();
@@ -2056,6 +2358,11 @@
         if (isDebotTokenPage() && index > 0) {
           if (!hasDebotTokenHeaderBadge()) {
             maybeScheduleDebotHeaderFullScan("spa-progressive");
+          }
+        } else if (isGmgnTokenPage() && index > 0) {
+          // Later passes: tryPaint only (no stacked force full-scan on chart).
+          if (!hasGmgnTokenHeaderBadge()) {
+            tryPaintGmgnTokenHeader("spa-progressive-later");
           }
         } else if (listReturn || isSpaListReturnSoft()) {
           // 0.4.33: first frame ONLY fastPaint (already ran) — no stacked full scan longtask.
@@ -2086,7 +2393,8 @@
 
         // After first paint: cancel pending progressive if already good enough.
         if (index === 0) {
-          const checkMs = isDebotTokenPage() ? 200 : listReturn ? 80 : 80;
+          const checkMs =
+            isDebotTokenPage() || isGmgnTokenPage() ? 200 : listReturn ? 80 : 80;
           const checkId = window.setTimeout(() => {
             spaNavScanTimers = spaNavScanTimers.filter((id) => id !== checkId);
             if (shouldCancelSpaProgressive()) clearSpaNavScanTimers();
@@ -2608,13 +2916,18 @@
     scanGeneration += 1;
 
     // Capture before getCandidateNodes consumes pendingLightScan.
-    // Debot token SPA: never light-scan until HEADER badge is real (ghost list must not starve).
+    // Token SPA: never light-scan until HEADER badge is real (ghost list must not starve).
     let lightScan =
       pendingLightScan || (isTokenPageSettledWithBadge() && isTokenDetailRoute());
     if (isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge()) {
       lightScan = false;
       pendingLightScan = false;
       tryPaintDebotTokenHeader("scan-pre");
+    }
+    if (isGmgnTokenPage() && extractTokenFromUrl() && !hasGmgnTokenHeaderBadge()) {
+      lightScan = false;
+      pendingLightScan = false;
+      tryPaintGmgnTokenHeader("scan-pre");
     }
     const listReturnSoft = isSpaListReturnSoft();
     const listReturnCacheOnly = isSpaListReturnCacheOnly();
@@ -3274,24 +3587,40 @@
       if (isGmgnTokenPage()) {
         const root = findGmgnTokenPageRoot();
         if (root && root !== document.body) roots.push(root);
-      }
-      // Home / war room / token-page side boards (always — not only when path is /).
-      document
-        .querySelectorAll(
-          "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
-        )
-        .forEach((el) => {
-          if (!(el instanceof HTMLElement)) return;
-          const r = el.getBoundingClientRect();
-          if (r.width >= 240 && r.height >= 200) roots.push(el);
-        });
-      // Fallback: largest overflow pane when no columns matched
-      if (!roots.length) {
-        document.querySelectorAll("div.overflow-auto, div.overflow-hidden").forEach((el) => {
-          if (!(el instanceof HTMLElement)) return;
-          const r = el.getBoundingClientRect();
-          if (r.width >= 400 && r.height >= 400 && r.top < window.innerHeight) roots.push(el);
-        });
+        // 0.4.37: until header badge exists, skip war-room columns (main 战壕→K线 jank).
+        // Side boards only after header settled (light scan covers dialogs).
+        if (!hasGmgnTokenHeaderBadge()) {
+          // keep only header root; dialogs collected below
+        } else {
+          document
+            .querySelectorAll(
+              "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
+            )
+            .forEach((el) => {
+              if (!(el instanceof HTMLElement)) return;
+              const r = el.getBoundingClientRect();
+              if (r.width >= 240 && r.height >= 200 && !roots.includes(el)) roots.push(el);
+            });
+        }
+      } else {
+        // Home / war room
+        document
+          .querySelectorAll(
+            "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
+          )
+          .forEach((el) => {
+            if (!(el instanceof HTMLElement)) return;
+            const r = el.getBoundingClientRect();
+            if (r.width >= 240 && r.height >= 200) roots.push(el);
+          });
+        // Fallback: largest overflow pane when no columns matched
+        if (!roots.length) {
+          document.querySelectorAll("div.overflow-auto, div.overflow-hidden").forEach((el) => {
+            if (!(el instanceof HTMLElement)) return;
+            const r = el.getBoundingClientRect();
+            if (r.width >= 400 && r.height >= 400 && r.top < window.innerHeight) roots.push(el);
+          });
+        }
       }
     } else if (host.endsWith("debot.ai") || host.endsWith("gungnir.bot")) {
       if (isDebotTokenPage()) {
@@ -4099,12 +4428,18 @@
         clearCardIcon(card);
       }
     });
-    // Debot token SPA: marks may be missing after host re-render — force header path.
+    // Token SPA: marks may be missing after host re-render — force header path.
     try {
       if (isDebotTokenPage()) {
         const urlTok = extractTokenFromUrl();
         if (urlTok && urlTok === String(token).toLowerCase() && !hasDebotTokenHeaderBadge()) {
           tryPaintDebotTokenHeader("api-apply");
+        }
+      }
+      if (isGmgnTokenPage()) {
+        const urlTok = extractTokenFromUrl();
+        if (urlTok && urlTok === String(token).toLowerCase() && !hasGmgnTokenHeaderBadge()) {
+          tryPaintGmgnTokenHeader("api-apply");
         }
       }
     } catch (_err) {
@@ -5790,13 +6125,24 @@
     if (!isExtensionContextValid()) return;
     if (!isScanPageAllowed()) return;
 
-    // 0.4.29: Debot header re-attach via tryPaint only (throttled); no full-scan on every mut.
+    // Header re-attach via tryPaint only (throttled); no full-scan on every mut.
     if (isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge()) {
       const now = Date.now();
       if (now - debotHeaderMutPaintAt >= 400) {
         debotHeaderMutPaintAt = now;
         try {
           tryPaintDebotTokenHeader("mutation");
+        } catch (_err) {
+          // ignore
+        }
+      }
+    }
+    if (isGmgnTokenPage() && extractTokenFromUrl() && !hasGmgnTokenHeaderBadge()) {
+      const now = Date.now();
+      if (now - debotHeaderMutPaintAt >= 400) {
+        debotHeaderMutPaintAt = now;
+        try {
+          tryPaintGmgnTokenHeader("mutation");
         } catch (_err) {
           // ignore
         }
@@ -5830,10 +6176,11 @@
     }
 
     // Longer debounce while token badge still loading (chart keeps mutating).
-    // Debot unsettled: tryPaint already ran; full scan rare via maybeScheduleDebotHeaderFullScan.
-    const debotUnsettled =
-      isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge();
-    const debounceMs = debotUnsettled
+    // Unsettled token: tryPaint already ran; avoid full-scan storm on K-line.
+    const tokenUnsettled =
+      (isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge()) ||
+      (isGmgnTokenPage() && extractTokenFromUrl() && !hasGmgnTokenHeaderBadge());
+    const debounceMs = tokenUnsettled
       ? 700
       : isTokenDetailRoute()
         ? MUTATION_SCAN_DEBOUNCE_TOKEN_LOADING_MS
@@ -5854,6 +6201,11 @@
       if (isDebotTokenPage()) {
         tryPaintDebotTokenHeader("mutation-scan");
         if (!hasDebotTokenHeaderBadge()) maybeScheduleDebotHeaderFullScan("mutation-scan");
+        return;
+      }
+      if (isGmgnTokenPage()) {
+        // Header-only tryPaint; no force full-scan of war-room columns (0.4.37).
+        tryPaintGmgnTokenHeader("mutation-scan");
         return;
       }
       pendingLightScan = false;
