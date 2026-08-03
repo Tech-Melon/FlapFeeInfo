@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.30: token↔list return — viewport-first soft rescan (jank↓, first-paint still snappy).
   // 0.4.29: cut SPA force-scan storm (meme→K-line jank) — coalesce + fewer progressive.
   // 0.4.28: Debot SPA — normalize route key (id_0x), click-arm, no thrash reset, paint in quiet.
   // 0.4.27: Debot SPA cross-browser — page-world history hook + always-on header guardian.
@@ -74,13 +75,24 @@
   // Coalesce multi pushState/replaceState during one navigation.
   const SPA_NAV_COALESCE_MS = 40;
   // Progressive hole-fill offsets from quiet end (ms).
-  // List/meme boards (Debot 3-col + GMGN home): 4 passes, last ~2s.
-  const SPA_NAV_SCAN_OFFSETS_LIST_MS = [0, 450, 1200, 2200];
+  // List/meme boards (cold / generic): 3 passes — 0.4.30 cut 4th to save main thread.
+  const SPA_NAV_SCAN_OFFSETS_LIST_MS = [0, 400, 1100];
+  // token→list return (js-mcp heavy path): snappy first paint + 1 hole-fill only.
+  const SPA_NAV_SCAN_OFFSETS_LIST_RETURN_MS = [0, 320, 900];
   // Token / K-line page (GMGN): few passes, early-stop when header badge exists.
-  const SPA_NAV_SCAN_OFFSETS_TOKEN_MS = [0, 600, 1600];
+  const SPA_NAV_SCAN_OFFSETS_TOKEN_MS = [0, 550, 1400];
   // Debot SPA token: header paint is cheap; full-scan storm was the jank (js-mcp 0.4.29).
-  // Keep 4 passes max; tryPaint covers holes without 10× force scans.
-  const SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS = [0, 700, 2000, 4500];
+  const SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS = [0, 600, 1800, 4000];
+  // Quiet shorter when returning to list — user expects badges ASAP (immediacy).
+  const SPA_NAV_QUIET_LIST_RETURN_MS = 320;
+  // After token→list: viewport-first soft window (ms) — smaller budget, skip offscreen.
+  const SPA_LIST_RETURN_SOFT_MS = 2800;
+  // Cards to really work per scan during list-return soft window (stable free).
+  const SPA_LIST_RETURN_CARDS = 22;
+  // Candidates cap during list-return soft window.
+  const SPA_LIST_RETURN_CANDIDATES = 56;
+  // Cancel further list progressive once this many visible badges painted.
+  const SPA_LIST_RETURN_ENOUGH_BADGES = 10;
   // Dedicated header paint watch after meme→token SPA (ms). DOM often late.
   // 0.4.29: longer tick, shorter window — paint-only, rare full scan.
   const DEBOT_TOKEN_HEADER_WATCH_MS = 12000;
@@ -271,6 +283,13 @@
   let debotHeaderFindCache = { at: 0, key: "", el: null };
   /** Positive hasDebotTokenHeaderBadge short cache. */
   let debotHeaderBadgeOkUntil = 0;
+  /**
+   * token→list SPA soft window: viewport-first, smaller budget, no offscreen thrash.
+   * Wall-clock until this time (0 = inactive).
+   */
+  let spaListReturnUntil = 0;
+  /** Prev route was token detail (for settle classification). */
+  let spaSettleFromToken = false;
 
   hydratePersistentCache();
   hydrateDisplayPrefs();
@@ -1078,8 +1097,47 @@
   }
 
   function cardsPerScanBudget() {
-    // Full budget always — stable cards free; SPA must cover 3-col lists in one pass.
+    // token→list soft window: smaller slices so list repaint does not freeze UI (0.4.30).
+    if (isSpaListReturnSoft()) return SPA_LIST_RETURN_CARDS;
+    // Full budget otherwise — stable cards free; 3-col lists still finish via progressive.
     return MAX_CARDS_PER_SCAN;
+  }
+
+  function isSpaListReturnSoft() {
+    return spaListReturnUntil > 0 && Date.now() < spaListReturnUntil && !isTokenDetailRoute();
+  }
+
+  /** Prev SPA key was a token detail path (GMGN/Debot/Gungnir). */
+  function routeKeyWasTokenDetail(routeKey) {
+    const s = String(routeKey || "");
+    return /\/token\//i.test(s) || /\/bsc\/token\//i.test(s);
+  }
+
+  /** Count visible painted badges (for list progressive early-stop). */
+  function countVisibleBadges(maxCheck = 40) {
+    let n = 0;
+    try {
+      const icons = document.querySelectorAll(`[${ICON_DATA}="1"]`);
+      const lim = Math.min(icons.length, maxCheck);
+      for (let i = 0; i < lim; i += 1) {
+        const el = icons[i];
+        if (!(el instanceof HTMLElement)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width >= 2 && r.height >= 2 && r.bottom > 0 && r.top < window.innerHeight) {
+          n += 1;
+        }
+      }
+    } catch (_err) {
+      return 0;
+    }
+    return n;
+  }
+
+  /** List progressive: enough first-screen badges → stop further force passes. */
+  function shouldCancelSpaListProgressive() {
+    if (isTokenDetailRoute()) return false;
+    if (!isSpaListReturnSoft() && !spaSettleFromToken) return false;
+    return countVisibleBadges(48) >= SPA_LIST_RETURN_ENOUGH_BADGES;
   }
 
   /**
@@ -1369,16 +1427,21 @@
     return isGmgnTokenPage() || isDebotTokenPage();
   }
 
-  function getSpaScanOffsets() {
+  function getSpaScanOffsets(fromTokenReturn = false) {
     // Route key already updated before settle — use current location.
     if (isDebotTokenPage()) return SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS;
     if (isTokenDetailRoute()) return SPA_NAV_SCAN_OFFSETS_TOKEN_MS;
+    // token→list is the heavy jank path (js-mcp) — fewer passes, snappy first.
+    if (fromTokenReturn) return SPA_NAV_SCAN_OFFSETS_LIST_RETURN_MS;
     return SPA_NAV_SCAN_OFFSETS_LIST_MS;
   }
 
-  /** Token page: stop further SPA force-scans once any badge is painted (header enough). */
+  /** Token page: stop further SPA force-scans once header badge exists. */
   function shouldCancelSpaProgressive() {
-    if (!isTokenDetailRoute()) return false;
+    if (!isTokenDetailRoute()) {
+      // List: early-stop when first screen is good enough (0.4.30).
+      return shouldCancelSpaListProgressive();
+    }
     // Non-8888/7777 token pages never need progressive hole-fill.
     if (isNonTargetTokenPage()) return true;
     // Only cancel when header settled — keep progressive for side boards/dialogs.
@@ -1406,6 +1469,11 @@
       prevTok === nextTok &&
       isDebotTokenPage();
 
+    const fromToken = routeKeyWasTokenDetail(prevKey);
+    const toList = !isTokenDetailRoute();
+    const listReturn = fromToken && toList;
+    spaSettleFromToken = listReturn;
+
     // Fresh caches — virtual list reuses nodes with stale token/mount mapping.
     debotMountCache = new WeakMap();
     cardTokenCache = new WeakMap();
@@ -1418,6 +1486,15 @@
       resetOurDomMarks();
     }
 
+    // token→list: soft viewport window (immediacy on first screen, no offscreen thrash).
+    if (listReturn) {
+      spaListReturnUntil = Date.now() + SPA_LIST_RETURN_SOFT_MS;
+      // List return quiet shorter — first badge paint feels instant.
+      spaQuietUntil = Date.now() + SPA_NAV_QUIET_LIST_RETURN_MS;
+    } else if (!softSameToken) {
+      spaListReturnUntil = 0;
+    }
+
     // ALWAYS observe documentElement — list roots detach on SPA and go silent (js-mcp).
     ensureDocumentObserver();
 
@@ -1427,16 +1504,19 @@
       return;
     }
 
-    // Progressive hole-fill: list boards get more passes; token/K-line fewer.
-    const base = softSameToken ? 0 : SPA_NAV_QUIET_MS;
-    const offsets = getSpaScanOffsets();
+    // Progressive: list-return snappy; token header light; cold list moderate.
+    const base = softSameToken
+      ? 0
+      : listReturn
+        ? SPA_NAV_QUIET_LIST_RETURN_MS
+        : SPA_NAV_QUIET_MS;
+    const offsets = getSpaScanOffsets(listReturn);
     offsets.forEach((offset, index) => {
       const timerId = window.setTimeout(() => {
         spaNavScanTimers = spaNavScanTimers.filter((id) => id !== timerId);
         if (!isTabVisible() || !isExtensionContextValid()) return;
 
-        // Token page already has a badge from an earlier pass — skip remaining force work.
-        // Debot: only cancel when HEADER badge exists (not ghost list).
+        // Early-stop: token header settled OR list first-screen enough badges.
         if (index > 0 && shouldCancelSpaProgressive()) {
           clearSpaNavScanTimers();
           spaQuietUntil = 0;
@@ -1466,7 +1546,7 @@
           pendingLightScan = false;
         }
 
-        // First pass: immediate force. Later: idle force (let chart run).
+        // First pass: immediate force (immediacy). Later: idle force (let site paint).
         // Debot later passes: tryPaint-only if header still missing after gap.
         if (isDebotTokenPage() && index > 0) {
           if (!hasDebotTokenHeaderBadge()) {
@@ -1475,18 +1555,20 @@
         } else {
           scheduleScan(0, {
             force: true,
+            // List-return first pass MUST be immediate for snappy badges.
             immediate: index === 0,
             light: false,
             bypassForceGap: index === 0
           });
         }
 
-        // After first paint on token page, cancel pending progressive only if header settled.
-        if (index === 0 && isTokenDetailRoute()) {
+        // After first paint: cancel pending progressive if already good enough.
+        if (index === 0) {
+          const checkMs = isDebotTokenPage() ? 200 : listReturn ? 120 : 80;
           const checkId = window.setTimeout(() => {
             spaNavScanTimers = spaNavScanTimers.filter((id) => id !== checkId);
             if (shouldCancelSpaProgressive()) clearSpaNavScanTimers();
-          }, isDebotTokenPage() ? 200 : 80);
+          }, checkMs);
           spaNavScanTimers.push(checkId);
         }
       }, base + offset);
@@ -1922,6 +2004,7 @@
       pendingLightScan = false;
       tryPaintDebotTokenHeader("scan-pre");
     }
+    const listReturnSoft = isSpaListReturnSoft();
     const seenCards = new Set();
     const nodes = siteStrategy.getCandidateNodes();
     let touched = 0;
@@ -1930,10 +2013,14 @@
     let skippedCached = 0;
     const budget = cardsPerScanBudget();
     const forceRemount = isResumeForceRemount();
-    const looseView = lightScan || isTokenDetailRoute();
+    // list-return: tight viewport only (immediacy for first screen, skip offscreen cost).
+    const looseView = listReturnSoft ? false : lightScan || isTokenDetailRoute();
 
-    // Expensive re-extract cleanup is rare (every N scans / force remount / SPA).
-    if (forceRemount || scanGeneration % CLEANUP_EVERY_N_SCANS === 0) {
+    // Expensive re-extract cleanup is rare — skip deep cleanup during list-return soft.
+    if (
+      !listReturnSoft &&
+      (forceRemount || scanGeneration % CLEANUP_EVERY_N_SCANS === 0)
+    ) {
       cleanupMarkedCards({ deep: forceRemount });
     }
 
@@ -2077,13 +2164,26 @@
     // 0.4.21: keep light mode on token settled pages so chart full-scan stays off.
     if (truncated) {
       const keepLight = lightScan || isTokenPageSettledWithBadge();
-      scheduleScan(60, { force: true, immediate: true, light: keepLight });
+      // list-return: slice remaining viewport ASAP (immediacy without one huge frame).
+      if (listReturnSoft) {
+        scheduleScan(30, {
+          force: true,
+          immediate: true,
+          light: false,
+          bypassForceGap: true
+        });
+      } else {
+        scheduleScan(60, { force: true, immediate: true, light: keepLight });
+      }
     } else if (queued > 0 && requestQueue.size > 0 && !batchActive && !batchTimer) {
       scheduleBatchFlush({ immediate: true });
     }
 
     // Per-card safety net only (same CA in 三栏 = multiple badges OK).
-    dedupeBadgesByToken();
+    // list-return soft: skip full-page dedupe every slice (cheap save).
+    if (!listReturnSoft || scanGeneration % 3 === 0) {
+      dedupeBadgesByToken();
+    }
 
     debugInfo("scan", {
       site: siteStrategy.name,
@@ -2666,6 +2766,8 @@
     const seen = new Set();
     const lightOnly = pendingLightScan;
     pendingLightScan = false;
+    // 0.4.30: token→list soft — viewport only, smaller caps (jank↓, first screen still filled).
+    const listReturnSoft = isSpaListReturnSoft();
 
     const addNode = (node, priority = 0) => {
       if (!(node instanceof HTMLElement) || seen.has(node)) return;
@@ -2679,13 +2781,22 @@
         // ignore
       }
       const item = { node, priority: pri };
+      // list-return: never queue far offscreen (main cost of GMGN token→home).
+      if (listReturnSoft) {
+        if (isNearViewport(node, false)) inView.push(item);
+        return;
+      }
       if (isNearViewport(node, lightOnly)) inView.push(item);
       else offscreen.push(item);
     };
 
     const collectFromRoot = (root) => {
       if (!root || !root.querySelectorAll) return;
-      const cap = lightOnly ? LIGHT_MAX_CANDIDATES * 2 : MAX_CANDIDATES_PER_SCAN * 2;
+      const candCap = listReturnSoft
+        ? SPA_LIST_RETURN_CANDIDATES
+        : lightOnly
+          ? LIGHT_MAX_CANDIDATES * 2
+          : MAX_CANDIDATES_PER_SCAN * 2;
       // Prefer site token routes over external flap.sh icons (js-mcp: flap.sh 18×18 noise).
       root
         .querySelectorAll(
@@ -2701,15 +2812,22 @@
       });
       // Short CA text in compact leaves (raise cap on light — virtual list new rows).
       // Debot/Gungnir: pure short CA is often a leaf DIV (js-mcp), not only a/span.
-      const leafBudget = lightOnly ? LIGHT_MAX_CANDIDATES : MAX_CANDIDATES_PER_SCAN;
+      const leafBudget = listReturnSoft
+        ? SPA_LIST_RETURN_CANDIDATES
+        : lightOnly
+          ? LIGHT_MAX_CANDIDATES
+          : MAX_CANDIDATES_PER_SCAN;
       if (inView.length < leafBudget) {
         const hn = location.hostname || "";
         const debotHost = hn.endsWith("debot.ai") || hn.endsWith("gungnir.bot");
         const leafSel = debotHost ? "a, span, div" : "a, span";
         const leaves = root.querySelectorAll(leafSel);
-        const maxCheck = Math.min(leaves.length, lightOnly ? 500 : debotHost ? 350 : 200);
+        const maxCheck = Math.min(
+          leaves.length,
+          listReturnSoft ? 160 : lightOnly ? 500 : debotHost ? 350 : 200
+        );
         for (let i = 0; i < maxCheck; i += 1) {
-          if (inView.length + offscreen.length >= cap) break;
+          if (inView.length + offscreen.length >= candCap) break;
           const el = leaves[i];
           const t = (el.textContent || "").trim();
           if (t.length > 24 || t.length < 8) continue;
@@ -2723,15 +2841,24 @@
 
     // Light scan: overlays + side boards only (token header settled / chart thrash).
     const roots = lightOnly ? getLightScanRoots() : getScanRoots();
-    const maxCand = lightOnly ? LIGHT_MAX_CANDIDATES * 2 : MAX_CANDIDATES_PER_SCAN * 2;
+    const maxCand = listReturnSoft
+      ? SPA_LIST_RETURN_CANDIDATES
+      : lightOnly
+        ? LIGHT_MAX_CANDIDATES * 2
+        : MAX_CANDIDATES_PER_SCAN * 2;
     for (const root of roots) {
       if (inView.length + offscreen.length >= maxCand) break;
       collectFromRoot(root);
     }
 
     // SPA hole-fill: if roots empty/wrong, scan body once.
-    // Never on light scan or settled/non-target token pages (chart DOM thrash).
-    if (!lightOnly && inView.length + offscreen.length < 8 && document.body) {
+    // Never on light / list-return soft / settled token pages.
+    if (
+      !lightOnly &&
+      !listReturnSoft &&
+      inView.length + offscreen.length < 8 &&
+      document.body
+    ) {
       if (
         !(
           isTokenDetailRoute() &&
@@ -2745,8 +2872,12 @@
     const sortPri = (a, b) => b.priority - a.priority;
     inView.sort(sortPri);
     offscreen.sort(sortPri);
-    const offTake = lightOnly ? LIGHT_MAX_OFFSCREEN : 12;
-    const sliceMax = lightOnly ? LIGHT_MAX_CANDIDATES : MAX_CANDIDATES_PER_SCAN;
+    const offTake = listReturnSoft ? 0 : lightOnly ? LIGHT_MAX_OFFSCREEN : 12;
+    const sliceMax = listReturnSoft
+      ? SPA_LIST_RETURN_CANDIDATES
+      : lightOnly
+        ? LIGHT_MAX_CANDIDATES
+        : MAX_CANDIDATES_PER_SCAN;
     const merged = inView.concat(offscreen.slice(0, offTake)).map((x) => x.node);
     return merged.slice(0, sliceMax);
   }
