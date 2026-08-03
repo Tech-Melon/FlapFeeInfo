@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.17: dark theme optional transparent bg toggle.
   // 0.4.16: dark theme solid #000 chip bg for contrast on colorful cards.
   // 0.4.15: hard double-badge dedupe (Debot drag); outermost card only; remount on abs.
   // 0.4.14: trench-only abs/drag; bsc scan gate; fix Debot 新创建 + double badge.
@@ -78,6 +79,9 @@
   // Badge color theme: dark (default, for dark sites) | light (solid soft chips for contrast).
   const BADGE_THEME_KEY = "flapFeeInfo.badgeTheme.v1";
   const DEFAULT_BADGE_THEME = "dark";
+  // Dark theme only: true = translucent accent bg (old look); false = solid #000 chip (default).
+  const BADGE_DARK_TRANSPARENT_KEY = "flapFeeInfo.badgeDarkTransparent.v1";
+  const DEFAULT_BADGE_DARK_TRANSPARENT = false;
   // Per-site badge placement:
   // - enabled=false (default): natural mount beside Tax / 总税率
   // - enabled=true: position absolute vs card top-left (x,y) — same for all badges on site
@@ -163,6 +167,8 @@
   let displayPrefs = { ...DEFAULT_DISPLAY_PREFS };
   /** dark | light — badge chrome colors */
   let badgeTheme = DEFAULT_BADGE_THEME;
+  /** dark theme: translucent bg instead of solid black */
+  let badgeDarkTransparent = DEFAULT_BADGE_DARK_TRANSPARENT;
   /** { gmgn|debot: { enabled, x, y } } */
   let badgeOffsets = {
     gmgn: { ...DEFAULT_BADGE_OFFSETS.gmgn },
@@ -203,6 +209,7 @@
   hydratePersistentCache();
   hydrateDisplayPrefs();
   hydrateBadgeTheme();
+  hydrateBadgeDarkTransparent();
   hydrateBadgeOffsets();
   hydrateBadgeDragEdit();
   watchDisplayPrefs();
@@ -2470,6 +2477,19 @@
     }
   }
 
+  function hydrateBadgeDarkTransparent() {
+    if (!isExtensionContextValid() || !chrome.storage?.local) return;
+    try {
+      chrome.storage.local.get([BADGE_DARK_TRANSPARENT_KEY], (items) => {
+        if (!isExtensionContextValid() || chrome.runtime.lastError) return;
+        badgeDarkTransparent = items?.[BADGE_DARK_TRANSPARENT_KEY] === true;
+        rerenderAllBadges();
+      });
+    } catch {
+      // ignore
+    }
+  }
+
   function clampBadgeOffset(n) {
     const v = Number(n);
     if (!Number.isFinite(v)) return 0;
@@ -2983,6 +3003,10 @@
           badgeTheme = normalizeBadgeTheme(changes[BADGE_THEME_KEY].newValue);
           dirty = true;
         }
+        if (changes[BADGE_DARK_TRANSPARENT_KEY]) {
+          badgeDarkTransparent = changes[BADGE_DARK_TRANSPARENT_KEY].newValue === true;
+          dirty = true;
+        }
         if (changes[BADGE_OFFSET_KEY]) {
           badgeOffsets = normalizeBadgeOffsets(changes[BADGE_OFFSET_KEY].newValue);
           applyOffsetToAllIcons();
@@ -3104,6 +3128,9 @@
     const className = [
       "gmgn-fee-mode-icon",
       `gmgn-fee-mode-icon--theme-${theme}`,
+      theme === "dark" && badgeDarkTransparent
+        ? "gmgn-fee-mode-icon--dark-transparent"
+        : "",
       `gmgn-fee-mode-icon--${meta.className}`,
       `gmgn-fee-mode-icon--${siteStrategy.name}`,
       segmentCount >= 3 ? "gmgn-fee-mode-icon--wide" : "",

@@ -275,6 +275,15 @@ body {
   margin-bottom: 8px;
 }
 
+.theme-opt-row {
+  margin-top: 8px;
+}
+
+.theme-opt-row.is-disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
 .offset-row {
   display: flex;
   align-items: center;
