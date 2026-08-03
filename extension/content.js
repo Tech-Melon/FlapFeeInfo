@@ -5,6 +5,7 @@
   // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
+  // 0.4.35: Debot SPA meme→K 线激活链加固 + 回战壕加速 + token 页减负.
   // 0.4.34: Debot「使用卡片坐标」时 K 线顶栏仍强制贴合（不走 absolute，修登录无徽章）.
   // 0.4.33: Debot login K-line badge + list-return mount pos; GMGN return first-frame fast-only.
   // 0.4.32: GMGN token→home — cache-first 6–8 card burst + 6ms slices (kill ~0.8s longtask).
@@ -89,25 +90,28 @@
   // Debot SPA token: prefer tryPaint; at most 2 progressive full scans.
   const SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS = [0, 900, 2500];
   // Quiet shorter when returning to list — user expects badges ASAP (immediacy).
-  const SPA_NAV_QUIET_LIST_RETURN_MS = 200;
+  // 0.4.35: 0ms — paint as soon as settle starts (战壕徽章太慢).
+  const SPA_NAV_QUIET_LIST_RETURN_MS = 0;
   // After token→list: viewport-first soft window (ms).
-  const SPA_LIST_RETURN_SOFT_MS = 3500;
+  const SPA_LIST_RETURN_SOFT_MS = 2800;
   // First wave: only paint cards with fee already in modeCache (no network, no deep extract).
-  const SPA_LIST_RETURN_CACHE_ONLY_MS = 900;
-  // Cards per slice during list-return (0.4.32: 7 — was 12 still too heavy on GMGN).
-  const SPA_LIST_RETURN_CARDS = 7;
+  const SPA_LIST_RETURN_CACHE_ONLY_MS = 600;
+  // Cards per slice during list-return.
+  const SPA_LIST_RETURN_CARDS = 10;
   // Candidates cap during list-return soft window (href-only).
-  const SPA_LIST_RETURN_CANDIDATES = 20;
+  const SPA_LIST_RETURN_CANDIDATES = 28;
   // Cancel further list progressive once this many visible badges painted.
-  const SPA_LIST_RETURN_ENOUGH_BADGES = 5;
+  const SPA_LIST_RETURN_ENOUGH_BADGES = 8;
   // Soft scan time budget per frame (ms) — hard stop mid-loop.
-  const SPA_LIST_RETURN_SLICE_MS = 6;
+  const SPA_LIST_RETURN_SLICE_MS = 8;
   // Fast-paint burst budget right after list settle (ms / cards).
-  const SPA_LIST_RETURN_FAST_MS = 6;
-  const SPA_LIST_RETURN_FAST_CARDS = 8;
+  const SPA_LIST_RETURN_FAST_MS = 10;
+  const SPA_LIST_RETURN_FAST_CARDS = 14;
   // Dedicated header paint watch after meme→token SPA (ms). Logged-in DOM is slower.
-  const DEBOT_TOKEN_HEADER_WATCH_MS = 18000;
-  const DEBOT_TOKEN_HEADER_TICK_MS = 500;
+  const DEBOT_TOKEN_HEADER_WATCH_MS = 20000;
+  const DEBOT_TOKEN_HEADER_TICK_MS = 400;
+  // Debot token SPA quiet (shorter than generic — paint sooner without waiting 800ms).
+  const SPA_NAV_QUIET_DEBOT_TOKEN_MS = 280;
   // Always-on guardian base interval; backs off while header missing (0.4.31).
   const DEBOT_TOKEN_GUARDIAN_MS = 1200;
   // After user clicks a /token/ link, keep header tryPaint this long (ms).
@@ -277,6 +281,9 @@
   /** Debot/Gungnir: force-paint token header until success or timeout after SPA. */
   let debotTokenHeaderWatchId = null;
   let debotTokenHeaderWatchUntil = 0;
+  /** MutationObserver until Debot token header badge appears (SPA activation). */
+  let debotHeaderDomObs = null;
+  let debotHeaderDomObsLastPaintAt = 0;
   /** Always-on while Debot/Gungnir tab lives — does not depend on SPA detect. */
   let debotTokenGuardianId = null;
   /** Quiet-end flush timer (spaDomDirty → one full scan). */
@@ -1547,11 +1554,85 @@
 
   /**
    * Debot often navigates without history.pushState (js-mcp: eventCount=0 on click).
-   * Capture token-link clicks as a reliable SPA signal.
+   * Capture token-link clicks AND card clicks that contain token hrefs (SPA activation).
+   * Also accelerate list-return when clicking 战壕/meme.
    */
   function installDebotTokenClickArm() {
     const host = location.hostname || "";
     if (!host.endsWith("debot.ai") && !host.endsWith("gungnir.bot")) return;
+
+    const armTokenPaint = (reasonPrefix) => {
+      debotTokenClickArmUntil = Date.now() + DEBOT_TOKEN_CLICK_ARM_MS;
+      armDebotHeaderDomWatch();
+      const kick = (ms, reason, fullScan) => {
+        window.setTimeout(() => {
+          if (!isExtensionContextValid() || !isTabVisible()) return;
+          try {
+            onSpaRouteChange(`${reasonPrefix}:${reason}`);
+          } catch (_err) {
+            // ignore
+          }
+          if (!isDebotTokenPage()) return;
+          const urlTok = extractTokenFromUrl();
+          if (!urlTok) return;
+          if (hasDebotTokenHeaderBadge()) {
+            stopDebotHeaderDomWatch();
+            return;
+          }
+          armDebotTokenHeaderWatch();
+          tryPaintDebotTokenHeader(`${reasonPrefix}:${reason}`);
+          if (fullScan && !hasDebotTokenHeaderBadge()) {
+            pendingLightScan = false;
+            scheduleScan(0, {
+              force: true,
+              immediate: true,
+              light: false,
+              bypassForceGap: true
+            });
+          }
+        }, ms);
+      };
+      // Dense early kicks — SPA header DOM often late when logged in.
+      kick(0, "0", false);
+      kick(80, "80", false);
+      kick(250, "250", true);
+      kick(600, "600", true);
+      kick(1200, "1200", true);
+      kick(2200, "2200", true);
+      kick(4000, "4000", false);
+    };
+
+    const armListReturnPaint = () => {
+      // Accelerate 战壕 repaint (user: 回战壕太慢).
+      spaListReturnUntil = Date.now() + SPA_LIST_RETURN_SOFT_MS;
+      spaListReturnCacheOnlyUntil = Date.now() + SPA_LIST_RETURN_CACHE_ONLY_MS;
+      spaQuietUntil = 0;
+      const kick = (ms) => {
+        window.setTimeout(() => {
+          if (!isExtensionContextValid() || !isTabVisible()) return;
+          if (isTokenDetailRoute()) return;
+          try {
+            onSpaRouteChange("list-return-click");
+          } catch (_err) {
+            // ignore
+          }
+          spaQuietUntil = 0;
+          spaListReturnUntil = Date.now() + SPA_LIST_RETURN_SOFT_MS;
+          fastPaintListReturnViewport();
+          scheduleScan(0, {
+            force: true,
+            immediate: true,
+            light: false,
+            bypassForceGap: true
+          });
+        }, ms);
+      };
+      kick(0);
+      kick(100);
+      kick(350);
+      kick(800);
+    };
+
     document.addEventListener(
       "click",
       (event) => {
@@ -1559,40 +1640,94 @@
           if (!isExtensionContextValid()) return;
           const t = event.target;
           if (!(t instanceof Element)) return;
-          const a = t.closest?.("a[href*='/token/'], a[href*='0x']");
-          if (!(a instanceof HTMLAnchorElement)) return;
-          const href = a.getAttribute("href") || a.href || "";
+
+          // --- Return to 战壕 / meme ---
+          const memeA = t.closest?.('a[href*="/meme"]');
+          const memeText =
+            t.closest?.("a,button,[role='tab']") &&
+            /战壕|meme|trench/i.test(
+              (t.closest("a,button,[role='tab']")?.textContent || "").trim()
+            );
+          if (memeA || memeText) {
+            if (isDebotTokenPage() || routeKeyWasTokenDetail(lastRouteKey)) {
+              armListReturnPaint();
+            }
+            return;
+          }
+
+          // --- Enter token K-line ---
+          let href = "";
+          const a = t.closest?.('a[href*="/token/"], a[href*="0x"]');
+          if (a instanceof HTMLAnchorElement) {
+            href = a.getAttribute("href") || a.href || "";
+          } else {
+            // Card click: find nested token link (Debot often wraps whole card).
+            const card = t.closest?.(
+              ".MuiCard-root, .MuiPaper-root, [class*='Card'], li, article"
+            );
+            if (card) {
+              const inner = card.querySelector?.(
+                'a[href*="/token/"][href*="7777"], a[href*="/token/"][href*="8888"], a[href*="0x"][href*="7777"], a[href*="0x"][href*="8888"]'
+              );
+              if (inner) href = inner.getAttribute("href") || inner.href || "";
+            }
+          }
+          if (!href) return;
           if (!/\/token\//i.test(href) && !/0x[a-fA-F0-9]{40}/i.test(href)) return;
-          // Only arm for 8888/7777 targets when CA is visible in href.
           const m = href.match(/0x[a-fA-F0-9]{40}/i);
           if (m && !TARGET_TOKEN_RE.test(m[0].toLowerCase())) return;
-          debotTokenClickArmUntil = Date.now() + DEBOT_TOKEN_CLICK_ARM_MS;
-          // Few paint kicks only (0.4.29: was 6× force full-scan = jank).
-          const kick = (ms, reason, fullScan) => {
-            window.setTimeout(() => {
-              if (!isExtensionContextValid() || !isTabVisible()) return;
-              try {
-                onSpaRouteChange(reason);
-              } catch (_err) {
-                // ignore
-              }
-              if (isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge()) {
-                tryPaintDebotTokenHeader(reason);
-                if (fullScan && !hasDebotTokenHeaderBadge()) {
-                  maybeScheduleDebotHeaderFullScan(reason);
-                }
-              }
-            }, ms);
-          };
-          kick(50, "click-arm-50", false);
-          kick(400, "click-arm-400", true);
-          kick(1200, "click-arm-1200", true);
+          armTokenPaint("click-arm");
         } catch (_err) {
           // ignore
         }
       },
       true
     );
+  }
+
+  /** Observe DOM until Debot token header badge is painted (SPA activation chain). */
+  function armDebotHeaderDomWatch() {
+    stopDebotHeaderDomWatch();
+    if (!isDebotTokenPage() && !debotTokenClickArmUntil) return;
+    try {
+      debotHeaderDomObs = new MutationObserver(() => {
+        if (!isExtensionContextValid()) {
+          stopDebotHeaderDomWatch();
+          return;
+        }
+        if (!isDebotTokenPage()) return;
+        if (hasDebotTokenHeaderBadge()) {
+          stopDebotHeaderDomWatch();
+          return;
+        }
+        const now = Date.now();
+        if (now - debotHeaderDomObsLastPaintAt < 180) return;
+        debotHeaderDomObsLastPaintAt = now;
+        tryPaintDebotTokenHeader("dom-watch");
+      });
+      debotHeaderDomObs.observe(document.documentElement, {
+        childList: true,
+        subtree: true
+      });
+      // Auto-stop after watch window
+      window.setTimeout(() => {
+        if (hasDebotTokenHeaderBadge()) stopDebotHeaderDomWatch();
+      }, DEBOT_TOKEN_HEADER_WATCH_MS);
+    } catch (_err) {
+      debotHeaderDomObs = null;
+    }
+  }
+
+  function stopDebotHeaderDomWatch() {
+    if (debotHeaderDomObs) {
+      try {
+        debotHeaderDomObs.disconnect();
+      } catch (_err) {
+        // ignore
+      }
+      debotHeaderDomObs = null;
+    }
+    debotHeaderDomObsLastPaintAt = 0;
   }
 
   function clearSpaNavScanTimers() {
@@ -1613,7 +1748,12 @@
 
     // SPA nav is not tab-background freeze.
     resumeForceRemountUntil = 0;
-    spaQuietUntil = Date.now() + SPA_NAV_QUIET_MS;
+    // Debot token: shorter quiet so header paint starts sooner (0.4.35).
+    // List return quiet applied later in beginSpaRouteSettle.
+    const quietMs = isDebotTokenPage()
+      ? SPA_NAV_QUIET_DEBOT_TOKEN_MS
+      : SPA_NAV_QUIET_MS;
+    spaQuietUntil = Date.now() + quietMs;
     spaDomDirty = false;
 
     // Drop pending scans from previous route (avoid stacking work during nav).
@@ -1737,7 +1877,7 @@
     // ALWAYS observe documentElement — list roots detach on SPA and go silent (js-mcp).
     ensureDocumentObserver();
 
-    // Entering Debot token: prime fee fetch immediately (js-mcp: 0 badge + no /modes).
+    // Entering Debot token: prime fee fetch + DOM watch (SPA activation chain).
     if (isDebotTokenPage()) {
       const enterTok = extractTokenFromUrl();
       if (enterTok) {
@@ -1746,8 +1886,20 @@
         recoverStuckBatch(false);
         queueToken(enterTok);
         scheduleBatchFlush({ immediate: true, delayMs: 0 });
+        armDebotHeaderDomWatch();
+        armDebotTokenHeaderWatch();
         tryPaintDebotTokenHeader("settle-enter");
+        // Immediate one full scan (not only tryPaint) — mimics hard refresh path.
+        pendingLightScan = false;
+        scheduleScan(0, {
+          force: true,
+          immediate: true,
+          light: false,
+          bypassForceGap: true
+        });
       }
+    } else {
+      stopDebotHeaderDomWatch();
     }
 
     // Soft same-token: header already painted → skip progressive storm.
@@ -1761,8 +1913,19 @@
       ? 0
       : listReturn
         ? SPA_NAV_QUIET_LIST_RETURN_MS
-        : SPA_NAV_QUIET_MS;
+        : isDebotTokenPage()
+          ? SPA_NAV_QUIET_DEBOT_TOKEN_MS
+          : SPA_NAV_QUIET_MS;
     const offsets = getSpaScanOffsets(listReturn);
+
+    // List-return: paint immediately (even before progressive timers).
+    if (listReturn) {
+      try {
+        fastPaintListReturnViewport();
+      } catch (_err) {
+        // ignore
+      }
+    }
     offsets.forEach((offset, index) => {
       const timerId = window.setTimeout(() => {
         spaNavScanTimers = spaNavScanTimers.filter((id) => id !== timerId);
@@ -1856,6 +2019,7 @@
     // Debot/Gungnir meme→token: arm continuous header watch (DOM often late after SPA).
     if (isDebotTokenPage() && extractTokenFromUrl()) {
       armDebotTokenHeaderWatch();
+      armDebotHeaderDomWatch();
     }
   }
 
@@ -3047,31 +3211,46 @@
         // Header strip first (SPA meme→token — MuiCards may be 0).
         const header = findDebotTokenHeaderCard();
         if (header instanceof HTMLElement) roots.push(header);
-        const mount = findDebotTokenPageMount(document.body);
-        if (mount) {
-          const box = mount.closest?.(".MuiBox-root") || mount;
-          if (box instanceof HTMLElement && !roots.includes(box)) roots.push(box);
+        const topShort = findDebotTopShortLeaf(extractTokenFromUrl(), document.body);
+        if (topShort?.parentElement instanceof HTMLElement) {
+          roots.unshift(topShort.parentElement);
         }
-      }
-      // 0.4.14: include 新创建 (left column). Do NOT require r.left > 80.
-      document.querySelectorAll(".MuiCard-root, div.MuiPaper-root.MuiCard-root").forEach((el) => {
-        if (!(el instanceof HTMLElement)) return;
-        const r = el.getBoundingClientRect();
-        if (r.width >= 240 && r.height >= 240) roots.push(el);
-      });
-      // Column containers (战壕 3 cols) when Paper root sizing differs.
-      document
-        .querySelectorAll(
-          ".MuiStack-root, [class*='MuiGrid'], div[class*='overflow']"
-        )
-        .forEach((el) => {
+        // 0.4.35: until header badge exists, skip scanning all MuiCards (main jank on K-line).
+        // Side boards only after header settled (light scan path covers dialogs).
+        if (hasDebotTokenHeaderBadge()) {
+          const mount = findDebotTokenPageMount(document.body);
+          if (mount) {
+            const box = mount.closest?.(".MuiBox-root") || mount;
+            if (box instanceof HTMLElement && !roots.includes(box)) roots.push(box);
+          }
+        }
+      } else {
+        // 战壕 list: full column roots
+        // 0.4.14: include 新创建 (left column). Do NOT require r.left > 80.
+        document.querySelectorAll(".MuiCard-root, div.MuiPaper-root.MuiCard-root").forEach((el) => {
           if (!(el instanceof HTMLElement)) return;
           const r = el.getBoundingClientRect();
-          // Tall column boards
-          if (r.width >= 240 && r.width <= 520 && r.height >= 360 && r.top < window.innerHeight) {
-            roots.push(el);
-          }
+          if (r.width >= 240 && r.height >= 240) roots.push(el);
         });
+        // Column containers (战壕 3 cols) when Paper root sizing differs.
+        document
+          .querySelectorAll(
+            ".MuiStack-root, [class*='MuiGrid'], div[class*='overflow']"
+          )
+          .forEach((el) => {
+            if (!(el instanceof HTMLElement)) return;
+            const r = el.getBoundingClientRect();
+            // Tall column boards
+            if (
+              r.width >= 240 &&
+              r.width <= 520 &&
+              r.height >= 360 &&
+              r.top < window.innerHeight
+            ) {
+              roots.push(el);
+            }
+          });
+      }
       if (!roots.length) {
         const main =
           document.querySelector(".MuiContainer-root") ||
