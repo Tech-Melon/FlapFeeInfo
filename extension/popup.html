@@ -9,7 +9,7 @@
   <body>
     <header class="head">
       <div class="title">技术瓜FlapFeeInfo</div>
-      <div class="sub">徽章显示与主题（即时生效）</div>
+      <div class="sub">徽章显示 · 主题 · 位置</div>
     </header>
 
     <section class="section">
@@ -34,15 +34,33 @@
     </section>
 
     <section class="section">
-      <div class="section-title">徽章位置（相对默认挂载点）</div>
+      <div class="section-title">徽章位置</div>
       <p class="theme-hint offset-hint">
-        在卡片原有挂载基础上微调偏移；同一站点所有徽章共用一套坐标。GMGN 与 Debot/Gungnir 分开保存。非拖拽实时重绘，改完后写入本地，下一轮绘制或刷新生效。
+        <strong>默认</strong>：贴合税率（Tax）旁，无需配置。<br />
+        <strong>卡片坐标</strong>：相对<strong>小卡片最左上角</strong>的 (X,Y) 像素，同站点全部徽章共用。<br />
+        <strong>拖拽</strong>：打开下方开关后，在页面上拖一个徽章，松手即写入坐标并应用到全部。
       </p>
+
+      <label class="row drag-row" for="dragEditToggle">
+        <input type="checkbox" id="dragEditToggle" />
+        <span class="emoji">✥</span>
+        <div class="label">
+          <strong>页面内拖拽定位</strong>
+          <span>开启后可拖徽章；只动当前那一个，松手后同步全站</span>
+        </div>
+      </label>
+
       <div class="offset-site" data-site="gmgn">
-        <div class="offset-site-title">GMGN</div>
+        <div class="offset-site-head">
+          <div class="offset-site-title">GMGN</div>
+          <label class="offset-enable">
+            <input type="checkbox" class="offset-enable-input" data-site="gmgn" />
+            使用卡片坐标
+          </label>
+        </div>
         <div class="offset-row">
           <label class="offset-axis">X
-            <input type="number" class="offset-input" data-site="gmgn" data-axis="x" min="-200" max="200" step="1" value="0" />
+            <input type="number" class="offset-input" data-site="gmgn" data-axis="x" min="-40" max="640" step="1" value="12" />
             <span class="offset-unit">px</span>
           </label>
           <div class="offset-step">
@@ -52,7 +70,7 @@
         </div>
         <div class="offset-row">
           <label class="offset-axis">Y
-            <input type="number" class="offset-input" data-site="gmgn" data-axis="y" min="-200" max="200" step="1" value="0" />
+            <input type="number" class="offset-input" data-site="gmgn" data-axis="y" min="-40" max="640" step="1" value="8" />
             <span class="offset-unit">px</span>
           </label>
           <div class="offset-step">
@@ -61,11 +79,18 @@
           </div>
         </div>
       </div>
+
       <div class="offset-site" data-site="debot">
-        <div class="offset-site-title">Debot / Gungnir</div>
+        <div class="offset-site-head">
+          <div class="offset-site-title">Debot / Gungnir</div>
+          <label class="offset-enable">
+            <input type="checkbox" class="offset-enable-input" data-site="debot" />
+            使用卡片坐标
+          </label>
+        </div>
         <div class="offset-row">
           <label class="offset-axis">X
-            <input type="number" class="offset-input" data-site="debot" data-axis="x" min="-200" max="200" step="1" value="0" />
+            <input type="number" class="offset-input" data-site="debot" data-axis="x" min="-40" max="640" step="1" value="12" />
             <span class="offset-unit">px</span>
           </label>
           <div class="offset-step">
@@ -75,7 +100,7 @@
         </div>
         <div class="offset-row">
           <label class="offset-axis">Y
-            <input type="number" class="offset-input" data-site="debot" data-axis="y" min="-200" max="200" step="1" value="0" />
+            <input type="number" class="offset-input" data-site="debot" data-axis="y" min="-40" max="640" step="1" value="8" />
             <span class="offset-unit">px</span>
           </label>
           <div class="offset-step">
@@ -84,8 +109,9 @@
           </div>
         </div>
       </div>
+
       <div class="offset-actions">
-        <button type="button" id="btnOffsetReset" class="btn btn-muted">重置全部偏移</button>
+        <button type="button" id="btnOffsetReset" class="btn btn-muted">恢复默认（贴税率旁）</button>
       </div>
       <p class="status" id="offsetStatus" aria-live="polite"></p>
     </section>
@@ -94,7 +120,7 @@
       <button type="button" id="btnAllOn" class="btn">全部开启</button>
       <button type="button" id="btnAllOff" class="btn btn-muted">全部关闭</button>
     </footer>
-    <p class="hint">主题/显示项即时刷新；位置偏移写入后由页面侧下一轮绘制应用（已打开页会同步 CSS 偏移）。</p>
+    <p class="hint">主题/显示项即时刷新。坐标模式关闭时徽章贴 Tax；开启后相对卡片左上角绝对定位。</p>
 
     <script src="popup.js"></script>
   </body>

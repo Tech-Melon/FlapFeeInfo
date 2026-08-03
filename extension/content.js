@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.13: badge pos — default beside Tax; optional card top-left absolute + page drag.
   // 0.4.12: K-line — stop mutation scans after badge; cache 总税率 lookup; per-site badge offset.
   // 0.4.11: SPA progressive scans cut to ~1.3–2s (was 6× up to 3s) — fix home→K-line jank.
   // Debot/GMGN list boards still get 4 light passes; token pages 3 + early-stop when badge exists.
@@ -74,15 +75,19 @@
   // Badge color theme: dark (default, for dark sites) | light (solid soft chips for contrast).
   const BADGE_THEME_KEY = "flapFeeInfo.badgeTheme.v1";
   const DEFAULT_BADGE_THEME = "dark";
-  // Per-site badge nudge from natural placement (px relative to card/base flow origin).
-  // gmgn vs debot(+gungnir) stored separately; applied on next paint / storage change (CSS only).
-  const BADGE_OFFSET_KEY = "flapFeeInfo.badgeOffset.v1";
+  // Per-site badge placement:
+  // - enabled=false (default): natural mount beside Tax / 总税率
+  // - enabled=true: position absolute vs card top-left (x,y) — same for all badges on site
+  // gmgn vs debot(+gungnir) separate. v2 schema (v1 relative-nudge ignored).
+  const BADGE_OFFSET_KEY = "flapFeeInfo.badgeOffset.v2";
+  const BADGE_DRAG_EDIT_KEY = "flapFeeInfo.badgeDragEdit.v1";
   const DEFAULT_BADGE_OFFSETS = {
-    gmgn: { x: 0, y: 0 },
-    debot: { x: 0, y: 0 }
+    gmgn: { enabled: false, x: 12, y: 8 },
+    debot: { enabled: false, x: 12, y: 8 }
   };
-  const BADGE_OFFSET_MIN = -200;
-  const BADGE_OFFSET_MAX = 200;
+  // Card-relative coords (px from card border-box top-left).
+  const BADGE_OFFSET_MIN = -40;
+  const BADGE_OFFSET_MAX = 640;
   const DEBUG_PREFIX = "[FlapFeeInfo]";
   const CARD_MARK = "gmgnFeeModeCard";
   const ICON_MARK = "gmgnFeeModeIcon";
@@ -155,11 +160,15 @@
   let displayPrefs = { ...DEFAULT_DISPLAY_PREFS };
   /** dark | light — badge chrome colors */
   let badgeTheme = DEFAULT_BADGE_THEME;
-  /** { gmgn: {x,y}, debot: {x,y} } — CSS nudge from natural placeIcon base */
+  /** { gmgn|debot: { enabled, x, y } } */
   let badgeOffsets = {
     gmgn: { ...DEFAULT_BADGE_OFFSETS.gmgn },
     debot: { ...DEFAULT_BADGE_OFFSETS.debot }
   };
+  /** Popup toggle: allow dragging a badge on page to set absolute coords. */
+  let badgeDragEdit = false;
+  /** Active pointer drag state (one badge only). */
+  let badgeDragState = null;
   /** Cached GMGN "总税率" label node (invalidated on SPA). */
   let taxRateLabelCache = { el: null, at: 0 };
   let pipelineWatchdogId = null;
@@ -192,7 +201,9 @@
   hydrateDisplayPrefs();
   hydrateBadgeTheme();
   hydrateBadgeOffsets();
+  hydrateBadgeDragEdit();
   watchDisplayPrefs();
+  installBadgeDragHandlers();
   startPipelineWatchdog();
   installHistoryHooks();
   startRoutePoller();
@@ -991,23 +1002,30 @@
           !forceRemount
         ) {
           if (existing.dataset.feeSig && existing.textContent === existing.dataset.feeSig) {
-            // Cheap: keep CSS offset in sync if prefs changed before storage listener ran.
-            const off = getActiveBadgeOffset();
-            if (
-              existing.dataset.feeOx !== String(off.x) ||
-              existing.dataset.feeOy !== String(off.y)
-            ) {
-              applyBadgeOffset(existing);
+            // Keep absolute coords in sync; mode mismatch → fall through to remount.
+            const pos = getActiveBadgePosition();
+            const want = pos.enabled ? "absolute" : "default";
+            const have = existing.dataset.feePosMode || "default";
+            if (have === want) {
+              if (
+                pos.enabled &&
+                (existing.dataset.feeOx !== String(pos.x) ||
+                  existing.dataset.feeOy !== String(pos.y))
+              ) {
+                applyAbsoluteBadgeStyles(existing, pos.x, pos.y);
+              }
+              skippedCached += 1;
+              rendered += 1;
+              continue;
             }
-            skippedCached += 1;
-            rendered += 1;
-            continue;
           }
           const quoteSymbol = resolveQuoteSymbol(card, entry);
           const { label, className, title } = computeBadgePresentation(entry, quoteSymbol);
           if (label && existing.textContent === label && existing.className === className) {
             existing.dataset.feeSig = label;
-            applyBadgeOffset(existing);
+            const pos = getActiveBadgePosition();
+            if (pos.enabled) applyAbsoluteBadgeStyles(existing, pos.x, pos.y);
+            else syncBadgeDragCursor(existing);
             skippedCached += 1;
             rendered += 1;
             continue;
@@ -1018,7 +1036,9 @@
             existing.className = className;
             existing.dataset.feeToken = token;
             existing.dataset.feeSig = label;
-            applyBadgeOffset(existing);
+            const pos = getActiveBadgePosition();
+            if (pos.enabled) applyAbsoluteBadgeStyles(existing, pos.x, pos.y);
+            else syncBadgeDragCursor(existing);
             skippedCached += 1;
             rendered += 1;
             continue;
@@ -2266,8 +2286,9 @@
       const o = raw[site];
       if (o && typeof o === "object") {
         out[site] = {
-          x: clampBadgeOffset(o.x),
-          y: clampBadgeOffset(o.y)
+          enabled: o.enabled === true,
+          x: clampBadgeOffset(o.x ?? DEFAULT_BADGE_OFFSETS[site].x),
+          y: clampBadgeOffset(o.y ?? DEFAULT_BADGE_OFFSETS[site].y)
         };
       }
     }
@@ -2278,32 +2299,178 @@
     return siteStrategy && siteStrategy.name === "debot" ? "debot" : "gmgn";
   }
 
-  function getActiveBadgeOffset() {
+  /** Active site placement: default (Tax) or absolute vs card top-left. */
+  function getActiveBadgePosition() {
     const key = getSiteOffsetKey();
     const o = badgeOffsets[key] || DEFAULT_BADGE_OFFSETS[key];
     return {
-      x: clampBadgeOffset(o?.x),
-      y: clampBadgeOffset(o?.y)
+      enabled: o?.enabled === true,
+      x: clampBadgeOffset(o?.x ?? 12),
+      y: clampBadgeOffset(o?.y ?? 8)
     };
   }
 
+  function ensureCardPositioning(card) {
+    if (!(card instanceof HTMLElement)) return;
+    try {
+      const st = window.getComputedStyle(card);
+      if (st.position === "static") {
+        card.style.position = "relative";
+        card.dataset.flapPosRel = "1";
+      }
+    } catch (_err) {
+      card.style.position = "relative";
+      card.dataset.flapPosRel = "1";
+    }
+  }
+
+  function clearAbsoluteBadgeStyles(icon) {
+    if (!(icon instanceof HTMLElement)) return;
+    icon.style.position = "";
+    icon.style.left = "";
+    icon.style.top = "";
+    icon.style.right = "";
+    icon.style.bottom = "";
+    icon.style.margin = "";
+    icon.style.zIndex = "";
+    icon.style.cursor = "";
+    icon.classList.remove("is-dragging");
+    delete icon.dataset.feePosMode;
+    delete icon.dataset.feeOx;
+    delete icon.dataset.feeOy;
+  }
+
+  function applyAbsoluteBadgeStyles(icon, x, y) {
+    if (!(icon instanceof HTMLElement)) return;
+    const cx = clampBadgeOffset(x);
+    const cy = clampBadgeOffset(y);
+    icon.style.position = "absolute";
+    icon.style.left = `${cx}px`;
+    icon.style.top = `${cy}px`;
+    icon.style.right = "auto";
+    icon.style.bottom = "auto";
+    icon.style.margin = "0";
+    icon.style.zIndex = "40";
+    icon.dataset.feePosMode = "absolute";
+    icon.dataset.feeOx = String(cx);
+    icon.dataset.feeOy = String(cy);
+    if (badgeDragEdit) icon.style.cursor = "grab";
+  }
+
   /**
-   * Nudge badge from natural placeIcon base (flow layout origin).
-   * Not absolute card coordinates — same delta for every badge on this site family.
+   * Place badge: default = natural Tax mount; absolute = card top-left (x,y).
+   * @returns {boolean}
    */
+  function placeBadgeOnCard(card, icon) {
+    if (!(card instanceof HTMLElement) || !(icon instanceof HTMLElement)) return false;
+    const pos = getActiveBadgePosition();
+
+    if (pos.enabled) {
+      ensureCardPositioning(card);
+      if (icon.parentElement !== card) {
+        try {
+          card.appendChild(icon);
+        } catch (_err) {
+          return false;
+        }
+      }
+      applyAbsoluteBadgeStyles(icon, pos.x, pos.y);
+      syncBadgeDragCursor(icon);
+      return true;
+    }
+
+    // Default: beside Tax / 总税率
+    clearAbsoluteBadgeStyles(icon);
+    const target = siteStrategy.findIconTarget(card);
+    if (!target) return false;
+    siteStrategy.placeIcon(target, icon);
+    icon.dataset.feePosMode = "default";
+    syncBadgeDragCursor(icon);
+    return true;
+  }
+
+  /** Re-apply placement for an existing icon (scan / storage / drag end). */
   function applyBadgeOffset(icon) {
     if (!(icon instanceof HTMLElement)) return;
-    const { x, y } = getActiveBadgeOffset();
-    icon.style.position = "relative";
-    icon.style.left = `${x}px`;
-    icon.style.top = `${y}px`;
-    icon.dataset.feeOx = String(x);
-    icon.dataset.feeOy = String(y);
+    const card = findCardForBadgeIcon(icon);
+    if (!card) return;
+    const pos = getActiveBadgePosition();
+    const want = pos.enabled ? "absolute" : "default";
+    const have = icon.dataset.feePosMode || "";
+
+    if (want === "absolute") {
+      ensureCardPositioning(card);
+      if (icon.parentElement !== card) {
+        try {
+          card.appendChild(icon);
+        } catch (_err) {
+          return;
+        }
+      }
+      applyAbsoluteBadgeStyles(icon, pos.x, pos.y);
+      syncBadgeDragCursor(icon);
+      return;
+    }
+
+    // default mode: if was absolute, need remount via renderMode (caller forceRemount)
+    if (have === "absolute") {
+      // leave for remount path — only clear styles if already on tax flow parent
+      clearAbsoluteBadgeStyles(icon);
+      icon.dataset.feePosMode = "default";
+    }
+    syncBadgeDragCursor(icon);
+  }
+
+  function findCardForBadgeIcon(icon) {
+    if (!(icon instanceof HTMLElement)) return null;
+    const marked = icon.closest?.(`[${CARD_DATA}]`);
+    if (marked instanceof HTMLElement) return marked;
+    // Sibling of card (placeBesideTaxChip beforebegin)
+    const next = icon.nextElementSibling;
+    if (next instanceof HTMLElement && next.dataset?.[CARD_MARK]) return next;
+    const prev = icon.previousElementSibling;
+    if (prev instanceof HTMLElement && prev.dataset?.[CARD_MARK]) return prev;
+    // Parent chain may hold mark
+    let p = icon.parentElement;
+    for (let i = 0; p && i < 8; i += 1) {
+      if (p.dataset?.[CARD_MARK]) return p;
+      p = p.parentElement;
+    }
+    return null;
+  }
+
+  function syncBadgeDragCursor(icon) {
+    if (!(icon instanceof HTMLElement)) return;
+    if (badgeDragEdit) {
+      icon.style.cursor = "grab";
+      icon.title = (icon.title || "").replace(/\s*\|?\s*拖拽调位置.*/, "") + " | 拖拽调位置";
+    } else if (icon.style.cursor === "grab" || icon.style.cursor === "grabbing") {
+      icon.style.cursor = "";
+    }
   }
 
   function applyOffsetToAllIcons() {
+    const pos = getActiveBadgePosition();
+    // Mode switch default↔absolute needs remount for Tax placement restore.
+    if (!pos.enabled) {
+      remountAllBadgesForPosition();
+      return;
+    }
     document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => {
       applyBadgeOffset(icon);
+    });
+  }
+
+  function remountAllBadgesForPosition() {
+    invalidateBadgeSignatures();
+    document.querySelectorAll(`[${CARD_DATA}]`).forEach((card) => {
+      const token = card.dataset[CARD_MARK] || card.getAttribute(CARD_DATA) || "";
+      if (!token) return;
+      const entry =
+        modeCache.get(token) ||
+        (isPersistentCacheHit(token) ? persistentCache.get(token) : null);
+      if (!entry) return;
+      renderMode(card, token, entry, { forceRemount: true });
     });
   }
 
@@ -2313,12 +2480,153 @@
       chrome.storage.local.get([BADGE_OFFSET_KEY], (items) => {
         if (!isExtensionContextValid() || chrome.runtime.lastError) return;
         badgeOffsets = normalizeBadgeOffsets(items?.[BADGE_OFFSET_KEY]);
-        // CSS-only refresh — no remount / re-place (next full paint also re-applies).
         applyOffsetToAllIcons();
       });
     } catch {
       // ignore
     }
+  }
+
+  function hydrateBadgeDragEdit() {
+    if (!isExtensionContextValid() || !chrome.storage?.local) return;
+    try {
+      chrome.storage.local.get([BADGE_DRAG_EDIT_KEY], (items) => {
+        if (!isExtensionContextValid() || chrome.runtime.lastError) return;
+        setBadgeDragEdit(items?.[BADGE_DRAG_EDIT_KEY] === true);
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  function setBadgeDragEdit(on) {
+    badgeDragEdit = on === true;
+    try {
+      document.documentElement.classList.toggle("flap-fee-drag-edit", badgeDragEdit);
+      document.body?.classList?.toggle("flap-fee-drag-edit", badgeDragEdit);
+    } catch (_err) {
+      // ignore
+    }
+    document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => syncBadgeDragCursor(icon));
+  }
+
+  function persistActiveSitePosition(pos) {
+    const key = getSiteOffsetKey();
+    const next = normalizeBadgeOffsets({
+      ...badgeOffsets,
+      [key]: {
+        enabled: pos.enabled === true,
+        x: clampBadgeOffset(pos.x),
+        y: clampBadgeOffset(pos.y)
+      }
+    });
+    badgeOffsets = next;
+    if (!isExtensionContextValid() || !chrome.storage?.local) return;
+    try {
+      chrome.storage.local.set({ [BADGE_OFFSET_KEY]: next }, () => {
+        void chrome.runtime?.lastError;
+      });
+    } catch (_err) {
+      // ignore
+    }
+  }
+
+  function installBadgeDragHandlers() {
+    // Capture so we beat site click handlers on the card.
+    document.addEventListener("pointerdown", onBadgePointerDown, true);
+    document.addEventListener("pointermove", onBadgePointerMove, true);
+    document.addEventListener("pointerup", onBadgePointerUp, true);
+    document.addEventListener("pointercancel", onBadgePointerUp, true);
+  }
+
+  function onBadgePointerDown(e) {
+    if (!badgeDragEdit || badgeDragState) return;
+    if (e.button != null && e.button !== 0) return;
+    const icon = e.target instanceof Element ? e.target.closest(`[${ICON_DATA}="1"]`) : null;
+    if (!(icon instanceof HTMLElement)) return;
+    const card = findCardForBadgeIcon(icon);
+    if (!(card instanceof HTMLElement)) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Lift current visual position into card-absolute coords (works from Tax default too).
+    ensureCardPositioning(card);
+    const cardRect = card.getBoundingClientRect();
+    const iconRect = icon.getBoundingClientRect();
+    const startX = clampBadgeOffset(iconRect.left - cardRect.left + (card.scrollLeft || 0));
+    const startY = clampBadgeOffset(iconRect.top - cardRect.top + (card.scrollTop || 0));
+
+    if (icon.parentElement !== card) {
+      try {
+        card.appendChild(icon);
+      } catch (_err) {
+        return;
+      }
+    }
+    applyAbsoluteBadgeStyles(icon, startX, startY);
+    icon.classList.add("is-dragging");
+    icon.style.cursor = "grabbing";
+
+    badgeDragState = {
+      icon,
+      card,
+      pointerId: e.pointerId,
+      grabOffsetX: e.clientX - iconRect.left,
+      grabOffsetY: e.clientY - iconRect.top
+    };
+    try {
+      icon.setPointerCapture(e.pointerId);
+    } catch (_err) {
+      // ignore
+    }
+  }
+
+  function onBadgePointerMove(e) {
+    if (!badgeDragState) return;
+    if (e.pointerId !== badgeDragState.pointerId) return;
+    const { icon, card, grabOffsetX, grabOffsetY } = badgeDragState;
+    if (!icon.isConnected || !card.isConnected) {
+      badgeDragState = null;
+      return;
+    }
+    e.preventDefault();
+    const cardRect = card.getBoundingClientRect();
+    const x = clampBadgeOffset(e.clientX - grabOffsetX - cardRect.left + (card.scrollLeft || 0));
+    const y = clampBadgeOffset(e.clientY - grabOffsetY - cardRect.top + (card.scrollTop || 0));
+    // Live move ONLY the dragged badge (not all cards).
+    icon.style.left = `${x}px`;
+    icon.style.top = `${y}px`;
+    icon.dataset.feeOx = String(x);
+    icon.dataset.feeOy = String(y);
+  }
+
+  function onBadgePointerUp(e) {
+    if (!badgeDragState) return;
+    if (e.pointerId != null && e.pointerId !== badgeDragState.pointerId) return;
+    const { icon } = badgeDragState;
+    const x = clampBadgeOffset(parseInt(icon.style.left, 10) || 0);
+    const y = clampBadgeOffset(parseInt(icon.style.top, 10) || 0);
+    try {
+      icon.releasePointerCapture?.(badgeDragState.pointerId);
+    } catch (_err) {
+      // ignore
+    }
+    icon.classList.remove("is-dragging");
+    icon.style.cursor = badgeDragEdit ? "grab" : "";
+    badgeDragState = null;
+
+    // Persist + enable absolute mode for this site; next paint / all icons share coords.
+    persistActiveSitePosition({ enabled: true, x, y });
+    // Apply to every badge (not during drag — only on release).
+    document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((el) => {
+      if (el === icon) {
+        applyAbsoluteBadgeStyles(el, x, y);
+        syncBadgeDragCursor(el);
+        return;
+      }
+      applyBadgeOffset(el);
+    });
   }
 
   function watchDisplayPrefs() {
@@ -2337,8 +2645,10 @@
         }
         if (changes[BADGE_OFFSET_KEY]) {
           badgeOffsets = normalizeBadgeOffsets(changes[BADGE_OFFSET_KEY].newValue);
-          // Offset only: CSS nudge, no full badge recompute.
           applyOffsetToAllIcons();
+        }
+        if (changes[BADGE_DRAG_EDIT_KEY]) {
+          setBadgeDragEdit(changes[BADGE_DRAG_EDIT_KEY].newValue === true);
         }
         if (dirty) rerenderAllBadges();
       });
@@ -2357,7 +2667,8 @@
         modeCache.get(token) ||
         (isPersistentCacheHit(token) ? persistentCache.get(token) : null);
       if (!entry) return;
-      renderMode(card, token, entry, { forceRemount: false });
+      // Position mode may need remount (Tax vs absolute).
+      renderMode(card, token, entry, { forceRemount: getActiveBadgePosition().enabled });
     });
   }
 
@@ -2494,6 +2805,8 @@
     const forceRemount = options.forceRemount === true || isResumeForceRemount();
     const quoteSymbol = resolveQuoteSymbol(card, entry);
     const { label, title, className } = computeBadgePresentation(entry, quoteSymbol);
+    const pos = getActiveBadgePosition();
+    const wantMode = pos.enabled ? "absolute" : "default";
 
     // All toggles off or nothing to show → clear badge.
     if (!label) {
@@ -2503,13 +2816,18 @@
       return true;
     }
 
-    // In-place update when node still valid (avoids remove/append flicker every scan).
-    const existing = card.querySelector(`[${ICON_DATA}="1"]`);
+    // In-place update when node still valid AND placement mode matches.
+    const existing =
+      card.querySelector(`[${ICON_DATA}="1"]`) ||
+      (card.previousElementSibling?.dataset?.[ICON_MARK] === "1"
+        ? card.previousElementSibling
+        : null);
     if (
       !forceRemount &&
       existing &&
       document.contains(existing) &&
-      existing.dataset.feeToken === token
+      existing.dataset.feeToken === token &&
+      (existing.dataset.feePosMode || "default") === wantMode
     ) {
       const er = existing.getBoundingClientRect();
       if (er.width >= 2 && er.height >= 2 && existing.parentElement) {
@@ -2518,15 +2836,21 @@
         existing.className = className;
         existing.dataset.feeToken = token;
         existing.dataset.feeSig = label;
-        applyBadgeOffset(existing);
+        if (wantMode === "absolute") {
+          applyAbsoluteBadgeStyles(existing, pos.x, pos.y);
+        }
+        syncBadgeDragCursor(existing);
         return true;
       }
     }
 
-    const target = siteStrategy.findIconTarget(card);
-    if (!target) {
-      // Layout may not be ready right after tab resume; keep mark so next scan retries.
-      return false;
+    // Default Tax mode needs a mount target; absolute only needs the card.
+    if (!pos.enabled) {
+      const target = siteStrategy.findIconTarget(card);
+      if (!target) {
+        // Layout may not be ready right after tab resume; keep mark so next scan retries.
+        return false;
+      }
     }
 
     // Remove previous badge near this card (icon may sit as sibling, not only descendant).
@@ -2538,12 +2862,19 @@
     icon.dataset[ICON_MARK] = "1";
     icon.dataset.feeToken = token;
     icon.dataset.feeSig = label;
-    siteStrategy.placeIcon(target, icon);
-
     icon.textContent = label;
     icon.title = `${title}${token}`;
     icon.className = className;
-    applyBadgeOffset(icon);
+
+    if (!placeBadgeOnCard(card, icon)) {
+      // Absolute always succeeds if card exists; Tax path missing target.
+      try {
+        icon.remove();
+      } catch (_err) {
+        // ignore
+      }
+      return false;
+    }
     return true;
   }
 

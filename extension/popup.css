@@ -234,10 +234,45 @@ body {
   margin-bottom: 8px;
 }
 
+.offset-site.is-disabled .offset-row {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.offset-site-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 2px 8px;
+}
+
 .offset-site-title {
   font-size: 12px;
   font-weight: 600;
-  margin: 0 2px 8px;
+}
+
+.offset-enable {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.offset-enable input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.drag-row {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 8px;
 }
 
 .offset-row {

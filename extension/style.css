@@ -98,6 +98,31 @@
   align-self: center;
 }
 
+/* Absolute mode: vs card top-left (data-fee-pos-mode=absolute) */
+.gmgn-fee-mode-icon[data-fee-pos-mode="absolute"] {
+  margin: 0 !important;
+  position: absolute !important;
+  z-index: 40 !important;
+  align-self: auto !important;
+  flex: 0 0 auto !important;
+}
+
+/* Page drag-edit: grab cursor on badges */
+html.flap-fee-drag-edit .gmgn-fee-mode-icon,
+body.flap-fee-drag-edit .gmgn-fee-mode-icon {
+  cursor: grab !important;
+  user-select: none;
+  touch-action: none;
+}
+
+html.flap-fee-drag-edit .gmgn-fee-mode-icon.is-dragging,
+body.flap-fee-drag-edit .gmgn-fee-mode-icon.is-dragging {
+  cursor: grabbing !important;
+  opacity: 0.92;
+  box-shadow: 0 0 0 1px rgba(61, 156, 240, 0.55), 0 4px 14px rgba(0, 0, 0, 0.35);
+  z-index: 60 !important;
+}
+
 /* Survive GMGN/Debot flex rows that shrink children */
 body .gmgn-fee-mode-icon {
   flex: 0 0 auto !important;

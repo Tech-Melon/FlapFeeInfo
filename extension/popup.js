@@ -1,14 +1,15 @@
 (() => {
   const PREFS_KEY = "flapFeeInfo.displayPrefs.v1";
   const THEME_KEY = "flapFeeInfo.badgeTheme.v1";
-  const OFFSET_KEY = "flapFeeInfo.badgeOffset.v1";
+  const OFFSET_KEY = "flapFeeInfo.badgeOffset.v2";
+  const DRAG_KEY = "flapFeeInfo.badgeDragEdit.v1";
   const DEFAULT_THEME = "dark";
   const DEFAULT_OFFSETS = {
-    gmgn: { x: 0, y: 0 },
-    debot: { x: 0, y: 0 }
+    gmgn: { enabled: false, x: 12, y: 8 },
+    debot: { enabled: false, x: 12, y: 8 }
   };
-  const OFFSET_MIN = -200;
-  const OFFSET_MAX = 200;
+  const OFFSET_MIN = -40;
+  const OFFSET_MAX = 640;
 
   /** @type {Array<{ key: string, emoji: string, title: string, desc: string }>} */
   const PREF_DEFS = [
@@ -31,14 +32,18 @@
   const themeLight = document.getElementById("themeLight");
   const btnOffsetReset = document.getElementById("btnOffsetReset");
   const offsetStatus = document.getElementById("offsetStatus");
+  const dragEditToggle = document.getElementById("dragEditToggle");
   const offsetInputs = Array.from(document.querySelectorAll(".offset-input"));
+  const offsetEnables = Array.from(document.querySelectorAll(".offset-enable-input"));
   const offsetSteps = Array.from(document.querySelectorAll(".btn-step"));
+  const offsetSites = Array.from(document.querySelectorAll(".offset-site"));
 
-  /** @type {{ gmgn: {x:number,y:number}, debot: {x:number,y:number} }} */
+  /** @type {{ gmgn: {enabled:boolean,x:number,y:number}, debot: {enabled:boolean,x:number,y:number} }} */
   let offsets = {
     gmgn: { ...DEFAULT_OFFSETS.gmgn },
     debot: { ...DEFAULT_OFFSETS.debot }
   };
+  let dragEdit = false;
   let saveTimer = null;
 
   function clampOffset(n) {
@@ -71,8 +76,9 @@
       const o = raw[site];
       if (o && typeof o === "object") {
         out[site] = {
-          x: clampOffset(o.x),
-          y: clampOffset(o.y)
+          enabled: o.enabled === true,
+          x: clampOffset(o.x ?? DEFAULT_OFFSETS[site].x),
+          y: clampOffset(o.y ?? DEFAULT_OFFSETS[site].y)
         };
       }
     }
@@ -82,26 +88,29 @@
   function loadAll() {
     return new Promise((resolve) => {
       try {
-        chrome.storage.local.get([PREFS_KEY, THEME_KEY, OFFSET_KEY], (items) => {
+        chrome.storage.local.get([PREFS_KEY, THEME_KEY, OFFSET_KEY, DRAG_KEY], (items) => {
           if (chrome.runtime.lastError) {
             resolve({
               prefs: { ...DEFAULT_PREFS },
               theme: DEFAULT_THEME,
-              offsets: normalizeOffsets(null)
+              offsets: normalizeOffsets(null),
+              dragEdit: false
             });
             return;
           }
           resolve({
             prefs: normalizePrefs(items?.[PREFS_KEY]),
             theme: normalizeTheme(items?.[THEME_KEY]),
-            offsets: normalizeOffsets(items?.[OFFSET_KEY])
+            offsets: normalizeOffsets(items?.[OFFSET_KEY]),
+            dragEdit: items?.[DRAG_KEY] === true
           });
         });
       } catch {
         resolve({
           prefs: { ...DEFAULT_PREFS },
           theme: DEFAULT_THEME,
-          offsets: normalizeOffsets(null)
+          offsets: normalizeOffsets(null),
+          dragEdit: false
         });
       }
     });
@@ -147,31 +156,68 @@
     });
   }
 
+  function saveDragEdit(on) {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.set({ [DRAG_KEY]: on === true }, () => {
+          void chrome.runtime?.lastError;
+          resolve();
+        });
+      } catch {
+        resolve();
+      }
+    });
+  }
+
   function scheduleSaveOffsets() {
     if (saveTimer) window.clearTimeout(saveTimer);
     saveTimer = window.setTimeout(async () => {
       saveTimer = null;
       offsets = await saveOffsets(offsets);
-      if (offsetStatus) {
-        offsetStatus.textContent = `已保存 · GMGN(${offsets.gmgn.x},${offsets.gmgn.y}) Debot(${offsets.debot.x},${offsets.debot.y})`;
-      }
-    }, 180);
+      updateStatus();
+    }, 160);
   }
 
-  function fillOffsetInputs(data) {
+  function updateStatus() {
+    if (!offsetStatus) return;
+    const g = offsets.gmgn;
+    const d = offsets.debot;
+    const parts = [];
+    parts.push(g.enabled ? `GMGN 坐标(${g.x},${g.y})` : "GMGN 贴税率");
+    parts.push(d.enabled ? `Debot 坐标(${d.x},${d.y})` : "Debot 贴税率");
+    if (dragEdit) parts.push("拖拽中");
+    offsetStatus.textContent = parts.join(" · ");
+  }
+
+  function fillOffsetUI(data) {
     for (const input of offsetInputs) {
       const site = input.dataset.site;
       const axis = input.dataset.axis;
       if (!site || !axis || !data[site]) continue;
       input.value = String(data[site][axis] ?? 0);
     }
+    for (const cb of offsetEnables) {
+      const site = cb.dataset.site;
+      if (!site || !data[site]) continue;
+      cb.checked = data[site].enabled === true;
+    }
+    for (const box of offsetSites) {
+      const site = box.dataset.site;
+      if (!site || !data[site]) continue;
+      box.classList.toggle("is-disabled", data[site].enabled !== true);
+    }
   }
 
-  function readOffsetsFromInputs() {
+  function readOffsetsFromUI() {
     const next = {
       gmgn: { ...offsets.gmgn },
       debot: { ...offsets.debot }
     };
+    for (const cb of offsetEnables) {
+      const site = cb.dataset.site;
+      if (!site || !next[site]) continue;
+      next[site].enabled = cb.checked === true;
+    }
     for (const input of offsetInputs) {
       const site = input.dataset.site;
       const axis = input.dataset.axis;
@@ -240,13 +286,34 @@
   btnAllOn.addEventListener("click", () => setAll(true));
   btnAllOff.addEventListener("click", () => setAll(false));
 
+  dragEditToggle?.addEventListener("change", async () => {
+    dragEdit = dragEditToggle.checked === true;
+    await saveDragEdit(dragEdit);
+    updateStatus();
+  });
+
+  for (const cb of offsetEnables) {
+    cb.addEventListener("change", () => {
+      offsets = readOffsetsFromUI();
+      fillOffsetUI(offsets);
+      scheduleSaveOffsets();
+    });
+  }
+
   for (const input of offsetInputs) {
     input.addEventListener("change", () => {
-      offsets = readOffsetsFromInputs();
+      offsets = readOffsetsFromUI();
+      // typing coords implies enable
+      const site = input.dataset.site;
+      if (site && offsets[site]) offsets[site].enabled = true;
+      fillOffsetUI(offsets);
       scheduleSaveOffsets();
     });
     input.addEventListener("input", () => {
-      offsets = readOffsetsFromInputs();
+      offsets = readOffsetsFromUI();
+      const site = input.dataset.site;
+      if (site && offsets[site]) offsets[site].enabled = true;
+      fillOffsetUI(offsets);
       scheduleSaveOffsets();
     });
   }
@@ -258,22 +325,46 @@
       const delta = Number(btn.dataset.delta) || 0;
       if (!site || !axis || !offsets[site]) return;
       offsets[site][axis] = clampOffset((Number(offsets[site][axis]) || 0) + delta);
-      fillOffsetInputs(offsets);
+      offsets[site].enabled = true;
+      fillOffsetUI(offsets);
       scheduleSaveOffsets();
     });
   }
 
   btnOffsetReset?.addEventListener("click", async () => {
     offsets = normalizeOffsets(null);
-    fillOffsetInputs(offsets);
+    fillOffsetUI(offsets);
     await saveOffsets(offsets);
-    if (offsetStatus) offsetStatus.textContent = "已重置为 (0, 0)";
+    updateStatus();
+    if (offsetStatus) offsetStatus.textContent = "已恢复默认（贴税率旁）";
   });
 
-  loadAll().then(({ prefs, theme, offsets: loadedOffsets }) => {
+  // Live refresh when drag on page writes storage
+  try {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== "local") return;
+      if (changes[OFFSET_KEY]) {
+        offsets = normalizeOffsets(changes[OFFSET_KEY].newValue);
+        fillOffsetUI(offsets);
+        updateStatus();
+      }
+      if (changes[DRAG_KEY]) {
+        dragEdit = changes[DRAG_KEY].newValue === true;
+        if (dragEditToggle) dragEditToggle.checked = dragEdit;
+        updateStatus();
+      }
+    });
+  } catch {
+    // ignore
+  }
+
+  loadAll().then(({ prefs, theme, offsets: loadedOffsets, dragEdit: loadedDrag }) => {
     renderTheme(theme);
     renderPrefs(prefs);
     offsets = loadedOffsets;
-    fillOffsetInputs(offsets);
+    dragEdit = loadedDrag;
+    if (dragEditToggle) dragEditToggle.checked = dragEdit;
+    fillOffsetUI(offsets);
+    updateStatus();
   });
 })();
