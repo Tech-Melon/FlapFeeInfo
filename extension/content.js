@@ -5,6 +5,7 @@
   // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
+  // 0.4.41: GMGN 彻底对齐 0.4.22 — 关 soft/DOM-watch/click-arm 风暴；K 线 settled 不扫三列.
   // 0.4.40: GMGN 回 0.4.22 轻量 progressive（砍 keep-alive/Tax 狂扫）；Debot 仍用加速路径.
   // 0.4.39: js-mcp — GMGN K→战壕 Tax@1.1s 但徽章@~6s：list-return 锚点+续扫+禁止 22px 假卡.
   // 0.4.38: 搜索/历史弹层 ~1s 出徽章 — dialog-first + cache 直绘 + 矮行 climb + API 回补扫.
@@ -140,7 +141,8 @@
   // After user clicks a /token/ link, keep header tryPaint this long (ms).
   const DEBOT_TOKEN_CLICK_ARM_MS = 10000;
   // Independent route poll — sites often capture native history before our wrap.
-  const ROUTE_POLL_MS = 300;
+  // 0.4.41: back to 0.4.22 500ms (300ms was busy-checking SPA every tick).
+  const ROUTE_POLL_MS = 500;
   // Guardian/watch full scan gap while header missing (backs off further).
   const DEBOT_HEADER_FULL_SCAN_GAP_MS = 3500;
   // Cache findDebotTokenHeaderCard / positive header-badge (ms).
@@ -346,6 +348,8 @@
   let lastOverlayOpen = false;
   /** GMGN search panel root short cache. */
   let gmgnSearchPanelCache = { el: null, at: 0 };
+  /** quickHasOpenOverlay short cache (mutation thrash). */
+  let overlayDetectCache = { at: 0, open: false };
   /** Consecutive Debot header miss ticks (guardian backoff). */
   let debotHeaderMissStreak = 0;
   /** Wall time when Debot header miss streak started. */
@@ -1260,8 +1264,11 @@
     return false;
   }
 
-  /** Cheap: open modal / search history panel needs light scan. */
+  /** Cheap: open modal / search history panel needs light scan. Cached 250ms (mutation thrash). */
   function quickHasOpenOverlay() {
+    const now = Date.now();
+    if (now - overlayDetectCache.at < 250) return overlayDetectCache.open;
+    let open = false;
     try {
       const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
       for (let i = 0; i < dialogs.length; i += 1) {
@@ -1269,25 +1276,30 @@
         if (!(el instanceof HTMLElement)) continue;
         const r = el.getBoundingClientRect();
         if (r.width >= 280 && r.height >= 120 && r.top < window.innerHeight && r.bottom > 0) {
-          return true;
+          open = true;
+          break;
         }
       }
-      // GMGN search/history: input visible with 搜索/合约 placeholder
-      const inputs = document.querySelectorAll(
-        'input[placeholder*="搜索"], input[placeholder*="合约"], input[placeholder*="KOL"]'
-      );
-      for (let i = 0; i < Math.min(inputs.length, 6); i += 1) {
-        const inp = inputs[i];
-        if (!(inp instanceof HTMLElement)) continue;
-        const r = inp.getBoundingClientRect();
-        if (r.width >= 120 && r.height >= 20 && r.top > 30 && r.bottom < window.innerHeight - 10) {
-          return true;
+      if (!open) {
+        // GMGN search/history: input visible with 搜索/合约 placeholder
+        const inputs = document.querySelectorAll(
+          'input[placeholder*="搜索"], input[placeholder*="合约"], input[placeholder*="KOL"]'
+        );
+        for (let i = 0; i < Math.min(inputs.length, 6); i += 1) {
+          const inp = inputs[i];
+          if (!(inp instanceof HTMLElement)) continue;
+          const r = inp.getBoundingClientRect();
+          if (r.width >= 120 && r.height >= 20 && r.top > 30 && r.bottom < window.innerHeight - 10) {
+            open = true;
+            break;
+          }
         }
       }
     } catch (_err) {
-      return false;
+      open = false;
     }
-    return false;
+    overlayDetectCache = { at: now, open };
+    return open;
   }
 
   /**
@@ -2196,13 +2208,16 @@
    * Used by Debot + GMGN click-arm (0.4.37 GMGN 回战壕加速).
    */
   function armListReturnSoftWindow(reason) {
+    // 0.4.41: GMGN never uses soft-window kicks — pure 0.4.22 progressive via route settle.
+    if (isGmgnHost()) return;
+
     const softMs = listReturnSoftDurationMs();
     spaListReturnUntil = Date.now() + softMs;
     spaListReturnCacheOnlyUntil = Date.now() + SPA_LIST_RETURN_CACHE_ONLY_MS;
     spaQuietUntil = 0;
     spaSettleFromToken = true;
     armListReturnDomWatch();
-    armListReturnKeepAlive(); // no-op on GMGN
+    armListReturnKeepAlive();
     const kick = (ms, immediate) => {
       window.setTimeout(() => {
         if (!isExtensionContextValid() || !isTabVisible()) return;
@@ -2219,7 +2234,6 @@
         } catch (_err) {
           // ignore
         }
-        // 0.4.40 / 0.4.22: only first kick immediate; later yield to site paint.
         scheduleScan(0, {
           force: true,
           immediate: immediate === true,
@@ -2228,19 +2242,11 @@
         });
       }, ms);
     };
-    if (isGmgnHost()) {
-      // 0.4.22-like: few kicks
-      kick(0, true);
-      kick(400, false);
-      kick(1100, false);
-      kick(2000, false);
-    } else {
-      kick(0, true);
-      kick(120, false);
-      kick(400, false);
-      kick(1000, false);
-      kick(2000, false);
-    }
+    kick(0, true);
+    kick(120, false);
+    kick(400, false);
+    kick(1000, false);
+    kick(2000, false);
   }
 
   /** When war-room columns mount late after token→list, re-fastPaint (throttled). */
@@ -2297,44 +2303,12 @@
   }
 
   /**
-   * GMGN SPA: click-arm for token enter (header-only) + 战壕/home return.
-   * GMGN often rewrites URL without our history wrap seeing it first.
+   * GMGN SPA: 0.4.41 — NO multi-kick / list-return soft storm (was remaining jank vs 0.4.22).
+   * Route poll + history/page-hook already drive settle. Optional single delayed header tryPaint.
    */
   function installGmgnSpaClickArm() {
     const host = location.hostname || "";
     if (!host.endsWith("gmgn.ai")) return;
-
-    const armTokenPaint = (reasonPrefix) => {
-      const kick = (ms, fullScan) => {
-        window.setTimeout(() => {
-          if (!isExtensionContextValid() || !isTabVisible()) return;
-          try {
-            onSpaRouteChange(`${reasonPrefix}:${ms}`);
-          } catch (_err) {
-            // ignore
-          }
-          if (!isGmgnTokenPage()) return;
-          const urlTok = extractTokenFromUrl();
-          if (!urlTok) return;
-          if (hasGmgnTokenHeaderBadge()) return;
-          tryPaintGmgnTokenHeader(`${reasonPrefix}:${ms}`);
-          // At most one delayed header-only force scan (not war-room columns).
-          if (fullScan && !hasGmgnTokenHeaderBadge()) {
-            pendingLightScan = false;
-            scheduleScan(0, {
-              force: true,
-              immediate: false,
-              light: false,
-              bypassForceGap: true
-            });
-          }
-        }, ms);
-      };
-      kick(0, false);
-      kick(120, false);
-      kick(350, true);
-      kick(900, false);
-    };
 
     document.addEventListener(
       "click",
@@ -2344,56 +2318,21 @@
           const t = event.target;
           if (!(t instanceof Element)) return;
 
-          // --- Return to 战壕 / home ---
-          const homeA =
-            t.closest?.('a[href="/"]') ||
-            t.closest?.('a[href^="/?"]') ||
-            t.closest?.('a[href*="tab=home"]') ||
-            t.closest?.('a[href*="/meme"]');
-          const homeText =
-            t.closest?.("a,button,[role='tab'],[role='button']") &&
-            /战壕|trench|home|新创建|即将打满|已迁移/i.test(
-              (t.closest("a,button,[role='tab'],[role='button']")?.textContent || "").trim().slice(0, 40)
-            );
-          // Logo often wraps img without text
-          const logo =
-            t.closest?.("a[href='/'], a[href^='/?chain']") ||
-            (t.closest?.("header a, nav a") &&
-              /gmgn|logo/i.test(
-                (
-                  t.closest("a")?.getAttribute?.("aria-label") ||
-                  t.closest("a")?.className ||
-                  ""
-                ).toString()
-              ));
-          if (homeA || homeText || logo) {
-            if (isGmgnTokenPage() || routeKeyWasTokenDetail(lastRouteKey)) {
-              armListReturnSoftWindow("gmgn-list-return-click");
-            }
-            return;
-          }
-
-          // --- Enter token K-line ---
+          // Token enter: one delayed tryPaint only (do NOT call onSpaRouteChange / force-scan).
           let href = "";
-          const a = t.closest?.('a[href*="/token/"], a[href*="0x"]');
+          const a = t.closest?.('a[href*="/token/"]');
           if (a instanceof HTMLAnchorElement) {
             href = a.getAttribute("href") || a.href || "";
-          } else {
-            const card = t.closest?.(
-              "div.flex.flex-col, li, article, [class*='cursor-pointer']"
-            );
-            if (card) {
-              const inner = card.querySelector?.(
-                'a[href*="/token/"][href*="7777"], a[href*="/token/"][href*="8888"], a[href*="0x"][href*="7777"], a[href*="0x"][href*="8888"]'
-              );
-              if (inner) href = inner.getAttribute("href") || inner.href || "";
-            }
           }
-          if (!href) return;
-          if (!/\/token\//i.test(href) && !/0x[a-fA-F0-9]{40}/i.test(href)) return;
+          if (!href || !/\/token\//i.test(href)) return;
           const m = href.match(/0x[a-fA-F0-9]{40}/i);
           if (m && !TARGET_TOKEN_RE.test(m[0].toLowerCase())) return;
-          armTokenPaint("gmgn-click-arm");
+          window.setTimeout(() => {
+            if (!isExtensionContextValid() || !isTabVisible()) return;
+            if (!isGmgnTokenPage()) return;
+            if (hasGmgnTokenHeaderBadge()) return;
+            tryPaintGmgnTokenHeader("gmgn-click-once");
+          }, 280);
         } catch (_err) {
           // ignore
         }
@@ -2404,7 +2343,7 @@
 
   /**
    * Pre-arm overlay-fast on search UI click (before panel fully mounts).
-   * Covers GMGN top search + Debot search icon.
+   * 0.4.41: GMGN only marks overlay window (no multi-kick arm); Debot keeps denser arm.
    */
   function installOverlayOpenArm() {
     document.addEventListener(
@@ -2414,7 +2353,6 @@
           if (!isExtensionContextValid()) return;
           const t = event.target;
           if (!(t instanceof Element)) return;
-          // Search input / magnifier / 搜索 placeholder focus
           const inp = t.closest?.(
             'input[placeholder*="搜索"], input[placeholder*="合约"], input[placeholder*="KOL"], input[type="search"]'
           );
@@ -2429,13 +2367,17 @@
                 .toString()
                 .slice(0, 24)
             );
-          // GMGN top-right search icon area (often SVG without text)
-          const headerSearch =
-            t.closest?.("header") &&
-            t.closest?.("svg, button, [class*='search'], [class*='Search']");
-          if (!inp && !searchBtn && !headerSearch) return;
-          // Optimistic window only — lastOverlayOpen is set when panel is really open.
+          // Do NOT match bare header SVG (false positives → overlay storm on GMGN).
+          if (!inp && !searchBtn) return;
           overlayFastUntil = Date.now() + OVERLAY_FAST_MS;
+          overlayDetectCache = { at: 0, open: false };
+          if (isGmgnHost()) {
+            window.setTimeout(() => {
+              if (!isExtensionContextValid() || !quickHasOpenOverlay()) return;
+              scheduleScan(0, { force: true, light: true, immediate: false, bypassForceGap: true });
+            }, 150);
+            return;
+          }
           window.setTimeout(() => {
             if (!isExtensionContextValid() || !isTabVisible()) return;
             if (quickHasOpenOverlay()) armOverlayFastScan("click-search");
@@ -2668,14 +2610,24 @@
       resetOurDomMarks();
     }
 
-    // token→list: soft viewport window (immediacy on first screen, no offscreen thrash).
-    if (listReturn) {
+    // token→list soft window: Debot only. GMGN uses plain progressive (0.4.22 / 0.4.41).
+    if (listReturn && !isGmgnHost()) {
       spaListReturnUntil = Date.now() + listReturnSoftDurationMs();
       spaListReturnCacheOnlyUntil = Date.now() + SPA_LIST_RETURN_CACHE_ONLY_MS;
-      // List return quiet shorter — first badge paint feels instant.
       spaQuietUntil = Date.now() + SPA_NAV_QUIET_LIST_RETURN_MS;
       armListReturnDomWatch();
-      armListReturnKeepAlive(); // GMGN no-op
+      armListReturnKeepAlive();
+    } else if (listReturn && isGmgnHost()) {
+      // Clear any leftover soft state; do not arm DOM-watch / keep-alive / soft scans.
+      spaListReturnUntil = 0;
+      spaListReturnCacheOnlyUntil = 0;
+      spaQuietUntil = Date.now() + SPA_NAV_QUIET_LIST_RETURN_MS;
+      spaSettleFromToken = true;
+      stopListReturnDomWatch();
+      if (listReturnKeepAliveId) {
+        window.clearTimeout(listReturnKeepAliveId);
+        listReturnKeepAliveId = null;
+      }
     } else if (!softSameToken) {
       spaListReturnUntil = 0;
       spaListReturnCacheOnlyUntil = 0;
@@ -2751,8 +2703,8 @@
             : SPA_NAV_QUIET_MS;
     const offsets = getSpaScanOffsets(listReturn);
 
-    // List-return: paint immediately (even before progressive timers).
-    if (listReturn) {
+    // Debot list-return: cache-first burst. GMGN: skip (0.4.41 / 0.4.22).
+    if (listReturn && !isGmgnHost()) {
       try {
         fastPaintListReturnViewport();
       } catch (_err) {
@@ -2775,14 +2727,16 @@
         if (Date.now() < spaQuietUntil) spaQuietUntil = 0;
         spaDomDirty = false;
         // Refresh roots each pass (home columns vs token header / Debot cards).
-        scanRootsCache = { at: 0, roots: [] };
-        try {
-          getScanRoots(true);
-        } catch (_err) {
-          // ignore
+        // 0.4.41: do not force-refresh roots every pass on GMGN (TTL cache is enough).
+        if (!isGmgnHost() || index === 0) {
+          scanRootsCache = { at: 0, roots: [] };
+          try {
+            getScanRoots(true);
+          } catch (_err) {
+            // ignore
+          }
         }
         ensureDocumentObserver();
-        // 0.4.29: do NOT zero lastScanAt every pass — that defeated scan rate limits.
 
         // Debot: cheap header paint first; may cancel remaining progressive without full scan.
         if (isDebotTokenPage()) {
@@ -2794,18 +2748,18 @@
           pendingLightScan = false;
         }
 
-        // GMGN: header tryPaint first; cancel progressive once header settled.
+        // GMGN token: header tryPaint; later passes paint-only (no full column scan).
         if (isGmgnTokenPage()) {
           tryPaintGmgnTokenHeader("spa-progressive");
-          if (hasGmgnTokenHeaderBadge() && index > 0) {
-            clearSpaNavScanTimers();
-            return;
+          if (hasGmgnTokenHeaderBadge()) {
+            if (index > 0) clearSpaNavScanTimers();
+            // First pass may still need one light header-scoped scan below.
           }
           pendingLightScan = false;
         }
 
-        // List-return: cache-first burst with correct site mounts.
-        if (listReturn || isSpaListReturnSoft()) {
+        // Debot list-return soft burst only.
+        if ((listReturn || isSpaListReturnSoft()) && !isGmgnHost()) {
           fastPaintListReturnViewport();
           if (index > 0 && shouldCancelSpaListProgressive()) {
             clearSpaNavScanTimers();
@@ -2813,19 +2767,17 @@
           }
         }
 
-        // First pass: immediate force (immediacy). Later: idle force (let site paint).
-        // Debot later passes: tryPaint-only if header still missing after gap.
+        // 0.4.22 style: first immediate; later idle. GMGN token later: tryPaint only.
         if (isDebotTokenPage() && index > 0) {
           if (!hasDebotTokenHeaderBadge()) {
             maybeScheduleDebotHeaderFullScan("spa-progressive");
           }
         } else if (isGmgnTokenPage() && index > 0) {
-          // Later passes: tryPaint only (no stacked force full-scan on chart).
           if (!hasGmgnTokenHeaderBadge()) {
             tryPaintGmgnTokenHeader("spa-progressive-later");
           }
-        } else if (listReturn || isSpaListReturnSoft()) {
-          // 0.4.40 / 0.4.22: first pass immediate; later idle so GMGN chart/list can paint.
+          // no scheduleScan — chart must not get force-scan stack
+        } else if ((listReturn || isSpaListReturnSoft()) && !isGmgnHost()) {
           scheduleScan(0, {
             force: true,
             immediate: index === 0,
@@ -2833,6 +2785,7 @@
             bypassForceGap: index === 0
           });
         } else {
+          // GMGN list return + cold list: classic progressive force (first immediate only).
           scheduleScan(0, {
             force: true,
             immediate: index === 0,
@@ -2844,7 +2797,7 @@
         // After first paint: cancel pending progressive if already good enough.
         if (index === 0) {
           const checkMs =
-            isDebotTokenPage() || isGmgnTokenPage() ? 200 : listReturn ? 80 : 80;
+            isDebotTokenPage() || isGmgnTokenPage() ? 200 : listReturn ? 120 : 120;
           const checkId = window.setTimeout(() => {
             spaNavScanTimers = spaNavScanTimers.filter((id) => id !== checkId);
             if (shouldCancelSpaProgressive()) clearSpaNavScanTimers();
@@ -4234,6 +4187,16 @@
       return uniqFast;
     }
     const host = location.hostname || "";
+    // 0.4.41: GMGN K-line settled light-scan must NOT rewalk 三列战壕 on every chart mutation.
+    // 0.4.22 still did side boards; real-world chart thrash made that the remaining jank.
+    if (host.endsWith("gmgn.ai") && isGmgnTokenPage()) {
+      const uniqTok = [];
+      for (const r of roots) {
+        if (!uniqTok.includes(r) && r.isConnected) uniqTok.push(r);
+        if (uniqTok.length >= 3) break;
+      }
+      return uniqTok;
+    }
     if (host.endsWith("gmgn.ai")) {
       document
         .querySelectorAll(
@@ -6626,12 +6589,13 @@
   }
 
   // Observe documentElement (roots detach after SPA). Chart thrash is filtered below.
+  // 0.4.41 GMGN: closer to 0.4.22 — no tryPaint/overlay storm on every mut.
   const mutationObserver = new MutationObserver(() => {
     if (!isTabVisible()) return;
     if (!isExtensionContextValid()) return;
     if (!isScanPageAllowed()) return;
 
-    // Header re-attach via tryPaint only (throttled); no full-scan on every mut.
+    // Debot header only (throttled). GMGN uses progressive/click-once — not every chart mut.
     if (isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge()) {
       const now = Date.now();
       if (now - debotHeaderMutPaintAt >= 400) {
@@ -6643,83 +6607,87 @@
         }
       }
     }
-    if (isGmgnTokenPage() && extractTokenFromUrl() && !hasGmgnTokenHeaderBadge()) {
-      const now = Date.now();
-      if (now - debotHeaderMutPaintAt >= 400) {
-        debotHeaderMutPaintAt = now;
-        try {
-          tryPaintGmgnTokenHeader("mutation");
-        } catch (_err) {
-          // ignore
-        }
-      }
-    }
-
-    // Overlay open edge: arm dense dialog-first kicks (home + token pages).
-    const overlayNow = quickHasOpenOverlay();
-    if (overlayNow && !lastOverlayOpen) {
-      lastOverlayOpen = true;
-      armOverlayFastScan("mutation-open");
-    } else if (!overlayNow && lastOverlayOpen) {
-      lastOverlayOpen = false;
-      overlayFastUntil = 0;
-    }
 
     // During SPA rebuild: mark dirty only; progressive + quiet-end handle full paint.
-    // Exception: open search overlay must still paint (user: 弹层 5s).
-    if (isSpaQuiet() && !overlayNow) {
+    if (isSpaQuiet()) {
       spaDomDirty = true;
       return;
     }
     // 0.4.12: non-8888/7777 token page — chart noise must not schedule scans.
-    if (isNonTargetTokenPage() && !overlayNow) return;
+    if (isNonTargetTokenPage()) return;
 
     if (mutationDebounceTimer) return;
 
-    // Overlay open (any page): snappy dialog-first light scan (0.4.38).
+    // Overlay: only when already known open (cached) — avoid quickHasOpenOverlay every mut on GMGN home.
+    const overlayNow = overlayDetectCache.at && Date.now() - overlayDetectCache.at < 250
+      ? overlayDetectCache.open
+      : quickHasOpenOverlay();
+    if (overlayNow && !lastOverlayOpen) {
+      lastOverlayOpen = true;
+      // Debot denser; GMGN single light schedule (no armOverlayFast multi-kick).
+      if (isGmgnHost()) {
+        mutationDebounceTimer = window.setTimeout(() => {
+          mutationDebounceTimer = null;
+          if (!quickHasOpenOverlay()) return;
+          scheduleScan(0, { force: true, light: true, immediate: false, bypassForceGap: true });
+        }, 200);
+      } else {
+        armOverlayFastScan("mutation-open");
+      }
+      return;
+    }
+    if (!overlayNow && lastOverlayOpen) {
+      lastOverlayOpen = false;
+      overlayFastUntil = 0;
+    }
+
     if (overlayNow) {
       mutationDebounceTimer = window.setTimeout(() => {
         mutationDebounceTimer = null;
         if (!isTabVisible() || !isExtensionContextValid()) return;
         if (!quickHasOpenOverlay()) return;
-        try {
-          fastPaintOverlayFromCache();
-        } catch (_err) {
-          // ignore
+        if (!isGmgnHost()) {
+          try {
+            fastPaintOverlayFromCache();
+          } catch (_err) {
+            // ignore
+          }
         }
         scheduleScan(0, {
           force: true,
           light: true,
-          immediate: true,
+          immediate: !isGmgnHost(),
           bypassForceGap: true
         });
-      }, MUTATION_SCAN_DEBOUNCE_HOME_OVERLAY_MS);
+      }, isGmgnHost() ? 220 : MUTATION_SCAN_DEBOUNCE_HOME_OVERLAY_MS);
       return;
     }
 
-    // 0.4.20: header settled → do NOT full-scan chart; still light-scan dialogs / side boards.
+    // Token settled: light scan. GMGN = dialog-only roots (getLightScanRoots). Debot may side boards.
     if (isTokenPageSettledWithBadge()) {
+      // GMGN K-line chart: skip light-scan entirely unless user opened overlay (handled above).
+      if (isGmgnHost() && isGmgnTokenPage()) return;
       const debounceMs = MUTATION_SCAN_DEBOUNCE_TOKEN_LIGHT_MS;
       mutationDebounceTimer = window.setTimeout(() => {
         mutationDebounceTimer = null;
         if (!isTabVisible() || !isExtensionContextValid()) return;
         if (isSpaQuiet() || isNonTargetTokenPage()) return;
-        // Light only: overlays + 战壕 side columns (skip header / full body).
         scheduleScan(0, { force: true, light: true, immediate: false });
       }, debounceMs);
       return;
     }
 
-    // Longer debounce while token badge still loading (chart keeps mutating).
-    // Unsettled token: tryPaint already ran; avoid full-scan storm on K-line.
+    // Unsettled / list: longer debounce on GMGN list thrash.
     const tokenUnsettled =
       (isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge()) ||
       (isGmgnTokenPage() && extractTokenFromUrl() && !hasGmgnTokenHeaderBadge());
     const debounceMs = tokenUnsettled
-      ? 700
+      ? 800
       : isTokenDetailRoute()
         ? MUTATION_SCAN_DEBOUNCE_TOKEN_LOADING_MS
-        : MUTATION_SCAN_DEBOUNCE_MS;
+        : isGmgnHost()
+          ? 550
+          : MUTATION_SCAN_DEBOUNCE_MS;
     mutationDebounceTimer = window.setTimeout(() => {
       mutationDebounceTimer = null;
       if (!isTabVisible()) return;
@@ -6728,8 +6696,8 @@
         return;
       }
       if (isNonTargetTokenPage()) return;
-      // Settled mid-wait → flip to light
       if (isTokenPageSettledWithBadge()) {
+        if (isGmgnHost() && isGmgnTokenPage()) return;
         scheduleScan(0, { force: true, light: true });
         return;
       }
@@ -6739,7 +6707,6 @@
         return;
       }
       if (isGmgnTokenPage()) {
-        // Header-only tryPaint; no force full-scan of war-room columns (0.4.37).
         tryPaintGmgnTokenHeader("mutation-scan");
         return;
       }

@@ -146,11 +146,11 @@ FlapFeeInfo\extension
 - GMGN **战壕↔K 线卡顿 / 回战壕徽章慢**：请使用 **0.4.37+**  
 - GMGN **搜索/历史弹层徽章慢（约 5s）**：请使用 **0.4.38+**  
 - GMGN **K 线→战壕徽章 ~3–6s 才齐**：请使用 **0.4.39+**（若卡顿请用 **0.4.40** 轻量路径）  
-- GMGN **整体卡顿（0.4.39 keep-alive）**：请使用 **0.4.40**（对齐 0.4.22 轻量 progressive）  
+- GMGN **整体卡顿**：请使用 **0.4.41**（彻底关 soft/DOM-watch/click 风暴，K 线 settled 不扫三列）  
 
 ### 2b. 已更新但仍像旧版
 
-- 产品站 / Releases 请确认 zip 文件名版本号 ≥ 你要的版本（例如 `FlapFeeInfo-extension-v0.4.40.zip`）  
+- 产品站 / Releases 请确认 zip 文件名版本号 ≥ 你要的版本（例如 `FlapFeeInfo-extension-v0.4.41.zip`）  
 - `chrome://extensions` 卡片上的版本号必须一致；改文件后要点 **重新加载**  
 - Debot / GMGN 页必须 **硬刷新**（Ctrl+F5），否则仍跑旧 content script  
 - Debot 路径 `249218_0x…`：0.4.28+ 已归一化  
@@ -161,7 +161,7 @@ FlapFeeInfo\extension
 - **GMGN 进出 K 线减负 + 回战壕加速**：0.4.37（header-only token scan + list-return DOM watch + click-arm）  
 - **搜索/历史弹层 ≤1s 级徽章**：0.4.38（dialog-first + cache 直绘 + 矮行 climb + 即时 batch）  
 - **GMGN K→战壕黑屏 5–6s**：0.4.39（Tax 种子 + keep-alive；易卡）  
-- **GMGN 流畅对齐 0.4.22**：0.4.40（砍 GMGN keep-alive / Tax 狂扫，Debot 仍加速）  
+- **GMGN 流畅对齐 0.4.22**：0.4.40–0.4.41（0.4.41 再关 soft/DOM-watch/K 线三列 light-scan）  
 
 
 
