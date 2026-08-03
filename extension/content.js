@@ -5,6 +5,7 @@
   // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
+  // 0.4.39: js-mcp — GMGN K→战壕 Tax@1.1s 但徽章@~6s：list-return 锚点+续扫+禁止 22px 假卡.
   // 0.4.38: 搜索/历史弹层 ~1s 出徽章 — dialog-first + cache 直绘 + 矮行 climb + API 回补扫.
   // 0.4.37: GMGN 进出 K 线减负 + 回战壕加速（header-only token scan + list-return DOM watch）.
   // 0.4.36: list-return 三栏轮询（已迁移/右列不再饿死）+ GMGN 同策略.
@@ -92,31 +93,36 @@
   // Progressive hole-fill offsets from quiet end (ms).
   // List/meme boards (cold / generic): 3 passes — 0.4.30 cut 4th to save main thread.
   const SPA_NAV_SCAN_OFFSETS_LIST_MS = [0, 400, 1100];
-  // token→list return: dense early slices (GMGN 回战壕要快).
-  const SPA_NAV_SCAN_OFFSETS_LIST_RETURN_MS = [0, 60, 160, 320, 550, 900];
+  // token→list return: dense early + late keep-alive (js-mcp: Tax@1.1s, badge was @6s).
+  const SPA_NAV_SCAN_OFFSETS_LIST_RETURN_MS = [
+    0, 50, 120, 250, 450, 800, 1300, 2000, 3200, 4800
+  ];
   // Token / K-line page (GMGN): header paint only — fewer full scans (0.4.37 jank fix).
   const SPA_NAV_SCAN_OFFSETS_TOKEN_MS = [0, 350, 900];
   // Debot SPA token: prefer tryPaint; at most 2 progressive full scans.
   const SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS = [0, 900, 2500];
   // Quiet shorter when returning to list — user expects badges ASAP (immediacy).
   const SPA_NAV_QUIET_LIST_RETURN_MS = 0;
-  // After token→list: viewport-first soft window (ms).
-  const SPA_LIST_RETURN_SOFT_MS = 2800;
+  // After token→list: viewport-first soft window (ms). Longer: GMGN list hydrates ~1s+.
+  const SPA_LIST_RETURN_SOFT_MS = 5500;
   // First wave: only paint cards with fee already in modeCache (no network, no deep extract).
-  const SPA_LIST_RETURN_CACHE_ONLY_MS = 400;
+  const SPA_LIST_RETURN_CACHE_ONLY_MS = 250;
   // Cards per slice during list-return (keep small for jank; more slices cover 3 cols).
-  const SPA_LIST_RETURN_CARDS = 10;
+  const SPA_LIST_RETURN_CARDS = 14;
   // Candidates cap — must cover 3 columns × ~8–10 tax rows.
-  const SPA_LIST_RETURN_CANDIDATES = 48;
+  const SPA_LIST_RETURN_CANDIDATES = 56;
   // Soft cancel: need badges across columns, not just left-col total (0.4.36).
   const SPA_LIST_RETURN_ENOUGH_BADGES = 12;
   // Per-column min visible badges before early-stop (Debot 已迁移 / GMGN 右列).
   const SPA_LIST_RETURN_MIN_PER_COL = 2;
   // Soft scan time budget per frame (ms) — hard stop mid-loop.
-  const SPA_LIST_RETURN_SLICE_MS = 8;
+  const SPA_LIST_RETURN_SLICE_MS = 10;
   // Fast-paint burst: column-round-robin.
-  const SPA_LIST_RETURN_FAST_MS = 12;
-  const SPA_LIST_RETURN_FAST_CARDS = 16;
+  const SPA_LIST_RETURN_FAST_MS = 16;
+  const SPA_LIST_RETURN_FAST_CARDS = 24;
+  // Keep forcing scans until badges enough or timeout (ms after list-return arm).
+  const SPA_LIST_RETURN_KEEPALIVE_MS = 7000;
+  const SPA_LIST_RETURN_KEEPALIVE_TICK_MS = 350;
   // Dedicated header paint watch after meme→token SPA (ms). Logged-in DOM is slower.
   const DEBOT_TOKEN_HEADER_WATCH_MS = 20000;
   const DEBOT_TOKEN_HEADER_TICK_MS = 400;
@@ -125,7 +131,7 @@
   // GMGN token SPA quiet — was 800ms then force-scan storm (user: 战壕↔K线很卡).
   const SPA_NAV_QUIET_GMGN_TOKEN_MS = 220;
   // List-return DOM watch: re-fastPaint when columns mount late (ms).
-  const LIST_RETURN_DOM_WATCH_MS = 2500;
+  const LIST_RETURN_DOM_WATCH_MS = 6500;
   // Always-on guardian base interval; backs off while header missing (0.4.31).
   const DEBOT_TOKEN_GUARDIAN_MS = 1200;
   // After user clicks a /token/ link, keep header tryPaint this long (ms).
@@ -329,6 +335,8 @@
   let spaListReturnCacheOnlyUntil = 0;
   /** Prev route was token detail (for settle classification). */
   let spaSettleFromToken = false;
+  /** List-return keep-alive timer id. */
+  let listReturnKeepAliveId = null;
   /** Overlay (search/history) fast-paint window until this wall time. */
   let overlayFastUntil = 0;
   /** Last known overlay open edge (arm dense kicks on open). */
@@ -1493,24 +1501,36 @@
     return /\/token\//i.test(s) || /\/bsc\/token\//i.test(s);
   }
 
-  /** Cheap climb from token <a href> to a card-sized host (no Tax/metric search). */
+  /**
+   * Cheap climb from token <a href> / Tax leaf to a card-sized host.
+   * 0.4.39: NEVER return 22px vlist junk (was main GMGN return paint miss).
+   */
   function quickClimbCardFromTokenLink(anchor) {
     if (!(anchor instanceof HTMLElement)) return null;
     let el = anchor;
-    for (let d = 0; d < 7 && el; d += 1) {
+    let best = null;
+    for (let d = 0; d < 10 && el; d += 1) {
       if (!(el instanceof HTMLElement)) break;
       if (el === document.body || el === document.documentElement) break;
       try {
         const r = el.getBoundingClientRect();
-        if (r.width >= 180 && r.height >= 48 && r.height <= 420 && r.width < window.innerWidth * 0.95) {
-          return el;
+        // Real trench rows ~97–140px; reject thin virtuoso shells.
+        if (
+          r.width >= 180 &&
+          r.height >= 56 &&
+          r.height <= 420 &&
+          r.width < window.innerWidth * 0.95
+        ) {
+          best = el;
+          // Prefer compact card row over taller wrappers.
+          if (r.height <= 200 && r.width >= 220) return el;
         }
       } catch (_err) {
         break;
       }
       el = el.parentElement;
     }
-    return anchor.parentElement instanceof HTMLElement ? anchor.parentElement : anchor;
+    return best;
   }
 
   /** Bucket element into left / mid / right third of viewport (Debot 3-col + GMGN). */
@@ -1528,17 +1548,28 @@
   }
 
   /**
-   * Collect tax-token anchors in viewport, round-robin by column.
-   * Fixes Debot 已迁移 / GMGN right col starved when left fills candidate cap first.
+   * Collect list-return seeds in viewport, round-robin by column.
+   * 0.4.39: href tokens + Tax chips + short-CA leaves (js-mcp: href-only climb miss).
    */
   function collectListReturnAnchorsRoundRobin() {
     const linkSel =
       "a[href*='/token/'][href*='8888'], a[href*='/token/'][href*='7777'], " +
       "a[href*='/bsc/token/'][href*='8888'], a[href*='/bsc/token/'][href*='7777']";
     const buckets = [[], [], []];
-    const seenHref = new Set();
+    const seenKey = new Set();
+    const pushSeed = (el, key) => {
+      if (!(el instanceof HTMLElement)) return;
+      if (!isNearViewport(el, false)) return;
+      const k = key || el;
+      if (seenKey.has(k)) return;
+      // Skip external explorer icons (flap.sh) — climb to wrong thin hosts.
+      const href = (el.getAttribute && el.getAttribute("href")) || "";
+      if (/flap\.sh|bscscan|etherscan/i.test(href)) return;
+      seenKey.add(k);
+      buckets[listColumnBucket(el)].push(el);
+    };
     try {
-      // Force fresh roots so all 3 Debot MuiCards are present.
+      // Force fresh roots so all 3 Debot MuiCards / GMGN columns are present.
       const roots = getScanRoots(true);
       for (let ri = 0; ri < roots.length; ri += 1) {
         const root = roots[ri];
@@ -1546,13 +1577,30 @@
         const found = root.querySelectorAll(linkSel);
         for (let i = 0; i < found.length; i += 1) {
           const a = found[i];
-          if (!(a instanceof HTMLElement)) continue;
-          if (!isNearViewport(a, false)) continue;
-          const href = a.getAttribute("href") || a.href || "";
-          const key = href.toLowerCase();
-          if (seenHref.has(key)) continue;
-          seenHref.add(key);
-          buckets[listColumnBucket(a)].push(a);
+          const href = (a.getAttribute && a.getAttribute("href")) || a.href || "";
+          pushSeed(a, `h:${href.toLowerCase()}`);
+        }
+        // Tax chips — reliable GMGN row seeds when token <a> is thin/virtuoso (0.4.39).
+        const leaves = root.querySelectorAll("span, div, p, a");
+        const max = Math.min(leaves.length, 500);
+        for (let i = 0; i < max; i += 1) {
+          const el = leaves[i];
+          if (!(el instanceof HTMLElement)) continue;
+          const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+          if (t.length > 18) continue;
+          if (/^Tax\s*\d/i.test(t) || t === "Tax") {
+            const r = el.getBoundingClientRect();
+            if (r.width > 0 && r.width < 120 && r.height > 0 && r.height < 28) {
+              pushSeed(el, `tax:${Math.round(r.top)}:${Math.round(r.left)}`);
+            }
+            continue;
+          }
+          if (TARGET_SHORT_TOKEN_RE.test(t) && t.length <= 22) {
+            const r = el.getBoundingClientRect();
+            if (r.width > 0 && r.width < 180 && r.height > 0 && r.height < 36) {
+              pushSeed(el, `s:${t.toLowerCase()}:${Math.round(r.top)}`);
+            }
+          }
         }
       }
     } catch (_err) {
@@ -1574,6 +1622,40 @@
       idx += 1;
     }
     return out;
+  }
+
+  /** Resolve card + token from a list-return seed (href / Tax / short). */
+  function resolveListReturnSeed(node) {
+    if (!(node instanceof HTMLElement)) return null;
+    let hrefTok = normalizeToken(
+      (node.getAttribute && node.getAttribute("href")) || node.href || ""
+    );
+    if (!hrefTok && node.querySelector) {
+      const a = node.querySelector(
+        "a[href*='/token/'][href*='0x'], a[href*='/bsc/token/'][href*='0x'], a[href*='0x']"
+      );
+      if (a) {
+        const h = a.getAttribute("href") || "";
+        if (!/flap\.sh|bscscan|etherscan/i.test(h)) {
+          hrefTok = normalizeToken(h);
+        }
+      }
+    }
+    // Prefer strategy findCard (Tax climb) — works when href climb fails.
+    let card =
+      (siteStrategy.findCard && siteStrategy.findCard(node)) ||
+      (hrefTok
+        ? quickClimbCardFromTokenLink(
+            node.tagName === "A" ? node : node.querySelector?.("a[href*='0x']") || node
+          )
+        : null);
+    if (!(card instanceof HTMLElement)) return null;
+    const cr = card.getBoundingClientRect();
+    if (cr.height < 56 || cr.height > window.innerHeight * 0.85) return null;
+    let token = hrefTok;
+    if (!token) token = siteStrategy.extractToken(card);
+    if (!token) return null;
+    return { card, token };
   }
 
   /** Visible badges per left/mid/right column. */
@@ -1598,29 +1680,38 @@
   }
 
   /**
-   * 0.4.36 list-return burst: fee-cached tokens, **column round-robin**.
-   * Skips network queue on first wave; keeps frames short.
+   * 0.4.36/0.4.39 list-return burst: cache-first, Tax+href seeds, column round-robin.
    */
   function fastPaintListReturnViewport() {
     if (isTokenDetailRoute() || !isExtensionContextValid()) return 0;
     const t0 = performance.now();
     let painted = 0;
+    let queued = 0;
     const seen = new Set();
     try {
-      const anchors = collectListReturnAnchorsRoundRobin();
-      for (let i = 0; i < anchors.length; i += 1) {
+      const seeds = collectListReturnAnchorsRoundRobin();
+      for (let i = 0; i < seeds.length; i += 1) {
         if (painted >= SPA_LIST_RETURN_FAST_CARDS) break;
         if (performance.now() - t0 > SPA_LIST_RETURN_FAST_MS) break;
-        const a = anchors[i];
-        const token = normalizeToken(a.getAttribute("href") || a.href || "");
-        if (!token || seen.has(token)) continue;
-        const entry = resolveEntry(token);
-        if (!entry) continue; // cache-only burst
-        const card = quickClimbCardFromTokenLink(a);
-        if (!(card instanceof HTMLElement) || seen.has(card)) continue;
+        const resolved = resolveListReturnSeed(seeds[i]);
+        if (!resolved) continue;
+        const { card, token } = resolved;
+        if (!token || seen.has(token) || seen.has(card)) continue;
         seen.add(card);
         seen.add(token);
         if (!isVisible(card)) continue;
+        const entry = resolveEntry(token);
+        if (!entry) {
+          queueToken(token);
+          queued += 1;
+          try {
+            card.dataset[CARD_MARK] = token;
+            card.setAttribute(CARD_DATA, token);
+          } catch (_err) {
+            // ignore
+          }
+          continue;
+        }
         // Already painted?
         const existing = card.querySelector?.(`[${ICON_DATA}="1"]`);
         if (existing && existing.dataset.feeToken === token) {
@@ -1635,11 +1726,48 @@
     } catch (_err) {
       // ignore
     }
+    if (queued > 0) scheduleBatchFlush({ immediate: true, delayMs: 0 });
     debugInfo("list-return:fast-paint", {
       painted,
+      queued,
       ms: Math.round(performance.now() - t0)
     });
     return painted;
+  }
+
+  /** Until first-screen badges enough: keep scanning (js-mcp gap after soft progressive). */
+  function armListReturnKeepAlive() {
+    if (listReturnKeepAliveId) {
+      window.clearTimeout(listReturnKeepAliveId);
+      listReturnKeepAliveId = null;
+    }
+    const until = Date.now() + SPA_LIST_RETURN_KEEPALIVE_MS;
+    const tick = () => {
+      listReturnKeepAliveId = null;
+      if (!isExtensionContextValid() || !isTabVisible()) return;
+      if (isTokenDetailRoute()) return;
+      if (Date.now() > until) return;
+      const vis = countVisibleBadges(80);
+      if (vis >= SPA_LIST_RETURN_ENOUGH_BADGES && shouldCancelSpaListProgressive()) {
+        return;
+      }
+      // Extend soft window so Tax seeds stay preferred.
+      spaListReturnUntil = Math.max(spaListReturnUntil, Date.now() + 900);
+      spaQuietUntil = 0;
+      try {
+        fastPaintListReturnViewport();
+      } catch (_err) {
+        // ignore
+      }
+      scheduleScan(0, {
+        force: true,
+        immediate: true,
+        light: false,
+        bypassForceGap: true
+      });
+      listReturnKeepAliveId = window.setTimeout(tick, SPA_LIST_RETURN_KEEPALIVE_TICK_MS);
+    };
+    listReturnKeepAliveId = window.setTimeout(tick, 200);
   }
 
   /**
@@ -2052,6 +2180,7 @@
     spaQuietUntil = 0;
     spaSettleFromToken = true;
     armListReturnDomWatch();
+    armListReturnKeepAlive();
     const kick = (ms) => {
       window.setTimeout(() => {
         if (!isExtensionContextValid() || !isTabVisible()) return;
@@ -2068,22 +2197,22 @@
         } catch (_err) {
           // ignore
         }
-        // First kick: fastPaint only. Later: idle micro full scan (avoid stacked longtask).
-        if (ms > 0) {
-          scheduleScan(0, {
-            force: true,
-            immediate: false,
-            light: false,
-            bypassForceGap: true
-          });
-        }
+        // Immediate micro full scan every kick (0.4.39: was idle-only → 5s blackout).
+        scheduleScan(0, {
+          force: true,
+          immediate: true,
+          light: false,
+          bypassForceGap: true
+        });
       }, ms);
     };
     kick(0);
     kick(80);
-    kick(220);
-    kick(500);
-    kick(1000);
+    kick(200);
+    kick(450);
+    kick(900);
+    kick(1600);
+    kick(2800);
   }
 
   /** When war-room columns mount late after token→list, re-fastPaint (throttled). */
@@ -2511,10 +2640,15 @@
       // List return quiet shorter — first badge paint feels instant.
       spaQuietUntil = Date.now() + SPA_NAV_QUIET_LIST_RETURN_MS;
       armListReturnDomWatch();
+      armListReturnKeepAlive();
     } else if (!softSameToken) {
       spaListReturnUntil = 0;
       spaListReturnCacheOnlyUntil = 0;
       stopListReturnDomWatch();
+      if (listReturnKeepAliveId) {
+        window.clearTimeout(listReturnKeepAliveId);
+        listReturnKeepAliveId = null;
+      }
     }
 
     // ALWAYS observe documentElement — list roots detach on SPA and go silent (js-mcp).
@@ -2656,23 +2790,13 @@
             tryPaintGmgnTokenHeader("spa-progressive-later");
           }
         } else if (listReturn || isSpaListReturnSoft()) {
-          // 0.4.33: first frame ONLY fastPaint (already ran) — no stacked full scan longtask.
-          // Subsequent passes: idle micro-slices only.
-          if (index === 0) {
-            scheduleScan(40, {
-              force: true,
-              immediate: false,
-              light: false,
-              bypassForceGap: true
-            });
-          } else {
-            scheduleScan(0, {
-              force: true,
-              immediate: false,
-              light: false,
-              bypassForceGap: true
-            });
-          }
+          // 0.4.39: always immediate — idle delayed GMGN return to ~6s (js-mcp).
+          scheduleScan(index === 0 ? 0 : 0, {
+            force: true,
+            immediate: true,
+            light: false,
+            bypassForceGap: true
+          });
         } else {
           scheduleScan(0, {
             force: true,
@@ -3261,16 +3385,19 @@
       let card;
       let hrefTok = null;
       if (listReturnSoft) {
-        hrefTok = normalizeToken(
-          (node.getAttribute && node.getAttribute("href")) || node.href || ""
-        );
-        if (!hrefTok && node.querySelector) {
-          const a = node.querySelector("a[href*='0x']");
-          hrefTok = normalizeToken(a?.getAttribute?.("href") || "");
+        // 0.4.39: Tax/short seeds + strategy findCard first (href-only climb was dead).
+        const resolved = resolveListReturnSeed(node);
+        if (resolved) {
+          card = resolved.card;
+          hrefTok = resolved.token;
+        } else {
+          hrefTok = normalizeToken(
+            (node.getAttribute && node.getAttribute("href")) || node.href || ""
+          );
+          card =
+            (siteStrategy.findCard && siteStrategy.findCard(node)) ||
+            (hrefTok ? quickClimbCardFromTokenLink(node) : null);
         }
-        card = hrefTok
-          ? quickClimbCardFromTokenLink(node.tagName === "A" ? node : node.querySelector?.("a[href*='0x']") || node)
-          : siteStrategy.findCard(node);
       } else {
         card = siteStrategy.findCard(node);
       }
