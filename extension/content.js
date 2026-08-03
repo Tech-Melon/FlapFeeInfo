@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.28: Debot SPA — normalize route key (id_0x), click-arm, no thrash reset, paint in quiet.
   // 0.4.27: Debot SPA cross-browser — page-world history hook + always-on header guardian.
   // 0.4.26: Debot SPA meme→token — header watch + div short-CA + Release zip.
   // 0.4.25: Debot SPA meme->token header badge (debot.ai + gungnir.bot).
@@ -79,10 +80,12 @@
   const DEBOT_TOKEN_HEADER_WATCH_MS = 20000;
   const DEBOT_TOKEN_HEADER_TICK_MS = 250;
   // Always-on guardian while on Debot token page without header badge (cross-browser SPA).
-  const DEBOT_TOKEN_GUARDIAN_MS = 700;
+  const DEBOT_TOKEN_GUARDIAN_MS = 500;
+  // After user clicks a /token/ link, keep force-painting header this long (ms).
+  const DEBOT_TOKEN_CLICK_ARM_MS = 25000;
   // Independent route poll — sites often capture native history before our wrap.
-  // 0.4.27: 200ms — content-script history wrap is flaky; poll is primary fallback.
-  const ROUTE_POLL_MS = 200;
+  // 0.4.28: 150ms — Debot may change URL without pushState (js-mcp eventCount=0).
+  const ROUTE_POLL_MS = 150;
   // Expensive mark cleanup only every N scans (0.3.4 never re-extracted every tick).
   const CLEANUP_EVERY_N_SCANS = 10;
   // Console spam costs main-thread time on Debot/GMGN — off by default.
@@ -243,6 +246,10 @@
   let debotTokenGuardianId = null;
   /** Quiet-end flush timer (spaDomDirty → one full scan). */
   let spaQuietFlushTimer = null;
+  /** After click on /token/ — keep header force-paint until this time. */
+  let debotTokenClickArmUntil = 0;
+  /** Throttle immediate mutation header paint. */
+  let debotHeaderMutPaintAt = 0;
 
   hydratePersistentCache();
   hydrateDisplayPrefs();
@@ -255,6 +262,7 @@
   startPipelineWatchdog();
   installHistoryHooks();
   installPageWorldSpaHook();
+  installDebotTokenClickArm();
   startRoutePoller();
   startDebotTokenGuardian();
 
@@ -1005,17 +1013,38 @@
   /**
    * Stable SPA route key. Ignore volatile `ref=` so only real path/tab/chain changes fire.
    * js-mcp: GMGN logo → `/?chain=bsc&ref=…&tab=home` from `/bsc/token/0x…`.
+   * Debot: `/token/bsc/249218_0x…` and `/token/bsc/0x…` are the same page — normalize
+   * or each rewrite re-fires settle and wipe badges (resetOurDomMarks thrash).
    */
+  function normalizeRoutePathname(pathname) {
+    let path = String(pathname || "/");
+    // Debot/Gungnir token: /token/{chain}/{optionalDigits_}{0xCA}
+    path = path.replace(
+      /(\/token\/[a-z0-9]+\/)\d+_(0x[a-fA-F0-9]{40})/i,
+      "$1$2"
+    );
+    return path;
+  }
+
   function getRouteKey() {
     try {
       const u = new URL(location.href);
       const chain = u.searchParams.get("chain") || "";
       const tab = u.searchParams.get("tab") || "";
+      const path = normalizeRoutePathname(u.pathname);
       // pathname drives token↔list; chain/tab distinguish boards.
-      return `${u.pathname}|c=${chain}|t=${tab}`;
+      return `${path}|c=${chain}|t=${tab}`;
     } catch (_err) {
-      return `${location.pathname}${location.search}`;
+      return `${normalizeRoutePathname(location.pathname)}${location.search}`;
     }
+  }
+
+  /** CA from a route key or path string (8888/7777 only). */
+  function extractTokenFromRouteKey(keyOrPath) {
+    const m = String(keyOrPath || "").match(/0x[a-fA-F0-9]{40}/i);
+    if (!m) return null;
+    const token = m[0].toLowerCase();
+    return TARGET_TOKEN_RE.test(token) ? token : null;
   }
 
   /**
@@ -1119,6 +1148,7 @@
    * Always-on Debot/Gungnir token header painter.
    * Does NOT depend on SPA route detection — fixes browsers where history wrap is silent
    * and progressive settle never arms (user: one browser OK, another needs hard refresh).
+   * 0.4.28: also paints during spa quiet; click-arm window forces work after /token/ click.
    */
   function startDebotTokenGuardian() {
     if (debotTokenGuardianId) return;
@@ -1129,20 +1159,74 @@
         const rk = getRouteKey();
         if (rk !== lastRouteKey) {
           onSpaRouteChange("guardian-route");
-          return;
+          // Fall through — do not wait another tick to paint header.
         }
         if (!isDebotTokenPage()) return;
         const urlTok = extractTokenFromUrl();
         if (!urlTok) return;
         if (hasDebotTokenHeaderBadge()) return;
-        // Full scan off light path; direct header paint.
+        // Header paint is allowed even during SPA quiet (quiet only swallows full mutation scans).
         pendingLightScan = false;
-        tryPaintDebotTokenHeader("guardian");
+        tryPaintDebotTokenHeader(
+          Date.now() < debotTokenClickArmUntil ? "guardian-click-arm" : "guardian"
+        );
         scheduleScan(0, { force: true, immediate: true, light: false });
       } catch (_err) {
         // ignore
       }
     }, DEBOT_TOKEN_GUARDIAN_MS);
+  }
+
+  /**
+   * Debot often navigates without history.pushState (js-mcp: eventCount=0 on click).
+   * Capture token-link clicks as a reliable SPA signal.
+   */
+  function installDebotTokenClickArm() {
+    const host = location.hostname || "";
+    if (!host.endsWith("debot.ai") && !host.endsWith("gungnir.bot")) return;
+    document.addEventListener(
+      "click",
+      (event) => {
+        try {
+          if (!isExtensionContextValid()) return;
+          const t = event.target;
+          if (!(t instanceof Element)) return;
+          const a = t.closest?.("a[href*='/token/'], a[href*='0x']");
+          if (!(a instanceof HTMLAnchorElement)) return;
+          const href = a.getAttribute("href") || a.href || "";
+          if (!/\/token\//i.test(href) && !/0x[a-fA-F0-9]{40}/i.test(href)) return;
+          // Only arm for 8888/7777 targets when CA is visible in href.
+          const m = href.match(/0x[a-fA-F0-9]{40}/i);
+          if (m && !TARGET_TOKEN_RE.test(m[0].toLowerCase())) return;
+          debotTokenClickArmUntil = Date.now() + DEBOT_TOKEN_CLICK_ARM_MS;
+          // Nudge route detect + paint after router applies location (next frames).
+          const kick = (ms, reason) => {
+            window.setTimeout(() => {
+              if (!isExtensionContextValid() || !isTabVisible()) return;
+              try {
+                onSpaRouteChange(reason);
+              } catch (_err) {
+                // ignore
+              }
+              if (isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge()) {
+                pendingLightScan = false;
+                tryPaintDebotTokenHeader(reason);
+                scheduleScan(0, { force: true, immediate: true, light: false });
+              }
+            }, ms);
+          };
+          kick(0, "click-arm-0");
+          kick(100, "click-arm-100");
+          kick(350, "click-arm-350");
+          kick(800, "click-arm-800");
+          kick(1600, "click-arm-1600");
+          kick(3000, "click-arm-3000");
+        } catch (_err) {
+          // ignore
+        }
+      },
+      true
+    );
   }
 
   function clearSpaNavScanTimers() {
@@ -1238,24 +1322,41 @@
    * Must NOT run heavy DOM walks synchronously inside history hooks (was main SPA jank).
    * 0.4.11: fewer passes + only first immediate; token early-stop — fixes ~3s K-line jank.
    */
-  function beginSpaRouteSettle(_prevKey, _nextKey) {
+  function beginSpaRouteSettle(prevKey, nextKey) {
     if (!isExtensionContextValid() || !isTabVisible()) return;
+
+    const prevTok = extractTokenFromRouteKey(prevKey);
+    const nextTok = extractTokenFromRouteKey(nextKey);
+    // Same 7777/8888 CA, only Debot id_ prefix or query noise — do NOT wipe badges.
+    const softSameToken =
+      !!prevTok &&
+      !!nextTok &&
+      prevTok === nextTok &&
+      isDebotTokenPage();
 
     // Fresh caches — virtual list reuses nodes with stale token/mount mapping.
     debotMountCache = new WeakMap();
     cardTokenCache = new WeakMap();
     scanRootsCache = { at: 0, roots: [] };
     taxRateLabelCache = { el: null, at: 0 };
-    stopDebotTokenHeaderWatch();
 
-    // Cheap full reset of OUR marks only (including body/chakra shells from token page).
-    resetOurDomMarks();
+    if (!softSameToken) {
+      stopDebotTokenHeaderWatch();
+      // Cheap full reset of OUR marks only (including body/chakra shells from token page).
+      resetOurDomMarks();
+    }
 
     // ALWAYS observe documentElement — list roots detach on SPA and go silent (js-mcp).
     ensureDocumentObserver();
 
+    // Soft same-token: header already painted → skip progressive storm.
+    if (softSameToken && hasDebotTokenHeaderBadge()) {
+      spaQuietUntil = 0;
+      return;
+    }
+
     // Progressive hole-fill: list boards get more passes; token/K-line fewer.
-    const base = SPA_NAV_QUIET_MS;
+    const base = softSameToken ? 0 : SPA_NAV_QUIET_MS;
     const offsets = getSpaScanOffsets();
     offsets.forEach((offset, index) => {
       const timerId = window.setTimeout(() => {
@@ -3054,6 +3155,17 @@
         clearCardIcon(card);
       }
     });
+    // Debot token SPA: marks may be missing after host re-render — force header path.
+    try {
+      if (isDebotTokenPage()) {
+        const urlTok = extractTokenFromUrl();
+        if (urlTok && urlTok === String(token).toLowerCase() && !hasDebotTokenHeaderBadge()) {
+          tryPaintDebotTokenHeader("api-apply");
+        }
+      }
+    } catch (_err) {
+      // ignore
+    }
   }
 
   function bpsToPercentStr(bps) {
@@ -4729,10 +4841,30 @@
     if (!isTabVisible()) return;
     if (!isExtensionContextValid()) return;
     if (!isScanPageAllowed()) return;
+
+    // 0.4.28: Debot token header paint is NOT blocked by spa quiet.
+    // Host re-renders wipe our badge; must re-attach as soon as short CA appears.
+    if (isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge()) {
+      const now = Date.now();
+      if (now - debotHeaderMutPaintAt >= 180) {
+        debotHeaderMutPaintAt = now;
+        try {
+          tryPaintDebotTokenHeader("mutation");
+        } catch (_err) {
+          // ignore
+        }
+      }
+      // Still mark dirty / continue into scan scheduling below when not quiet.
+    }
+
     // During SPA rebuild: mark dirty only; progressive scans + quiet-end handle paint.
+    // Debot unsettled header: do not early-return forever — allow throttled full scans.
     if (isSpaQuiet()) {
       spaDomDirty = true;
-      return;
+      if (!(isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge())) {
+        return;
+      }
+      // Fall through to schedule a forced non-light scan (debounced).
     }
     // 0.4.12: non-8888/7777 token page — chart noise must not schedule scans.
     if (isNonTargetTokenPage()) return;
@@ -4756,13 +4888,18 @@
     }
 
     // Longer debounce while token badge still loading (chart keeps mutating).
-    const debounceMs = isTokenDetailRoute()
-      ? MUTATION_SCAN_DEBOUNCE_TOKEN_LOADING_MS
-      : MUTATION_SCAN_DEBOUNCE_MS;
+    // Debot click-arm / unsettled: faster.
+    const debotUnsettled =
+      isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge();
+    const debounceMs = debotUnsettled
+      ? 220
+      : isTokenDetailRoute()
+        ? MUTATION_SCAN_DEBOUNCE_TOKEN_LOADING_MS
+        : MUTATION_SCAN_DEBOUNCE_MS;
     mutationDebounceTimer = window.setTimeout(() => {
       mutationDebounceTimer = null;
       if (!isTabVisible()) return;
-      if (isSpaQuiet()) {
+      if (isSpaQuiet() && !(isDebotTokenPage() && !hasDebotTokenHeaderBadge())) {
         spaDomDirty = true;
         return;
       }
@@ -4772,7 +4909,9 @@
         scheduleScan(0, { force: true, light: true });
         return;
       }
-      scheduleScan(debounceMs);
+      pendingLightScan = false;
+      if (isDebotTokenPage()) tryPaintDebotTokenHeader("mutation-scan");
+      scheduleScan(0, { force: true, immediate: true, light: false });
     }, debounceMs);
   });
 
