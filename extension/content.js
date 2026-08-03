@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.21: K-line side board — prioritize unpainted, higher light caps, light continue.
   // 0.4.20: light→高对比; token settled still light-scan dialog/side boards; drag auto-off.
   // 0.4.19: light theme always solid dark chip (no bg toggle); dark keeps optional solid.
   // 0.4.18: default classic translucent; optional solid dark card bg; no hybrid gradient.
@@ -47,10 +48,14 @@
   const MUTATION_SCAN_DEBOUNCE_MS = 400;
   // Token/K-line while badge still loading: longer coalesce against chart Mutation flood.
   const MUTATION_SCAN_DEBOUNCE_TOKEN_LOADING_MS = 900;
-  // After header badge settled: slow light scan for dialogs / side boards only (ms).
-  const MUTATION_SCAN_DEBOUNCE_TOKEN_LIGHT_MS = 1200;
+  // After header badge settled: light scan for dialogs / side boards only (ms).
+  // 0.4.21: 700ms — new 战壕 rows must appear faster without chart full-scans.
+  const MUTATION_SCAN_DEBOUNCE_TOKEN_LIGHT_MS = 700;
   // Overlay open: faster light scan (ms).
-  const MUTATION_SCAN_DEBOUNCE_OVERLAY_MS = 320;
+  const MUTATION_SCAN_DEBOUNCE_OVERLAY_MS = 280;
+  // Light scan candidate caps (side board + dialog only).
+  const LIGHT_MAX_CANDIDATES = 96;
+  const LIGHT_MAX_OFFSCREEN = 24;
   // SPA: swallow mutation flood while host rebuilds (chart/list); progressive scans fill holes.
   const SPA_NAV_QUIET_MS = 650;
   // Cache header "总税率" node — avoid document-wide span/div walks every root refresh.
@@ -440,7 +445,7 @@
     // Light scan (dialog/side boards): do NOT inject K-line header walks.
     const light = pendingLightScan;
     const nodes = getCandidateNodes();
-    if (light) return nodes.slice(0, Math.min(MAX_CANDIDATES_PER_SCAN, 48));
+    if (light) return nodes.slice(0, LIGHT_MAX_CANDIDATES);
 
     const root = findGmgnTokenPageRoot();
     if (root && !nodes.includes(root)) nodes.unshift(root);
@@ -1130,6 +1135,9 @@
     lastScanWallMs = Date.now();
     scanGeneration += 1;
 
+    // Capture before getCandidateNodes consumes pendingLightScan.
+    const lightScan =
+      pendingLightScan || (isTokenPageSettledWithBadge() && isTokenDetailRoute());
     const seenCards = new Set();
     const nodes = siteStrategy.getCandidateNodes();
     let touched = 0;
@@ -1138,6 +1146,7 @@
     let skippedCached = 0;
     const budget = cardsPerScanBudget();
     const forceRemount = isResumeForceRemount();
+    const looseView = lightScan || isTokenDetailRoute();
 
     // Expensive re-extract cleanup is rare (every N scans / force remount / SPA).
     if (forceRemount || scanGeneration % CLEANUP_EVERY_N_SCANS === 0) {
@@ -1147,7 +1156,7 @@
     // Collect unique visible cards first, then prioritize unpainted (Debot 右列饿死修复).
     const allCards = [];
     for (const node of nodes) {
-      if (!isNearViewport(node)) continue;
+      if (!isNearViewport(node, looseView)) continue;
       const card = siteStrategy.findCard(node);
       if (!card || seenCards.has(card) || !isVisible(card)) continue;
       // Reject full-page shells (token SPA leftover / body mark).
@@ -1187,6 +1196,13 @@
         needWork.push(card);
       }
     }
+
+    // 0.4.21: unpainted first — new 战壕 rows must not starve behind remounts.
+    needWork.sort((a, b) => {
+      const ab = a.querySelector?.(`[${ICON_DATA}="1"]`) ? 1 : 0;
+      const bb = b.querySelector?.(`[${ICON_DATA}="1"]`) ? 1 : 0;
+      return ab - bb;
+    });
 
     let truncated = false;
     for (const card of needWork) {
@@ -1274,9 +1290,10 @@
     }
 
     // Always continue when work remains (not only SPA) — covers Debot 3-col first paint.
-    // force:true so SCAN_INTERVAL throttle does not delay hole-fill after left columns.
+    // 0.4.21: keep light mode on token settled pages so chart full-scan stays off.
     if (truncated) {
-      scheduleScan(60, { force: true, immediate: true });
+      const keepLight = lightScan || isTokenPageSettledWithBadge();
+      scheduleScan(60, { force: true, immediate: true, light: keepLight });
     } else if (queued > 0 && requestQueue.size > 0 && !batchActive && !batchTimer) {
       scheduleBatchFlush({ immediate: true });
     }
@@ -1832,14 +1849,22 @@
     const addNode = (node, priority = 0) => {
       if (!(node instanceof HTMLElement) || seen.has(node)) return;
       seen.add(node);
-      const item = { node, priority };
-      // Viewport-first: process on-screen cards first (smooth scroll / steady state).
-      if (isNearViewport(node)) inView.push(item);
+      // Boost unpainted: nodes whose nearest card has no badge yet (new 战壕 rows).
+      let pri = priority;
+      try {
+        const host = node.closest?.("a, div, li, article") || node.parentElement;
+        if (host && !host.querySelector?.(`[${ICON_DATA}="1"]`)) pri += 3;
+      } catch (_err) {
+        // ignore
+      }
+      const item = { node, priority: pri };
+      if (isNearViewport(node, lightOnly)) inView.push(item);
       else offscreen.push(item);
     };
 
     const collectFromRoot = (root) => {
       if (!root || !root.querySelectorAll) return;
+      const cap = lightOnly ? LIGHT_MAX_CANDIDATES * 2 : MAX_CANDIDATES_PER_SCAN * 2;
       // Prefer site token routes over external flap.sh icons (js-mcp: flap.sh 18×18 noise).
       root
         .querySelectorAll(
@@ -1853,12 +1878,13 @@
         if (/flap\.sh|bscscan|etherscan/i.test(href)) addNode(n, 0);
         else addNode(n, 1);
       });
-      // Short CA text in compact leaves
-      if (inView.length < MAX_CANDIDATES_PER_SCAN) {
+      // Short CA text in compact leaves (raise cap on light — virtual list new rows)
+      const leafBudget = lightOnly ? LIGHT_MAX_CANDIDATES : MAX_CANDIDATES_PER_SCAN;
+      if (inView.length < leafBudget) {
         const leaves = root.querySelectorAll("a, span");
-        const maxCheck = Math.min(leaves.length, 200);
+        const maxCheck = Math.min(leaves.length, lightOnly ? 400 : 200);
         for (let i = 0; i < maxCheck; i += 1) {
-          if (inView.length + offscreen.length >= MAX_CANDIDATES_PER_SCAN * 2) break;
+          if (inView.length + offscreen.length >= cap) break;
           const el = leaves[i];
           const t = el.textContent || "";
           if (t.length > 24 || t.length < 8) continue;
@@ -1869,7 +1895,7 @@
 
     // Light scan: overlays + side boards only (token header settled / chart thrash).
     const roots = lightOnly ? getLightScanRoots() : getScanRoots();
-    const maxCand = lightOnly ? Math.min(MAX_CANDIDATES_PER_SCAN, 48) : MAX_CANDIDATES_PER_SCAN * 2;
+    const maxCand = lightOnly ? LIGHT_MAX_CANDIDATES * 2 : MAX_CANDIDATES_PER_SCAN * 2;
     for (const root of roots) {
       if (inView.length + offscreen.length >= maxCand) break;
       collectFromRoot(root);
@@ -1891,8 +1917,10 @@
     const sortPri = (a, b) => b.priority - a.priority;
     inView.sort(sortPri);
     offscreen.sort(sortPri);
-    const merged = inView.concat(offscreen.slice(0, 12)).map((x) => x.node);
-    return merged.slice(0, MAX_CANDIDATES_PER_SCAN);
+    const offTake = lightOnly ? LIGHT_MAX_OFFSCREEN : 12;
+    const sliceMax = lightOnly ? LIGHT_MAX_CANDIDATES : MAX_CANDIDATES_PER_SCAN;
+    const merged = inView.concat(offscreen.slice(0, offTake)).map((x) => x.node);
+    return merged.slice(0, sliceMax);
   }
 
   function climbToCard(node, options) {
@@ -2088,12 +2116,17 @@
     return rect.width > 0 && rect.height > 0 && rect.bottom >= 0 && rect.top <= window.innerHeight;
   }
 
-  /** Near viewport (small margin) — used to skip climb/extract on off-screen nodes. */
-  function isNearViewport(el) {
+  /**
+   * Near viewport — skip climb/extract on far off-screen nodes.
+   * loose=true: larger margin for scrollable side boards (K-line 战壕 column).
+   */
+  function isNearViewport(el, loose = false) {
     if (!(el instanceof HTMLElement)) return false;
     const rect = el.getBoundingClientRect();
     if (rect.width <= 0 && rect.height <= 0) return false;
-    return rect.bottom >= -60 && rect.top <= window.innerHeight + 100;
+    const padY = loose ? 480 : 100;
+    const padTop = loose ? 200 : 60;
+    return rect.bottom >= -padTop && rect.top <= window.innerHeight + padY;
   }
 
   /**
@@ -2230,6 +2263,10 @@
       (data.missing || []).forEach((token) => {
         if (!modeCache.has(token)) requestQueue.add(String(token).toLowerCase());
       });
+      // 0.4.21: after API returns, light-scan side boards so new rows get badges quickly.
+      if (isTokenDetailRoute() && isTokenPageSettledWithBadge()) {
+        scheduleScan(40, { force: true, light: true, immediate: true });
+      }
     } catch (error) {
       if (generation !== batchGeneration) return;
       if (isContextInvalidError(error)) {
