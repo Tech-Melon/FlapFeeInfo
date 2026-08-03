@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.22: K-line side 战壕 rows share home trench absolute coords (header stays Tax).
   // 0.4.21: K-line side board — prioritize unpainted, higher light caps, light continue.
   // 0.4.20: light→高对比; token settled still light-scan dialog/side boards; drag auto-off.
   // 0.4.19: light theme always solid dark chip (no bg toggle); dark keeps optional solid.
@@ -387,8 +388,7 @@
   }
 
   /**
-   * List war-room / 战壕 boards where free badge drag + absolute coords apply.
-   * K-line / token detail NEVER use absolute/drag (always 总税率 / Tax mount).
+   * Pure home / meme 战壕 page (no token K-line in path).
    */
   function isTrenchListPage() {
     if (isTokenDetailRoute()) return false;
@@ -401,6 +401,39 @@
     }
     if (host.endsWith("debot.ai") || host.endsWith("gungnir.bot")) {
       return /\/meme/i.test(path) || path === "/" || path === "";
+    }
+    return false;
+  }
+
+  /**
+   * Whether this card may use trench absolute coords / drag.
+   * - Home 战壕 list: yes
+   * - K-line page side 新创建/战壕 rows: yes (same gmgn offset as home)
+   * - K-line header 总税率 strip: NO (always default Tax mount)
+   */
+  function canUseTrenchAbsoluteCoords(card) {
+    if (!isAllowedScanChain()) return false;
+    if (card && isGmgnTokenHeaderCard(card)) return false;
+    // Debot/Gungnir token detail header-ish full page mount: keep default if card is page shell
+    if (card && isDebotTokenPage() && isDebotTokenHeaderLike(card)) return false;
+    if (isTrenchListPage()) return true;
+    // Token page: list cards only (side boards / dialog rows)
+    if (isTokenDetailRoute() && card) return true;
+    // No card context (global remount flags): allow if home trench or token page has boards
+    if (!card && (isTrenchListPage() || isTokenDetailRoute())) return true;
+    return false;
+  }
+
+  /** Oversized "card" on Debot token page = page shell, not a meme list row. */
+  function isDebotTokenHeaderLike(card) {
+    if (!(card instanceof HTMLElement) || !isDebotTokenPage()) return false;
+    try {
+      const r = card.getBoundingClientRect();
+      if (r.width > window.innerWidth * 0.55 && r.height > window.innerHeight * 0.35) {
+        return true;
+      }
+    } catch (_err) {
+      return false;
     }
     return false;
   }
@@ -1097,6 +1130,19 @@
     ) {
       return false;
     }
+    // Placement mode must match (list absolute vs header Tax / default).
+    const want = getActiveBadgePosition(card).enabled ? "absolute" : "default";
+    const have = existing.dataset.feePosMode || "default";
+    if (have !== want) return false;
+    if (want === "absolute") {
+      const pos = getActiveBadgePosition(card);
+      if (
+        existing.dataset.feeOx !== String(pos.x) ||
+        existing.dataset.feeOy !== String(pos.y)
+      ) {
+        return false;
+      }
+    }
     if (!cardStillMatchesToken(card, marked)) return false;
     const er = existing.getBoundingClientRect();
     return er.width >= 2 && er.height >= 2;
@@ -1238,7 +1284,7 @@
         ) {
           if (existing.dataset.feeSig && existing.textContent === existing.dataset.feeSig) {
             // Keep absolute coords in sync; mode mismatch → fall through to remount.
-            const pos = getActiveBadgePosition();
+            const pos = getActiveBadgePosition(card);
             const want = pos.enabled ? "absolute" : "default";
             const have = existing.dataset.feePosMode || "default";
             if (have === want) {
@@ -1258,7 +1304,7 @@
           const { label, className, title } = computeBadgePresentation(entry, quoteSymbol);
           if (label && existing.textContent === label && existing.className === className) {
             existing.dataset.feeSig = label;
-            const pos = getActiveBadgePosition();
+            const pos = getActiveBadgePosition(card);
             if (pos.enabled) applyAbsoluteBadgeStyles(existing, pos.x, pos.y);
             else syncBadgeDragCursor(existing);
             skippedCached += 1;
@@ -1271,7 +1317,7 @@
             existing.className = className;
             existing.dataset.feeToken = token;
             existing.dataset.feeSig = label;
-            const pos = getActiveBadgePosition();
+            const pos = getActiveBadgePosition(card);
             if (pos.enabled) applyAbsoluteBadgeStyles(existing, pos.x, pos.y);
             else syncBadgeDragCursor(existing);
             skippedCached += 1;
@@ -2715,13 +2761,13 @@
 
   /**
    * Active site placement: default (Tax) or absolute vs card top-left.
-   * 0.4.14: absolute/drag ONLY on trench list pages — never K-line / token detail.
+   * 0.4.22: list rows on K-line side 战壕 share home coords; header stays Tax-only.
+   * @param {HTMLElement|null} card
    */
-  function getActiveBadgePosition() {
+  function getActiveBadgePosition(card) {
     const key = getSiteOffsetKey();
     const o = badgeOffsets[key] || DEFAULT_BADGE_OFFSETS[key];
-    // K-line / token: always natural 总税率 / Tax mount.
-    if (!isTrenchListPage()) {
+    if (!canUseTrenchAbsoluteCoords(card || null)) {
       return { enabled: false, x: 0, y: 0 };
     }
     return {
@@ -2870,7 +2916,7 @@
    */
   function placeBadgeOnCard(card, icon) {
     if (!(card instanceof HTMLElement) || !(icon instanceof HTMLElement)) return false;
-    const pos = getActiveBadgePosition();
+    const pos = getActiveBadgePosition(card);
     const token = icon.dataset.feeToken || card.dataset[CARD_MARK] || "";
 
     // Defense: wipe any leftover siblings/orphans before insert (keep `icon` itself).
@@ -2926,7 +2972,7 @@
     if (!(icon instanceof HTMLElement)) return;
     const card = findCardForBadgeIcon(icon);
     if (!card) return;
-    const pos = getActiveBadgePosition();
+    const pos = getActiveBadgePosition(card);
     const want = pos.enabled ? "absolute" : "default";
     const have = icon.dataset.feePosMode || "";
 
@@ -3037,8 +3083,8 @@
     document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => syncBadgeDragCursor(icon));
     // Turning drag on must not leave stacked badges from prior abs experiments.
     dedupeBadgesByToken();
-    if (badgeDragEdit && isTrenchListPage()) {
-      scheduleScan(50, { force: true, immediate: true });
+    if (badgeDragEdit && (isTrenchListPage() || isTokenDetailRoute())) {
+      scheduleScan(50, { force: true, immediate: true, light: isTokenPageSettledWithBadge() });
     }
   }
 
@@ -3073,13 +3119,13 @@
 
   function onBadgePointerDown(e) {
     if (!badgeDragEdit || badgeDragState) return;
-    // 0.4.14: drag only on trench list boards — never K-line / token.
-    if (!isTrenchListPage()) return;
     if (e.button != null && e.button !== 0) return;
     const icon = e.target instanceof Element ? e.target.closest(`[${ICON_DATA}="1"]`) : null;
     if (!(icon instanceof HTMLElement)) return;
     const card = findCardForBadgeIcon(icon);
     if (!(card instanceof HTMLElement)) return;
+    // 0.4.22: home 战壕 + K-line side list rows; never K-line header 总税率.
+    if (!canUseTrenchAbsoluteCoords(card)) return;
 
     e.preventDefault();
     e.stopPropagation();
@@ -3150,9 +3196,8 @@
     icon.style.cursor = "";
     badgeDragState = null;
 
-    if (!isTrenchListPage()) {
-      // Drag ended after navigation — discard absolute for K-line safety.
-      // Still turn off drag mode so user must re-enable intentionally.
+    if (!canUseTrenchAbsoluteCoords(card)) {
+      // Header / invalid — discard; still turn off drag.
       setBadgeDragEdit(false);
       try {
         if (isExtensionContextValid() && chrome.storage?.local) {
@@ -3166,7 +3211,7 @@
       return;
     }
 
-    // Persist + enable absolute mode for this site; next paint / all icons share coords.
+    // Persist + enable absolute mode for this site (same gmgn key as home 战壕).
     persistActiveSitePosition({ enabled: true, x, y });
     // Dedup then apply absolute to every trench badge.
     if (card instanceof HTMLElement) {
@@ -3249,7 +3294,9 @@
         (isPersistentCacheHit(token) ? persistentCache.get(token) : null);
       if (!entry) return;
       // Position mode may need remount (Tax vs absolute).
-      renderMode(card, token, entry, { forceRemount: getActiveBadgePosition().enabled });
+      renderMode(card, token, entry, {
+        forceRemount: getActiveBadgePosition(card).enabled
+      });
     });
   }
 
@@ -3393,7 +3440,7 @@
     const forceRemount = options.forceRemount === true || isResumeForceRemount();
     const quoteSymbol = resolveQuoteSymbol(card, entry);
     const { label, title, className } = computeBadgePresentation(entry, quoteSymbol);
-    const pos = getActiveBadgePosition();
+    const pos = getActiveBadgePosition(card);
     const wantMode = pos.enabled ? "absolute" : "default";
 
     // All toggles off or nothing to show → clear badge.
