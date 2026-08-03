@@ -142,18 +142,18 @@ FlapFeeInfo\extension
 - 等列表加载完或刷新页面  
 - 确认 token 尾号是 `8888` 或 `7777`  
 - 扩展已重新加载，且页面已硬刷新  
-- Debot / Gungnir **从 meme 点进 token 详情**：请使用 **0.4.35+**  
+- Debot / Gungnir **从 meme 点进 token 详情**：请使用 **0.4.36+**  
 
 ### 2b. 已更新但仍像旧版
 
-- 产品站 / Releases 请确认 zip 文件名版本号 ≥ 你要的版本（例如 `FlapFeeInfo-extension-v0.4.35.zip`）  
+- 产品站 / Releases 请确认 zip 文件名版本号 ≥ 你要的版本（例如 `FlapFeeInfo-extension-v0.4.36.zip`）  
 - `chrome://extensions` 卡片上的版本号必须一致；改文件后要点 **重新加载**  
 - Debot 页必须 **硬刷新**（Ctrl+F5），否则仍跑旧 content script  
 - Debot 路径 `249218_0x…`：0.4.28+ 已归一化  
-- **Debot 战壕→K 线 SPA 无徽章**：0.4.35 卡片点击武装 + DOM watch + 进页立刻全扫  
-- **回战壕太慢**：0.4.35 quiet=0 + 点击即 fastPaint  
-- **Debot K 线卡顿**：未 settle 前不扫全部 MuiCard  
-- **K 线顶栏不走卡片坐标**：0.4.34+（坐标只作用于战壕列表）  
+- **回战壕「已迁移」慢 / 左中有右无**：0.4.36 三栏轮询，不再左列吃满配额  
+- **GMGN 回 home 右列**：同三栏轮询策略  
+- **K 线顶栏不走卡片坐标**：0.4.34+  
+- **战壕→K 线 SPA**：0.4.35+ 激活链加固  
 
 ### 3. 有 fee 但没有 🪙BNB / 🪙USD1
 

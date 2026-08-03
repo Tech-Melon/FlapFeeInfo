@@ -5,6 +5,7 @@
   // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
+  // 0.4.36: list-return 三栏轮询（已迁移/右列不再饿死）+ GMGN 同策略.
   // 0.4.35: Debot SPA meme→K 线激活链加固 + 回战壕加速 + token 页减负.
   // 0.4.34: Debot「使用卡片坐标」时 K 线顶栏仍强制贴合（不走 absolute，修登录无徽章）.
   // 0.4.33: Debot login K-line badge + list-return mount pos; GMGN return first-frame fast-only.
@@ -93,20 +94,22 @@
   // 0.4.35: 0ms — paint as soon as settle starts (战壕徽章太慢).
   const SPA_NAV_QUIET_LIST_RETURN_MS = 0;
   // After token→list: viewport-first soft window (ms).
-  const SPA_LIST_RETURN_SOFT_MS = 2800;
+  const SPA_LIST_RETURN_SOFT_MS = 3200;
   // First wave: only paint cards with fee already in modeCache (no network, no deep extract).
-  const SPA_LIST_RETURN_CACHE_ONLY_MS = 600;
-  // Cards per slice during list-return.
-  const SPA_LIST_RETURN_CARDS = 10;
-  // Candidates cap during list-return soft window (href-only).
-  const SPA_LIST_RETURN_CANDIDATES = 28;
-  // Cancel further list progressive once this many visible badges painted.
-  const SPA_LIST_RETURN_ENOUGH_BADGES = 8;
+  const SPA_LIST_RETURN_CACHE_ONLY_MS = 500;
+  // Cards per slice during list-return (keep small for jank; more slices cover 3 cols).
+  const SPA_LIST_RETURN_CARDS = 9;
+  // Candidates cap — must cover 3 columns × ~8–10 tax rows.
+  const SPA_LIST_RETURN_CANDIDATES = 48;
+  // Soft cancel: need badges across columns, not just left-col total (0.4.36).
+  const SPA_LIST_RETURN_ENOUGH_BADGES = 12;
+  // Per-column min visible badges before early-stop (Debot 已迁移 / GMGN 右列).
+  const SPA_LIST_RETURN_MIN_PER_COL = 2;
   // Soft scan time budget per frame (ms) — hard stop mid-loop.
   const SPA_LIST_RETURN_SLICE_MS = 8;
-  // Fast-paint burst budget right after list settle (ms / cards).
-  const SPA_LIST_RETURN_FAST_MS = 10;
-  const SPA_LIST_RETURN_FAST_CARDS = 14;
+  // Fast-paint burst: more cards, column-round-robin (was left-first starve 已迁移).
+  const SPA_LIST_RETURN_FAST_MS = 14;
+  const SPA_LIST_RETURN_FAST_CARDS = 18;
   // Dedicated header paint watch after meme→token SPA (ms). Logged-in DOM is slower.
   const DEBOT_TOKEN_HEADER_WATCH_MS = 20000;
   const DEBOT_TOKEN_HEADER_TICK_MS = 400;
@@ -1207,21 +1210,33 @@
     return anchor.parentElement instanceof HTMLElement ? anchor.parentElement : anchor;
   }
 
-  /**
-   * 0.4.32 list-return first burst: paint ONLY fee-cached tokens from viewport hrefs.
-   * Skips findIconTarget / short-CA deep scan / network queue — keeps first frame under ~6ms.
-   */
-  function fastPaintListReturnViewport() {
-    if (isTokenDetailRoute() || !isExtensionContextValid()) return 0;
-    const t0 = performance.now();
-    let painted = 0;
-    const seen = new Set();
+  /** Bucket element into left / mid / right third of viewport (Debot 3-col + GMGN). */
+  function listColumnBucket(el) {
     try {
-      const roots = getScanRoots(false);
-      const linkSel =
-        "a[href*='/token/'][href*='8888'], a[href*='/token/'][href*='7777'], " +
-        "a[href*='/bsc/token/'][href*='8888'], a[href*='/bsc/token/'][href*='7777']";
-      const anchors = [];
+      const r = el.getBoundingClientRect();
+      const mid = r.left + r.width * 0.5;
+      const w = window.innerWidth || 1;
+      if (mid < w / 3) return 0;
+      if (mid < (2 * w) / 3) return 1;
+      return 2;
+    } catch (_err) {
+      return 1;
+    }
+  }
+
+  /**
+   * Collect tax-token anchors in viewport, round-robin by column.
+   * Fixes Debot 已迁移 / GMGN right col starved when left fills candidate cap first.
+   */
+  function collectListReturnAnchorsRoundRobin() {
+    const linkSel =
+      "a[href*='/token/'][href*='8888'], a[href*='/token/'][href*='7777'], " +
+      "a[href*='/bsc/token/'][href*='8888'], a[href*='/bsc/token/'][href*='7777']";
+    const buckets = [[], [], []];
+    const seenHref = new Set();
+    try {
+      // Force fresh roots so all 3 Debot MuiCards are present.
+      const roots = getScanRoots(true);
       for (let ri = 0; ri < roots.length; ri += 1) {
         const root = roots[ri];
         if (!root || !root.querySelectorAll) continue;
@@ -1230,11 +1245,66 @@
           const a = found[i];
           if (!(a instanceof HTMLElement)) continue;
           if (!isNearViewport(a, false)) continue;
-          anchors.push(a);
-          if (anchors.length >= SPA_LIST_RETURN_CANDIDATES) break;
+          const href = a.getAttribute("href") || a.href || "";
+          const key = href.toLowerCase();
+          if (seenHref.has(key)) continue;
+          seenHref.add(key);
+          buckets[listColumnBucket(a)].push(a);
         }
-        if (anchors.length >= SPA_LIST_RETURN_CANDIDATES) break;
       }
+    } catch (_err) {
+      // ignore
+    }
+    // Round-robin: col0, col1, col2, col0, ...
+    const out = [];
+    let idx = 0;
+    while (out.length < SPA_LIST_RETURN_CANDIDATES) {
+      let added = false;
+      for (let b = 0; b < 3; b += 1) {
+        if (idx < buckets[b].length) {
+          out.push(buckets[b][idx]);
+          added = true;
+          if (out.length >= SPA_LIST_RETURN_CANDIDATES) break;
+        }
+      }
+      if (!added) break;
+      idx += 1;
+    }
+    return out;
+  }
+
+  /** Visible badges per left/mid/right column. */
+  function countVisibleBadgesByColumn() {
+    const counts = [0, 0, 0];
+    try {
+      const icons = document.querySelectorAll(`[${ICON_DATA}="1"]`);
+      const lim = Math.min(icons.length, 80);
+      for (let i = 0; i < lim; i += 1) {
+        const el = icons[i];
+        if (!(el instanceof HTMLElement)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.top > window.innerHeight) {
+          continue;
+        }
+        counts[listColumnBucket(el)] += 1;
+      }
+    } catch (_err) {
+      // ignore
+    }
+    return counts;
+  }
+
+  /**
+   * 0.4.36 list-return burst: fee-cached tokens, **column round-robin**.
+   * Skips network queue on first wave; keeps frames short.
+   */
+  function fastPaintListReturnViewport() {
+    if (isTokenDetailRoute() || !isExtensionContextValid()) return 0;
+    const t0 = performance.now();
+    let painted = 0;
+    const seen = new Set();
+    try {
+      const anchors = collectListReturnAnchorsRoundRobin();
       for (let i = 0; i < anchors.length; i += 1) {
         if (painted >= SPA_LIST_RETURN_FAST_CARDS) break;
         if (performance.now() - t0 > SPA_LIST_RETURN_FAST_MS) break;
@@ -1262,7 +1332,10 @@
     } catch (_err) {
       // ignore
     }
-    debugInfo("list-return:fast-paint", { painted, ms: Math.round(performance.now() - t0) });
+    debugInfo("list-return:fast-paint", {
+      painted,
+      ms: Math.round(performance.now() - t0)
+    });
     return painted;
   }
 
@@ -1347,7 +1420,15 @@
   function shouldCancelSpaListProgressive() {
     if (isTokenDetailRoute()) return false;
     if (!isSpaListReturnSoft() && !spaSettleFromToken) return false;
-    return countVisibleBadges(48) >= SPA_LIST_RETURN_ENOUGH_BADGES;
+    const total = countVisibleBadges(80);
+    if (total >= SPA_LIST_RETURN_ENOUGH_BADGES * 2) return true;
+    // 0.4.36: do NOT stop when only left/mid columns are painted (Debot 已迁移 starve).
+    const cols = countVisibleBadgesByColumn();
+    const covered = cols.filter((n) => n >= SPA_LIST_RETURN_MIN_PER_COL).length;
+    // Need at least 2 columns covered with min badges, or all 3 if total is modest.
+    if (covered >= 3) return true;
+    if (covered >= 2 && total >= SPA_LIST_RETURN_ENOUGH_BADGES) return true;
+    return false;
   }
 
   /**
@@ -2634,9 +2715,15 @@
     }
 
     // 0.4.21: unpainted first — new 战壕 rows must not starve behind remounts.
-    // list-return: prefer cards that already have fee in memory (instant paint).
+    // 0.4.36 list-return: prefer unpainted columns + cache hits (已迁移/右列优先补洞).
     if (listReturnSoft) {
+      const colCounts = countVisibleBadgesByColumn();
       needWork.sort((a, b) => {
+        const ca = listColumnBucket(a);
+        const cb = listColumnBucket(b);
+        // Columns with fewer badges first
+        const colPri = colCounts[ca] - colCounts[cb];
+        if (colPri !== 0) return colPri;
         const ta = listReturnTokenHint.get(a) || a.dataset[CARD_MARK] || "";
         const tb = listReturnTokenHint.get(b) || b.dataset[CARD_MARK] || "";
         const ea = ta && resolveEntry(ta) ? 0 : 1;
@@ -3387,6 +3474,12 @@
     pendingLightScan = false;
     // 0.4.30: token→list soft — viewport only, smaller caps (jank↓, first screen still filled).
     const listReturnSoft = isSpaListReturnSoft();
+
+    // 0.4.36: list-return uses column round-robin anchors only (covers 已迁移 / GMGN 右列).
+    if (listReturnSoft) {
+      const anchors = collectListReturnAnchorsRoundRobin();
+      return anchors.slice(0, SPA_LIST_RETURN_CANDIDATES);
+    }
 
     const addNode = (node, priority = 0) => {
       if (!(node instanceof HTMLElement) || seen.has(node)) return;
