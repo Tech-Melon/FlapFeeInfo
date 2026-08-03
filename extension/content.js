@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.15: hard double-badge dedupe (Debot drag); outermost card only; remount on abs.
   // 0.4.14: trench-only abs/drag; bsc scan gate; fix Debot 新创建 + double badge.
   // 0.4.13: badge pos — default beside Tax; optional card top-left absolute + page drag.
   // 0.4.12: K-line — stop mutation scans after badge; cache 总税率 lookup; per-site badge offset.
@@ -955,11 +956,51 @@
     });
   }
 
-  /** True when card already has a correct, connected badge (no extract needed). */
+  /**
+   * Count our badges tied to this card (descendants + adjacent siblings).
+   * >1 means double-badge bug — must remount, never treat as stable.
+   */
+  function countBadgesNearCard(card, tokenHint) {
+    if (!(card instanceof HTMLElement)) return 0;
+    const token = tokenHint || card.dataset[CARD_MARK] || "";
+    const found = new Set();
+    card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => found.add(n));
+    for (const sib of [card.previousElementSibling, card.nextElementSibling]) {
+      if (
+        sib instanceof HTMLElement &&
+        (sib.dataset?.[ICON_MARK] === "1" || sib.matches?.(`[${ICON_DATA}="1"]`))
+      ) {
+        found.add(sib);
+      }
+    }
+    // Parent children with same token near this card (Tax climb mounts).
+    const parent = card.parentElement;
+    if (parent) {
+      Array.from(parent.children).forEach((ch) => {
+        if (!(ch instanceof HTMLElement) || ch === card) return;
+        if (!ch.matches?.(`[${ICON_DATA}="1"]`) && ch.dataset?.[ICON_MARK] !== "1") return;
+        if (token && ch.dataset.feeToken && ch.dataset.feeToken !== token) return;
+        try {
+          const cr = card.getBoundingClientRect();
+          const ir = ch.getBoundingClientRect();
+          if (Math.abs(ir.top - cr.top) > cr.height + 12) return;
+          if (ir.right < cr.left - 12 || ir.left > cr.right + 12) return;
+          found.add(ch);
+        } catch (_err) {
+          found.add(ch);
+        }
+      });
+    }
+    return found.size;
+  }
+
+  /** True when card already has exactly one correct badge (no extract needed). */
   function isStablePaintedCard(card, forceRemount) {
     if (forceRemount || !(card instanceof HTMLElement)) return false;
     const marked = card.dataset[CARD_MARK];
     if (!marked) return false;
+    // 0.4.15: doubles must never short-circuit the scan.
+    if (countBadgesNearCard(card, marked) !== 1) return false;
     const existing = card.querySelector(`[${ICON_DATA}="1"]`);
     if (
       !existing ||
@@ -1039,8 +1080,16 @@
       allCards.push(card);
     }
 
+    // 0.4.15: keep outermost cards only — nested climbToCard caused 2 badges on 1 visual row.
+    const outerCards = allCards.filter((card) => {
+      return !allCards.some((other) => other !== card && other.contains(card));
+    });
+
     const needWork = [];
-    for (const card of allCards) {
+    for (const card of outerCards) {
+      // Nested mark cleanup: drop CARD_MARK on discarded inner nodes.
+      // (handled by only painting outerCards)
+
       if (isStablePaintedCard(card, forceRemount)) {
         // 0.4.10: stale feeSig may keep wrong 🪙BNB after API has 币安人生 — cheap recheck.
         const marked = card.dataset[CARD_MARK];
@@ -1075,6 +1124,12 @@
 
       const entry = resolveEntry(token);
       if (entry) {
+        // Doubles always remount (isStable may have been false but fast path still ran).
+        if (countBadgesNearCard(card, token) > 1) {
+          renderMode(card, token, entry, { forceRemount: true });
+          rendered += 1;
+          continue;
+        }
         // Fast path: badge already correct — zero layout remount.
         const existing = card.querySelector(`[${ICON_DATA}="1"]`);
         if (
@@ -1144,10 +1199,14 @@
       scheduleBatchFlush({ immediate: true });
     }
 
+    // Global safety net: same feeToken must never have 2 icons on page.
+    dedupeBadgesByToken();
+
     debugInfo("scan", {
       site: siteStrategy.name,
       candidates: nodes.length,
-      cards: allCards.length,
+      cards: outerCards.length,
+      nestedDropped: allCards.length - outerCards.length,
       needWork: needWork.length,
       touched,
       rendered,
@@ -1158,6 +1217,50 @@
       spaQuiet: isSpaQuiet(),
       queueSize: requestQueue.size,
       batchActive
+    });
+  }
+
+  /**
+   * Keep at most one badge per feeToken. Prefer icon inside a marked card.
+   * Fixes Debot double-paint when drag/absolute left an orphan + remount.
+   */
+  function dedupeBadgesByToken() {
+    const byToken = new Map();
+    document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => {
+      if (!(icon instanceof HTMLElement)) return;
+      const tok = icon.dataset.feeToken || "";
+      if (!tok) {
+        // Orphan without token — remove.
+        try {
+          icon.remove();
+        } catch (_err) {
+          // ignore
+        }
+        return;
+      }
+      if (!byToken.has(tok)) byToken.set(tok, []);
+      byToken.get(tok).push(icon);
+    });
+    byToken.forEach((icons) => {
+      if (icons.length <= 1) return;
+      // Prefer: absolute on card > inside marked card > first
+      icons.sort((a, b) => {
+        const score = (el) => {
+          let s = 0;
+          if (el.dataset.feePosMode === "absolute") s += 4;
+          if (el.closest?.(`[${CARD_DATA}]`)) s += 2;
+          if (el.isConnected) s += 1;
+          return s;
+        };
+        return score(b) - score(a);
+      });
+      for (let i = 1; i < icons.length; i += 1) {
+        try {
+          icons[i].remove();
+        } catch (_err) {
+          // ignore
+        }
+      }
     });
   }
 
@@ -2553,6 +2656,31 @@
   function placeBadgeOnCard(card, icon) {
     if (!(card instanceof HTMLElement) || !(icon instanceof HTMLElement)) return false;
     const pos = getActiveBadgePosition();
+    const token = icon.dataset.feeToken || card.dataset[CARD_MARK] || "";
+
+    // Defense: wipe any leftover siblings/orphans before insert (keep `icon` itself).
+    card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
+      if (n !== icon) {
+        try {
+          n.remove();
+        } catch (_err) {
+          // ignore
+        }
+      }
+    });
+    if (token) {
+      document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
+        if (n === icon) return;
+        if (n.dataset.feeToken !== token) return;
+        const host = n.closest?.(`[${CARD_DATA}]`);
+        if (host && host !== card && !card.contains(host) && !host.contains(card)) return;
+        try {
+          n.remove();
+        } catch (_err) {
+          // ignore
+        }
+      });
+    }
 
     if (pos.enabled) {
       ensureCardPositioning(card);
@@ -2639,15 +2767,10 @@
   }
 
   function applyOffsetToAllIcons() {
-    const pos = getActiveBadgePosition();
-    // Mode switch default↔absolute needs remount for Tax placement restore.
-    if (!pos.enabled) {
-      remountAllBadgesForPosition();
-      return;
-    }
-    document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => {
-      applyBadgeOffset(icon);
-    });
+    // 0.4.15: NEVER CSS-only move for mode switch — always remount once.
+    // CSS-only left a Tax-mounted badge + absolute child = double on Debot.
+    remountAllBadgesForPosition();
+    dedupeBadgesByToken();
   }
 
   function remountAllBadgesForPosition() {
@@ -2697,6 +2820,11 @@
       // ignore
     }
     document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => syncBadgeDragCursor(icon));
+    // Turning drag on must not leave stacked badges from prior abs experiments.
+    dedupeBadgesByToken();
+    if (badgeDragEdit && isTrenchListPage()) {
+      scheduleScan(50, { force: true, immediate: true });
+    }
   }
 
   function persistActiveSitePosition(pos) {
@@ -3026,20 +3154,7 @@
     }
 
     // Count badges for this card/token — more than one → force remount/dedup.
-    const inside = card.querySelectorAll(`[${ICON_DATA}="1"]`);
-    let multi = inside.length > 1;
-    if (!multi && token) {
-      let n = inside.length;
-      for (const sib of [card.previousElementSibling, card.nextElementSibling]) {
-        if (
-          sib instanceof HTMLElement &&
-          (sib.dataset?.[ICON_MARK] === "1" || sib.getAttribute?.(ICON_DATA) === "1")
-        ) {
-          n += 1;
-        }
-      }
-      multi = n > 1;
-    }
+    const multi = countBadgesNearCard(card, token) > 1;
 
     // In-place update when node still valid AND placement mode matches AND single badge.
     const existing =
@@ -3408,6 +3523,18 @@
    */
   function placeDebotIcon(target, icon) {
     const kind = target?.dataset?.flapMount || "";
+    // Never leave an older badge next to the new mount point.
+    if (target && target.querySelectorAll) {
+      target.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
+        if (n !== icon) {
+          try {
+            n.remove();
+          } catch (_err) {
+            // ignore
+          }
+        }
+      });
+    }
 
     if (kind === "buy") {
       const buyWrap =
