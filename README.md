@@ -142,15 +142,16 @@ FlapFeeInfo\extension
 - 等列表加载完或刷新页面  
 - 确认 token 尾号是 `8888` 或 `7777`  
 - 扩展已重新加载，且页面已硬刷新  
-- Debot / Gungnir **从 meme 点进 token 详情**：请使用 **0.4.32+**  
+- Debot / Gungnir **从 meme 点进 token 详情**：请使用 **0.4.33+**  
 
 ### 2b. 已更新但仍像旧版
 
-- 产品站 / Releases 请确认 zip 文件名版本号 ≥ 你要的版本（例如 `FlapFeeInfo-extension-v0.4.32.zip`）  
+- 产品站 / Releases 请确认 zip 文件名版本号 ≥ 你要的版本（例如 `FlapFeeInfo-extension-v0.4.33.zip`）  
 - `chrome://extensions` 卡片上的版本号必须一致；改文件后要点 **重新加载**  
 - Debot 页必须 **硬刷新**（Ctrl+F5），否则仍跑旧 content script  
 - Debot 路径 `249218_0x…`：0.4.28+ 已归一化  
-- **GMGN 回 home 卡顿**：0.4.32 缓存首帧 6–8 卡 + 6ms 时间片，禁止回列表整页 Tax/leaf 深扫  
+- **Debot 登录后 K 线无徽章 / 回战壕位置乱**：0.4.33 顶栏 short-CA 强化挂载 + 回列表改回 metrics/Tax 正确挂点  
+- **GMGN 回 home 卡顿**：0.4.32–0.4.33 缓存首帧 + 首帧禁止叠加强制全扫  
 
 ### 3. 有 fee 但没有 🪙BNB / 🪙USD1
 

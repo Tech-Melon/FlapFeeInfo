@@ -2,8 +2,10 @@
   const DEFAULT_API_BASE = "https://flap-fee-info.tech-melon.workers.dev";
   const TOKEN_RE = /0x[a-fA-F0-9]{40}/;
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
-  const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
-  const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
+  const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
+  const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
+  // 0.4.33: Debot login K-line badge + list-return mount pos; GMGN return first-frame fast-only.
   // 0.4.32: GMGN token→home — cache-first 6–8 card burst + 6ms slices (kill ~0.8s longtask).
   // 0.4.31: js-mcp report — Debot token dwell jank + 0 badge; GMGN return still ~0.6–0.8s.
   // 0.4.30: token↔list return — viewport-first soft rescan (jank↓, first-paint still snappy).
@@ -102,9 +104,9 @@
   // Fast-paint burst budget right after list settle (ms / cards).
   const SPA_LIST_RETURN_FAST_MS = 6;
   const SPA_LIST_RETURN_FAST_CARDS = 8;
-  // Dedicated header paint watch after meme→token SPA (ms).
-  const DEBOT_TOKEN_HEADER_WATCH_MS = 10000;
-  const DEBOT_TOKEN_HEADER_TICK_MS = 600;
+  // Dedicated header paint watch after meme→token SPA (ms). Logged-in DOM is slower.
+  const DEBOT_TOKEN_HEADER_WATCH_MS = 18000;
+  const DEBOT_TOKEN_HEADER_TICK_MS = 500;
   // Always-on guardian base interval; backs off while header missing (0.4.31).
   const DEBOT_TOKEN_GUARDIAN_MS = 1200;
   // After user clicks a /token/ link, keep header tryPaint this long (ms).
@@ -1224,8 +1226,8 @@
   }
 
   /**
-   * Paint list badge using only in-memory fee entry (no DOM quote scan / Tax search).
-   * List-return speed path — may use absolute top-left when trench abs enabled.
+   * Paint list badge from in-memory fee entry.
+   * MUST use site natural mount (Debot metrics / GMGN Tax) — blind card.append 会位置乱飞.
    */
   function paintListCardFromCacheFast(card, token, entry) {
     if (!(card instanceof HTMLElement) || !token || !entry) return false;
@@ -1244,22 +1246,26 @@
 
       let icon = card.querySelector(`[${ICON_DATA}="1"]`);
       if (icon && icon.dataset.feeToken === token) {
-        icon.textContent = label;
-        icon.title = `${title}${token}`;
-        icon.className = className;
-        icon.dataset.feeSig = label;
-        return true;
+        const er = icon.getBoundingClientRect();
+        if (er.width >= 2 && er.height >= 2) {
+          icon.textContent = label;
+          icon.title = `${title}${token}`;
+          icon.className = className;
+          icon.dataset.feeSig = label;
+          return true;
+        }
       }
 
-      // Wipe leftovers on this card only
-      card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
-        try {
-          n.remove();
-        } catch (_err) {
-          // ignore
-        }
-      });
+      // Prefer full renderMode so Debot metrics / GMGN Tax placement is correct.
+      // (0.4.32 blind append caused 战壕徽章位置乱飞)
+      const ok = renderMode(card, token, entry, { forceRemount: true });
+      if (ok) return true;
 
+      // Absolute trench coords only when user enabled — never invent random top-left.
+      const pos = getActiveBadgePosition(card);
+      if (!pos.enabled) return false;
+
+      removeAllBadgesForCard(card, token);
       icon = document.createElement("span");
       icon.dataset[ICON_MARK] = "1";
       icon.dataset.feeToken = token;
@@ -1267,18 +1273,9 @@
       icon.textContent = label;
       icon.title = `${title}${token}`;
       icon.className = className;
-
-      const pos = getActiveBadgePosition(card);
-      if (pos.enabled) {
-        ensureCardPositioning(card);
-        card.appendChild(icon);
-        applyAbsoluteBadgeStyles(icon, pos.x, pos.y);
-      } else {
-        // Natural list mount without Tax search: append into card (flex rows tolerate it).
-        clearAbsoluteBadgeStyles(icon);
-        icon.dataset.feePosMode = "default";
-        card.appendChild(icon);
-      }
+      ensureCardPositioning(card);
+      card.appendChild(icon);
+      applyAbsoluteBadgeStyles(icon, pos.x, pos.y);
       return true;
     } catch (_err) {
       return false;
@@ -1767,7 +1764,7 @@
           pendingLightScan = false;
         }
 
-        // List-return: cache-first burst (no Tax search / no deep extract).
+        // List-return: cache-first burst with correct site mounts.
         if (listReturn || isSpaListReturnSoft()) {
           fastPaintListReturnViewport();
           if (index > 0 && shouldCancelSpaListProgressive()) {
@@ -1783,13 +1780,23 @@
             maybeScheduleDebotHeaderFullScan("spa-progressive");
           }
         } else if (listReturn || isSpaListReturnSoft()) {
-          // After fast-paint, only small idle slices — never another huge immediate frame.
-          scheduleScan(0, {
-            force: true,
-            immediate: index === 0,
-            light: false,
-            bypassForceGap: index === 0
-          });
+          // 0.4.33: first frame ONLY fastPaint (already ran) — no stacked full scan longtask.
+          // Subsequent passes: idle micro-slices only.
+          if (index === 0) {
+            scheduleScan(40, {
+              force: true,
+              immediate: false,
+              light: false,
+              bypassForceGap: true
+            });
+          } else {
+            scheduleScan(0, {
+              force: true,
+              immediate: false,
+              light: false,
+              bypassForceGap: true
+            });
+          }
         } else {
           scheduleScan(0, {
             force: true,
@@ -1938,23 +1945,14 @@
 
     let header = findDebotTokenHeaderCard();
     if (!header) {
-      // Last resort: pure short CA leaf / its parent row near top.
-      try {
-        const leaves = document.querySelectorAll("span, a, div");
-        for (let i = 0; i < Math.min(leaves.length, 280); i += 1) {
-          const el = leaves[i];
-          const t = (el.textContent || "").trim();
-          if (!TARGET_SHORT_TOKEN_RE.test(t) || t.length > 22) continue;
-          if (el.children && el.children.length > 2) continue;
-          if (!tokenMatchesShort(urlTok, t)) continue;
-          const r = el.getBoundingClientRect();
-          if (r.top >= 0 && r.top < 200 && r.width > 0 && r.height > 0 && r.height <= 48) {
-            header = el.parentElement instanceof HTMLElement ? el.parentElement : el;
-            break;
-          }
-        }
-      } catch (_err) {
-        // ignore
+      // Logged-in Debot: header chrome denser — use top short leaf as mount host.
+      const topShort = findDebotTopShortLeaf(urlTok, document.body);
+      if (topShort) {
+        header =
+          (topShort.parentElement instanceof HTMLElement &&
+          topShort.parentElement.parentElement instanceof HTMLElement
+            ? topShort.parentElement
+            : topShort.parentElement) || topShort;
       }
     }
     if (!(header instanceof HTMLElement)) {
@@ -2020,40 +2018,88 @@
   }
 
   /**
+   * Find pure short-CA leaf matching token near top of viewport (logged-in Debot header).
+   * Scope: header first, then document top strip (login chrome adds extra nodes).
+   */
+  function findDebotTopShortLeaf(token, scope) {
+    const roots = [];
+    if (scope instanceof HTMLElement) roots.push(scope);
+    if (document.body) roots.push(document.body);
+    for (let ri = 0; ri < roots.length; ri += 1) {
+      const root = roots[ri];
+      const leaves = root.querySelectorAll
+        ? root.querySelectorAll("span, a, div, p, button")
+        : [];
+      const max = Math.min(leaves.length, ri === 0 ? 120 : 300);
+      for (let i = 0; i < max; i += 1) {
+        const el = leaves[i];
+        if (!(el instanceof HTMLElement)) continue;
+        // Prefer pure leaf text (length ≤22); also accept leaf with only short CA child text.
+        let t = (el.textContent || "").trim();
+        if (t.length > 28) continue;
+        if (!TARGET_SHORT_TOKEN_RE.test(t)) continue;
+        if (el.children && el.children.length > 3) continue;
+        if (token && !tokenMatchesShort(token, t.match(SHORT_TOKEN_RE)?.[0] || t)) continue;
+        try {
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0 || r.height > 48) continue;
+          if (r.top < 0 || r.top > 220) continue;
+          // Prefer the smallest leaf containing the short form.
+          return el;
+        } catch (_err) {
+          // ignore
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
    * Last-resort paint: insert badge after pure short CA leaf in token header.
-   * Bypasses metrics/buy mount discovery failures after SPA.
+   * Bypasses metrics/buy mount discovery failures after SPA / login chrome.
    */
   function forceAppendDebotHeaderBadge(header, token, entry) {
     if (!(header instanceof HTMLElement) || !entry || !token) return false;
     try {
-      const quoteSymbol = resolveQuoteSymbol(header, entry);
-      const { label, title, className } = computeBadgePresentation(entry, quoteSymbol);
+      // Prefer API quote — avoid expensive DOM quote walk on header SPA.
+      const q =
+        normalizeQuoteSymbol(entry.quote_symbol || "", { allowCjk: true }) ||
+        resolveQuoteSymbol(header, entry) ||
+        "BNB";
+      const { label, title, className } = computeBadgePresentation(entry, q);
       if (!label) return false;
 
       let short =
         findDebotShortAddressNode(header) ||
-        null;
-      if (!short) {
-        const leaves = header.querySelectorAll
-          ? header.querySelectorAll("span, a, div, p, button")
-          : [];
-        for (let i = 0; i < leaves.length; i += 1) {
-          const el = leaves[i];
-          const t = (el.textContent || "").trim();
-          if (!TARGET_SHORT_TOKEN_RE.test(t) || t.length > 22) continue;
-          if (el.children && el.children.length > 2) continue;
-          if (!tokenMatchesShort(token, t)) continue;
-          short = el;
-          break;
-        }
-      }
-      const anchor =
-        (short && short.parentElement instanceof HTMLElement ? short.parentElement : null) ||
+        findDebotTopShortLeaf(token, header) ||
+        findDebotTopShortLeaf(token, document.body);
+
+      const mountRow =
+        (short &&
+          (findDebotShortAddressRow(short.parentElement || short) ||
+            short.parentElement)) ||
         header;
+      const anchor = mountRow instanceof HTMLElement ? mountRow : header;
 
       // Remove old badges only on this anchor/header (keep other cards).
       removeAllBadgesForCard(header, token);
       if (anchor !== header) removeAllBadgesForCard(anchor, token);
+      // Also drop same-token orphans in top strip (login SPA leftovers).
+      try {
+        document.querySelectorAll(`[${ICON_DATA}="1"][data-fee-token="${token}"]`).forEach((n) => {
+          if (!(n instanceof HTMLElement)) return;
+          const r = n.getBoundingClientRect();
+          if (r.top >= 0 && r.top < 200) {
+            try {
+              n.remove();
+            } catch (_err) {
+              // ignore
+            }
+          }
+        });
+      } catch (_err) {
+        // ignore
+      }
 
       const icon = document.createElement("span");
       icon.dataset[ICON_MARK] = "1";
@@ -2064,10 +2110,19 @@
       icon.title = `${title}${token}`;
       icon.className = className;
 
-      if (short && short.parentElement) {
+      if (short && short.isConnected) {
+        // Place immediately after short CA leaf (user expects badge by address).
         short.insertAdjacentElement("afterend", icon);
       } else {
         anchor.append(icon);
+      }
+      if (short?.parentElement instanceof HTMLElement) {
+        short.parentElement.dataset[CARD_MARK] = token;
+        try {
+          short.parentElement.setAttribute(CARD_DATA, token);
+        } catch (_err) {
+          // ignore
+        }
       }
       anchor.dataset[CARD_MARK] = token;
       try {
@@ -3267,8 +3322,11 @@
     if (!shortAddress) return true;
     const short = String(shortAddress).toLowerCase();
     const full = String(fullToken).toLowerCase();
-    const parts = short.split(/\.{2,}/);
-    if (parts.length < 2) return full.includes(short.replace(/\./g, ""));
+    // Support "..." and Unicode ellipsis "…" (Debot logged-in header).
+    const parts = short.split(/(?:\.{2,}|\u2026|\u22ef)/);
+    if (parts.length < 2) {
+      return full.includes(short.replace(/\.|\u2026|\u22ef/g, ""));
+    }
     const head = parts[0].replace(/^0x/, "");
     const tail = parts[parts.length - 1];
     return full.startsWith(`0x${head}`) && full.endsWith(tail);
