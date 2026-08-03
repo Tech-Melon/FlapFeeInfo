@@ -284,6 +284,10 @@ body {
   pointer-events: none;
 }
 
+.theme-opt-row[hidden] {
+  display: none !important;
+}
+
 .offset-row {
   display: flex;
   align-items: center;

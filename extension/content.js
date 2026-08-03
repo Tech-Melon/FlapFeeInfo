@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.19: light theme always solid dark chip (no bg toggle); dark keeps optional solid.
   // 0.4.18: default classic translucent; optional solid dark card bg; no hybrid gradient.
   // 0.4.17: dark theme optional transparent bg toggle.
   // 0.4.16: dark theme solid #000 chip bg for contrast on colorful cards.
@@ -3141,10 +3142,14 @@
     const poolLine = quoteSymbol ? `底池: ${quoteSymbol}\n` : "";
     const title = `${poolLine}${entry.title || meta.title}\n`;
     const theme = badgeTheme === "light" ? "light" : "dark";
+    // Light: never translucent / never honor solidDark toggle — CSS forces solid dark chip.
+    // Dark: optional solid-dark class when user checks 深色背景.
+    const solidDarkClass =
+      theme === "dark" && badgeSolidDark ? "gmgn-fee-mode-icon--solid-dark" : "";
     const className = [
       "gmgn-fee-mode-icon",
       `gmgn-fee-mode-icon--theme-${theme}`,
-      theme === "dark" && badgeSolidDark ? "gmgn-fee-mode-icon--solid-dark" : "",
+      solidDarkClass,
       `gmgn-fee-mode-icon--${meta.className}`,
       `gmgn-fee-mode-icon--${siteStrategy.name}`,
       segmentCount >= 3 ? "gmgn-fee-mode-icon--wide" : "",

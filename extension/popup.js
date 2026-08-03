@@ -270,10 +270,14 @@
     themeLight.classList.toggle("is-active", t === "light");
     themeDark.setAttribute("aria-pressed", t === "dark" ? "true" : "false");
     themeLight.setAttribute("aria-pressed", t === "light" ? "true" : "false");
-    // 深色背景 only applies to dark theme
-    solidDarkRow?.classList.toggle("is-disabled", t !== "dark");
+    // 深色背景：仅深色主题可调；浅色主题隐藏（固定实心深底，避免透明看不清字）
+    const solidOnlyDark = t === "dark";
+    if (solidDarkRow) {
+      solidDarkRow.classList.toggle("is-disabled", !solidOnlyDark);
+      solidDarkRow.hidden = !solidOnlyDark;
+    }
     if (solidDarkToggle) {
-      solidDarkToggle.disabled = t !== "dark";
+      solidDarkToggle.disabled = !solidOnlyDark;
     }
     if (themeHint) {
       themeHint.textContent =
@@ -281,7 +285,7 @@
           ? solidDark
             ? "深色 + 深色背景：实心深底（贴近卡片底色），彩色字边。"
             : "深色默认：半透明色底 + 彩色字（经典样式，无渐变）。"
-          : "浅色：实心浅底，对比更强。";
+          : "浅色：固定实心深底 + 彩色字（不可调透明，保证清晰）。";
     }
   }
 

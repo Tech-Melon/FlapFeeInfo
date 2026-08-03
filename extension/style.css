@@ -250,59 +250,51 @@ body .gmgn-fee-mode-icon {
   color: #d0d5dd;
 }
 
-/* ---------- Theme: light — solid soft chips, higher contrast on dark pages ---------- */
+/*
+ * Theme: light — always solid dark chip (no bg toggle, no translucent).
+ * Pastel/transparent on busy cards washes out text; force card-like #0d1110.
+ */
 .gmgn-fee-mode-icon--theme-light {
+  background-color: #0d1110 !important;
+  background-image: none !important;
   border-width: 1px;
   border-style: solid;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
 }
 
 .gmgn-fee-mode-icon--theme-light.gmgn-fee-mode-icon--holder {
-  background: linear-gradient(180deg, #f0fdf6 0%, #dcfce7 100%);
-  border-color: rgba(5, 150, 105, 0.35);
-  box-shadow: 0 1px 2px rgba(6, 95, 70, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.6) inset;
-  color: #047857;
+  border-color: rgba(39, 233, 132, 0.55);
+  color: #27e984;
 }
 
 .gmgn-fee-mode-icon--theme-light.gmgn-fee-mode-icon--gift {
-  background: linear-gradient(180deg, #fffbeb 0%, #fef3c7 100%);
-  border-color: rgba(217, 119, 6, 0.35);
-  box-shadow: 0 1px 2px rgba(146, 64, 14, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.65) inset;
-  color: #b45309;
+  border-color: rgba(255, 202, 69, 0.55);
+  color: #ffca45;
 }
 
 .gmgn-fee-mode-icon--theme-light.gmgn-fee-mode-icon--creator {
-  background: linear-gradient(180deg, #eff6ff 0%, #dbeafe 100%);
-  border-color: rgba(37, 99, 235, 0.35);
-  box-shadow: 0 1px 2px rgba(30, 64, 175, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.65) inset;
-  color: #1d4ed8;
+  border-color: rgba(98, 173, 255, 0.55);
+  color: #62adff;
 }
 
 .gmgn-fee-mode-icon--theme-light.gmgn-fee-mode-icon--burn {
-  background: linear-gradient(180deg, #fff7ed 0%, #ffedd5 100%);
-  border-color: rgba(234, 88, 12, 0.35);
-  box-shadow: 0 1px 2px rgba(154, 52, 18, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.65) inset;
-  color: #c2410c;
+  border-color: rgba(255, 122, 89, 0.55);
+  color: #ff7a59;
 }
 
 .gmgn-fee-mode-icon--theme-light.gmgn-fee-mode-icon--lp {
-  background: linear-gradient(180deg, #f0f9ff 0%, #e0f2fe 100%);
-  border-color: rgba(14, 165, 233, 0.4);
-  box-shadow: 0 1px 2px rgba(7, 89, 133, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.65) inset;
-  color: #0369a1;
+  border-color: rgba(56, 189, 248, 0.55);
+  color: #38bdf8;
 }
 
 .gmgn-fee-mode-icon--theme-light.gmgn-fee-mode-icon--hybrid {
-  background: linear-gradient(90deg, #ecfdf5 0%, #eff6ff 50%, #fffbeb 100%);
-  border-color: rgba(100, 116, 139, 0.35);
-  box-shadow: 0 1px 2px rgba(51, 65, 85, 0.1), 0 0 0 1px rgba(255, 255, 255, 0.7) inset;
-  color: #334155;
+  border-color: rgba(243, 246, 251, 0.35);
+  color: #f3f6fb;
 }
 
 .gmgn-fee-mode-icon--theme-light.gmgn-fee-mode-icon--unknown {
-  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
-  border-color: rgba(100, 116, 139, 0.35);
-  box-shadow: 0 1px 2px rgba(51, 65, 85, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.7) inset;
-  color: #64748b;
+  border-color: rgba(208, 213, 221, 0.4);
+  color: #d0d5dd;
 }
 
 /* Legacy badges without theme class → treat as dark */
