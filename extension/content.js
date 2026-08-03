@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.24: dedupe per card only — 三栏同 CA 各显徽章 (fix按 token 全页只留 1 个).
   // 0.4.23: popup EN/ZH + display prefs collapsed by default.
   // 0.4.22: K-line side 战壕 rows share home trench absolute coords (header stays Tax).
   // 0.4.21: K-line side board — prioritize unpainted, higher light caps, light continue.
@@ -1345,7 +1346,7 @@
       scheduleBatchFlush({ immediate: true });
     }
 
-    // Global safety net: same feeToken must never have 2 icons on page.
+    // Per-card safety net only (same CA in 三栏 = multiple badges OK).
     dedupeBadgesByToken();
 
     debugInfo("scan", {
@@ -1366,17 +1367,40 @@
     });
   }
 
+  function badgeDedupeScore(el) {
+    let s = 0;
+    if (el.dataset.feePosMode === "absolute") s += 4;
+    if (el.closest?.(`[${CARD_DATA}]`)) s += 2;
+    if (el.isConnected) s += 1;
+    return s;
+  }
+
+  function keepBestBadgeOnly(icons) {
+    if (!icons || icons.length <= 1) return;
+    icons.sort((a, b) => badgeDedupeScore(b) - badgeDedupeScore(a));
+    for (let i = 1; i < icons.length; i += 1) {
+      try {
+        icons[i].remove();
+      } catch (_err) {
+        // ignore
+      }
+    }
+  }
+
   /**
-   * Keep at most one badge per feeToken. Prefer icon inside a marked card.
-   * Fixes Debot double-paint when drag/absolute left an orphan + remount.
+   * Keep at most one badge per marked card (or per visual host).
+   * Same feeToken on DIFFERENT cards (新创建/即将打满/已开盘) must all remain.
+   * Only collapses true double-mount on the same card / same pixel stack.
    */
   function dedupeBadgesByToken() {
-    const byToken = new Map();
+    /** @type {Map<Element, HTMLElement[]>} */
+    const byCard = new Map();
+    /** @type {HTMLElement[]} */
+    const orphans = [];
+
     document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => {
       if (!(icon instanceof HTMLElement)) return;
-      const tok = icon.dataset.feeToken || "";
-      if (!tok) {
-        // Orphan without token — remove.
+      if (!icon.dataset.feeToken) {
         try {
           icon.remove();
         } catch (_err) {
@@ -1384,30 +1408,38 @@
         }
         return;
       }
-      if (!byToken.has(tok)) byToken.set(tok, []);
-      byToken.get(tok).push(icon);
-    });
-    byToken.forEach((icons) => {
-      if (icons.length <= 1) return;
-      // Prefer: absolute on card > inside marked card > first
-      icons.sort((a, b) => {
-        const score = (el) => {
-          let s = 0;
-          if (el.dataset.feePosMode === "absolute") s += 4;
-          if (el.closest?.(`[${CARD_DATA}]`)) s += 2;
-          if (el.isConnected) s += 1;
-          return s;
-        };
-        return score(b) - score(a);
-      });
-      for (let i = 1; i < icons.length; i += 1) {
-        try {
-          icons[i].remove();
-        } catch (_err) {
-          // ignore
-        }
+      let host = icon.closest?.(`[${CARD_DATA}]`);
+      if (!(host instanceof HTMLElement)) {
+        const next = icon.nextElementSibling;
+        const prev = icon.previousElementSibling;
+        if (next instanceof HTMLElement && next.dataset?.[CARD_MARK]) host = next;
+        else if (prev instanceof HTMLElement && prev.dataset?.[CARD_MARK]) host = prev;
+      }
+      if (host instanceof HTMLElement) {
+        if (!byCard.has(host)) byCard.set(host, []);
+        byCard.get(host).push(icon);
+      } else {
+        orphans.push(icon);
       }
     });
+
+    byCard.forEach((icons) => keepBestBadgeOnly(icons));
+
+    // Orphans (no card host): only merge true overlaps (same token + same screen cell).
+    /** @type {Map<string, HTMLElement[]>} */
+    const orphanCells = new Map();
+    orphans.forEach((icon) => {
+      let key = icon.dataset.feeToken || "";
+      try {
+        const r = icon.getBoundingClientRect();
+        key = `${key}|${Math.round(r.top / 10)}|${Math.round(r.left / 10)}`;
+      } catch (_err) {
+        // keep token-only key
+      }
+      if (!orphanCells.has(key)) orphanCells.set(key, []);
+      orphanCells.get(key).push(icon);
+    });
+    orphanCells.forEach((icons) => keepBestBadgeOnly(icons));
   }
 
   function isResumeForceRemount() {
@@ -2920,7 +2952,8 @@
     const pos = getActiveBadgePosition(card);
     const token = icon.dataset.feeToken || card.dataset[CARD_MARK] || "";
 
-    // Defense: wipe any leftover siblings/orphans before insert (keep `icon` itself).
+    // Defense: wipe leftovers on THIS card only (keep `icon` itself).
+    // Do NOT remove same-token badges on other column cards (三栏重复 CA).
     card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
       if (n !== icon) {
         try {
@@ -2930,18 +2963,15 @@
         }
       }
     });
-    if (token) {
-      document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
-        if (n === icon) return;
-        if (n.dataset.feeToken !== token) return;
-        const host = n.closest?.(`[${CARD_DATA}]`);
-        if (host && host !== card && !card.contains(host) && !host.contains(card)) return;
+    for (const sib of [card.previousElementSibling, card.nextElementSibling]) {
+      if (!(sib instanceof HTMLElement) || sib === icon) continue;
+      if (sib.dataset?.[ICON_MARK] === "1" || sib.matches?.(`[${ICON_DATA}="1"]`)) {
         try {
-          n.remove();
+          sib.remove();
         } catch (_err) {
           // ignore
         }
-      });
+      }
     }
 
     if (pos.enabled) {
