@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.26: Debot SPA meme→token — header watch + div short-CA + Release zip.
   // 0.4.25: Debot SPA meme->token header badge (debot.ai + gungnir.bot).
   // 0.4.24: dedupe per card only — 三栏同 CA 各显徽章 (fix按 token 全页只留 1 个).
   // 0.4.23: popup EN/ZH + display prefs collapsed by default.
@@ -72,9 +73,12 @@
   // Token / K-line page: fewer passes, early-stop when header badge exists.
   const SPA_NAV_SCAN_OFFSETS_TOKEN_MS = [0, 500, 1300];
   // Debot SPA token detail mounts slowly — extra late passes (meme→token).
-  const SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS = [0, 400, 900, 1800, 3200, 5000];
+  const SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS = [0, 200, 500, 900, 1400, 2200, 3500, 5500, 8000, 12000];
+  // Dedicated header paint watch after meme→token SPA (ms). DOM often late.
+  const DEBOT_TOKEN_HEADER_WATCH_MS = 15000;
+  const DEBOT_TOKEN_HEADER_TICK_MS = 300;
   // Independent route poll — sites often capture native history before our wrap.
-  const ROUTE_POLL_MS = 500;
+  const ROUTE_POLL_MS = 400;
   // Expensive mark cleanup only every N scans (0.3.4 never re-extracted every tick).
   const CLEANUP_EVERY_N_SCANS = 10;
   // Console spam costs main-thread time on Debot/GMGN — off by default.
@@ -228,6 +232,9 @@
   let lastObserverRoots = [];
   /** Next scan only walks dialog + side-board roots (skip K-line header thrash). */
   let pendingLightScan = false;
+  /** Debot/Gungnir: force-paint token header until success or timeout after SPA. */
+  let debotTokenHeaderWatchId = null;
+  let debotTokenHeaderWatchUntil = 0;
 
   hydratePersistentCache();
   hydrateDisplayPrefs();
@@ -425,24 +432,27 @@
 
   /**
    * Stable top header strip on Debot/Gungnir token page (name + short CA + badge row).
-   * Cached per route via scanGeneration of roots — recompute each call (SPA safe).
+   * js-mcp 0.4.26: pure short CA is often a leaf DIV (not span/a), row height ~14–20px.
    */
   function findDebotTokenHeaderCard() {
     const urlTok = extractTokenFromUrl();
-    // 1) Short CA near top of viewport
+    // 1) Pure short CA leaf near top of viewport (textContent length ≤22)
     try {
       const body = document.body;
       if (!body) return null;
       const shorts = body.querySelectorAll("span, a, div, p, button");
       const topShorts = [];
-      const max = Math.min(shorts.length, 250);
+      const max = Math.min(shorts.length, 400);
       for (let i = 0; i < max; i += 1) {
         const el = shorts[i];
+        // Prefer pure leaf text — nested parents have long textContent and must be skipped.
         const t = (el.textContent || "").trim();
         if (!TARGET_SHORT_TOKEN_RE.test(t) || t.length > 22) continue;
+        // Skip containers that merely wrap the short CA plus other chrome.
+        if (el.children && el.children.length > 2) continue;
         const r = el.getBoundingClientRect();
-        if (r.width <= 0 || r.height <= 0 || r.height > 40) continue;
-        if (r.top < 0 || r.top > 160) continue;
+        if (r.width <= 0 || r.height <= 0 || r.height > 48) continue;
+        if (r.top < 0 || r.top > 200) continue;
         // Prefer short CA that matches URL token when known.
         if (urlTok && !tokenMatchesShort(urlTok, t)) continue;
         topShorts.push(el);
@@ -451,29 +461,32 @@
         topShorts.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
         const short = topShorts[0];
         let p = short;
-        for (let d = 0; p && d < 8; d += 1) {
+        for (let d = 0; p && d < 10; d += 1) {
           if (!(p instanceof HTMLElement)) break;
           if (p === document.body || p === document.documentElement) break;
           const r = p.getBoundingClientRect();
-          // Header bar: wide, short, near top
+          // Header bar / short-CA row: wide enough, not full viewport shell.
+          // Height can be ~18–20 (title row) up to ~80 (with avatar).
           if (
-            r.width >= 280 &&
+            r.width >= 200 &&
             r.width < window.innerWidth * 0.98 &&
-            r.height >= 28 &&
-            r.height <= 100 &&
+            r.height >= 14 &&
+            r.height <= 120 &&
             r.top >= 0 &&
-            r.top < 180
+            r.top < 220
           ) {
-            return p;
+            // Prefer the flex row that holds short CA (not the 1460px full strip if too tall alone).
+            if (r.height <= 56 || d >= 2) return p;
           }
           p = p.parentElement;
         }
+        // Ideal mount: parent row of pure short CA leaf.
         return short.parentElement instanceof HTMLElement ? short.parentElement : short;
       }
     } catch (_err) {
       // fall through
     }
-    // 2) Stats panel with 价格+流动性
+    // 2) Stats panel with 价格+流动性 (right of header strip)
     const stats = findDebotTokenPageMount(document);
     if (stats) {
       let p = stats;
@@ -780,22 +793,9 @@
         return false;
       }
       if (isDebotTokenPage()) {
-        // Must be header strip (top of viewport), not a residual meme card still in DOM.
-        const header = findDebotTokenHeaderCard();
-        if (header && header.querySelector(`[${ICON_DATA}="1"]`)) return true;
-        if (urlTok) {
-          const icons = document.querySelectorAll(
-            `[${ICON_DATA}="1"][data-fee-token="${urlTok}"]`
-          );
-          for (let i = 0; i < icons.length; i += 1) {
-            const ir = icons[i].getBoundingClientRect();
-            if (ir.width >= 2 && ir.height >= 2 && ir.top >= 0 && ir.top < 200) {
-              // Exclude badges deep inside scrollable meme columns
-              if (ir.left < window.innerWidth * 0.92) return true;
-            }
-          }
-        }
-        return false;
+        // STRICT: only a badge inside the header strip counts as settled.
+        // Ghost meme-list cards of the same CA must NOT cancel SPA progressive.
+        return hasDebotTokenHeaderBadge();
       }
       return false;
     } catch (_err) {
@@ -1129,6 +1129,7 @@
     cardTokenCache = new WeakMap();
     scanRootsCache = { at: 0, roots: [] };
     taxRateLabelCache = { el: null, at: 0 };
+    stopDebotTokenHeaderWatch();
 
     // Cheap full reset of OUR marks only (including body/chakra shells from token page).
     resetOurDomMarks();
@@ -1145,6 +1146,7 @@
         if (!isTabVisible() || !isExtensionContextValid()) return;
 
         // Token page already has a badge from an earlier pass — skip remaining force work.
+        // Debot: only cancel when HEADER badge exists (not ghost list).
         if (index > 0 && shouldCancelSpaProgressive()) {
           clearSpaNavScanTimers();
           spaQuietUntil = 0;
@@ -1163,8 +1165,15 @@
         }
         ensureDocumentObserver();
         lastScanAt = 0;
+        // Debot token SPA: never light-scan during progressive (need full header inject).
+        if (isDebotTokenPage()) pendingLightScan = false;
         // Only first pass immediate — later passes yield to host chart/list paint (js-mcp).
-        scheduleScan(0, { force: true, immediate: index === 0 });
+        scheduleScan(0, { force: true, immediate: index === 0 || isDebotTokenPage() });
+
+        // Debot: also try dedicated header paint each progressive tick.
+        if (isDebotTokenPage()) {
+          tryPaintDebotTokenHeader("spa-progressive");
+        }
 
         // After first paint on token page, cancel pending progressive only if header settled.
         // Debot SPA: DOM late — do not cancel after 80ms (was killing remaining passes).
@@ -1178,6 +1187,172 @@
       }, base + offset);
       spaNavScanTimers.push(timerId);
     });
+
+    // Debot/Gungnir meme→token: arm continuous header watch (DOM often late after SPA).
+    if (isDebotTokenPage()) {
+      armDebotTokenHeaderWatch();
+    }
+  }
+
+  function stopDebotTokenHeaderWatch() {
+    if (debotTokenHeaderWatchId) {
+      window.clearInterval(debotTokenHeaderWatchId);
+      debotTokenHeaderWatchId = null;
+    }
+    debotTokenHeaderWatchUntil = 0;
+  }
+
+  function armDebotTokenHeaderWatch() {
+    stopDebotTokenHeaderWatch();
+    if (!isDebotTokenPage()) return;
+    const urlTok = extractTokenFromUrl();
+    if (!urlTok) return; // non-8888/7777 — nothing to paint
+    debotTokenHeaderWatchUntil = Date.now() + DEBOT_TOKEN_HEADER_WATCH_MS;
+    // Immediate attempt
+    tryPaintDebotTokenHeader("watch-arm");
+    debotTokenHeaderWatchId = window.setInterval(() => {
+      if (!isExtensionContextValid() || !isTabVisible()) {
+        stopDebotTokenHeaderWatch();
+        return;
+      }
+      if (!isDebotTokenPage() || Date.now() > debotTokenHeaderWatchUntil) {
+        stopDebotTokenHeaderWatch();
+        return;
+      }
+      if (hasDebotTokenHeaderBadge()) {
+        stopDebotTokenHeaderWatch();
+        return;
+      }
+      tryPaintDebotTokenHeader("watch-tick");
+      // Also nudge a full (non-light) scan so queue/API path runs.
+      pendingLightScan = false;
+      scheduleScan(0, { force: true, immediate: true });
+    }, DEBOT_TOKEN_HEADER_TICK_MS);
+  }
+
+  /** True only if badge sits on Debot token header strip (not meme list residual). */
+  function hasDebotTokenHeaderBadge() {
+    try {
+      const header = findDebotTokenHeaderCard();
+      if (header) {
+        const icon =
+          header.querySelector(`[${ICON_DATA}="1"]`) ||
+          (header.parentElement && header.parentElement.querySelector(`[${ICON_DATA}="1"]`));
+        if (icon) {
+          const r = icon.getBoundingClientRect();
+          // Must be on/near the header strip, not a deep list residual contained by a huge shell.
+          if (r.width >= 2 && r.height >= 2 && r.top >= 0 && r.top < 200) {
+            // Reject badges inside tall list cards still under a page shell.
+            const listCard = icon.closest?.(".MuiCard-root, .MuiPaper-root.MuiCard-root");
+            if (!listCard) return true;
+            const lr = listCard.getBoundingClientRect();
+            // Real list cards are tall; header mounts are short.
+            if (lr.height < 120) return true;
+          }
+        }
+      }
+      const urlTok = extractTokenFromUrl();
+      if (!urlTok) return false;
+      // Badge next to pure short CA in top bar (js-mcp: parent stack ~y=120).
+      const icons = document.querySelectorAll(
+        `[${ICON_DATA}="1"][data-fee-token="${urlTok}"]`
+      );
+      for (let i = 0; i < icons.length; i += 1) {
+        const icon = icons[i];
+        const listCard = icon.closest?.(".MuiCard-root, .MuiPaper-root.MuiCard-root");
+        if (listCard) {
+          const lr = listCard.getBoundingClientRect();
+          if (lr.height >= 120) continue;
+        }
+        const r = icon.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2 || r.top < 0 || r.top >= 160) continue;
+        // Prefer icons whose nearby text contains matching short CA.
+        const host = icon.parentElement;
+        const hostText = (host?.textContent || "").slice(0, 80);
+        const shortHit = hostText.match(SHORT_TOKEN_RE);
+        if (shortHit && tokenMatchesShort(urlTok, shortHit[0])) return true;
+        // Or icon is in top strip with flapMount token-header/stats
+        const mount = icon.closest?.("[data-flap-mount]");
+        if (mount && /token-header|token-stats/.test(mount.dataset.flapMount || "")) return true;
+      }
+    } catch (_err) {
+      return false;
+    }
+    return false;
+  }
+
+  /**
+   * Direct paint path for Debot/Gungnir token header (bypasses candidate starvation).
+   * @returns {boolean} true if badge painted or queued with mount ready
+   */
+  function tryPaintDebotTokenHeader(reason) {
+    if (!isDebotTokenPage() || !isExtensionContextValid()) return false;
+    const urlTok = extractTokenFromUrl();
+    if (!urlTok) return false;
+    if (hasDebotTokenHeaderBadge()) return true;
+
+    let header = findDebotTokenHeaderCard();
+    if (!header) {
+      // Last resort: pure short CA leaf / its parent row near top.
+      try {
+        const leaves = document.querySelectorAll("span, a, div");
+        for (let i = 0; i < Math.min(leaves.length, 400); i += 1) {
+          const el = leaves[i];
+          const t = (el.textContent || "").trim();
+          if (!TARGET_SHORT_TOKEN_RE.test(t) || t.length > 22) continue;
+          if (el.children && el.children.length > 2) continue;
+          if (!tokenMatchesShort(urlTok, t)) continue;
+          const r = el.getBoundingClientRect();
+          if (r.top >= 0 && r.top < 200 && r.width > 0 && r.height > 0 && r.height <= 48) {
+            header = el.parentElement instanceof HTMLElement ? el.parentElement : el;
+            break;
+          }
+        }
+      } catch (_err) {
+        // ignore
+      }
+    }
+    if (!(header instanceof HTMLElement)) return false;
+
+    // Prefer the compact short-CA row as card (stable mount for token-header).
+    try {
+      const short =
+        findDebotShortAddressNode(header) ||
+        (TARGET_SHORT_TOKEN_RE.test((header.textContent || "").trim()) ? header : null);
+      if (short) {
+        const row = findDebotShortAddressRow(header) || short.parentElement || short;
+        if (row instanceof HTMLElement) {
+          const rr = row.getBoundingClientRect();
+          if (rr.width >= 80 && rr.height >= 12 && rr.height <= 80) header = row;
+        }
+      }
+    } catch (_err) {
+      // keep header as-is
+    }
+
+    // Mark and paint
+    header.dataset[CARD_MARK] = urlTok;
+    try {
+      header.setAttribute(CARD_DATA, urlTok);
+    } catch (_err) {
+      // ignore
+    }
+
+    const entry = resolveEntry(urlTok);
+    if (entry) {
+      const ok = renderMode(header, urlTok, entry, { forceRemount: true });
+      if (ok) {
+        debugInfo("debot:header-paint", {
+          reason,
+          token: urlTok.slice(0, 12),
+          settled: hasDebotTokenHeaderBadge()
+        });
+      }
+      return !!ok;
+    }
+    queueToken(urlTok);
+    scheduleBatchFlush({ immediate: true, delayMs: 0 });
+    return false;
   }
 
   /** Keep a live MutationObserver on documentElement (roots may detach after SPA). */
@@ -1343,8 +1518,14 @@
     scanGeneration += 1;
 
     // Capture before getCandidateNodes consumes pendingLightScan.
-    const lightScan =
+    // Debot token SPA: never light-scan until HEADER badge is real (ghost list must not starve).
+    let lightScan =
       pendingLightScan || (isTokenPageSettledWithBadge() && isTokenDetailRoute());
+    if (isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge()) {
+      lightScan = false;
+      pendingLightScan = false;
+      tryPaintDebotTokenHeader("scan-pre");
+    }
     const seenCards = new Set();
     const nodes = siteStrategy.getCandidateNodes();
     let touched = 0;
@@ -1927,8 +2108,14 @@
       }
     } else if (host.endsWith("debot.ai") || host.endsWith("gungnir.bot")) {
       if (isDebotTokenPage()) {
+        // Header strip first (SPA meme→token — MuiCards may be 0).
+        const header = findDebotTokenHeaderCard();
+        if (header instanceof HTMLElement) roots.push(header);
         const mount = findDebotTokenPageMount(document.body);
-        if (mount) roots.push(mount.closest?.(".MuiBox-root") || mount);
+        if (mount) {
+          const box = mount.closest?.(".MuiBox-root") || mount;
+          if (box instanceof HTMLElement && !roots.includes(box)) roots.push(box);
+        }
       }
       // 0.4.14: include 新创建 (left column). Do NOT require r.left > 80.
       document.querySelectorAll(".MuiCard-root, div.MuiPaper-root.MuiCard-root").forEach((el) => {
@@ -2116,17 +2303,24 @@
         if (/flap\.sh|bscscan|etherscan/i.test(href)) addNode(n, 0);
         else addNode(n, 1);
       });
-      // Short CA text in compact leaves (raise cap on light — virtual list new rows)
+      // Short CA text in compact leaves (raise cap on light — virtual list new rows).
+      // Debot/Gungnir: pure short CA is often a leaf DIV (js-mcp), not only a/span.
       const leafBudget = lightOnly ? LIGHT_MAX_CANDIDATES : MAX_CANDIDATES_PER_SCAN;
       if (inView.length < leafBudget) {
-        const leaves = root.querySelectorAll("a, span");
-        const maxCheck = Math.min(leaves.length, lightOnly ? 400 : 200);
+        const hn = location.hostname || "";
+        const debotHost = hn.endsWith("debot.ai") || hn.endsWith("gungnir.bot");
+        const leafSel = debotHost ? "a, span, div" : "a, span";
+        const leaves = root.querySelectorAll(leafSel);
+        const maxCheck = Math.min(leaves.length, lightOnly ? 500 : debotHost ? 350 : 200);
         for (let i = 0; i < maxCheck; i += 1) {
           if (inView.length + offscreen.length >= cap) break;
           const el = leaves[i];
-          const t = el.textContent || "";
+          const t = (el.textContent || "").trim();
           if (t.length > 24 || t.length < 8) continue;
-          if (TARGET_SHORT_TOKEN_RE.test(t)) addNode(el, 1);
+          if (!TARGET_SHORT_TOKEN_RE.test(t)) continue;
+          // Skip fat wrappers that only contain the short CA among other chrome.
+          if (el.tagName === "DIV" && el.children && el.children.length > 2) continue;
+          addNode(el, 1);
         }
       }
     };
