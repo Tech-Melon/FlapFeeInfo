@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.18: default classic translucent; optional solid dark card bg; no hybrid gradient.
   // 0.4.17: dark theme optional transparent bg toggle.
   // 0.4.16: dark theme solid #000 chip bg for contrast on colorful cards.
   // 0.4.15: hard double-badge dedupe (Debot drag); outermost card only; remount on abs.
@@ -79,9 +80,12 @@
   // Badge color theme: dark (default, for dark sites) | light (solid soft chips for contrast).
   const BADGE_THEME_KEY = "flapFeeInfo.badgeTheme.v1";
   const DEFAULT_BADGE_THEME = "dark";
-  // Dark theme only: true = translucent accent bg (old look); false = solid #000 chip (default).
-  const BADGE_DARK_TRANSPARENT_KEY = "flapFeeInfo.badgeDarkTransparent.v1";
-  const DEFAULT_BADGE_DARK_TRANSPARENT = false;
+  // Dark theme: solid card-like fill when true. Default false = classic translucent accents.
+  // v2 key (v1 transparent toggle inverted / renamed).
+  const BADGE_SOLID_DARK_KEY = "flapFeeInfo.badgeSolidDark.v1";
+  const DEFAULT_BADGE_SOLID_DARK = false;
+  // Legacy key — migrate once if present.
+  const BADGE_DARK_TRANSPARENT_KEY_LEGACY = "flapFeeInfo.badgeDarkTransparent.v1";
   // Per-site badge placement:
   // - enabled=false (default): natural mount beside Tax / 总税率
   // - enabled=true: position absolute vs card top-left (x,y) — same for all badges on site
@@ -167,8 +171,8 @@
   let displayPrefs = { ...DEFAULT_DISPLAY_PREFS };
   /** dark | light — badge chrome colors */
   let badgeTheme = DEFAULT_BADGE_THEME;
-  /** dark theme: translucent bg instead of solid black */
-  let badgeDarkTransparent = DEFAULT_BADGE_DARK_TRANSPARENT;
+  /** dark theme: solid card-like bg (#0d1110) when true */
+  let badgeSolidDark = DEFAULT_BADGE_SOLID_DARK;
   /** { gmgn|debot: { enabled, x, y } } */
   let badgeOffsets = {
     gmgn: { ...DEFAULT_BADGE_OFFSETS.gmgn },
@@ -209,7 +213,7 @@
   hydratePersistentCache();
   hydrateDisplayPrefs();
   hydrateBadgeTheme();
-  hydrateBadgeDarkTransparent();
+  hydrateBadgeSolidDark();
   hydrateBadgeOffsets();
   hydrateBadgeDragEdit();
   watchDisplayPrefs();
@@ -2477,14 +2481,26 @@
     }
   }
 
-  function hydrateBadgeDarkTransparent() {
+  function hydrateBadgeSolidDark() {
     if (!isExtensionContextValid() || !chrome.storage?.local) return;
     try {
-      chrome.storage.local.get([BADGE_DARK_TRANSPARENT_KEY], (items) => {
-        if (!isExtensionContextValid() || chrome.runtime.lastError) return;
-        badgeDarkTransparent = items?.[BADGE_DARK_TRANSPARENT_KEY] === true;
-        rerenderAllBadges();
-      });
+      chrome.storage.local.get(
+        [BADGE_SOLID_DARK_KEY, BADGE_DARK_TRANSPARENT_KEY_LEGACY],
+        (items) => {
+          if (!isExtensionContextValid() || chrome.runtime.lastError) return;
+          if (Object.prototype.hasOwnProperty.call(items || {}, BADGE_SOLID_DARK_KEY)) {
+            badgeSolidDark = items[BADGE_SOLID_DARK_KEY] === true;
+          } else if (
+            Object.prototype.hasOwnProperty.call(items || {}, BADGE_DARK_TRANSPARENT_KEY_LEGACY)
+          ) {
+            // Old "背景透明" checked → translucent (solid=false); unchecked → solid.
+            badgeSolidDark = items[BADGE_DARK_TRANSPARENT_KEY_LEGACY] !== true;
+          } else {
+            badgeSolidDark = DEFAULT_BADGE_SOLID_DARK;
+          }
+          rerenderAllBadges();
+        }
+      );
     } catch {
       // ignore
     }
@@ -3003,8 +3019,8 @@
           badgeTheme = normalizeBadgeTheme(changes[BADGE_THEME_KEY].newValue);
           dirty = true;
         }
-        if (changes[BADGE_DARK_TRANSPARENT_KEY]) {
-          badgeDarkTransparent = changes[BADGE_DARK_TRANSPARENT_KEY].newValue === true;
+        if (changes[BADGE_SOLID_DARK_KEY]) {
+          badgeSolidDark = changes[BADGE_SOLID_DARK_KEY].newValue === true;
           dirty = true;
         }
         if (changes[BADGE_OFFSET_KEY]) {
@@ -3128,9 +3144,7 @@
     const className = [
       "gmgn-fee-mode-icon",
       `gmgn-fee-mode-icon--theme-${theme}`,
-      theme === "dark" && badgeDarkTransparent
-        ? "gmgn-fee-mode-icon--dark-transparent"
-        : "",
+      theme === "dark" && badgeSolidDark ? "gmgn-fee-mode-icon--solid-dark" : "",
       `gmgn-fee-mode-icon--${meta.className}`,
       `gmgn-fee-mode-icon--${siteStrategy.name}`,
       segmentCount >= 3 ? "gmgn-fee-mode-icon--wide" : "",

@@ -130,150 +130,123 @@ body .gmgn-fee-mode-icon {
 }
 
 /*
- * Theme: dark (default)
- * Solid near-black chip base (#000 / #0a0a0a) so badges stay readable on
- * colorful Debot/GMGN cards (purple/green tiles). Accent stays on text + border.
+ * Theme: dark — DEFAULT = classic translucent accent (pre-0.4.16).
+ * No linear-gradient (avoids multi-tone smear on colorful cards).
+ * Optional solid dark fill via --solid-dark (popup: 深色背景).
  */
 .gmgn-fee-mode-icon--theme-dark {
-  background-color: #000000;
-  background-image: none;
+  background-image: none !important;
   border-width: 1px;
   border-style: solid;
-  /* Soft lift off busy card art */
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
 }
 
 .gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--holder {
-  background-color: #000000;
-  border-color: rgba(39, 233, 132, 0.55);
-  box-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.55),
-    0 0 0 1px rgba(39, 233, 132, 0.12),
-    0 0 10px rgba(39, 233, 132, 0.12);
-  color: #27e984;
-}
-
-.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--gift {
-  background-color: #000000;
-  border-color: rgba(255, 202, 69, 0.55);
-  box-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.55),
-    0 0 0 1px rgba(255, 202, 69, 0.12),
-    0 0 10px rgba(255, 202, 69, 0.12);
-  color: #ffca45;
-}
-
-.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--creator {
-  background-color: #000000;
-  border-color: rgba(98, 173, 255, 0.55);
-  box-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.55),
-    0 0 0 1px rgba(98, 173, 255, 0.12),
-    0 0 10px rgba(98, 173, 255, 0.12);
-  color: #62adff;
-}
-
-.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--burn {
-  background-color: #000000;
-  border-color: rgba(255, 122, 89, 0.55);
-  box-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.55),
-    0 0 0 1px rgba(255, 122, 89, 0.12),
-    0 0 10px rgba(255, 122, 89, 0.12);
-  color: #ff7a59;
-}
-
-.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--lp {
-  background-color: #000000;
-  border-color: rgba(56, 189, 248, 0.55);
-  box-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.55),
-    0 0 0 1px rgba(56, 189, 248, 0.12),
-    0 0 10px rgba(56, 189, 248, 0.12);
-  color: #38bdf8;
-}
-
-.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--hybrid {
-  background-color: #000000;
-  border-color: rgba(243, 246, 251, 0.35);
-  box-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.55),
-    0 0 0 1px rgba(255, 255, 255, 0.08),
-    0 0 10px rgba(148, 163, 184, 0.12);
-  color: #f3f6fb;
-}
-
-.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--unknown {
-  background-color: #000000;
-  border-color: rgba(208, 213, 221, 0.4);
-  box-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.55),
-    0 0 0 1px rgba(156, 163, 175, 0.12);
-  color: #d0d5dd;
-}
-
-/*
- * Dark + 背景透明：restore translucent accent fills (pre-0.4.16 look).
- * Toggle via popup → 背景透明.
- */
-.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--dark-transparent {
-  background-color: transparent;
-  box-shadow: none;
-}
-
-.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--dark-transparent.gmgn-fee-mode-icon--holder {
   background-color: rgba(37, 211, 102, 0.22);
-  background-image: none;
   border-color: currentColor;
   box-shadow: 0 0 0 1px rgba(37, 211, 102, 0.16), 0 0 8px rgba(37, 211, 102, 0.18);
   color: #27e984;
 }
 
-.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--dark-transparent.gmgn-fee-mode-icon--gift {
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--gift {
   background-color: rgba(255, 184, 52, 0.24);
   border-color: currentColor;
   box-shadow: 0 0 0 1px rgba(255, 184, 52, 0.16), 0 0 8px rgba(255, 184, 52, 0.2);
   color: #ffca45;
 }
 
-.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--dark-transparent.gmgn-fee-mode-icon--creator {
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--creator {
   background-color: rgba(74, 157, 255, 0.24);
   border-color: currentColor;
   box-shadow: 0 0 0 1px rgba(74, 157, 255, 0.16), 0 0 8px rgba(74, 157, 255, 0.2);
   color: #62adff;
 }
 
-.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--dark-transparent.gmgn-fee-mode-icon--burn {
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--burn {
   background-color: rgba(255, 99, 71, 0.22);
   border-color: currentColor;
   box-shadow: 0 0 0 1px rgba(255, 99, 71, 0.16), 0 0 8px rgba(255, 99, 71, 0.18);
   color: #ff7a59;
 }
 
-.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--dark-transparent.gmgn-fee-mode-icon--lp {
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--lp {
   background-color: rgba(56, 189, 248, 0.22);
   border-color: currentColor;
   box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.16), 0 0 8px rgba(56, 189, 248, 0.18);
   color: #38bdf8;
 }
 
-.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--dark-transparent.gmgn-fee-mode-icon--hybrid {
-  background-color: transparent;
-  background-image: linear-gradient(
-    90deg,
-    rgba(37, 211, 102, 0.2),
-    rgba(74, 157, 255, 0.2),
-    rgba(255, 184, 52, 0.2)
-  );
-  border-color: rgba(255, 255, 255, 0.35);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14), 0 0 8px rgba(148, 163, 184, 0.22);
+/* Hybrid: flat muted fill only — NO rainbow gradient */
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--hybrid {
+  background-color: rgba(30, 36, 48, 0.72);
+  border-color: rgba(243, 246, 251, 0.35);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1);
   color: #f3f6fb;
 }
 
-.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--dark-transparent.gmgn-fee-mode-icon--unknown {
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--unknown {
   background-color: rgba(156, 163, 175, 0.24);
   border-color: currentColor;
-  box-shadow: 0 0 0 1px rgba(156, 163, 175, 0.16), 0 0 8px rgba(156, 163, 175, 0.16);
+  box-shadow: 0 0 0 1px rgba(156, 163, 175, 0.16);
+  color: #d0d5dd;
+}
+
+/*
+ * Dark + 深色背景 (popup checked): solid card-like fill.
+ * Matches Debot/GMGN trench card surface (~#0d1110 / pure black).
+ */
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark {
+  background-color: #0d1110 !important;
+  background-image: none !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+}
+
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--holder {
+  border-color: rgba(39, 233, 132, 0.55);
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(39, 233, 132, 0.14);
+  color: #27e984;
+}
+
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--gift {
+  border-color: rgba(255, 202, 69, 0.55);
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 202, 69, 0.14);
+  color: #ffca45;
+}
+
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--creator {
+  border-color: rgba(98, 173, 255, 0.55);
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(98, 173, 255, 0.14);
+  color: #62adff;
+}
+
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--burn {
+  border-color: rgba(255, 122, 89, 0.55);
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 122, 89, 0.14);
+  color: #ff7a59;
+}
+
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--lp {
+  border-color: rgba(56, 189, 248, 0.55);
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(56, 189, 248, 0.14);
+  color: #38bdf8;
+}
+
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--hybrid {
+  border-color: rgba(243, 246, 251, 0.35);
+  color: #f3f6fb;
+}
+
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--unknown {
+  border-color: rgba(208, 213, 221, 0.4);
   color: #d0d5dd;
 }
 

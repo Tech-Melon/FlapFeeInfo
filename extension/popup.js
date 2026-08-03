@@ -1,7 +1,8 @@
 (() => {
   const PREFS_KEY = "flapFeeInfo.displayPrefs.v1";
   const THEME_KEY = "flapFeeInfo.badgeTheme.v1";
-  const DARK_TRANSPARENT_KEY = "flapFeeInfo.badgeDarkTransparent.v1";
+  const SOLID_DARK_KEY = "flapFeeInfo.badgeSolidDark.v1";
+  const DARK_TRANSPARENT_KEY_LEGACY = "flapFeeInfo.badgeDarkTransparent.v1";
   const OFFSET_KEY = "flapFeeInfo.badgeOffset.v2";
   const DRAG_KEY = "flapFeeInfo.badgeDragEdit.v1";
   const DEFAULT_THEME = "dark";
@@ -31,8 +32,8 @@
   const btnAllOff = document.getElementById("btnAllOff");
   const themeDark = document.getElementById("themeDark");
   const themeLight = document.getElementById("themeLight");
-  const darkTransparentToggle = document.getElementById("darkTransparentToggle");
-  const darkTransparentRow = document.getElementById("darkTransparentRow");
+  const solidDarkToggle = document.getElementById("solidDarkToggle");
+  const solidDarkRow = document.getElementById("solidDarkRow");
   const themeHint = document.getElementById("themeHint");
   const btnOffsetReset = document.getElementById("btnOffsetReset");
   const offsetStatus = document.getElementById("offsetStatus");
@@ -48,7 +49,7 @@
     debot: { ...DEFAULT_OFFSETS.debot }
   };
   let dragEdit = false;
-  let darkTransparent = false;
+  let solidDark = false;
   let currentTheme = DEFAULT_THEME;
   let saveTimer = null;
 
@@ -95,22 +96,31 @@
     return new Promise((resolve) => {
       try {
         chrome.storage.local.get(
-          [PREFS_KEY, THEME_KEY, DARK_TRANSPARENT_KEY, OFFSET_KEY, DRAG_KEY],
+          [PREFS_KEY, THEME_KEY, SOLID_DARK_KEY, DARK_TRANSPARENT_KEY_LEGACY, OFFSET_KEY, DRAG_KEY],
           (items) => {
             if (chrome.runtime.lastError) {
               resolve({
                 prefs: { ...DEFAULT_PREFS },
                 theme: DEFAULT_THEME,
-                darkTransparent: false,
+                solidDark: false,
                 offsets: normalizeOffsets(null),
                 dragEdit: false
               });
               return;
             }
+            let solid = false;
+            if (Object.prototype.hasOwnProperty.call(items || {}, SOLID_DARK_KEY)) {
+              solid = items[SOLID_DARK_KEY] === true;
+            } else if (
+              Object.prototype.hasOwnProperty.call(items || {}, DARK_TRANSPARENT_KEY_LEGACY)
+            ) {
+              // Old "背景透明" checked → not solid; unchecked → solid.
+              solid = items[DARK_TRANSPARENT_KEY_LEGACY] !== true;
+            }
             resolve({
               prefs: normalizePrefs(items?.[PREFS_KEY]),
               theme: normalizeTheme(items?.[THEME_KEY]),
-              darkTransparent: items?.[DARK_TRANSPARENT_KEY] === true,
+              solidDark: solid,
               offsets: normalizeOffsets(items?.[OFFSET_KEY]),
               dragEdit: items?.[DRAG_KEY] === true
             });
@@ -120,7 +130,7 @@
         resolve({
           prefs: { ...DEFAULT_PREFS },
           theme: DEFAULT_THEME,
-          darkTransparent: false,
+          solidDark: false,
           offsets: normalizeOffsets(null),
           dragEdit: false
         });
@@ -154,10 +164,10 @@
     });
   }
 
-  function saveDarkTransparent(on) {
+  function saveSolidDark(on) {
     return new Promise((resolve) => {
       try {
-        chrome.storage.local.set({ [DARK_TRANSPARENT_KEY]: on === true }, () => {
+        chrome.storage.local.set({ [SOLID_DARK_KEY]: on === true }, () => {
           void chrome.runtime?.lastError;
           resolve();
         });
@@ -260,17 +270,17 @@
     themeLight.classList.toggle("is-active", t === "light");
     themeDark.setAttribute("aria-pressed", t === "dark" ? "true" : "false");
     themeLight.setAttribute("aria-pressed", t === "light" ? "true" : "false");
-    // 背景透明 only applies to dark theme
-    darkTransparentRow?.classList.toggle("is-disabled", t !== "dark");
-    if (darkTransparentToggle) {
-      darkTransparentToggle.disabled = t !== "dark";
+    // 深色背景 only applies to dark theme
+    solidDarkRow?.classList.toggle("is-disabled", t !== "dark");
+    if (solidDarkToggle) {
+      solidDarkToggle.disabled = t !== "dark";
     }
     if (themeHint) {
       themeHint.textContent =
         t === "dark"
-          ? darkTransparent
-            ? "深色 + 背景透明：半透明色底（旧样式）。"
-            : "深色：纯黑底 + 彩色字边，叠在彩色卡片上更清晰。"
+          ? solidDark
+            ? "深色 + 深色背景：实心深底（贴近卡片底色），彩色字边。"
+            : "深色默认：半透明色底 + 彩色字（经典样式，无渐变）。"
           : "浅色：实心浅底，对比更强。";
     }
   }
@@ -322,9 +332,9 @@
     renderTheme("light");
   });
 
-  darkTransparentToggle?.addEventListener("change", async () => {
-    darkTransparent = darkTransparentToggle.checked === true;
-    await saveDarkTransparent(darkTransparent);
+  solidDarkToggle?.addEventListener("change", async () => {
+    solidDark = solidDarkToggle.checked === true;
+    await saveSolidDark(solidDark);
     renderTheme(currentTheme);
   });
 
@@ -401,9 +411,9 @@
       if (changes[THEME_KEY]) {
         renderTheme(normalizeTheme(changes[THEME_KEY].newValue));
       }
-      if (changes[DARK_TRANSPARENT_KEY]) {
-        darkTransparent = changes[DARK_TRANSPARENT_KEY].newValue === true;
-        if (darkTransparentToggle) darkTransparentToggle.checked = darkTransparent;
+      if (changes[SOLID_DARK_KEY]) {
+        solidDark = changes[SOLID_DARK_KEY].newValue === true;
+        if (solidDarkToggle) solidDarkToggle.checked = solidDark;
         renderTheme(currentTheme);
       }
     });
@@ -412,9 +422,9 @@
   }
 
   loadAll().then(
-    ({ prefs, theme, darkTransparent: loadedTransparent, offsets: loadedOffsets, dragEdit: loadedDrag }) => {
-      darkTransparent = loadedTransparent === true;
-      if (darkTransparentToggle) darkTransparentToggle.checked = darkTransparent;
+    ({ prefs, theme, solidDark: loadedSolid, offsets: loadedOffsets, dragEdit: loadedDrag }) => {
+      solidDark = loadedSolid === true;
+      if (solidDarkToggle) solidDarkToggle.checked = solidDark;
       renderTheme(theme);
       renderPrefs(prefs);
       offsets = loadedOffsets;
