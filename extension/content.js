@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.20: light→高对比; token settled still light-scan dialog/side boards; drag auto-off.
   // 0.4.19: light theme always solid dark chip (no bg toggle); dark keeps optional solid.
   // 0.4.18: default classic translucent; optional solid dark card bg; no hybrid gradient.
   // 0.4.17: dark theme optional transparent bg toggle.
@@ -46,6 +47,10 @@
   const MUTATION_SCAN_DEBOUNCE_MS = 400;
   // Token/K-line while badge still loading: longer coalesce against chart Mutation flood.
   const MUTATION_SCAN_DEBOUNCE_TOKEN_LOADING_MS = 900;
+  // After header badge settled: slow light scan for dialogs / side boards only (ms).
+  const MUTATION_SCAN_DEBOUNCE_TOKEN_LIGHT_MS = 1200;
+  // Overlay open: faster light scan (ms).
+  const MUTATION_SCAN_DEBOUNCE_OVERLAY_MS = 320;
   // SPA: swallow mutation flood while host rebuilds (chart/list); progressive scans fill holes.
   const SPA_NAV_QUIET_MS = 650;
   // Cache header "总税率" node — avoid document-wide span/div walks every root refresh.
@@ -210,6 +215,8 @@
   let scanGeneration = 0;
   /** Last bound observer roots (skip rebind when identity unchanged). */
   let lastObserverRoots = [];
+  /** Next scan only walks dialog + side-board roots (skip K-line header thrash). */
+  let pendingLightScan = false;
 
   hydratePersistentCache();
   hydrateDisplayPrefs();
@@ -430,7 +437,11 @@
     // List/home: root-scoped candidates only (no extra full-page walks).
     if (!isGmgnTokenPage()) return getCandidateNodes();
 
+    // Light scan (dialog/side boards): do NOT inject K-line header walks.
+    const light = pendingLightScan;
     const nodes = getCandidateNodes();
+    if (light) return nodes.slice(0, Math.min(MAX_CANDIDATES_PER_SCAN, 48));
+
     const root = findGmgnTokenPageRoot();
     if (root && !nodes.includes(root)) nodes.unshift(root);
     if (root && root !== document.body) {
@@ -565,14 +576,65 @@
     return !TARGET_TOKEN_RE.test(m[0].toLowerCase());
   }
 
-  /** Token/K-line page already has at least one painted badge. */
+  /**
+   * Token/K-line header already has badge (chart can thrash freely).
+   * Do NOT use "any badge on page" — side-board badges must not silence dialog scans.
+   */
   function isTokenPageSettledWithBadge() {
     if (!isTokenDetailRoute()) return false;
     try {
+      if (isGmgnTokenPage()) {
+        const root = findGmgnTokenPageRoot();
+        if (root && root.querySelector(`[${ICON_DATA}="1"]`)) return true;
+        // Header root missing but URL is 8888/7777 and any header-area badge
+        const urlTok = extractTokenFromUrl();
+        if (urlTok) {
+          const hit = document.querySelector(`[${ICON_DATA}="1"][data-fee-token="${urlTok}"]`);
+          if (hit && !hit.closest?.('[role="dialog"], [role="alertdialog"]')) {
+            // Prefer treat as settled only if not inside a list column board
+            const col = hit.closest?.(
+              "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
+            );
+            if (!col) return true;
+          }
+        }
+        return false;
+      }
+      // Debot token: settled if any badge on token stats, not only list
       return !!document.querySelector(`[${ICON_DATA}="1"]`);
     } catch (_err) {
       return false;
     }
+  }
+
+  /** Cheap: open modal / search history panel needs light scan. */
+  function quickHasOpenOverlay() {
+    try {
+      const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
+      for (let i = 0; i < dialogs.length; i += 1) {
+        const el = dialogs[i];
+        if (!(el instanceof HTMLElement)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width >= 280 && r.height >= 120 && r.top < window.innerHeight && r.bottom > 0) {
+          return true;
+        }
+      }
+      // GMGN search/history: input visible with 搜索/合约 placeholder
+      const inputs = document.querySelectorAll(
+        'input[placeholder*="搜索"], input[placeholder*="合约"], input[placeholder*="KOL"]'
+      );
+      for (let i = 0; i < Math.min(inputs.length, 6); i += 1) {
+        const inp = inputs[i];
+        if (!(inp instanceof HTMLElement)) continue;
+        const r = inp.getBoundingClientRect();
+        if (r.width >= 120 && r.height >= 20 && r.top > 30 && r.bottom < window.innerHeight - 10) {
+          return true;
+        }
+      }
+    } catch (_err) {
+      return false;
+    }
+    return false;
   }
 
   /**
@@ -667,6 +729,7 @@
   function scheduleScan(delay = 250, options = {}) {
     const force = options.force === true;
     const immediate = options.immediate === true;
+    const light = options.light === true;
     // Avoid burning CPU/network while the tab is fully hidden (timers are frozen anyway).
     if (!isTabVisible() && !force) return;
     // chain=Robinhood / non-allowed pages: never schedule work.
@@ -677,6 +740,9 @@
       // Drop stale "scanScheduled" lock from timers that never ran while frozen.
       scanScheduled = false;
     }
+    // Light scan: dialogs + side boards only (token page chart settled).
+    if (light) pendingLightScan = true;
+    else if (force && options.light === false) pendingLightScan = false;
     scanScheduled = true;
 
     const timerId = window.setTimeout(() => {
@@ -685,8 +751,10 @@
       if (!isTabVisible() && !force) return;
       if (!isExtensionContextValid()) return;
       const now = performance.now();
-      if (!force && now - lastScanAt < SCAN_INTERVAL_MS) {
-        scheduleScan(SCAN_INTERVAL_MS - (now - lastScanAt));
+      // Light scans use shorter min interval (overlay UX).
+      const minGap = pendingLightScan ? 450 : SCAN_INTERVAL_MS;
+      if (!force && now - lastScanAt < minGap) {
+        scheduleScan(minGap - (now - lastScanAt), { light: pendingLightScan });
         return;
       }
       lastScanAt = now;
@@ -842,8 +910,9 @@
     if (!isTokenDetailRoute()) return false;
     // Non-8888/7777 token pages never need progressive hole-fill.
     if (isNonTargetTokenPage()) return true;
+    // Only cancel when header settled — keep progressive for side boards/dialogs.
     try {
-      return !!document.querySelector(`[${ICON_DATA}="1"]`);
+      return isTokenPageSettledWithBadge() && !quickHasOpenOverlay();
     } catch (_err) {
       return false;
     }
@@ -1667,29 +1736,98 @@
   }
 
   /**
-   * Only visible open dialogs (GMGN search/history). Cap 2 — never whole document.
+   * Visible open dialogs (role=dialog) + GMGN search/history panels (no role).
+   * Cap total overlay roots — never whole document.
    */
   function collectOpenDialogRoots(roots) {
     if (!document.querySelectorAll) return;
     let added = 0;
-    document.querySelectorAll('[role="dialog"], [role="alertdialog"]').forEach((el) => {
-      if (added >= 2) return;
+    const pushIfOk = (el) => {
+      if (added >= 3) return;
       if (!(el instanceof HTMLElement) || !el.isConnected) return;
+      if (roots.includes(el)) return;
       const r = el.getBoundingClientRect();
-      // Visible mid-size modal (not full-viewport shell, not tiny toast).
-      if (r.width < 280 || r.height < 120) return;
+      if (r.width < 260 || r.height < 100) return;
       if (r.width > window.innerWidth * 0.98 && r.height > window.innerHeight * 0.92) return;
       if (r.bottom < 0 || r.top > window.innerHeight) return;
       if (r.right < 0 || r.left > window.innerWidth) return;
       roots.push(el);
       added += 1;
-    });
+    };
+
+    document.querySelectorAll('[role="dialog"], [role="alertdialog"]').forEach((el) => pushIfOk(el));
+
+    // GMGN: search / 历史代币 panel — climb from search input (cheap, few inputs).
+    if (added < 3 && location.hostname.endsWith("gmgn.ai")) {
+      const inputs = document.querySelectorAll(
+        'input[placeholder*="搜索"], input[placeholder*="合约"], input[placeholder*="KOL"]'
+      );
+      for (let i = 0; i < Math.min(inputs.length, 8) && added < 3; i += 1) {
+        const inp = inputs[i];
+        if (!(inp instanceof HTMLElement)) continue;
+        const ir = inp.getBoundingClientRect();
+        if (ir.width < 100 || ir.top < 20 || ir.bottom > window.innerHeight) continue;
+        let p = inp.parentElement;
+        let best = null;
+        for (let d = 0; p && d < 12; d += 1) {
+          if (!(p instanceof HTMLElement)) break;
+          const r = p.getBoundingClientRect();
+          if (
+            r.width >= 320 &&
+            r.width <= window.innerWidth * 0.92 &&
+            r.height >= 200 &&
+            r.height <= window.innerHeight * 0.92 &&
+            r.top > 20
+          ) {
+            best = p;
+          }
+          p = p.parentElement;
+        }
+        if (best) pushIfOk(best);
+      }
+    }
+  }
+
+  /**
+   * Lightweight roots: open overlays + list side boards. Skips K-line header root.
+   * Used when token header badge already settled (chart thrashing).
+   */
+  function getLightScanRoots() {
+    const roots = [];
+    collectOpenDialogRoots(roots);
+    const host = location.hostname || "";
+    if (host.endsWith("gmgn.ai")) {
+      document
+        .querySelectorAll(
+          "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
+        )
+        .forEach((el) => {
+          if (!(el instanceof HTMLElement)) return;
+          const r = el.getBoundingClientRect();
+          if (r.width >= 200 && r.height >= 160 && r.top < window.innerHeight) roots.push(el);
+        });
+    } else if (host.endsWith("debot.ai") || host.endsWith("gungnir.bot")) {
+      document.querySelectorAll(".MuiCard-root, div.MuiPaper-root.MuiCard-root").forEach((el) => {
+        if (!(el instanceof HTMLElement)) return;
+        const r = el.getBoundingClientRect();
+        if (r.width >= 240 && r.height >= 200) roots.push(el);
+      });
+    }
+    // Dedup
+    const uniq = [];
+    for (const r of roots) {
+      if (!uniq.includes(r) && r.isConnected) uniq.push(r);
+      if (uniq.length >= 8) break;
+    }
+    return uniq;
   }
 
   function getCandidateNodes() {
     const inView = [];
     const offscreen = [];
     const seen = new Set();
+    const lightOnly = pendingLightScan;
+    pendingLightScan = false;
 
     const addNode = (node, priority = 0) => {
       if (!(node instanceof HTMLElement) || seen.has(node)) return;
@@ -1729,15 +1867,17 @@
       }
     };
 
-    const roots = getScanRoots();
+    // Light scan: overlays + side boards only (token header settled / chart thrash).
+    const roots = lightOnly ? getLightScanRoots() : getScanRoots();
+    const maxCand = lightOnly ? Math.min(MAX_CANDIDATES_PER_SCAN, 48) : MAX_CANDIDATES_PER_SCAN * 2;
     for (const root of roots) {
-      if (inView.length + offscreen.length >= MAX_CANDIDATES_PER_SCAN * 2) break;
+      if (inView.length + offscreen.length >= maxCand) break;
       collectFromRoot(root);
     }
 
     // SPA hole-fill: if roots empty/wrong, scan body once.
-    // 0.4.12: never full-body walk on settled/non-target token pages (chart DOM thrash).
-    if (inView.length + offscreen.length < 8 && document.body) {
+    // Never on light scan or settled/non-target token pages (chart DOM thrash).
+    if (!lightOnly && inView.length + offscreen.length < 8 && document.body) {
       if (
         !(
           isTokenDetailRoute() &&
@@ -2970,11 +3110,22 @@
       // ignore
     }
     icon.classList.remove("is-dragging");
-    icon.style.cursor = badgeDragEdit ? "grab" : "";
+    icon.style.cursor = "";
     badgeDragState = null;
 
     if (!isTrenchListPage()) {
       // Drag ended after navigation — discard absolute for K-line safety.
+      // Still turn off drag mode so user must re-enable intentionally.
+      setBadgeDragEdit(false);
+      try {
+        if (isExtensionContextValid() && chrome.storage?.local) {
+          chrome.storage.local.set({ [BADGE_DRAG_EDIT_KEY]: false }, () => {
+            void chrome.runtime?.lastError;
+          });
+        }
+      } catch (_err) {
+        // ignore
+      }
       return;
     }
 
@@ -2989,7 +3140,6 @@
         ensureCardPositioning(card);
         card.appendChild(icon);
         applyAbsoluteBadgeStyles(icon, x, y);
-        syncBadgeDragCursor(icon);
       } catch (_err) {
         // ignore
       }
@@ -3004,6 +3154,19 @@
       if (!entry) return;
       renderMode(c, token, entry, { forceRemount: true });
     });
+    dedupeBadgesByToken();
+
+    // 0.4.20: auto-disable drag after one placement — re-open in popup to drag again.
+    setBadgeDragEdit(false);
+    try {
+      if (isExtensionContextValid() && chrome.storage?.local) {
+        chrome.storage.local.set({ [BADGE_DRAG_EDIT_KEY]: false }, () => {
+          void chrome.runtime?.lastError;
+        });
+      }
+    } catch (_err) {
+      // ignore
+    }
   }
 
   function watchDisplayPrefs() {
@@ -3165,6 +3328,8 @@
   function badgeNeedsUpdate(card, token, entry) {
     // After long background, always remount (ghost nodes / wrong parent / display:none wrappers).
     if (isResumeForceRemount()) return true;
+    // Doubles / orphans near card → always remount.
+    if (countBadgesNearCard(card, token) !== 1) return true;
 
     const existing = card.querySelector(`[${ICON_DATA}="1"]`);
     if (!existing || !document.contains(existing)) return true;
@@ -3888,10 +4053,25 @@
     }
     // 0.4.12: non-8888/7777 token page — chart noise must not schedule scans.
     if (isNonTargetTokenPage()) return;
-    // 0.4.12: token/K-line already painted — stop mutation-driven full-page scans.
-    if (isTokenPageSettledWithBadge()) return;
 
     if (mutationDebounceTimer) return;
+
+    // 0.4.20: header settled → do NOT full-scan chart; still light-scan dialogs / side boards.
+    if (isTokenPageSettledWithBadge()) {
+      const overlay = quickHasOpenOverlay();
+      const debounceMs = overlay
+        ? MUTATION_SCAN_DEBOUNCE_OVERLAY_MS
+        : MUTATION_SCAN_DEBOUNCE_TOKEN_LIGHT_MS;
+      mutationDebounceTimer = window.setTimeout(() => {
+        mutationDebounceTimer = null;
+        if (!isTabVisible() || !isExtensionContextValid()) return;
+        if (isSpaQuiet() || isNonTargetTokenPage()) return;
+        // Light only: overlays + 战壕 side columns (skip header / full body).
+        scheduleScan(0, { force: true, light: true, immediate: overlay });
+      }, debounceMs);
+      return;
+    }
+
     // Longer debounce while token badge still loading (chart keeps mutating).
     const debounceMs = isTokenDetailRoute()
       ? MUTATION_SCAN_DEBOUNCE_TOKEN_LOADING_MS
@@ -3903,7 +4083,12 @@
         spaDomDirty = true;
         return;
       }
-      if (isNonTargetTokenPage() || isTokenPageSettledWithBadge()) return;
+      if (isNonTargetTokenPage()) return;
+      // Settled mid-wait → flip to light
+      if (isTokenPageSettledWithBadge()) {
+        scheduleScan(0, { force: true, light: true });
+        return;
+      }
       scheduleScan(debounceMs);
     }, debounceMs);
   });
