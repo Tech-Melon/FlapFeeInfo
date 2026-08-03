@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.32: GMGN token→home — cache-first 6–8 card burst + 6ms slices (kill ~0.8s longtask).
   // 0.4.31: js-mcp report — Debot token dwell jank + 0 badge; GMGN return still ~0.6–0.8s.
   // 0.4.30: token↔list return — viewport-first soft rescan (jank↓, first-paint still snappy).
   // 0.4.29: cut SPA force-scan storm (meme→K-line jank) — coalesce + fewer progressive.
@@ -78,24 +79,29 @@
   // Progressive hole-fill offsets from quiet end (ms).
   // List/meme boards (cold / generic): 3 passes — 0.4.30 cut 4th to save main thread.
   const SPA_NAV_SCAN_OFFSETS_LIST_MS = [0, 400, 1100];
-  // token→list return (js-mcp heavy path): snappy first paint + hole-fill.
-  const SPA_NAV_SCAN_OFFSETS_LIST_RETURN_MS = [0, 280, 800];
+  // token→list return: many tiny slices (js-mcp 0.4.31 still had ~0.8s single longtask).
+  const SPA_NAV_SCAN_OFFSETS_LIST_RETURN_MS = [0, 120, 280, 500, 900, 1500];
   // Token / K-line page (GMGN): few passes, early-stop when header badge exists.
   const SPA_NAV_SCAN_OFFSETS_TOKEN_MS = [0, 500, 1300];
   // Debot SPA token: prefer tryPaint; at most 2 progressive full scans.
   const SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS = [0, 900, 2500];
   // Quiet shorter when returning to list — user expects badges ASAP (immediacy).
-  const SPA_NAV_QUIET_LIST_RETURN_MS = 280;
-  // After token→list: viewport-first soft window (ms) — smaller budget, skip offscreen.
-  const SPA_LIST_RETURN_SOFT_MS = 2400;
-  // Cards per slice during list-return (js-mcp: 22 still caused ~600ms longtask on GMGN).
-  const SPA_LIST_RETURN_CARDS = 12;
-  // Candidates cap during list-return soft window.
-  const SPA_LIST_RETURN_CANDIDATES = 40;
+  const SPA_NAV_QUIET_LIST_RETURN_MS = 200;
+  // After token→list: viewport-first soft window (ms).
+  const SPA_LIST_RETURN_SOFT_MS = 3500;
+  // First wave: only paint cards with fee already in modeCache (no network, no deep extract).
+  const SPA_LIST_RETURN_CACHE_ONLY_MS = 900;
+  // Cards per slice during list-return (0.4.32: 7 — was 12 still too heavy on GMGN).
+  const SPA_LIST_RETURN_CARDS = 7;
+  // Candidates cap during list-return soft window (href-only).
+  const SPA_LIST_RETURN_CANDIDATES = 20;
   // Cancel further list progressive once this many visible badges painted.
-  const SPA_LIST_RETURN_ENOUGH_BADGES = 6;
-  // Soft scan time budget per frame (ms) — hard stop mid-loop to avoid longtask.
-  const SPA_LIST_RETURN_SLICE_MS = 9;
+  const SPA_LIST_RETURN_ENOUGH_BADGES = 5;
+  // Soft scan time budget per frame (ms) — hard stop mid-loop.
+  const SPA_LIST_RETURN_SLICE_MS = 6;
+  // Fast-paint burst budget right after list settle (ms / cards).
+  const SPA_LIST_RETURN_FAST_MS = 6;
+  const SPA_LIST_RETURN_FAST_CARDS = 8;
   // Dedicated header paint watch after meme→token SPA (ms).
   const DEBOT_TOKEN_HEADER_WATCH_MS = 10000;
   const DEBOT_TOKEN_HEADER_TICK_MS = 600;
@@ -291,6 +297,8 @@
    * Wall-clock until this time (0 = inactive).
    */
   let spaListReturnUntil = 0;
+  /** First wave: only paint from modeCache / persistent cache (skip extract+queue). */
+  let spaListReturnCacheOnlyUntil = 0;
   /** Prev route was token detail (for settle classification). */
   let spaSettleFromToken = false;
   /** Consecutive Debot header miss ticks (guardian backoff). */
@@ -1122,10 +1130,159 @@
     return spaListReturnUntil > 0 && Date.now() < spaListReturnUntil && !isTokenDetailRoute();
   }
 
+  function isSpaListReturnCacheOnly() {
+    return (
+      spaListReturnCacheOnlyUntil > 0 &&
+      Date.now() < spaListReturnCacheOnlyUntil &&
+      !isTokenDetailRoute()
+    );
+  }
+
   /** Prev SPA key was a token detail path (GMGN/Debot/Gungnir). */
   function routeKeyWasTokenDetail(routeKey) {
     const s = String(routeKey || "");
     return /\/token\//i.test(s) || /\/bsc\/token\//i.test(s);
+  }
+
+  /** Cheap climb from token <a href> to a card-sized host (no Tax/metric search). */
+  function quickClimbCardFromTokenLink(anchor) {
+    if (!(anchor instanceof HTMLElement)) return null;
+    let el = anchor;
+    for (let d = 0; d < 7 && el; d += 1) {
+      if (!(el instanceof HTMLElement)) break;
+      if (el === document.body || el === document.documentElement) break;
+      try {
+        const r = el.getBoundingClientRect();
+        if (r.width >= 180 && r.height >= 48 && r.height <= 420 && r.width < window.innerWidth * 0.95) {
+          return el;
+        }
+      } catch (_err) {
+        break;
+      }
+      el = el.parentElement;
+    }
+    return anchor.parentElement instanceof HTMLElement ? anchor.parentElement : anchor;
+  }
+
+  /**
+   * 0.4.32 list-return first burst: paint ONLY fee-cached tokens from viewport hrefs.
+   * Skips findIconTarget / short-CA deep scan / network queue — keeps first frame under ~6ms.
+   */
+  function fastPaintListReturnViewport() {
+    if (isTokenDetailRoute() || !isExtensionContextValid()) return 0;
+    const t0 = performance.now();
+    let painted = 0;
+    const seen = new Set();
+    try {
+      const roots = getScanRoots(false);
+      const linkSel =
+        "a[href*='/token/'][href*='8888'], a[href*='/token/'][href*='7777'], " +
+        "a[href*='/bsc/token/'][href*='8888'], a[href*='/bsc/token/'][href*='7777']";
+      const anchors = [];
+      for (let ri = 0; ri < roots.length; ri += 1) {
+        const root = roots[ri];
+        if (!root || !root.querySelectorAll) continue;
+        const found = root.querySelectorAll(linkSel);
+        for (let i = 0; i < found.length; i += 1) {
+          const a = found[i];
+          if (!(a instanceof HTMLElement)) continue;
+          if (!isNearViewport(a, false)) continue;
+          anchors.push(a);
+          if (anchors.length >= SPA_LIST_RETURN_CANDIDATES) break;
+        }
+        if (anchors.length >= SPA_LIST_RETURN_CANDIDATES) break;
+      }
+      for (let i = 0; i < anchors.length; i += 1) {
+        if (painted >= SPA_LIST_RETURN_FAST_CARDS) break;
+        if (performance.now() - t0 > SPA_LIST_RETURN_FAST_MS) break;
+        const a = anchors[i];
+        const token = normalizeToken(a.getAttribute("href") || a.href || "");
+        if (!token || seen.has(token)) continue;
+        const entry = resolveEntry(token);
+        if (!entry) continue; // cache-only burst
+        const card = quickClimbCardFromTokenLink(a);
+        if (!(card instanceof HTMLElement) || seen.has(card)) continue;
+        seen.add(card);
+        seen.add(token);
+        if (!isVisible(card)) continue;
+        // Already painted?
+        const existing = card.querySelector?.(`[${ICON_DATA}="1"]`);
+        if (existing && existing.dataset.feeToken === token) {
+          const er = existing.getBoundingClientRect();
+          if (er.width >= 2 && er.height >= 2) {
+            painted += 1;
+            continue;
+          }
+        }
+        if (paintListCardFromCacheFast(card, token, entry)) painted += 1;
+      }
+    } catch (_err) {
+      // ignore
+    }
+    debugInfo("list-return:fast-paint", { painted, ms: Math.round(performance.now() - t0) });
+    return painted;
+  }
+
+  /**
+   * Paint list badge using only in-memory fee entry (no DOM quote scan / Tax search).
+   * List-return speed path — may use absolute top-left when trench abs enabled.
+   */
+  function paintListCardFromCacheFast(card, token, entry) {
+    if (!(card instanceof HTMLElement) || !token || !entry) return false;
+    try {
+      const q =
+        normalizeQuoteSymbol(entry.quote_symbol || "", { allowCjk: true }) || "BNB";
+      const { label, title, className } = computeBadgePresentation(entry, q);
+      if (!label) return false;
+
+      card.dataset[CARD_MARK] = token;
+      try {
+        card.setAttribute(CARD_DATA, token);
+      } catch (_err) {
+        // ignore
+      }
+
+      let icon = card.querySelector(`[${ICON_DATA}="1"]`);
+      if (icon && icon.dataset.feeToken === token) {
+        icon.textContent = label;
+        icon.title = `${title}${token}`;
+        icon.className = className;
+        icon.dataset.feeSig = label;
+        return true;
+      }
+
+      // Wipe leftovers on this card only
+      card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
+        try {
+          n.remove();
+        } catch (_err) {
+          // ignore
+        }
+      });
+
+      icon = document.createElement("span");
+      icon.dataset[ICON_MARK] = "1";
+      icon.dataset.feeToken = token;
+      icon.dataset.feeSig = label;
+      icon.textContent = label;
+      icon.title = `${title}${token}`;
+      icon.className = className;
+
+      const pos = getActiveBadgePosition(card);
+      if (pos.enabled) {
+        ensureCardPositioning(card);
+        card.appendChild(icon);
+        applyAbsoluteBadgeStyles(icon, pos.x, pos.y);
+      } else {
+        // Natural list mount without Tax search: append into card (flex rows tolerate it).
+        clearAbsoluteBadgeStyles(icon);
+        icon.dataset.feePosMode = "default";
+        card.appendChild(icon);
+      }
+      return true;
+    } catch (_err) {
+      return false;
+    }
   }
 
   /** Count visible painted badges (for list progressive early-stop). */
@@ -1538,10 +1695,12 @@
     // token→list: soft viewport window (immediacy on first screen, no offscreen thrash).
     if (listReturn) {
       spaListReturnUntil = Date.now() + SPA_LIST_RETURN_SOFT_MS;
+      spaListReturnCacheOnlyUntil = Date.now() + SPA_LIST_RETURN_CACHE_ONLY_MS;
       // List return quiet shorter — first badge paint feels instant.
       spaQuietUntil = Date.now() + SPA_NAV_QUIET_LIST_RETURN_MS;
     } else if (!softSameToken) {
       spaListReturnUntil = 0;
+      spaListReturnCacheOnlyUntil = 0;
     }
 
     // ALWAYS observe documentElement — list roots detach on SPA and go silent (js-mcp).
@@ -1608,16 +1767,32 @@
           pendingLightScan = false;
         }
 
+        // List-return: cache-first burst (no Tax search / no deep extract).
+        if (listReturn || isSpaListReturnSoft()) {
+          fastPaintListReturnViewport();
+          if (index > 0 && shouldCancelSpaListProgressive()) {
+            clearSpaNavScanTimers();
+            return;
+          }
+        }
+
         // First pass: immediate force (immediacy). Later: idle force (let site paint).
         // Debot later passes: tryPaint-only if header still missing after gap.
         if (isDebotTokenPage() && index > 0) {
           if (!hasDebotTokenHeaderBadge()) {
             maybeScheduleDebotHeaderFullScan("spa-progressive");
           }
+        } else if (listReturn || isSpaListReturnSoft()) {
+          // After fast-paint, only small idle slices — never another huge immediate frame.
+          scheduleScan(0, {
+            force: true,
+            immediate: index === 0,
+            light: false,
+            bypassForceGap: index === 0
+          });
         } else {
           scheduleScan(0, {
             force: true,
-            // List-return first pass MUST be immediate for snappy badges.
             immediate: index === 0,
             light: false,
             bypassForceGap: index === 0
@@ -1626,7 +1801,7 @@
 
         // After first paint: cancel pending progressive if already good enough.
         if (index === 0) {
-          const checkMs = isDebotTokenPage() ? 200 : listReturn ? 120 : 80;
+          const checkMs = isDebotTokenPage() ? 200 : listReturn ? 80 : 80;
           const checkId = window.setTimeout(() => {
             spaNavScanTimers = spaNavScanTimers.filter((id) => id !== checkId);
             if (shouldCancelSpaProgressive()) clearSpaNavScanTimers();
@@ -2087,6 +2262,7 @@
       tryPaintDebotTokenHeader("scan-pre");
     }
     const listReturnSoft = isSpaListReturnSoft();
+    const listReturnCacheOnly = isSpaListReturnCacheOnly();
     const seenCards = new Set();
     const nodes = siteStrategy.getCandidateNodes();
     let touched = 0;
@@ -2107,10 +2283,28 @@
     }
 
     // Collect unique visible cards first, then prioritize unpainted (Debot 右列饿死修复).
+    // list-return: pair node(href) → quick climb (no Tax climbToCard).
     const allCards = [];
+    /** @type {Map<Element, string>} */
+    const listReturnTokenHint = new Map();
     for (const node of nodes) {
       if (!isNearViewport(node, looseView)) continue;
-      const card = siteStrategy.findCard(node);
+      let card;
+      let hrefTok = null;
+      if (listReturnSoft) {
+        hrefTok = normalizeToken(
+          (node.getAttribute && node.getAttribute("href")) || node.href || ""
+        );
+        if (!hrefTok && node.querySelector) {
+          const a = node.querySelector("a[href*='0x']");
+          hrefTok = normalizeToken(a?.getAttribute?.("href") || "");
+        }
+        card = hrefTok
+          ? quickClimbCardFromTokenLink(node.tagName === "A" ? node : node.querySelector?.("a[href*='0x']") || node)
+          : siteStrategy.findCard(node);
+      } else {
+        card = siteStrategy.findCard(node);
+      }
       if (!card || seenCards.has(card) || !isVisible(card)) continue;
       // Reject full-page shells (token SPA leftover / body mark).
       if (card === document.body || card === document.documentElement) continue;
@@ -2122,19 +2316,23 @@
       }
       seenCards.add(card);
       allCards.push(card);
+      if (hrefTok) listReturnTokenHint.set(card, hrefTok);
     }
 
     // 0.4.15: keep outermost cards only — nested climbToCard caused 2 badges on 1 visual row.
-    const outerCards = allCards.filter((card) => {
-      return !allCards.some((other) => other !== card && other.contains(card));
-    });
+    // list-return: skip O(n²) contains checks when n is small viewport set.
+    const outerCards = listReturnSoft
+      ? allCards
+      : allCards.filter((card) => {
+          return !allCards.some((other) => other !== card && other.contains(card));
+        });
 
     const needWork = [];
     for (const card of outerCards) {
       // Nested mark cleanup: drop CARD_MARK on discarded inner nodes.
       // (handled by only painting outerCards)
 
-      if (isStablePaintedCard(card, forceRemount)) {
+      if (!listReturnSoft && isStablePaintedCard(card, forceRemount)) {
         // 0.4.10: stale feeSig may keep wrong 🪙BNB after API has 币安人生 — cheap recheck.
         const marked = card.dataset[CARD_MARK];
         const existing = marked ? card.querySelector(`[${ICON_DATA}="1"]`) : null;
@@ -2145,17 +2343,39 @@
           skippedCached += 1;
           // Stable cards do NOT consume budget — left/mid columns must not starve 已开盘.
         }
+      } else if (listReturnSoft) {
+        // Already has visible badge → skip
+        const existing = card.querySelector(`[${ICON_DATA}="1"]`);
+        if (existing) {
+          const er = existing.getBoundingClientRect();
+          if (er.width >= 2 && er.height >= 2) {
+            skippedCached += 1;
+            continue;
+          }
+        }
+        needWork.push(card);
       } else {
         needWork.push(card);
       }
     }
 
     // 0.4.21: unpainted first — new 战壕 rows must not starve behind remounts.
-    needWork.sort((a, b) => {
-      const ab = a.querySelector?.(`[${ICON_DATA}="1"]`) ? 1 : 0;
-      const bb = b.querySelector?.(`[${ICON_DATA}="1"]`) ? 1 : 0;
-      return ab - bb;
-    });
+    // list-return: prefer cards that already have fee in memory (instant paint).
+    if (listReturnSoft) {
+      needWork.sort((a, b) => {
+        const ta = listReturnTokenHint.get(a) || a.dataset[CARD_MARK] || "";
+        const tb = listReturnTokenHint.get(b) || b.dataset[CARD_MARK] || "";
+        const ea = ta && resolveEntry(ta) ? 0 : 1;
+        const eb = tb && resolveEntry(tb) ? 0 : 1;
+        return ea - eb;
+      });
+    } else {
+      needWork.sort((a, b) => {
+        const ab = a.querySelector?.(`[${ICON_DATA}="1"]`) ? 1 : 0;
+        const bb = b.querySelector?.(`[${ICON_DATA}="1"]`) ? 1 : 0;
+        return ab - bb;
+      });
+    }
 
     let truncated = false;
     const sliceBudgetMs = listReturnSoft ? SPA_LIST_RETURN_SLICE_MS : 0;
@@ -2171,19 +2391,40 @@
         break;
       }
 
-      const token = siteStrategy.extractToken(card);
+      // list-return: token from href hint first (skip extractCardToken deep walk).
+      let token =
+        listReturnTokenHint.get(card) ||
+        (listReturnSoft
+          ? normalizeToken(
+              card.querySelector?.("a[href*='0x']")?.getAttribute?.("href") || ""
+            )
+          : null);
+      if (!token) token = siteStrategy.extractToken(card);
       if (!token) {
-        clearCardIcon(card);
+        if (!listReturnSoft) clearCardIcon(card);
+        continue;
+      }
+
+      // Cache-only wave: skip cards without in-memory fee (paint later idle slices).
+      const entryEarly = resolveEntry(token);
+      if (listReturnCacheOnly && !entryEarly) {
         continue;
       }
 
       card.dataset[CARD_MARK] = token;
       touched += 1;
 
-      const entry = resolveEntry(token);
+      const entry = entryEarly || resolveEntry(token);
       if (entry) {
+        // list-return fast paint (no Tax search / no multi-badge geometry).
+        if (listReturnSoft) {
+          if (paintListCardFromCacheFast(card, token, entry)) {
+            rendered += 1;
+            continue;
+          }
+        }
         // Doubles always remount (isStable may have been false but fast path still ran).
-        if (countBadgesNearCard(card, token) > 1) {
+        if (!listReturnSoft && countBadgesNearCard(card, token) > 1) {
           renderMode(card, token, entry, { forceRemount: true });
           rendered += 1;
           continue;
@@ -2253,11 +2494,11 @@
     // 0.4.21: keep light mode on token settled pages so chart full-scan stays off.
     if (truncated) {
       const keepLight = lightScan || isTokenPageSettledWithBadge();
-      // list-return: slice remaining viewport ASAP (immediacy without one huge frame).
+      // list-return: yield to site paint (immediate:false) — 0.4.32 kill stacked longtasks.
       if (listReturnSoft) {
-        scheduleScan(30, {
+        scheduleScan(listReturnCacheOnly ? 16 : 32, {
           force: true,
-          immediate: true,
+          immediate: false,
           light: false,
           bypassForceGap: true
         });
@@ -2269,8 +2510,8 @@
     }
 
     // Per-card safety net only (same CA in 三栏 = multiple badges OK).
-    // list-return soft: skip full-page dedupe every slice (cheap save).
-    if (!listReturnSoft || scanGeneration % 3 === 0) {
+    // list-return soft: skip full-page dedupe (geometry walks were part of the 0.8s spike).
+    if (!listReturnSoft) {
       dedupeBadgesByToken();
     }
 
@@ -2893,6 +3134,8 @@
             "a[href*='/bsc/token/'][href*='8888'], a[href*='/bsc/token/'][href*='7777']"
         )
         .forEach((n) => addNode(n, 2));
+      // list-return: href-only — skip SUFFIX + leaf walks (main cost of GMGN return).
+      if (listReturnSoft) return;
       root.querySelectorAll(SUFFIX_SELECTORS).forEach((n) => {
         const href = (n.getAttribute && n.getAttribute("href")) || "";
         // Deprioritize external explorer / flap icons
@@ -2901,20 +3144,13 @@
       });
       // Short CA text in compact leaves (raise cap on light — virtual list new rows).
       // Debot/Gungnir: pure short CA is often a leaf DIV (js-mcp), not only a/span.
-      const leafBudget = listReturnSoft
-        ? SPA_LIST_RETURN_CANDIDATES
-        : lightOnly
-          ? LIGHT_MAX_CANDIDATES
-          : MAX_CANDIDATES_PER_SCAN;
+      const leafBudget = lightOnly ? LIGHT_MAX_CANDIDATES : MAX_CANDIDATES_PER_SCAN;
       if (inView.length < leafBudget) {
         const hn = location.hostname || "";
         const debotHost = hn.endsWith("debot.ai") || hn.endsWith("gungnir.bot");
         const leafSel = debotHost ? "a, span, div" : "a, span";
         const leaves = root.querySelectorAll(leafSel);
-        const maxCheck = Math.min(
-          leaves.length,
-          listReturnSoft ? 160 : lightOnly ? 500 : debotHost ? 350 : 200
-        );
+        const maxCheck = Math.min(leaves.length, lightOnly ? 500 : debotHost ? 350 : 200);
         for (let i = 0; i < maxCheck; i += 1) {
           if (inView.length + offscreen.length >= candCap) break;
           const el = leaves[i];
