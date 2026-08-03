@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.16: dark theme solid #000 chip bg for contrast on colorful cards.
   // 0.4.15: hard double-badge dedupe (Debot drag); outermost card only; remount on abs.
   // 0.4.14: trench-only abs/drag; bsc scan gate; fix Debot 新创建 + double badge.
   // 0.4.13: badge pos — default beside Tax; optional card top-left absolute + page drag.
