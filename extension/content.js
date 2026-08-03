@@ -5,6 +5,7 @@
   // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
+  // 0.4.38: 搜索/历史弹层 ~1s 出徽章 — dialog-first + cache 直绘 + 矮行 climb + API 回补扫.
   // 0.4.37: GMGN 进出 K 线减负 + 回战壕加速（header-only token scan + list-return DOM watch）.
   // 0.4.36: list-return 三栏轮询（已迁移/右列不再饿死）+ GMGN 同策略.
   // 0.4.35: Debot SPA meme→K 线激活链加固 + 回战壕加速 + token 页减负.
@@ -70,11 +71,17 @@
   // After header badge settled: light scan for dialogs / side boards only (ms).
   // 0.4.21: 700ms — new 战壕 rows must appear faster without chart full-scans.
   const MUTATION_SCAN_DEBOUNCE_TOKEN_LIGHT_MS = 700;
-  // Overlay open: faster light scan (ms).
-  const MUTATION_SCAN_DEBOUNCE_OVERLAY_MS = 280;
+  // Overlay open: snappy light scan (ms) — was 280, still felt slow on search history.
+  const MUTATION_SCAN_DEBOUNCE_OVERLAY_MS = 90;
   // Light scan candidate caps (side board + dialog only).
   const LIGHT_MAX_CANDIDATES = 96;
   const LIGHT_MAX_OFFSCREEN = 24;
+  // Overlay-fast window: dialog-only candidates + dense kicks (0.4.38).
+  const OVERLAY_FAST_MS = 4500;
+  const OVERLAY_MAX_CANDIDATES = 36;
+  const OVERLAY_MAX_CARDS = 28;
+  // Home page mutation while overlay open (was full 400ms + idle).
+  const MUTATION_SCAN_DEBOUNCE_HOME_OVERLAY_MS = 90;
   // SPA: swallow mutation flood while host rebuilds (chart/list); progressive scans fill holes.
   // 0.4.29: slightly longer quiet so chart paints first (was competing with force-scan storm).
   const SPA_NAV_QUIET_MS = 800;
@@ -322,6 +329,12 @@
   let spaListReturnCacheOnlyUntil = 0;
   /** Prev route was token detail (for settle classification). */
   let spaSettleFromToken = false;
+  /** Overlay (search/history) fast-paint window until this wall time. */
+  let overlayFastUntil = 0;
+  /** Last known overlay open edge (arm dense kicks on open). */
+  let lastOverlayOpen = false;
+  /** GMGN search panel root short cache. */
+  let gmgnSearchPanelCache = { el: null, at: 0 };
   /** Consecutive Debot header miss ticks (guardian backoff). */
   let debotHeaderMissStreak = 0;
   /** Wall time when Debot header miss streak started. */
@@ -340,6 +353,7 @@
   installPageWorldSpaHook();
   installDebotTokenClickArm();
   installGmgnSpaClickArm();
+  installOverlayOpenArm();
   startRoutePoller();
   startDebotTokenGuardian();
 
@@ -394,11 +408,11 @@
 
   /** GMGN list / dialog row card (scoped climb — not full-page walk). */
   function climbGmgnListCard(node) {
-    const inDialog = isInsideOverlayDialog(node);
-    // History/search rows are short (~44–56px); list cards ~124px.
-    const minHeight = inDialog ? 40 : 58;
-    const maxHeight = inDialog ? 120 : 280;
-    const minWidth = inDialog ? 180 : 200;
+    // isOverlayFast / panel contains: history rows ~44–56px need short thresholds (0.4.38).
+    const inDialog = isInsideOverlayDialog(node) || isOverlayFast();
+    const minHeight = inDialog ? 36 : 58;
+    const maxHeight = inDialog ? 140 : 280;
+    const minWidth = inDialog ? 160 : 200;
     return (
       climbToCard(node, {
         maxDepth: 10,
@@ -426,10 +440,210 @@
   function isInsideOverlayDialog(node) {
     if (!(node instanceof HTMLElement)) return false;
     try {
-      return !!node.closest?.('[role="dialog"], [role="alertdialog"]');
+      if (node.closest?.('[role="dialog"], [role="alertdialog"]')) return true;
+      // GMGN search/history often has no role=dialog — still need short-row climb.
+      const panel = findGmgnSearchPanelRoot();
+      if (panel && panel.contains(node)) return true;
+      // Debot/Gungnir: MUI modal paper without role sometimes.
+      if (node.closest?.(".MuiModal-root, .MuiDialog-root, [class*='Modal']")) return true;
     } catch (_err) {
       return false;
     }
+    return false;
+  }
+
+  /** True while overlay-fast window active (dialog-only scan priority). */
+  function isOverlayFast() {
+    return overlayFastUntil > 0 && Date.now() < overlayFastUntil && quickHasOpenOverlay();
+  }
+
+  /**
+   * GMGN search / 历史代币 panel root (no role=dialog on many builds).
+   * Cached briefly — mutation thrash must not re-climb every node.
+   */
+  function findGmgnSearchPanelRoot() {
+    if (!location.hostname.endsWith("gmgn.ai")) return null;
+    const now = Date.now();
+    const cached = gmgnSearchPanelCache.el;
+    if (cached instanceof HTMLElement && cached.isConnected && now - gmgnSearchPanelCache.at < 2500) {
+      return cached;
+    }
+    let best = null;
+    try {
+      const inputs = document.querySelectorAll(
+        'input[placeholder*="搜索"], input[placeholder*="合约"], input[placeholder*="KOL"]'
+      );
+      for (let i = 0; i < Math.min(inputs.length, 8); i += 1) {
+        const inp = inputs[i];
+        if (!(inp instanceof HTMLElement)) continue;
+        const ir = inp.getBoundingClientRect();
+        if (ir.width < 100 || ir.top < 20 || ir.bottom > window.innerHeight) continue;
+        let p = inp.parentElement;
+        for (let d = 0; p && d < 12; d += 1) {
+          if (!(p instanceof HTMLElement)) break;
+          const r = p.getBoundingClientRect();
+          if (
+            r.width >= 320 &&
+            r.width <= window.innerWidth * 0.92 &&
+            r.height >= 200 &&
+            r.height <= window.innerHeight * 0.92 &&
+            r.top > 20
+          ) {
+            best = p;
+          }
+          p = p.parentElement;
+        }
+        if (best) break;
+      }
+    } catch (_err) {
+      best = null;
+    }
+    gmgnSearchPanelCache = { el: best, at: now };
+    return best;
+  }
+
+  /**
+   * Arm dense dialog-first paints when search/history opens.
+   * Goal: cache-hit badges ≤1s; cold still mark+queue immediately.
+   */
+  function armOverlayFastScan(reason) {
+    overlayFastUntil = Date.now() + OVERLAY_FAST_MS;
+    scanRootsCache = { at: 0, roots: [] };
+    gmgnSearchPanelCache = { el: null, at: 0 };
+    // Do not wait SPA quiet for overlay UX.
+    if (Date.now() < spaQuietUntil) spaQuietUntil = 0;
+    const kick = (ms) => {
+      window.setTimeout(() => {
+        if (!isExtensionContextValid() || !isTabVisible()) return;
+        if (!quickHasOpenOverlay()) {
+          overlayFastUntil = 0;
+          return;
+        }
+        overlayFastUntil = Date.now() + Math.max(0, OVERLAY_FAST_MS - ms);
+        try {
+          fastPaintOverlayFromCache();
+        } catch (_err) {
+          // ignore
+        }
+        // light + immediate: dialog roots preferred under overlay-fast.
+        scheduleScan(0, {
+          force: true,
+          immediate: true,
+          light: true,
+          bypassForceGap: true
+        });
+      }, ms);
+    };
+    debugInfo("overlay:arm", { reason });
+    kick(0);
+    kick(100);
+    kick(280);
+    kick(650);
+  }
+
+  /**
+   * Cache-first paint for open search/history rows (no full trench walk).
+   * @returns {number} painted count
+   */
+  function fastPaintOverlayFromCache() {
+    if (!isExtensionContextValid() || !quickHasOpenOverlay()) return 0;
+    const t0 = performance.now();
+    const roots = [];
+    collectOpenDialogRoots(roots);
+    if (!roots.length) {
+      const panel = findGmgnSearchPanelRoot();
+      if (panel) roots.push(panel);
+    }
+    if (!roots.length) return 0;
+
+    let painted = 0;
+    let queued = 0;
+    const seen = new Set();
+    const maxPaint = OVERLAY_MAX_CARDS;
+
+    for (let ri = 0; ri < roots.length; ri += 1) {
+      const root = roots[ri];
+      if (!root?.querySelectorAll) continue;
+      const anchors = root.querySelectorAll(
+        "a[href*='8888'], a[href*='7777'], a[href*='/token/'][href*='0x']"
+      );
+      const lim = Math.min(anchors.length, OVERLAY_MAX_CANDIDATES);
+      for (let i = 0; i < lim; i += 1) {
+        if (painted >= maxPaint) break;
+        const a = anchors[i];
+        if (!(a instanceof HTMLElement)) continue;
+        const token = normalizeToken(a.getAttribute("href") || a.href || "");
+        if (!token || seen.has(token)) continue;
+        seen.add(token);
+        const card =
+          (siteStrategy.findCard && siteStrategy.findCard(a)) ||
+          quickClimbCardFromTokenLink(a);
+        if (!(card instanceof HTMLElement) || seen.has(card)) continue;
+        if (!isInsideOverlayDialog(card) && !roots.some((r) => r.contains(card))) {
+          // Prefer rows clearly in overlay; skip trench ghosts under the panel.
+          const cr = card.getBoundingClientRect();
+          if (cr.top < 40 || cr.height > 200) continue;
+        }
+        seen.add(card);
+        const entry = resolveEntry(token);
+        if (!entry) {
+          queueToken(token);
+          queued += 1;
+          // Still mark so applyMode can paint when API returns.
+          try {
+            card.dataset[CARD_MARK] = token;
+            card.setAttribute(CARD_DATA, token);
+          } catch (_err) {
+            // ignore
+          }
+          continue;
+        }
+        if (paintListCardFromCacheFast(card, token, entry)) painted += 1;
+      }
+      // Short CA leaves without full href (some history rows).
+      if (painted < maxPaint) {
+        const leaves = root.querySelectorAll("a, span, div, p");
+        const lmax = Math.min(leaves.length, 120);
+        for (let i = 0; i < lmax; i += 1) {
+          if (painted >= maxPaint) break;
+          const el = leaves[i];
+          if (!(el instanceof HTMLElement)) continue;
+          const t = (el.textContent || "").trim();
+          if (t.length > 22 || !TARGET_SHORT_TOKEN_RE.test(t)) continue;
+          const card =
+            (siteStrategy.findCard && siteStrategy.findCard(el)) ||
+            quickClimbCardFromTokenLink(el);
+          if (!(card instanceof HTMLElement) || seen.has(card)) continue;
+          seen.add(card);
+          const token = siteStrategy.extractToken(card);
+          if (!token || seen.has(token)) continue;
+          seen.add(token);
+          const entry = resolveEntry(token);
+          if (!entry) {
+            queueToken(token);
+            queued += 1;
+            try {
+              card.dataset[CARD_MARK] = token;
+              card.setAttribute(CARD_DATA, token);
+            } catch (_err) {
+              // ignore
+            }
+            continue;
+          }
+          if (paintListCardFromCacheFast(card, token, entry)) painted += 1;
+        }
+      }
+    }
+
+    if (queued > 0) {
+      scheduleBatchFlush({ immediate: true, delayMs: 0 });
+    }
+    debugInfo("overlay:fast-paint", {
+      painted,
+      queued,
+      ms: Math.round(performance.now() - t0)
+    });
+    return painted;
   }
 
   function createDebotStrategy() {
@@ -1253,6 +1467,8 @@
   }
 
   function cardsPerScanBudget() {
+    // Overlay-fast: spend budget on dialog rows only (0.4.38).
+    if (isOverlayFast()) return OVERLAY_MAX_CARDS;
     // token→list soft window: smaller slices so list repaint does not freeze UI (0.4.30).
     if (isSpaListReturnSoft()) return SPA_LIST_RETURN_CARDS;
     // Full budget otherwise — stable cards free; 3-col lists still finish via progressive.
@@ -2018,6 +2234,81 @@
           const m = href.match(/0x[a-fA-F0-9]{40}/i);
           if (m && !TARGET_TOKEN_RE.test(m[0].toLowerCase())) return;
           armTokenPaint("gmgn-click-arm");
+        } catch (_err) {
+          // ignore
+        }
+      },
+      true
+    );
+  }
+
+  /**
+   * Pre-arm overlay-fast on search UI click (before panel fully mounts).
+   * Covers GMGN top search + Debot search icon.
+   */
+  function installOverlayOpenArm() {
+    document.addEventListener(
+      "click",
+      (event) => {
+        try {
+          if (!isExtensionContextValid()) return;
+          const t = event.target;
+          if (!(t instanceof Element)) return;
+          // Search input / magnifier / 搜索 placeholder focus
+          const inp = t.closest?.(
+            'input[placeholder*="搜索"], input[placeholder*="合约"], input[placeholder*="KOL"], input[type="search"]'
+          );
+          const searchBtn =
+            t.closest?.("button, [role='button'], a") &&
+            /搜索|search|历史/i.test(
+              (
+                t.closest("button, [role='button'], a")?.getAttribute?.("aria-label") ||
+                t.closest("button, [role='button'], a")?.textContent ||
+                ""
+              )
+                .toString()
+                .slice(0, 24)
+            );
+          // GMGN top-right search icon area (often SVG without text)
+          const headerSearch =
+            t.closest?.("header") &&
+            t.closest?.("svg, button, [class*='search'], [class*='Search']");
+          if (!inp && !searchBtn && !headerSearch) return;
+          // Optimistic window only — lastOverlayOpen is set when panel is really open.
+          overlayFastUntil = Date.now() + OVERLAY_FAST_MS;
+          window.setTimeout(() => {
+            if (!isExtensionContextValid() || !isTabVisible()) return;
+            if (quickHasOpenOverlay()) armOverlayFastScan("click-search");
+          }, 60);
+          window.setTimeout(() => {
+            if (!isExtensionContextValid() || !isTabVisible()) return;
+            if (quickHasOpenOverlay()) armOverlayFastScan("click-search-late");
+          }, 220);
+        } catch (_err) {
+          // ignore
+        }
+      },
+      true
+    );
+    // Focus on search input also opens history list.
+    document.addEventListener(
+      "focusin",
+      (event) => {
+        try {
+          if (!isExtensionContextValid()) return;
+          const t = event.target;
+          if (!(t instanceof Element)) return;
+          if (
+            !t.matches?.(
+              'input[placeholder*="搜索"], input[placeholder*="合约"], input[placeholder*="KOL"], input[type="search"]'
+            )
+          ) {
+            return;
+          }
+          overlayFastUntil = Date.now() + OVERLAY_FAST_MS;
+          window.setTimeout(() => {
+            if (quickHasOpenOverlay()) armOverlayFastScan("focus-search");
+          }, 80);
         } catch (_err) {
           // ignore
         }
@@ -2931,6 +3222,15 @@
     }
     const listReturnSoft = isSpaListReturnSoft();
     const listReturnCacheOnly = isSpaListReturnCacheOnly();
+    const overlayFast = isOverlayFast();
+    // Overlay open: cache-first burst before full card loop (0.4.38).
+    if (overlayFast || quickHasOpenOverlay()) {
+      try {
+        fastPaintOverlayFromCache();
+      } catch (_err) {
+        // ignore
+      }
+    }
     const seenCards = new Set();
     const nodes = siteStrategy.getCandidateNodes();
     let touched = 0;
@@ -2939,8 +3239,9 @@
     let skippedCached = 0;
     const budget = cardsPerScanBudget();
     const forceRemount = isResumeForceRemount();
-    // list-return: tight viewport only (immediacy for first screen, skip offscreen cost).
-    const looseView = listReturnSoft ? false : lightScan || isTokenDetailRoute();
+    // list-return / overlay: tight viewport only (immediacy for first screen, skip offscreen cost).
+    const looseView =
+      listReturnSoft || overlayFast ? false : lightScan || isTokenDetailRoute();
 
     // Expensive re-extract cleanup is rare — skip deep cleanup during list-return soft.
     if (
@@ -3167,13 +3468,21 @@
     // Always continue when work remains (not only SPA) — covers Debot 3-col first paint.
     // 0.4.21: keep light mode on token settled pages so chart full-scan stays off.
     if (truncated) {
-      const keepLight = lightScan || isTokenPageSettledWithBadge();
+      const keepLight =
+        lightScan || overlayFast || isTokenPageSettledWithBadge() || quickHasOpenOverlay();
       // list-return: yield to site paint (immediate:false) — 0.4.32 kill stacked longtasks.
-      if (listReturnSoft) {
+      if (listReturnSoft && !overlayFast) {
         scheduleScan(listReturnCacheOnly ? 16 : 32, {
           force: true,
           immediate: false,
           light: false,
+          bypassForceGap: true
+        });
+      } else if (overlayFast) {
+        scheduleScan(40, {
+          force: true,
+          immediate: true,
+          light: true,
           bypassForceGap: true
         });
       } else {
@@ -3730,34 +4039,19 @@
 
     document.querySelectorAll('[role="dialog"], [role="alertdialog"]').forEach((el) => pushIfOk(el));
 
-    // GMGN: search / 历史代币 panel — climb from search input (cheap, few inputs).
+    // MUI modals (Debot/Gungnir search)
+    if (added < 3) {
+      document.querySelectorAll(".MuiModal-root, .MuiDialog-root").forEach((el) => {
+        if (added >= 3) return;
+        const paper = el.querySelector?.(".MuiPaper-root, .MuiDialog-paper") || el;
+        pushIfOk(paper instanceof HTMLElement ? paper : el);
+      });
+    }
+
+    // GMGN: search / 历史代币 panel — cached climb (0.4.38).
     if (added < 3 && location.hostname.endsWith("gmgn.ai")) {
-      const inputs = document.querySelectorAll(
-        'input[placeholder*="搜索"], input[placeholder*="合约"], input[placeholder*="KOL"]'
-      );
-      for (let i = 0; i < Math.min(inputs.length, 8) && added < 3; i += 1) {
-        const inp = inputs[i];
-        if (!(inp instanceof HTMLElement)) continue;
-        const ir = inp.getBoundingClientRect();
-        if (ir.width < 100 || ir.top < 20 || ir.bottom > window.innerHeight) continue;
-        let p = inp.parentElement;
-        let best = null;
-        for (let d = 0; p && d < 12; d += 1) {
-          if (!(p instanceof HTMLElement)) break;
-          const r = p.getBoundingClientRect();
-          if (
-            r.width >= 320 &&
-            r.width <= window.innerWidth * 0.92 &&
-            r.height >= 200 &&
-            r.height <= window.innerHeight * 0.92 &&
-            r.top > 20
-          ) {
-            best = p;
-          }
-          p = p.parentElement;
-        }
-        if (best) pushIfOk(best);
-      }
+      const panel = findGmgnSearchPanelRoot();
+      if (panel) pushIfOk(panel);
     }
   }
 
@@ -3768,6 +4062,15 @@
   function getLightScanRoots() {
     const roots = [];
     collectOpenDialogRoots(roots);
+    // 0.4.38 overlay-fast: dialog ONLY — do not compete with 三列战壕 (main 5s cause).
+    if (isOverlayFast() && roots.length) {
+      const uniqFast = [];
+      for (const r of roots) {
+        if (!uniqFast.includes(r) && r.isConnected) uniqFast.push(r);
+        if (uniqFast.length >= 3) break;
+      }
+      return uniqFast;
+    }
     const host = location.hostname || "";
     if (host.endsWith("gmgn.ai")) {
       document
@@ -3803,9 +4106,10 @@
     pendingLightScan = false;
     // 0.4.30: token→list soft — viewport only, smaller caps (jank↓, first screen still filled).
     const listReturnSoft = isSpaListReturnSoft();
+    const overlayOnly = isOverlayFast();
 
     // 0.4.36: list-return uses column round-robin anchors only (covers 已迁移 / GMGN 右列).
-    if (listReturnSoft) {
+    if (listReturnSoft && !overlayOnly) {
       const anchors = collectListReturnAnchorsRoundRobin();
       return anchors.slice(0, SPA_LIST_RETURN_CANDIDATES);
     }
@@ -3818,12 +4122,14 @@
       try {
         const host = node.closest?.("a, div, li, article") || node.parentElement;
         if (host && !host.querySelector?.(`[${ICON_DATA}="1"]`)) pri += 3;
+        // Overlay rows always win over trench during overlay-fast.
+        if (overlayOnly || isInsideOverlayDialog(node)) pri += 8;
       } catch (_err) {
         // ignore
       }
       const item = { node, priority: pri };
-      // list-return: never queue far offscreen (main cost of GMGN token→home).
-      if (listReturnSoft) {
+      // list-return / overlay-fast: never queue far offscreen.
+      if (listReturnSoft || overlayOnly) {
         if (isNearViewport(node, false)) inView.push(item);
         return;
       }
@@ -3833,11 +4139,13 @@
 
     const collectFromRoot = (root) => {
       if (!root || !root.querySelectorAll) return;
-      const candCap = listReturnSoft
-        ? SPA_LIST_RETURN_CANDIDATES
-        : lightOnly
-          ? LIGHT_MAX_CANDIDATES * 2
-          : MAX_CANDIDATES_PER_SCAN * 2;
+      const candCap = overlayOnly
+        ? OVERLAY_MAX_CANDIDATES * 2
+        : listReturnSoft
+          ? SPA_LIST_RETURN_CANDIDATES
+          : lightOnly
+            ? LIGHT_MAX_CANDIDATES * 2
+            : MAX_CANDIDATES_PER_SCAN * 2;
       // Prefer site token routes over external flap.sh icons (js-mcp: flap.sh 18×18 noise).
       root
         .querySelectorAll(
@@ -3846,7 +4154,7 @@
         )
         .forEach((n) => addNode(n, 2));
       // list-return: href-only — skip SUFFIX + leaf walks (main cost of GMGN return).
-      if (listReturnSoft) return;
+      if (listReturnSoft && !overlayOnly) return;
       root.querySelectorAll(SUFFIX_SELECTORS).forEach((n) => {
         const href = (n.getAttribute && n.getAttribute("href")) || "";
         // Deprioritize external explorer / flap icons
@@ -3855,13 +4163,21 @@
       });
       // Short CA text in compact leaves (raise cap on light — virtual list new rows).
       // Debot/Gungnir: pure short CA is often a leaf DIV (js-mcp), not only a/span.
-      const leafBudget = lightOnly ? LIGHT_MAX_CANDIDATES : MAX_CANDIDATES_PER_SCAN;
+      // Overlay history rows: also walk div leaves (short CA only).
+      const leafBudget = overlayOnly
+        ? OVERLAY_MAX_CANDIDATES
+        : lightOnly
+          ? LIGHT_MAX_CANDIDATES
+          : MAX_CANDIDATES_PER_SCAN;
       if (inView.length < leafBudget) {
         const hn = location.hostname || "";
         const debotHost = hn.endsWith("debot.ai") || hn.endsWith("gungnir.bot");
-        const leafSel = debotHost ? "a, span, div" : "a, span";
+        const leafSel = debotHost || overlayOnly ? "a, span, div" : "a, span";
         const leaves = root.querySelectorAll(leafSel);
-        const maxCheck = Math.min(leaves.length, lightOnly ? 500 : debotHost ? 350 : 200);
+        const maxCheck = Math.min(
+          leaves.length,
+          overlayOnly ? 200 : lightOnly ? 500 : debotHost ? 350 : 200
+        );
         for (let i = 0; i < maxCheck; i += 1) {
           if (inView.length + offscreen.length >= candCap) break;
           const el = leaves[i];
@@ -3870,27 +4186,33 @@
           if (!TARGET_SHORT_TOKEN_RE.test(t)) continue;
           // Skip fat wrappers that only contain the short CA among other chrome.
           if (el.tagName === "DIV" && el.children && el.children.length > 2) continue;
-          addNode(el, 1);
+          addNode(el, overlayOnly ? 3 : 1);
         }
       }
     };
 
-    // Light scan: overlays + side boards only (token header settled / chart thrash).
-    const roots = lightOnly ? getLightScanRoots() : getScanRoots();
-    const maxCand = listReturnSoft
-      ? SPA_LIST_RETURN_CANDIDATES
-      : lightOnly
-        ? LIGHT_MAX_CANDIDATES * 2
-        : MAX_CANDIDATES_PER_SCAN * 2;
+    // Light / overlay-fast: dialog (+ side boards only when not overlay-fast).
+    const roots =
+      lightOnly || overlayOnly
+        ? getLightScanRoots()
+        : getScanRoots();
+    const maxCand = overlayOnly
+      ? OVERLAY_MAX_CANDIDATES * 2
+      : listReturnSoft
+        ? SPA_LIST_RETURN_CANDIDATES
+        : lightOnly
+          ? LIGHT_MAX_CANDIDATES * 2
+          : MAX_CANDIDATES_PER_SCAN * 2;
     for (const root of roots) {
       if (inView.length + offscreen.length >= maxCand) break;
       collectFromRoot(root);
     }
 
     // SPA hole-fill: if roots empty/wrong, scan body once.
-    // Never on light / list-return soft / settled token pages.
+    // Never on light / overlay-fast / list-return soft / settled token pages.
     if (
       !lightOnly &&
+      !overlayOnly &&
       !listReturnSoft &&
       inView.length + offscreen.length < 8 &&
       document.body
@@ -3908,12 +4230,14 @@
     const sortPri = (a, b) => b.priority - a.priority;
     inView.sort(sortPri);
     offscreen.sort(sortPri);
-    const offTake = listReturnSoft ? 0 : lightOnly ? LIGHT_MAX_OFFSCREEN : 12;
-    const sliceMax = listReturnSoft
-      ? SPA_LIST_RETURN_CANDIDATES
-      : lightOnly
-        ? LIGHT_MAX_CANDIDATES
-        : MAX_CANDIDATES_PER_SCAN;
+    const offTake = listReturnSoft || overlayOnly ? 0 : lightOnly ? LIGHT_MAX_OFFSCREEN : 12;
+    const sliceMax = overlayOnly
+      ? OVERLAY_MAX_CANDIDATES
+      : listReturnSoft
+        ? SPA_LIST_RETURN_CANDIDATES
+        : lightOnly
+          ? LIGHT_MAX_CANDIDATES
+          : MAX_CANDIDATES_PER_SCAN;
     const merged = inView.concat(offscreen.slice(0, offTake)).map((x) => x.node);
     return merged.slice(0, sliceMax);
   }
@@ -4159,7 +4483,12 @@
     if (modeCache.has(token) || isPersistentCacheHit(token) || requestQueue.has(token)) return;
     requestQueue.add(token);
     debugInfo("queue", { token });
-    scheduleBatchFlush();
+    // Overlay UX: flush immediately (was BATCH_FLUSH_MS 350 + idle → multi-second wait).
+    if (isOverlayFast() || quickHasOpenOverlay()) {
+      scheduleBatchFlush({ immediate: true, delayMs: 0 });
+    } else {
+      scheduleBatchFlush();
+    }
   }
 
   function scheduleBatchFlush(options = {}) {
@@ -4441,6 +4770,21 @@
         if (urlTok && urlTok === String(token).toLowerCase() && !hasGmgnTokenHeaderBadge()) {
           tryPaintGmgnTokenHeader("api-apply");
         }
+      }
+      // Search/history overlay: paint as soon as fee returns (0.4.38).
+      if (quickHasOpenOverlay()) {
+        overlayFastUntil = Math.max(overlayFastUntil, Date.now() + 2000);
+        try {
+          fastPaintOverlayFromCache();
+        } catch (_err2) {
+          // ignore
+        }
+        scheduleScan(0, {
+          force: true,
+          immediate: true,
+          light: true,
+          bypassForceGap: true
+        });
       }
     } catch (_err) {
       // ignore
@@ -6149,28 +6493,57 @@
       }
     }
 
+    // Overlay open edge: arm dense dialog-first kicks (home + token pages).
+    const overlayNow = quickHasOpenOverlay();
+    if (overlayNow && !lastOverlayOpen) {
+      lastOverlayOpen = true;
+      armOverlayFastScan("mutation-open");
+    } else if (!overlayNow && lastOverlayOpen) {
+      lastOverlayOpen = false;
+      overlayFastUntil = 0;
+    }
+
     // During SPA rebuild: mark dirty only; progressive + quiet-end handle full paint.
-    if (isSpaQuiet()) {
+    // Exception: open search overlay must still paint (user: 弹层 5s).
+    if (isSpaQuiet() && !overlayNow) {
       spaDomDirty = true;
       return;
     }
     // 0.4.12: non-8888/7777 token page — chart noise must not schedule scans.
-    if (isNonTargetTokenPage()) return;
+    if (isNonTargetTokenPage() && !overlayNow) return;
 
     if (mutationDebounceTimer) return;
 
+    // Overlay open (any page): snappy dialog-first light scan (0.4.38).
+    if (overlayNow) {
+      mutationDebounceTimer = window.setTimeout(() => {
+        mutationDebounceTimer = null;
+        if (!isTabVisible() || !isExtensionContextValid()) return;
+        if (!quickHasOpenOverlay()) return;
+        try {
+          fastPaintOverlayFromCache();
+        } catch (_err) {
+          // ignore
+        }
+        scheduleScan(0, {
+          force: true,
+          light: true,
+          immediate: true,
+          bypassForceGap: true
+        });
+      }, MUTATION_SCAN_DEBOUNCE_HOME_OVERLAY_MS);
+      return;
+    }
+
     // 0.4.20: header settled → do NOT full-scan chart; still light-scan dialogs / side boards.
     if (isTokenPageSettledWithBadge()) {
-      const overlay = quickHasOpenOverlay();
-      const debounceMs = overlay
-        ? MUTATION_SCAN_DEBOUNCE_OVERLAY_MS
-        : MUTATION_SCAN_DEBOUNCE_TOKEN_LIGHT_MS;
+      const debounceMs = MUTATION_SCAN_DEBOUNCE_TOKEN_LIGHT_MS;
       mutationDebounceTimer = window.setTimeout(() => {
         mutationDebounceTimer = null;
         if (!isTabVisible() || !isExtensionContextValid()) return;
         if (isSpaQuiet() || isNonTargetTokenPage()) return;
         // Light only: overlays + 战壕 side columns (skip header / full body).
-        scheduleScan(0, { force: true, light: true, immediate: overlay });
+        scheduleScan(0, { force: true, light: true, immediate: false });
       }, debounceMs);
       return;
     }
