@@ -382,6 +382,13 @@ python tools/ctl.py watchdog-run
   - `0.4.50`：GMGN K 线强制 short CA afterend（禁总税率兜底；税率旁已挂则迁移到地址旁）  
   - `0.4.51`：GMGN/Debot 三列同 CA 各显徽章（list-return 禁 token 级 dedupe）；单卡仍防双徽章  
   - `0.5.0`：里程碑 — GMGN 战壕流畅与 K 线地址旁挂载、三列同 CA 各显；Debot K 线顶栏/坐标双徽章；100% 仅类型图标；回战壕 ~0.5s 铺满  
+  - `0.5.1`：GMGN 多栏布局 short CA 中位 — 放宽地址 left 带  
+  - `0.5.2`：GMGN token 多栏同时扫顶栏+左侧战壕（对齐 0.4.24，修 settled 死锁）  
+  - `0.5.3`–`0.5.4`：K 线顶栏防闪没（`data-fee-header` 锁 + 列表扫勿 clear）  
+  - `0.5.5`：token 页 guardian 续画 + insert 成功即算挂载成功  
+  - `0.5.6`–`0.5.7`：内联战壕开时勿误选左侧 short CA；全宽恢复顶栏地址  
+  - `0.5.8`：顶栏成功仅认真锁，左侧同 CA 列表徽章不冒充顶栏  
+  - `0.5.9`：优先 `#token-base-address`/`data-addr`；地址行 DOM 重绘后 observer 补挂  
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`

@@ -5,6 +5,15 @@
   // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
+  // 0.5.9: GMGN 顶栏优先 #token-base-address / [data-addr]；DOM 被 React 重绘后 observer 补挂.
+  // 0.5.8: 顶栏成功判定仅 fee-header 真锁；勿把左侧同 CA 列表徽章当顶栏已挂好；cache ready 强制补画.
+  // 0.5.7: short CA 定位 — 仅在内联战壕打开时排除左侧列；全宽 K 线恢复左顶栏地址.
+  // 0.5.6: 内联战壕开启时 short CA 勿选左侧列 — 优先总税率左侧最近的顶栏地址.
+  // 0.5.5: GMGN 顶栏强制可挂（insert 成功即 OK）+ token 页 guardian 续画；修双端都不显示.
+  // 0.5.4: GMGN 顶栏徽章 data-fee-header 锁定 — 防 isStable 误判/列表 remount 闪没.
+  // 0.5.3: GMGN K 线徽章闪一下消失 — 禁止 tryPaint 狂清顶栏；列表扫勿 clear 顶栏 URL 徽章.
+  // 0.5.2: GMGN token 多栏 — 顶栏+左侧战壕同时扫（取消 settled 才开侧栏的死锁，对齐 0.4.24）.
+  // 0.5.1: GMGN 多栏布局(战壕+K线) short CA 不在视口左侧 — 放宽 left 带限制.
   // 0.5.0: 里程碑发布 — GMGN 流畅/地址旁挂载/三列同 CA；Debot 顶栏+坐标双徽章；100% 仅图标.
   // 0.4.51: GMGN 三列同 CA 各显徽章（list-return 禁 token 级 seen）；单卡仍防双徽章.
   // 0.4.50: GMGN K 线强制 short CA afterend（禁总税率兜底抢挂）；已挂税率旁则迁移.
@@ -405,6 +414,12 @@
   let debotHeaderMissStreak = 0;
   /** Wall time when Debot header miss streak started. */
   let debotHeaderMissSince = 0;
+  /** GMGN token multi-panel: keep header + left trench painting (cross-browser). */
+  let gmgnTokenGuardianId = null;
+  let gmgnHeaderMissSince = 0;
+  /** Watch token-base-address parent — React often wipes afterend badge. */
+  let gmgnHeaderDomObs = null;
+  let gmgnHeaderDomObsLastAt = 0;
 
   hydratePersistentCache();
   hydrateDisplayPrefs();
@@ -424,8 +439,9 @@
   installGmgnSpaClickArm();
   installOverlayOpenArm();
   startRoutePoller();
-  // Guardian is Debot-only work; skip timer on GMGN entirely.
-  if (!location.hostname.endsWith("gmgn.ai")) {
+  if (location.hostname.endsWith("gmgn.ai")) {
+    startGmgnTokenGuardian();
+  } else {
     startDebotTokenGuardian();
   }
 
@@ -1182,30 +1198,23 @@
 
     // Light scan (dialog/side boards): do NOT inject K-line header walks.
     const light = pendingLightScan;
-    // Unsettled token: header-only seeds — avoid war-room column walks during chart mount (0.4.37).
-    if (!light && !isTokenPageSettledWithBadge()) {
-      const nodes = [];
-      const root = findGmgnTokenPageRoot();
-      if (root && root !== document.body) {
-        nodes.push(root);
-        const leaves = root.querySelectorAll("a, span");
-        const max = Math.min(leaves.length, 40);
-        for (let i = 0; i < max; i += 1) {
-          const el = leaves[i];
-          const t = (el.textContent || "").trim();
-          if (TARGET_SHORT_TOKEN_RE.test(t) && t.length < 22 && !nodes.includes(el)) {
-            nodes.push(el);
-          }
-        }
-      }
-      return nodes.slice(0, 24);
-    }
-
+    // 0.5.2: ALWAYS scan side 战壕 columns on token multi-panel (like 0.4.24).
+    // 0.4.37 header-only-until-settled caused deadlock: header paint miss → left column 0 badges forever.
+    // Header seeds are unshifted for priority; column candidates still collected.
     const nodes = getCandidateNodes();
     if (light) return nodes.slice(0, LIGHT_MAX_CANDIDATES);
 
     const root = findGmgnTokenPageRoot();
-    if (root && !nodes.includes(root)) nodes.unshift(root);
+    if (root && root !== document.body && !nodes.includes(root)) {
+      nodes.unshift(root);
+    }
+    // Prefer address leaf as first seed (mount path).
+    try {
+      const addr = findGmgnHeaderAddressMount();
+      if (addr instanceof HTMLElement && !nodes.includes(addr)) nodes.unshift(addr);
+    } catch (_err) {
+      // ignore
+    }
     if (root && root !== document.body) {
       root.querySelectorAll("a, span").forEach((el) => {
         if (nodes.length >= MAX_CANDIDATES_PER_SCAN) return;
@@ -1359,27 +1368,11 @@
 
   /**
    * True if badge sits on GMGN token header beside short CA (not war-room, not 总税率).
-   * 0.4.50: tax-strip mounts must NOT count as settled — otherwise we never migrate.
+   * 0.5.3: use findGmgnHeaderBadgeEl (stable).
    */
   function hasGmgnTokenHeaderBadge() {
     try {
-      const urlTok = extractTokenFromUrl();
-      if (!urlTok) return false;
-      const hit = document.querySelector(
-        `[${ICON_DATA}="1"][data-fee-token="${urlTok}"]`
-      );
-      if (!(hit instanceof HTMLElement)) return false;
-      if (hit.closest?.('[role="dialog"], [role="alertdialog"]')) return false;
-      // War-room column residual must not count.
-      const col = hit.closest?.(
-        "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
-      );
-      if (col) {
-        const cr = col.getBoundingClientRect();
-        // Tall list column — not header.
-        if (cr.height > 200) return false;
-      }
-      return isGmgnBadgeBesideAddress(hit, urlTok);
+      return !!findGmgnHeaderBadgeEl(extractTokenFromUrl());
     } catch (_err) {
       return false;
     }
@@ -1390,26 +1383,138 @@
    * js-mcp 0.4.50: `0xa4...7777` is often <span> inside flex copy row at ~left 120.
    * Must NOT rely on document-order caps that skip past the leaf.
    */
-  function findGmgnHeaderShortCaLeaf(urlTok) {
+  /**
+   * Optional x of 「总税率」label in header — used to keep address left of metrics.
+   * Multi-panel layout: tax may be at x>1500; address at x~700 (still middle of viewport).
+   */
+  function findGmgnTaxLabelLeft() {
+    try {
+      const lab = findGmgnTaxRateLabel();
+      if (lab instanceof HTMLElement && lab.isConnected) {
+        const r = lab.getBoundingClientRect();
+        if (r.width > 0 && r.top >= 0 && r.top < 220) return r.left;
+      }
+    } catch (_err) {
+      // ignore
+    }
+    return 0;
+  }
+
+  /**
+   * True if node is inside left/side 战壕 column (inline multi-panel), not K-line header.
+   * User repro: with left trench open, leftmost short-CA match steals header paint.
+   */
+  function isInsideGmgnSideTrench(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    try {
+      const col = el.closest?.(
+        "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
+      );
+      if (!(col instanceof HTMLElement)) return false;
+      const cr = col.getBoundingClientRect();
+      // Tall narrow side boards only (left 战壕 / mid 钱包).
+      if (cr.height < 280) return false;
+      if (cr.width >= window.innerWidth * 0.55) return false;
+      // Side panel starts near left edge; chart header starts mid-page when multi-panel open.
+      if (cr.left < window.innerWidth * 0.42) return true;
+    } catch (_err) {
+      return false;
+    }
+    return false;
+  }
+
+  /** True when GMGN token page shows a tall left 战壕/side board (inline multi-panel). */
+  function isGmgnInlineTrenchOpen() {
+    try {
+      const cols = document.querySelectorAll(
+        "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
+      );
+      for (let i = 0; i < cols.length; i += 1) {
+        const el = cols[i];
+        if (!(el instanceof HTMLElement)) continue;
+        const r = el.getBoundingClientRect();
+        if (
+          r.height >= 280 &&
+          r.width >= 180 &&
+          r.width < window.innerWidth * 0.5 &&
+          r.left < window.innerWidth * 0.42 &&
+          r.top < window.innerHeight
+        ) {
+          return true;
+        }
+      }
+    } catch (_err) {
+      return false;
+    }
+    return false;
+  }
+
+  /**
+   * 0.5.9 js-mcp: GMGN exposes stable header short-CA node:
+   *   <span id="token-base-address" data-addr="0x…">0x..7777</span>
+   * Prefer this over scanning whole document (avoids left-trench false matches).
+   */
+  function findGmgnOfficialTokenBaseAddress(urlTok) {
     if (!urlTok) return null;
     try {
+      const byId = document.getElementById("token-base-address");
+      if (byId instanceof HTMLElement) {
+        const addr = normalizeToken(byId.getAttribute("data-addr") || byId.getAttribute("title") || "");
+        const text = (byId.textContent || "").trim();
+        if ((!addr || addr === urlTok) && (!text || tokenMatchesShort(urlTok, text.match(SHORT_TOKEN_RE)?.[0] || text) || TARGET_SHORT_TOKEN_RE.test(text))) {
+          if (!isInsideGmgnSideTrench(byId)) {
+            const r = byId.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0 && r.top >= 40 && r.top < 220) return byId;
+          }
+        }
+      }
+      // data-addr exact full CA (header only)
+      const nodes = document.querySelectorAll(`[data-addr="${urlTok}"], [data-addr="${urlTok.toLowerCase()}"], [data-addr="${urlTok.toUpperCase()}"]`);
+      for (let i = 0; i < nodes.length; i += 1) {
+        const el = nodes[i];
+        if (!(el instanceof HTMLElement)) continue;
+        if (isInsideGmgnSideTrench(el)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0 || r.height > 40) continue;
+        if (r.top < 40 || r.top >= 220) continue;
+        return el;
+      }
+    } catch (_err) {
+      // ignore
+    }
+    return null;
+  }
+
+  function findGmgnHeaderShortCaLeaf(urlTok) {
+    if (!urlTok) return null;
+    // 0.5.9: official GMGN node first (js-mcp ground truth on multi-panel + full-width).
+    const official = findGmgnOfficialTokenBaseAddress(urlTok);
+    if (official) return official;
+
+    try {
       const hits = [];
+      const taxLeft = findGmgnTaxLabelLeft();
+      const multiPanel = isGmgnInlineTrenchOpen();
+      // 0.5.7/0.5.9: multi-panel skip left trench; full-width keep header band leaves.
       const pushIfOk = (el) => {
         if (!(el instanceof HTMLElement) || hits.includes(el)) return;
+        if (multiPanel && isInsideGmgnSideTrench(el)) return;
         const r = el.getBoundingClientRect();
-        // Address sits under token name (~y 100–160), left of metrics (not 总税率 ~x900).
         if (r.width <= 0 || r.height <= 0 || r.height > 36) return;
-        if (r.top < 70 || r.top > 180) return;
-        if (r.left < 40 || r.left > Math.min(720, window.innerWidth * 0.55)) return;
+        if (r.top < 55 || r.top > 175) return;
+        if (r.left < 0 || r.right > window.innerWidth + 20) return;
+        if (taxLeft > 200 && r.left >= taxLeft - 8) return;
+        if (r.left > window.innerWidth * 0.92) return;
         hits.push(el);
       };
 
-      // 1) Exact title=full CA (when GMGN exposes it).
+      // 1) Exact title=full CA
       try {
         document.querySelectorAll("[title]").forEach((el) => {
           if (!(el instanceof HTMLElement)) return;
           const titleTok = normalizeToken(el.getAttribute("title") || "");
           if (titleTok !== urlTok) return;
+          if (multiPanel && isInsideGmgnSideTrench(el)) return;
           const leaf =
             Array.from(el.querySelectorAll("span, div, a")).find((n) => {
               const tt = (n.textContent || "").trim();
@@ -1425,22 +1530,23 @@
         // ignore
       }
 
-      // 2) Visible short-CA text leaves in header band (primary path on current GMGN).
+      // 2) Visible short-CA text leaves in header band
       const nodes = document.querySelectorAll("span, a, div, p, button");
-      const max = Math.min(nodes.length, 1200);
+      const max = Math.min(nodes.length, 1600);
       for (let i = 0; i < max; i += 1) {
         const el = nodes[i];
         if (!(el instanceof HTMLElement)) continue;
-        // Own text only — avoid huge parents whose textContent includes the short CA.
         const own = Array.from(el.childNodes)
           .filter((n) => n.nodeType === Node.TEXT_NODE)
           .map((n) => (n.textContent || "").trim())
           .join("");
-        const t = (own || (el.children && el.children.length === 0 ? (el.textContent || "").trim() : "")).trim();
+        const t = (
+          own ||
+          (el.children && el.children.length === 0 ? (el.textContent || "").trim() : "")
+        ).trim();
         if (!t || t.length > 22 || t.length < 8) continue;
         if (!TARGET_SHORT_TOKEN_RE.test(t) && !SHORT_TOKEN_RE.test(t)) continue;
         if (!tokenMatchesShort(urlTok, t.match(SHORT_TOKEN_RE)?.[0] || t)) continue;
-        // Prefer true leaves (span with text) over wrappers.
         if (el.children && el.children.length > 1) continue;
         pushIfOk(el);
       }
@@ -1449,11 +1555,13 @@
       hits.sort((a, b) => {
         const ar = a.getBoundingClientRect();
         const br = b.getBoundingClientRect();
-        // Prefer leaf-like (smaller), leftmost (address not metrics), then top.
-        const area = ar.width * ar.height - br.width * br.height;
-        if (Math.abs(area) > 40) return area;
-        if (ar.left !== br.left) return ar.left - br.left;
-        return ar.top - br.top;
+        if (multiPanel) {
+          if (Math.abs(ar.left - br.left) > 12) return br.left - ar.left;
+        } else {
+          if (Math.abs(ar.left - br.left) > 12) return ar.left - br.left;
+        }
+        if (Math.abs(ar.top - br.top) > 4) return ar.top - br.top;
+        return ar.width * ar.height - br.width * br.height;
       });
       return hits[0];
     } catch (_err) {
@@ -1463,45 +1571,61 @@
 
   /**
    * True if badge is already sitting next to the short CA (not 总税率 metrics).
-   * js-mcp: tax-mounted badge has prevText「总税率」and left ~1000; address ~left 190.
+   * 0.5.8: fee-header alone is NOT enough — must not be in left trench; prefer short CA neighbor.
    */
   function isGmgnBadgeBesideAddress(icon, urlTok) {
     if (!(icon instanceof HTMLElement)) return false;
     try {
       const r = icon.getBoundingClientRect();
-      if (r.width < 2 || r.height < 2 || r.top < 0 || r.top >= 200) return false;
-      // Metrics strip badges sit far right near 总税率.
-      if (r.left > Math.min(700, window.innerWidth * 0.55)) return false;
+      if (r.width < 2 || r.height < 2 || r.top < 0 || r.top >= 240) return false;
+      if (isInsideGmgnSideTrench(icon)) return false;
+      // Locked header badge in top band: trust.
+      if (icon.dataset.feeHeader === "1") {
+        if (urlTok && icon.dataset.feeToken && icon.dataset.feeToken !== urlTok) return false;
+        if (r.top >= 40 && r.top < 200) return true;
+      }
       const mount = icon.closest?.("[data-flap-mount]");
       const mk = mount?.dataset?.flapMount || "";
-      if (mk === "gmgn-header-address" || mk === "gmgn-header-address-leaf") return true;
       if (mk === "gmgn-header-metrics" || mk === "gmgn-tax-cell") return false;
-      // Sibling / near short CA leaf.
-      const short = findGmgnHeaderShortCaLeaf(urlTok);
-      if (short && short.isConnected) {
-        const sr = short.getBoundingClientRect();
-        if (Math.abs(r.top - sr.top) <= 28 && r.left >= sr.left - 8 && r.left <= sr.right + 220) {
-          return true;
-        }
-        // immediately after short or its parent
-        if (
-          icon.previousElementSibling === short ||
-          short.nextElementSibling === icon ||
-          short.parentElement?.nextElementSibling === icon ||
-          short.parentElement?.contains(icon)
-        ) {
-          // contained by short parent is ok only if not the metrics strip
-          if (icon.parentElement === short.parentElement) return true;
-          if (icon.previousElementSibling === short || short.nextElementSibling === icon) {
-            return true;
-          }
-        }
-      }
-      // prev sibling text is short CA
+      if (mk === "gmgn-header-address" || mk === "gmgn-header-address-leaf") return true;
+
+      // prev sibling is short CA (strongest signal, no absolute-x gate).
       const prev = icon.previousElementSibling;
       if (prev) {
         const pt = (prev.textContent || "").trim();
-        if (TARGET_SHORT_TOKEN_RE.test(pt) && pt.length <= 22) return true;
+        if (
+          (TARGET_SHORT_TOKEN_RE.test(pt) || SHORT_TOKEN_RE.test(pt)) &&
+          pt.length <= 22 &&
+          (!urlTok || tokenMatchesShort(urlTok, pt.match(SHORT_TOKEN_RE)?.[0] || pt))
+        ) {
+          return true;
+        }
+      }
+
+      // Near short CA leaf (geometry relative to leaf, works at any viewport x).
+      const short = findGmgnHeaderShortCaLeaf(urlTok);
+      if (short && short.isConnected) {
+        const sr = short.getBoundingClientRect();
+        if (
+          Math.abs(r.top - sr.top) <= 32 &&
+          r.left >= sr.left - 12 &&
+          r.left <= sr.right + 280
+        ) {
+          return true;
+        }
+        if (
+          icon.previousElementSibling === short ||
+          short.nextElementSibling === icon ||
+          (icon.parentElement && icon.parentElement === short.parentElement)
+        ) {
+          return true;
+        }
+      }
+
+      // Explicit reject: next to 总税率 text.
+      if (prev) {
+        const pt = (prev.textContent || "").replace(/\s+/g, " ").trim();
+        if (/总税率/.test(pt)) return false;
       }
     } catch (_err) {
       return false;
@@ -1525,7 +1649,8 @@
 
   /**
    * Direct paint for GMGN K-line header.
-   * 0.4.50: ONLY short-CA afterend. Never settle on 总税率. Migrate if already wrong.
+   * 0.5.3: if already beside short CA, only refresh label — never wipe-and-repaint
+   * (mutation/scan-pre thrash caused badge flash-then-gone).
    */
   function tryPaintGmgnTokenHeader(reason) {
     if (!isGmgnTokenPage() || !isExtensionContextValid()) return false;
@@ -1534,20 +1659,25 @@
 
     queueToken(urlTok);
 
-    const addrLeaf = findGmgnHeaderAddressMount();
-    // Already correct placement → done.
-    if (addrLeaf) {
-      const existing = document.querySelector(
-        `[${ICON_DATA}="1"][data-fee-token="${urlTok}"]`
-      );
-      if (
-        existing instanceof HTMLElement &&
-        isGmgnBadgeBesideAddress(existing, urlTok)
-      ) {
-        return true;
+    const existingGood = findGmgnHeaderBadgeEl(urlTok);
+    if (existingGood) {
+      const entryHit = resolveEntry(urlTok);
+      if (entryHit) {
+        try {
+          const q =
+            normalizeQuoteSymbol(entryHit.quote_symbol || "", { allowCjk: true }) ||
+            "BNB";
+          const { label, title, className } = computeBadgePresentation(entryHit, q);
+          if (label && existingGood.textContent !== label) {
+            existingGood.textContent = label;
+            existingGood.title = `${title}${urlTok}`;
+            existingGood.className = className;
+            existingGood.dataset.feeSig = label;
+          }
+        } catch (_err) {
+          // ignore
+        }
       }
-    } else if (hasGmgnTokenHeaderBadge()) {
-      // No address leaf yet but something painted — wait for DOM (don't tax-lock forever).
       return true;
     }
 
@@ -1558,6 +1688,7 @@
       return false;
     }
 
+    const addrLeaf = findGmgnHeaderAddressMount();
     // Host for CARD_MARK: climb from address leaf, else root (still place on leaf).
     const host =
       (addrLeaf && climbGmgnHeaderCardFromLeaf(addrLeaf)) ||
@@ -1577,11 +1708,27 @@
     }
 
     // Address-only paint (no renderMode → findIconTarget → 总税率 path).
-    const ok = forceAppendGmgnHeaderBadge(markHost, urlTok, entry, addrLeaf);
-    if (ok || (addrLeaf && isGmgnBadgeBesideAddress(
-      document.querySelector(`[${ICON_DATA}="1"][data-fee-token="${urlTok}"]`),
-      urlTok
-    ))) {
+    let ok = forceAppendGmgnHeaderBadge(markHost, urlTok, entry, addrLeaf);
+    // Retry once after short delay if leaf was late (SPA multi-panel).
+    if (!ok && !findGmgnHeaderBadgeEl(urlTok)) {
+      window.setTimeout(() => {
+        if (!isExtensionContextValid() || !isGmgnTokenPage()) return;
+        if (hasGmgnTokenHeaderBadge()) return;
+        try {
+          forceAppendGmgnHeaderBadge(
+            markHost && markHost.isConnected ? markHost : findGmgnTokenPageRoot(),
+            urlTok,
+            entry,
+            findGmgnHeaderAddressMount()
+          );
+          armGmgnHeaderDomWatch();
+        } catch (_err) {
+          // ignore
+        }
+      }, 120);
+    }
+    if (ok || findGmgnHeaderBadgeEl(urlTok)) {
+      armGmgnHeaderDomWatch();
       debugInfo("gmgn:header-paint", {
         reason,
         token: urlTok.slice(0, 12),
@@ -1589,7 +1736,68 @@
       });
       return true;
     }
+    // Keep watching so React rewrite of token-base-address can re-trigger paint.
+    armGmgnHeaderDomWatch();
     return false;
+  }
+
+  /**
+   * Visible K-line HEADER badge for URL token only.
+   * 0.5.8: NEVER treat left-trench same-CA list badge as header success
+   * (that made tryPaint/guardian skip forever after first flash).
+   */
+  function findGmgnHeaderBadgeEl(urlTok) {
+    if (!urlTok) return null;
+    try {
+      const nodes = document.querySelectorAll(
+        `[${ICON_DATA}="1"][data-fee-token="${urlTok}"]`
+      );
+      for (let i = 0; i < nodes.length; i += 1) {
+        const el = nodes[i];
+        if (!(el instanceof HTMLElement) || !document.contains(el)) continue;
+        // Must be explicit header lock.
+        if (el.dataset.feeHeader !== "1") continue;
+        // Not left 战壕 column.
+        if (isInsideGmgnSideTrench(el)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2) continue;
+        if (r.top < 40 || r.top >= 200) continue;
+        // Prefer next to short CA text when present.
+        const prev = el.previousElementSibling;
+        const pt = (prev?.textContent || "").trim();
+        if (pt && SHORT_TOKEN_RE.test(pt) && pt.length <= 22) {
+          if (!tokenMatchesShort(urlTok, pt.match(SHORT_TOKEN_RE)?.[0] || pt)) {
+            // Wrong short neighbor — still accept if mount mark says header.
+            const mk = el.closest?.("[data-flap-mount]")?.dataset?.flapMount || "";
+            if (mk !== "gmgn-header-address" && mk !== "gmgn-header-address-leaf") {
+              continue;
+            }
+          }
+        }
+        return el;
+      }
+    } catch (_err) {
+      // ignore
+    }
+    return null;
+  }
+
+  /** Never delete a locked K-line header badge (except explicit page leave). */
+  function isGmgnLockedHeaderBadge(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    if (el.dataset.feeHeader !== "1") return false;
+    if (!isGmgnTokenPage()) return false;
+    if (isInsideGmgnSideTrench(el)) return false;
+    const urlTok = extractTokenFromUrl();
+    if (!urlTok) return false;
+    if (el.dataset.feeToken && el.dataset.feeToken !== urlTok) return false;
+    try {
+      const r = el.getBoundingClientRect();
+      if (r.top < 40 || r.top >= 220) return false;
+    } catch (_err) {
+      return false;
+    }
+    return true;
   }
 
   /** Climb from short CA leaf to a reasonable header card host (for CARD_MARK only). */
@@ -1629,6 +1837,18 @@
       const { label, title, className } = computeBadgePresentation(entry, q);
       if (!label) return false;
 
+      // Already correct → in-place update only (0.5.3/0.5.4 flash fix).
+      const already = findGmgnHeaderBadgeEl(token);
+      if (already) {
+        already.textContent = label;
+        already.title = `${title}${token}`;
+        already.className = className;
+        already.dataset.feeSig = label;
+        already.dataset.feeHeader = "1";
+        already.dataset.feePosMode = "default";
+        return true;
+      }
+
       // Resolve pure text leaf (SPAN) — not the flex wrapper.
       let leaf =
         shortHint instanceof HTMLElement && shortHint.isConnected ? shortHint : null;
@@ -1645,31 +1865,36 @@
         if (inner instanceof HTMLElement) leaf = inner;
       }
       if (!(leaf instanceof HTMLElement) || !leaf.isConnected) return false;
+      // Never mount on left 战壕 leaf when multi-panel open — K-line address only.
+      if (isGmgnInlineTrenchOpen() && isInsideGmgnSideTrench(leaf)) return false;
 
-      // Remove ALL same-token badges in top strip (including wrong 总税率 mounts).
+      // Only remove WRONG top-strip mounts for this token (总税率 / orphan).
+      // Do NOT wipe locked/good address badges.
       try {
         document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
           if (!(n instanceof HTMLElement)) return;
           if (n.dataset.feeToken && n.dataset.feeToken !== token) return;
+          if (isGmgnLockedHeaderBadge(n)) return;
+          if (isGmgnBadgeBesideAddress(n, token)) return;
           const r = n.getBoundingClientRect();
-          if (r.top >= 0 && r.top < 220) {
-            try {
-              n.remove();
-            } catch (_err) {
-              // ignore
-            }
+          if (r.top < 0 || r.top >= 220) return;
+          try {
+            n.remove();
+          } catch (_err) {
+            // ignore
           }
         });
       } catch (_err) {
         // ignore
       }
-      if (host instanceof HTMLElement) removeAllBadgesForCard(host, token);
 
       const icon = document.createElement("span");
       icon.dataset[ICON_MARK] = "1";
       icon.dataset.feeToken = token;
       icon.dataset.feeSig = label;
       icon.dataset.feePosMode = "default";
+      // 0.5.4: lock header badge so list remount / isStable thrash cannot delete it.
+      icon.dataset.feeHeader = "1";
       icon.textContent = label;
       icon.title = `${title}${token}`;
       icon.className = className;
@@ -1693,11 +1918,45 @@
         leaf.parentElement.dataset.flapMount = "gmgn-header-address";
       }
 
+      // 0.5.5/0.5.7: insert success + visible; reject if multi-panel and landed in left trench.
+      if (!icon.isConnected) return false;
+      if (
+        isGmgnInlineTrenchOpen() &&
+        (isInsideGmgnSideTrench(icon) || isInsideGmgnSideTrench(leaf))
+      ) {
+        try {
+          icon.remove();
+        } catch (_errRm) {
+          // ignore
+        }
+        return false;
+      }
       const r = icon.getBoundingClientRect();
-      return r.width >= 2 && r.height >= 2 && isGmgnBadgeBesideAddress(icon, token);
+      return r.width >= 2 && r.height >= 2;
     } catch (_err) {
       return false;
     }
+  }
+
+  /** True if this card is the GMGN K-line header host (must not be wiped by list extract miss). */
+  function isGmgnHeaderMarkedCard(card) {
+    if (!(card instanceof HTMLElement) || !isGmgnTokenPage()) return false;
+    try {
+      if (isGmgnTokenHeaderCard(card)) return true;
+      const urlTok = extractTokenFromUrl();
+      if (!urlTok) return false;
+      const marked = card.dataset[CARD_MARK] || card.getAttribute(CARD_DATA) || "";
+      if (marked && marked === urlTok) {
+        const r = card.getBoundingClientRect();
+        if (r.top >= 0 && r.top < 240 && r.height <= 200) return true;
+      }
+      // Badge already beside address lives under/near this card.
+      const icon = card.querySelector?.(`[${ICON_DATA}="1"]`);
+      if (icon && isGmgnBadgeBesideAddress(icon, urlTok)) return true;
+    } catch (_err) {
+      return false;
+    }
+    return false;
   }
 
   /** Cheap: open modal / search history panel needs light scan. Cached 250ms (mutation thrash). */
@@ -2746,6 +3005,135 @@
    * and progressive settle never arms (user: one browser OK, another needs hard refresh).
    * 0.4.28: also paints during spa quiet; click-arm window forces work after /token/ click.
    */
+  /**
+   * GMGN multi-panel (战壕|K线): keep trying header address badge + side list scan.
+   * Fixes browsers where first tryPaint fails and never retries (user: one OK, one empty).
+   */
+  /**
+   * 0.5.9: Watch the official token-base-address row. GMGN React often replaces
+   * children and drops our afterend badge — re-paint without full list thrash.
+   */
+  function armGmgnHeaderDomWatch() {
+    if (!isGmgnHost() || !isGmgnTokenPage()) return;
+    const urlTok = extractTokenFromUrl();
+    if (!urlTok) return;
+    const leaf =
+      findGmgnOfficialTokenBaseAddress(urlTok) || findGmgnHeaderShortCaLeaf(urlTok);
+    if (!(leaf instanceof HTMLElement)) return;
+    const host = leaf.parentElement || leaf;
+    try {
+      if (gmgnHeaderDomObs) {
+        gmgnHeaderDomObs.disconnect();
+        gmgnHeaderDomObs = null;
+      }
+      gmgnHeaderDomObs = new MutationObserver(() => {
+        if (!isExtensionContextValid() || !isTabVisible()) return;
+        if (!isGmgnTokenPage()) {
+          stopGmgnHeaderDomWatch();
+          return;
+        }
+        const now = Date.now();
+        if (now - gmgnHeaderDomObsLastAt < 120) return;
+        gmgnHeaderDomObsLastAt = now;
+        if (hasGmgnTokenHeaderBadge()) return;
+        try {
+          tryPaintGmgnTokenHeader("header-dom-watch");
+        } catch (_err) {
+          // ignore
+        }
+      });
+      gmgnHeaderDomObs.observe(host, { childList: true, subtree: true });
+      // Also observe a bit higher so header strip rebuilds are caught.
+      const strip = host.parentElement;
+      if (strip && strip !== host) {
+        try {
+          gmgnHeaderDomObs.observe(strip, { childList: true, subtree: true });
+        } catch (_err2) {
+          // ignore
+        }
+      }
+    } catch (_err) {
+      gmgnHeaderDomObs = null;
+    }
+  }
+
+  function stopGmgnHeaderDomWatch() {
+    if (gmgnHeaderDomObs) {
+      try {
+        gmgnHeaderDomObs.disconnect();
+      } catch (_err) {
+        // ignore
+      }
+      gmgnHeaderDomObs = null;
+    }
+    gmgnHeaderDomObsLastAt = 0;
+  }
+
+  function startGmgnTokenGuardian() {
+    if (gmgnTokenGuardianId) return;
+    const BASE_MS = 700;
+    const scheduleNext = (ms) => {
+      gmgnTokenGuardianId = window.setTimeout(tick, ms);
+    };
+    const tick = () => {
+      gmgnTokenGuardianId = null;
+      let nextMs = BASE_MS;
+      try {
+        if (!isExtensionContextValid()) return;
+        if (!isTabVisible()) {
+          scheduleNext(BASE_MS);
+          return;
+        }
+        const rk = getRouteKey();
+        if (rk !== lastRouteKey) {
+          try {
+            onSpaRouteChange("gmgn-guardian-route");
+          } catch (_err) {
+            // ignore
+          }
+        }
+        if (!isGmgnTokenPage()) {
+          gmgnHeaderMissSince = 0;
+          stopGmgnHeaderDomWatch();
+          nextMs = BASE_MS * 2;
+        } else {
+          const urlTok = extractTokenFromUrl();
+          if (!urlTok) {
+            gmgnHeaderMissSince = 0;
+          } else if (hasGmgnTokenHeaderBadge()) {
+            gmgnHeaderMissSince = 0;
+            armGmgnHeaderDomWatch();
+            // Header OK — still light-kick left trench occasionally.
+            nextMs = BASE_MS * 3;
+            scheduleScan(0, { force: false, immediate: false, light: false });
+          } else {
+            if (!gmgnHeaderMissSince) gmgnHeaderMissSince = Date.now();
+            const missAge = Date.now() - gmgnHeaderMissSince;
+            queueToken(urlTok);
+            recoverStuckBatch(false);
+            scheduleBatchFlush({ immediate: true, delayMs: 0 });
+            tryPaintGmgnTokenHeader("gmgn-guardian");
+            armGmgnHeaderDomWatch();
+            // Also ensure list column scan runs.
+            scheduleScan(0, {
+              force: true,
+              immediate: false,
+              light: false,
+              bypassForceGap: true
+            });
+            if (missAge > 15000) nextMs = 2800;
+            else if (missAge > 6000) nextMs = 1200;
+            else nextMs = BASE_MS;
+          }
+        }
+      } catch (_err) {
+        // ignore
+      }
+      if (isExtensionContextValid()) scheduleNext(nextMs);
+    };
+    scheduleNext(250);
+  }
+
   function startDebotTokenGuardian() {
     if (debotTokenGuardianId) return;
     const scheduleNext = (ms) => {
@@ -4159,6 +4547,20 @@
 
     // 0.4.43 GMGN: local badge only + dataset signatures — skip parent-rect thrash & textContent.
     if (isGmgnHost()) {
+      // 0.5.4: K-line header locked badge is always stable (ignore stray hrefs in header host).
+      if (isGmgnHeaderMarkedCard(card) || isGmgnTokenHeaderCard(card)) {
+        const locked =
+          findLocalBadgeForCard(card, marked) ||
+          findGmgnHeaderBadgeEl(marked) ||
+          card.querySelector?.(`[${ICON_DATA}="1"][data-fee-header="1"]`);
+        if (
+          locked instanceof HTMLElement &&
+          document.contains(locked) &&
+          (!locked.dataset.feeToken || locked.dataset.feeToken === marked)
+        ) {
+          return true;
+        }
+      }
       if (countLocalBadgesForCard(card, marked) !== 1) return false;
       const existing = findLocalBadgeForCard(card, marked);
       if (
@@ -4186,10 +4588,13 @@
         }
       }
       // Virtual list recycle: only re-check token when href is cheaply available.
-      const hrefEl = card.querySelector?.("a[href*='0x']");
-      if (hrefEl) {
-        const hrefToken = normalizeToken(hrefEl.getAttribute("href"));
-        if (hrefToken && hrefToken !== marked) return false;
+      // Skip for header (multiple 0x links in ticker/share row).
+      if (!(existing.dataset.feeHeader === "1" || isGmgnHeaderMarkedCard(card))) {
+        const hrefEl = card.querySelector?.("a[href*='0x']");
+        if (hrefEl) {
+          const hrefToken = normalizeToken(hrefEl.getAttribute("href"));
+          if (hrefToken && hrefToken !== marked) return false;
+        }
       }
       return true;
     }
@@ -4452,7 +4857,11 @@
           : null);
       if (!token) token = siteStrategy.extractToken(card);
       if (!token) {
-        if (!listReturnSoft) clearCardIcon(card);
+        // 0.5.3: never wipe GMGN K-line header mark on transient extract miss
+        // (was flash-then-gone: tryPaint mounts → scan extractToken fails → clear).
+        if (!listReturnSoft && !(isGmgnHost() && isGmgnHeaderMarkedCard(card))) {
+          clearCardIcon(card);
+        }
         continue;
       }
 
@@ -4617,6 +5026,7 @@
 
   function badgeDedupeScore(el) {
     let s = 0;
+    if (el?.dataset?.feeHeader === "1") s += 100;
     if (el.dataset.feePosMode === "absolute") s += 4;
     if (el.closest?.(`[${CARD_DATA}]`)) s += 2;
     if (el.isConnected) s += 1;
@@ -4625,8 +5035,15 @@
 
   function keepBestBadgeOnly(icons) {
     if (!icons || icons.length <= 1) return;
-    icons.sort((a, b) => badgeDedupeScore(b) - badgeDedupeScore(a));
+    // Prefer locked header badge over anything else.
+    icons.sort((a, b) => {
+      const ha = a?.dataset?.feeHeader === "1" ? 100 : 0;
+      const hb = b?.dataset?.feeHeader === "1" ? 100 : 0;
+      if (hb !== ha) return hb - ha;
+      return badgeDedupeScore(b) - badgeDedupeScore(a);
+    });
     for (let i = 1; i < icons.length; i += 1) {
+      if (isGmgnLockedHeaderBadge(icons[i])) continue;
       try {
         icons[i].remove();
       } catch (_err) {
@@ -5062,21 +5479,25 @@
       if (isGmgnTokenPage()) {
         const root = findGmgnTokenPageRoot();
         if (root && root !== document.body) roots.push(root);
-        // 0.4.37: until header badge exists, skip war-room columns (main 战壕→K线 jank).
-        // Side boards only after header settled (light scan covers dialogs).
-        if (!hasGmgnTokenHeaderBadge()) {
-          // keep only header root; dialogs collected below
-        } else {
-          document
-            .querySelectorAll(
-              "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
-            )
-            .forEach((el) => {
-              if (!(el instanceof HTMLElement)) return;
-              const r = el.getBoundingClientRect();
-              if (r.width >= 240 && r.height >= 200 && !roots.includes(el)) roots.push(el);
-            });
-        }
+        // 0.5.2 / 0.4.24: always include left 战壕 / side columns on token multi-panel.
+        // Waiting for header settled (0.4.37) left both header+left empty when mount failed.
+        document
+          .querySelectorAll(
+            "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
+          )
+          .forEach((el) => {
+            if (!(el instanceof HTMLElement)) return;
+            const r = el.getBoundingClientRect();
+            // Side trench columns: tall panels (left 战壕 in split view ~w 240–700).
+            if (
+              r.width >= 200 &&
+              r.height >= 160 &&
+              r.top < window.innerHeight &&
+              !roots.includes(el)
+            ) {
+              roots.push(el);
+            }
+          });
       } else {
         // Home / war room — keep only top 3 tall columns (selector matches ~40 nested shells).
         const candidates = [];
@@ -5981,7 +6402,8 @@
       }
       if (isGmgnTokenPage()) {
         const urlTok = extractTokenFromUrl();
-        if (urlTok && urlTok === String(token).toLowerCase() && !hasGmgnTokenHeaderBadge()) {
+        if (urlTok && urlTok === String(token).toLowerCase()) {
+          // Always re-assert header after fee data lands (0.5.5).
           tryPaintGmgnTokenHeader("api-apply");
         }
       }
@@ -6434,7 +6856,14 @@
       card.getAttribute(CARD_DATA) ||
       "";
 
+    const canRemove = (n) => {
+      // 0.5.4: locked K-line header badge is immortal until SPA leave (resetOurDomMarks).
+      if (isGmgnLockedHeaderBadge(n)) return false;
+      return true;
+    };
+
     card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
+      if (!canRemove(n)) return;
       try {
         n.remove();
       } catch (_err) {
@@ -6448,6 +6877,7 @@
         sib instanceof HTMLElement &&
         (sib.dataset?.[ICON_MARK] === "1" || sib.getAttribute?.(ICON_DATA) === "1")
       ) {
+        if (!canRemove(sib)) continue;
         try {
           sib.remove();
         } catch (_err) {
@@ -6463,6 +6893,7 @@
         if (!(ch instanceof HTMLElement)) return;
         if (ch === card) return;
         if (ch.dataset?.[ICON_MARK] !== "1" && ch.getAttribute?.(ICON_DATA) !== "1") return;
+        if (!canRemove(ch)) return;
         const feeTok = ch.dataset?.feeToken || "";
         if (token && feeTok && feeTok !== token) return;
         // Only remove if visually adjacent to this card (same row band).
@@ -6489,6 +6920,7 @@
       document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
         if (!(n instanceof HTMLElement)) return;
         if (n.dataset.feeToken !== token) return;
+        if (!canRemove(n)) return;
         // Keep if already inside this card (should have been cleared above).
         if (card.contains(n)) {
           try {
@@ -7236,7 +7668,10 @@
         clearCardIcon(card);
         return;
       }
+      // 0.5.3: protect GMGN K-line header card from deep extract thrash.
+      if (isGmgnHost() && isGmgnHeaderMarkedCard(card)) return;
       const icon = card.querySelector(`[${ICON_DATA}="1"]`);
+      // Badge may be afterend sibling of short CA (outside marked host) — don't treat as missing.
       if (icon && !document.contains(icon)) {
         try {
           icon.remove();
@@ -7697,6 +8132,29 @@
   function markPersistentCacheReady() {
     persistentCacheReady = true;
     persistentCacheReadyWaiters.splice(0).forEach((resolve) => resolve());
+    // 0.5.8: after storage hydrate, force header paint + list scan (refresh often races cache).
+    try {
+      if (isGmgnHost() && isGmgnTokenPage()) {
+        window.setTimeout(() => {
+          if (!isExtensionContextValid() || !isTabVisible()) return;
+          try {
+            tryPaintGmgnTokenHeader("cache-ready");
+          } catch (_err) {
+            // ignore
+          }
+          scheduleScan(0, {
+            force: true,
+            immediate: false,
+            light: false,
+            bypassForceGap: true
+          });
+        }, 50);
+      } else {
+        scheduleScan(80, { force: true, immediate: false });
+      }
+    } catch (_err) {
+      // ignore
+    }
   }
 
   function hydratePersistentCache() {
@@ -7991,7 +8449,13 @@
       // Scroll may have started during debounce window (list-return soft still runs).
       if (isGmgnScrollCooling() && !isOverlayFast() && !isSpaListReturnSoft()) return;
       if (isTokenPageSettledWithBadge()) {
-        if (isGmgnHost() && isGmgnTokenPage()) return;
+        // 0.5.2: settled K-line still needs light/non-force scan so left 战壕 keeps badges
+        // (was full skip on GMGN token → multi-panel left column starved).
+        if (isGmgnHost() && isGmgnTokenPage()) {
+          pendingLightScan = false;
+          scheduleScan(0, { force: false, immediate: false, light: false });
+          return;
+        }
         scheduleScan(0, { force: true, light: true });
         return;
       }
@@ -8001,7 +8465,10 @@
         return;
       }
       if (isGmgnTokenPage()) {
+        // 0.5.2: header paint + side 战壕 scan (was header-only return → left column never filled).
         tryPaintGmgnTokenHeader("mutation-scan");
+        pendingLightScan = false;
+        scheduleScan(0, { force: false, immediate: false, light: false });
         return;
       }
       // 0.4.42 / 0.4.22: GMGN list mutations use NON-force scan (SCAN_INTERVAL 900ms gate).
@@ -8084,10 +8551,34 @@
     hardResetPipeline("init-was-discarded");
   }
 
-  // 0.4.43: GMGN first scan further delayed (host hydration first; was 500).
-  // Debot keeps immediate first paint.
+  // 0.5.8: GMGN token page — early header paint + scan (cache may land via markPersistentCacheReady).
+  // Full-width/list still uses longer delay to avoid host hydration contention.
   if (isGmgnHost()) {
-    scheduleScan(GMGN_FIRST_SCAN_DELAY_MS, { force: true, immediate: false });
+    if (isGmgnTokenPage()) {
+      scheduleScan(200, { force: true, immediate: false });
+      window.setTimeout(() => {
+        try {
+          tryPaintGmgnTokenHeader("boot-300");
+        } catch (_err) {
+          // ignore
+        }
+      }, 300);
+      window.setTimeout(() => {
+        try {
+          tryPaintGmgnTokenHeader("boot-800");
+        } catch (_err) {
+          // ignore
+        }
+        scheduleScan(0, {
+          force: true,
+          immediate: false,
+          light: false,
+          bypassForceGap: true
+        });
+      }, 800);
+    } else {
+      scheduleScan(GMGN_FIRST_SCAN_DELAY_MS, { force: true, immediate: false });
+    }
   } else {
     scheduleScan(100, { force: true, immediate: true });
   }
