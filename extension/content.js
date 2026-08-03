@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.14: trench-only abs/drag; bsc scan gate; fix Debot 新创建 + double badge.
   // 0.4.13: badge pos — default beside Tax; optional card top-left absolute + page drag.
   // 0.4.12: K-line — stop mutation scans after badge; cache 总税率 lookup; per-site badge offset.
   // 0.4.11: SPA progressive scans cut to ~1.3–2s (was 6× up to 3s) — fix home→K-line jank.
@@ -23,9 +24,9 @@
   const PIPELINE_WATCHDOG_MS = 45000;
   // If no successful scan for this long while visible, force one (watchdog).
   const SCAN_STALE_MS = 120000;
-  // Cap *real work* per scan (stable badges do not count). Debot 3 cols ≈ 27 cards.
-  const MAX_CANDIDATES_PER_SCAN = 80;
-  const MAX_CARDS_PER_SCAN = 40;
+  // Cap *real work* per scan (stable badges do not count). Debot 3 cols ≈ 40+ cards.
+  const MAX_CANDIDATES_PER_SCAN = 120;
+  const MAX_CARDS_PER_SCAN = 56;
   const MAX_BATCH_TOKENS = 48;
   const BATCH_FLUSH_MS = 350;
   const RETRY_BASE_MS = 900;
@@ -337,6 +338,68 @@
     return /\/token\//i.test(location.pathname || "");
   }
 
+  /** URL ?chain= (gmgn/debot/gungnir). Empty → treat as unknown. */
+  function getUrlChain() {
+    try {
+      return String(new URL(location.href).searchParams.get("chain") || "").toLowerCase();
+    } catch (_err) {
+      return "";
+    }
+  }
+
+  /** Only BSC trenches for now; Robinhood / other chains → no scan. */
+  function isAllowedScanChain() {
+    const chain = getUrlChain();
+    if (!chain) {
+      // GMGN token pages sometimes omit chain in path-only URLs — allow token if host ok.
+      if (isGmgnTokenPage() || isDebotTokenPage()) return true;
+      // Home/meme without chain param: default boards are usually bsc — allow.
+      return true;
+    }
+    if (chain === "robinhood" || chain === "rh") return false;
+    return chain === "bsc";
+  }
+
+  /**
+   * List war-room / 战壕 boards where free badge drag + absolute coords apply.
+   * K-line / token detail NEVER use absolute/drag (always 总税率 / Tax mount).
+   */
+  function isTrenchListPage() {
+    if (isTokenDetailRoute()) return false;
+    if (!isAllowedScanChain()) return false;
+    const host = location.hostname || "";
+    const path = location.pathname || "/";
+    if (host.endsWith("gmgn.ai")) {
+      // Home / tab boards: / or /trend etc without /token/
+      return !/\/token\//i.test(path);
+    }
+    if (host.endsWith("debot.ai") || host.endsWith("gungnir.bot")) {
+      return /\/meme/i.test(path) || path === "/" || path === "";
+    }
+    return false;
+  }
+
+  /**
+   * Hard gate: whether this page should run fee scans at all.
+   * - chain=Robinhood → off
+   * - non-bsc (when chain present) → off
+   * - allowed: gmgn (list + token on bsc), debot/gungnir meme (+ token if needed)
+   */
+  function isScanPageAllowed() {
+    if (!isAllowedScanChain()) return false;
+    const host = location.hostname || "";
+    const path = location.pathname || "/";
+    if (host.endsWith("gmgn.ai")) return true;
+    if (host.endsWith("debot.ai") || host.endsWith("gungnir.bot")) {
+      // Meme trenches + token detail; skip pure unrelated routes if any.
+      if (/\/meme/i.test(path) || /\/token\//i.test(path) || path === "/" || path === "") {
+        return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
   /** CA from URL path (GMGN/Debot token detail). Only 8888/7777 tax tokens. */
   function extractTokenFromUrl() {
     const m = String(location.pathname || "").match(/0x[a-fA-F0-9]{40}/i);
@@ -566,15 +629,18 @@
     placeBesideTaxChip(target, icon);
   }
 
-  /** Narrow side panels (钱包追踪 / 持仓) — not meme board cards. */
+  /**
+   * Narrow side panels (钱包追踪 / 持仓) — not meme board cards.
+   * 0.4.14: do NOT use left<100 && width<300 (kills 新创建 column rows).
+   * Only true narrow rails (~≤200px) or AI-only rails without Tax/MC.
+   */
   function isDebotSideRailCard(card) {
     if (!(card instanceof HTMLElement)) return false;
     const r = card.getBoundingClientRect();
-    if (r.width > 0 && r.width < 210) return true;
-    // Far-left rail
-    if (r.left >= 0 && r.left < 100 && r.width < 300) return true;
-    // Far-right rail (持仓)
-    if (r.right > window.innerWidth - 40 && r.width < 360) return true;
+    // True side rails are very narrow (js-mcp: ~168px DOGI/TSLAB).
+    if (r.width > 0 && r.width <= 200) return true;
+    // Far-right 持仓 strip only when narrow.
+    if (r.right > window.innerWidth - 40 && r.width > 0 && r.width < 280) return true;
     const t = (card.textContent || "").replace(/\s+/g, " ");
     if (/AI报告/.test(t) && !/MC|市值|Tax\s*\d/i.test(t)) return true;
     return false;
@@ -589,6 +655,8 @@
     const immediate = options.immediate === true;
     // Avoid burning CPU/network while the tab is fully hidden (timers are frozen anyway).
     if (!isTabVisible() && !force) return;
+    // chain=Robinhood / non-allowed pages: never schedule work.
+    if (!isScanPageAllowed()) return;
     // Non-force coalesces; force always schedules (but clear stuck flag first).
     if (scanScheduled && !force) return;
     if (force) {
@@ -912,6 +980,20 @@
       return;
     }
     if (!isTabVisible()) return;
+    if (!isScanPageAllowed()) {
+      // Leave Robinhood / wrong chain clean — drop our marks if any.
+      if (scanGeneration % 20 === 0) {
+        try {
+          document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => n.remove());
+          document.querySelectorAll(`[${CARD_DATA}]`).forEach((c) => {
+            if (c instanceof HTMLElement) delete c.dataset[CARD_MARK];
+          });
+        } catch (_err) {
+          // ignore
+        }
+      }
+      return;
+    }
 
     // Detect SPA path changes missed by history hooks (site may capture native history).
     const routeNow = getRouteKey();
@@ -1408,11 +1490,25 @@
         const mount = findDebotTokenPageMount(document.body);
         if (mount) roots.push(mount.closest?.(".MuiBox-root") || mount);
       }
+      // 0.4.14: include 新创建 (left column). Do NOT require r.left > 80.
       document.querySelectorAll(".MuiCard-root, div.MuiPaper-root.MuiCard-root").forEach((el) => {
         if (!(el instanceof HTMLElement)) return;
         const r = el.getBoundingClientRect();
-        if (r.width >= 280 && r.height >= 300 && r.left > 80) roots.push(el);
+        if (r.width >= 240 && r.height >= 240) roots.push(el);
       });
+      // Column containers (战壕 3 cols) when Paper root sizing differs.
+      document
+        .querySelectorAll(
+          ".MuiStack-root, [class*='MuiGrid'], div[class*='overflow']"
+        )
+        .forEach((el) => {
+          if (!(el instanceof HTMLElement)) return;
+          const r = el.getBoundingClientRect();
+          // Tall column boards
+          if (r.width >= 240 && r.width <= 520 && r.height >= 360 && r.top < window.innerHeight) {
+            roots.push(el);
+          }
+        });
       if (!roots.length) {
         const main =
           document.querySelector(".MuiContainer-root") ||
@@ -2299,15 +2395,108 @@
     return siteStrategy && siteStrategy.name === "debot" ? "debot" : "gmgn";
   }
 
-  /** Active site placement: default (Tax) or absolute vs card top-left. */
+  /**
+   * Active site placement: default (Tax) or absolute vs card top-left.
+   * 0.4.14: absolute/drag ONLY on trench list pages — never K-line / token detail.
+   */
   function getActiveBadgePosition() {
     const key = getSiteOffsetKey();
     const o = badgeOffsets[key] || DEFAULT_BADGE_OFFSETS[key];
+    // K-line / token: always natural 总税率 / Tax mount.
+    if (!isTrenchListPage()) {
+      return { enabled: false, x: 0, y: 0 };
+    }
     return {
       enabled: o?.enabled === true,
       x: clampBadgeOffset(o?.x ?? 12),
       y: clampBadgeOffset(o?.y ?? 8)
     };
+  }
+
+  /**
+   * Remove every badge tied to a card (inside + siblings + same-token orphans).
+   * Fixes double-badge when default Tax mount left a sibling outside card.
+   */
+  function removeAllBadgesForCard(card, tokenHint) {
+    if (!(card instanceof HTMLElement)) return;
+    const token =
+      tokenHint ||
+      card.dataset[CARD_MARK] ||
+      card.getAttribute(CARD_DATA) ||
+      "";
+
+    card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
+      try {
+        n.remove();
+      } catch (_err) {
+        // ignore
+      }
+    });
+
+    // Immediate siblings (placeBesideTaxChip beforebegin / afterend).
+    for (const sib of [card.previousElementSibling, card.nextElementSibling]) {
+      if (
+        sib instanceof HTMLElement &&
+        (sib.dataset?.[ICON_MARK] === "1" || sib.getAttribute?.(ICON_DATA) === "1")
+      ) {
+        try {
+          sib.remove();
+        } catch (_err) {
+          // ignore
+        }
+      }
+    }
+
+    // Parent-level siblings near this card (climbed Tax mounts).
+    const parent = card.parentElement;
+    if (parent) {
+      Array.from(parent.children).forEach((ch) => {
+        if (!(ch instanceof HTMLElement)) return;
+        if (ch === card) return;
+        if (ch.dataset?.[ICON_MARK] !== "1" && ch.getAttribute?.(ICON_DATA) !== "1") return;
+        const feeTok = ch.dataset?.feeToken || "";
+        if (token && feeTok && feeTok !== token) return;
+        // Only remove if visually adjacent to this card (same row band).
+        try {
+          const cr = card.getBoundingClientRect();
+          const ir = ch.getBoundingClientRect();
+          if (Math.abs(ir.top - cr.top) > cr.height + 8) return;
+          if (ir.right < cr.left - 8 || ir.left > cr.right + 8) return;
+        } catch (_err) {
+          // ignore geometry
+        }
+        try {
+          ch.remove();
+        } catch (_err2) {
+          // ignore
+        }
+      });
+    }
+
+    // Orphans with same token still in document (absolute remount leftovers).
+    if (token) {
+      document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
+        if (!(n instanceof HTMLElement)) return;
+        if (n.dataset.feeToken !== token) return;
+        // Keep if already inside this card (should have been cleared above).
+        if (card.contains(n)) {
+          try {
+            n.remove();
+          } catch (_err) {
+            // ignore
+          }
+          return;
+        }
+        // Outside: drop if near this card or unparented from any marked card.
+        const hostCard = n.closest?.(`[${CARD_DATA}]`);
+        if (hostCard && hostCard !== card) return;
+        try {
+          n.remove();
+        } catch (_err) {
+          // ignore
+        }
+      });
+    }
   }
 
   function ensureCardPositioning(card) {
@@ -2541,6 +2730,8 @@
 
   function onBadgePointerDown(e) {
     if (!badgeDragEdit || badgeDragState) return;
+    // 0.4.14: drag only on trench list boards — never K-line / token.
+    if (!isTrenchListPage()) return;
     if (e.button != null && e.button !== 0) return;
     const icon = e.target instanceof Element ? e.target.closest(`[${ICON_DATA}="1"]`) : null;
     if (!(icon instanceof HTMLElement)) return;
@@ -2604,7 +2795,7 @@
   function onBadgePointerUp(e) {
     if (!badgeDragState) return;
     if (e.pointerId != null && e.pointerId !== badgeDragState.pointerId) return;
-    const { icon } = badgeDragState;
+    const { icon, card } = badgeDragState;
     const x = clampBadgeOffset(parseInt(icon.style.left, 10) || 0);
     const y = clampBadgeOffset(parseInt(icon.style.top, 10) || 0);
     try {
@@ -2616,16 +2807,36 @@
     icon.style.cursor = badgeDragEdit ? "grab" : "";
     badgeDragState = null;
 
+    if (!isTrenchListPage()) {
+      // Drag ended after navigation — discard absolute for K-line safety.
+      return;
+    }
+
     // Persist + enable absolute mode for this site; next paint / all icons share coords.
     persistActiveSitePosition({ enabled: true, x, y });
-    // Apply to every badge (not during drag — only on release).
-    document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((el) => {
-      if (el === icon) {
-        applyAbsoluteBadgeStyles(el, x, y);
-        syncBadgeDragCursor(el);
-        return;
+    // Dedup then apply absolute to every trench badge.
+    if (card instanceof HTMLElement) {
+      const tok = icon.dataset.feeToken || card.dataset[CARD_MARK] || "";
+      removeAllBadgesForCard(card, tok);
+      // Re-place the dragged visual as the single badge for this card.
+      try {
+        ensureCardPositioning(card);
+        card.appendChild(icon);
+        applyAbsoluteBadgeStyles(icon, x, y);
+        syncBadgeDragCursor(icon);
+      } catch (_err) {
+        // ignore
       }
-      applyBadgeOffset(el);
+    }
+    document.querySelectorAll(`[${CARD_DATA}]`).forEach((c) => {
+      if (!(c instanceof HTMLElement) || c === card) return;
+      const token = c.dataset[CARD_MARK] || "";
+      if (!token) return;
+      const entry =
+        modeCache.get(token) ||
+        (isPersistentCacheHit(token) ? persistentCache.get(token) : null);
+      if (!entry) return;
+      renderMode(c, token, entry, { forceRemount: true });
     });
   }
 
@@ -2810,13 +3021,27 @@
 
     // All toggles off or nothing to show → clear badge.
     if (!label) {
-      card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((oldIcon) => oldIcon.remove());
-      const prevEmpty = card.previousElementSibling;
-      if (prevEmpty && prevEmpty.dataset && prevEmpty.dataset[ICON_MARK] === "1") prevEmpty.remove();
+      removeAllBadgesForCard(card, token);
       return true;
     }
 
-    // In-place update when node still valid AND placement mode matches.
+    // Count badges for this card/token — more than one → force remount/dedup.
+    const inside = card.querySelectorAll(`[${ICON_DATA}="1"]`);
+    let multi = inside.length > 1;
+    if (!multi && token) {
+      let n = inside.length;
+      for (const sib of [card.previousElementSibling, card.nextElementSibling]) {
+        if (
+          sib instanceof HTMLElement &&
+          (sib.dataset?.[ICON_MARK] === "1" || sib.getAttribute?.(ICON_DATA) === "1")
+        ) {
+          n += 1;
+        }
+      }
+      multi = n > 1;
+    }
+
+    // In-place update when node still valid AND placement mode matches AND single badge.
     const existing =
       card.querySelector(`[${ICON_DATA}="1"]`) ||
       (card.previousElementSibling?.dataset?.[ICON_MARK] === "1"
@@ -2824,6 +3049,7 @@
         : null);
     if (
       !forceRemount &&
+      !multi &&
       existing &&
       document.contains(existing) &&
       existing.dataset.feeToken === token &&
@@ -2853,10 +3079,8 @@
       }
     }
 
-    // Remove previous badge near this card (icon may sit as sibling, not only descendant).
-    card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((oldIcon) => oldIcon.remove());
-    const prev = card.previousElementSibling;
-    if (prev && prev.dataset && prev.dataset[ICON_MARK] === "1") prev.remove();
+    // Always full cleanup before (re)mount — kills double-badge.
+    removeAllBadgesForCard(card, token);
 
     const icon = document.createElement("span");
     icon.dataset[ICON_MARK] = "1";
@@ -2879,10 +3103,9 @@
   }
 
   function clearCardIcon(card) {
-    delete card.dataset[CARD_MARK];
-    card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => icon.remove());
-    const prev = card.previousElementSibling;
-    if (prev && prev.dataset && prev.dataset[ICON_MARK] === "1") prev.remove();
+    const token = card instanceof HTMLElement ? card.dataset[CARD_MARK] || "" : "";
+    removeAllBadgesForCard(card, token);
+    if (card instanceof HTMLElement) delete card.dataset[CARD_MARK];
   }
 
   /**
@@ -3483,6 +3706,7 @@
   const mutationObserver = new MutationObserver(() => {
     if (!isTabVisible()) return;
     if (!isExtensionContextValid()) return;
+    if (!isScanPageAllowed()) return;
     // During SPA rebuild: mark dirty only; progressive scans + quiet-end handle paint.
     if (isSpaQuiet()) {
       spaDomDirty = true;
