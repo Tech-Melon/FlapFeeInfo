@@ -5,6 +5,7 @@
   // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
+  // 0.4.40: GMGN 回 0.4.22 轻量 progressive（砍 keep-alive/Tax 狂扫）；Debot 仍用加速路径.
   // 0.4.39: js-mcp — GMGN K→战壕 Tax@1.1s 但徽章@~6s：list-return 锚点+续扫+禁止 22px 假卡.
   // 0.4.38: 搜索/历史弹层 ~1s 出徽章 — dialog-first + cache 直绘 + 矮行 climb + API 回补扫.
   // 0.4.37: GMGN 进出 K 线减负 + 回战壕加速（header-only token scan + list-return DOM watch）.
@@ -93,45 +94,47 @@
   // Progressive hole-fill offsets from quiet end (ms).
   // List/meme boards (cold / generic): 3 passes — 0.4.30 cut 4th to save main thread.
   const SPA_NAV_SCAN_OFFSETS_LIST_MS = [0, 400, 1100];
-  // token→list return: dense early + late keep-alive (js-mcp: Tax@1.1s, badge was @6s).
-  const SPA_NAV_SCAN_OFFSETS_LIST_RETURN_MS = [
-    0, 50, 120, 250, 450, 800, 1300, 2000, 3200, 4800
-  ];
+  // token→list return (Debot): a few dense kicks — not a 10-pass storm.
+  const SPA_NAV_SCAN_OFFSETS_LIST_RETURN_MS = [0, 120, 400, 1000, 2000];
+  // GMGN list-return: **0.4.22 style** — few passes, first immediate, rest idle (no jank).
+  const SPA_NAV_SCAN_OFFSETS_LIST_RETURN_GMGN_MS = [0, 400, 1100, 2000];
   // Token / K-line page (GMGN): header paint only — fewer full scans (0.4.37 jank fix).
-  const SPA_NAV_SCAN_OFFSETS_TOKEN_MS = [0, 350, 900];
+  const SPA_NAV_SCAN_OFFSETS_TOKEN_MS = [0, 500, 1300];
   // Debot SPA token: prefer tryPaint; at most 2 progressive full scans.
   const SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS = [0, 900, 2500];
   // Quiet shorter when returning to list — user expects badges ASAP (immediacy).
   const SPA_NAV_QUIET_LIST_RETURN_MS = 0;
-  // After token→list: viewport-first soft window (ms). Longer: GMGN list hydrates ~1s+.
-  const SPA_LIST_RETURN_SOFT_MS = 5500;
+  // After token→list: viewport-first soft window (ms). GMGN shorter = less soft thrash.
+  const SPA_LIST_RETURN_SOFT_MS = 3200;
+  const SPA_LIST_RETURN_SOFT_GMGN_MS = 2000;
   // First wave: only paint cards with fee already in modeCache (no network, no deep extract).
-  const SPA_LIST_RETURN_CACHE_ONLY_MS = 250;
+  const SPA_LIST_RETURN_CACHE_ONLY_MS = 300;
   // Cards per slice during list-return (keep small for jank; more slices cover 3 cols).
-  const SPA_LIST_RETURN_CARDS = 14;
+  const SPA_LIST_RETURN_CARDS = 12;
   // Candidates cap — must cover 3 columns × ~8–10 tax rows.
-  const SPA_LIST_RETURN_CANDIDATES = 56;
+  const SPA_LIST_RETURN_CANDIDATES = 48;
   // Soft cancel: need badges across columns, not just left-col total (0.4.36).
   const SPA_LIST_RETURN_ENOUGH_BADGES = 12;
   // Per-column min visible badges before early-stop (Debot 已迁移 / GMGN 右列).
   const SPA_LIST_RETURN_MIN_PER_COL = 2;
   // Soft scan time budget per frame (ms) — hard stop mid-loop.
-  const SPA_LIST_RETURN_SLICE_MS = 10;
+  const SPA_LIST_RETURN_SLICE_MS = 8;
   // Fast-paint burst: column-round-robin.
-  const SPA_LIST_RETURN_FAST_MS = 16;
-  const SPA_LIST_RETURN_FAST_CARDS = 24;
-  // Keep forcing scans until badges enough or timeout (ms after list-return arm).
-  const SPA_LIST_RETURN_KEEPALIVE_MS = 7000;
-  const SPA_LIST_RETURN_KEEPALIVE_TICK_MS = 350;
+  const SPA_LIST_RETURN_FAST_MS = 12;
+  const SPA_LIST_RETURN_FAST_CARDS = 16;
+  // Keep-alive ONLY for Debot (GMGN keep-alive was main 0.4.39 jank — 20 force scans / 7s).
+  const SPA_LIST_RETURN_KEEPALIVE_MS = 4500;
+  const SPA_LIST_RETURN_KEEPALIVE_TICK_MS = 600;
   // Dedicated header paint watch after meme→token SPA (ms). Logged-in DOM is slower.
   const DEBOT_TOKEN_HEADER_WATCH_MS = 20000;
   const DEBOT_TOKEN_HEADER_TICK_MS = 400;
   // Debot token SPA quiet (shorter than generic — paint sooner without waiting 800ms).
   const SPA_NAV_QUIET_DEBOT_TOKEN_MS = 280;
-  // GMGN token SPA quiet — was 800ms then force-scan storm (user: 战壕↔K线很卡).
-  const SPA_NAV_QUIET_GMGN_TOKEN_MS = 220;
-  // List-return DOM watch: re-fastPaint when columns mount late (ms).
-  const LIST_RETURN_DOM_WATCH_MS = 6500;
+  // GMGN token SPA quiet — closer to 0.4.22 (650) but slightly snappier.
+  const SPA_NAV_QUIET_GMGN_TOKEN_MS = 400;
+  // List-return DOM watch (ms). GMGN short; Debot longer.
+  const LIST_RETURN_DOM_WATCH_MS = 3500;
+  const LIST_RETURN_DOM_WATCH_GMGN_MS = 1800;
   // Always-on guardian base interval; backs off while header missing (0.4.31).
   const DEBOT_TOKEN_GUARDIAN_MS = 1200;
   // After user clicks a /token/ link, keep header tryPaint this long (ms).
@@ -1487,6 +1490,19 @@
     return spaListReturnUntil > 0 && Date.now() < spaListReturnUntil && !isTokenDetailRoute();
   }
 
+  /** GMGN needs 0.4.22-light SPA; Debot keeps denser recovery. */
+  function isGmgnHost() {
+    return (location.hostname || "").endsWith("gmgn.ai");
+  }
+
+  function listReturnSoftDurationMs() {
+    return isGmgnHost() ? SPA_LIST_RETURN_SOFT_GMGN_MS : SPA_LIST_RETURN_SOFT_MS;
+  }
+
+  function listReturnDomWatchMs() {
+    return isGmgnHost() ? LIST_RETURN_DOM_WATCH_GMGN_MS : LIST_RETURN_DOM_WATCH_MS;
+  }
+
   function isSpaListReturnCacheOnly() {
     return (
       spaListReturnCacheOnlyUntil > 0 &&
@@ -1580,25 +1596,24 @@
           const href = (a.getAttribute && a.getAttribute("href")) || a.href || "";
           pushSeed(a, `h:${href.toLowerCase()}`);
         }
-        // Tax chips — reliable GMGN row seeds when token <a> is thin/virtuoso (0.4.39).
-        const leaves = root.querySelectorAll("span, div, p, a");
-        const max = Math.min(leaves.length, 500);
-        for (let i = 0; i < max; i += 1) {
-          const el = leaves[i];
-          if (!(el instanceof HTMLElement)) continue;
-          const t = (el.textContent || "").replace(/\s+/g, " ").trim();
-          if (t.length > 18) continue;
-          if (/^Tax\s*\d/i.test(t) || t === "Tax") {
-            const r = el.getBoundingClientRect();
-            if (r.width > 0 && r.width < 120 && r.height > 0 && r.height < 28) {
-              pushSeed(el, `tax:${Math.round(r.top)}:${Math.round(r.left)}`);
-            }
-            continue;
-          }
-          if (TARGET_SHORT_TOKEN_RE.test(t) && t.length <= 22) {
-            const r = el.getBoundingClientRect();
-            if (r.width > 0 && r.width < 180 && r.height > 0 && r.height < 36) {
-              pushSeed(el, `s:${t.toLowerCase()}:${Math.round(r.top)}`);
+        // Tax / short seeds ONLY when href seeds are thin (0.4.40: no 500-leaf thrash every tick).
+        // 0.4.22 never walked Tax leaves — that walk was a major GMGN jank source in 0.4.39.
+        const hrefCount = buckets[0].length + buckets[1].length + buckets[2].length;
+        if (hrefCount < 10) {
+          const leaves = root.querySelectorAll("span, a");
+          const max = Math.min(leaves.length, isGmgnHost() ? 80 : 160);
+          let taxAdded = 0;
+          for (let i = 0; i < max && taxAdded < 16; i += 1) {
+            const el = leaves[i];
+            if (!(el instanceof HTMLElement)) continue;
+            const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+            if (t.length > 16) continue;
+            if (/^Tax\s*\d/i.test(t) || t === "Tax") {
+              const r = el.getBoundingClientRect();
+              if (r.width > 0 && r.width < 120 && r.height > 0 && r.height < 28) {
+                pushSeed(el, `tax:${Math.round(r.top)}:${Math.round(r.left)}`);
+                taxAdded += 1;
+              }
             }
           }
         }
@@ -1735,12 +1750,18 @@
     return painted;
   }
 
-  /** Until first-screen badges enough: keep scanning (js-mcp gap after soft progressive). */
+  /**
+   * Debot-only keep-alive. GMGN must NOT run this (0.4.39: 7s×350ms force-scan = 卡顿).
+   * Align GMGN with 0.4.22: progressive timers + mutation only.
+   */
   function armListReturnKeepAlive() {
     if (listReturnKeepAliveId) {
       window.clearTimeout(listReturnKeepAliveId);
       listReturnKeepAliveId = null;
     }
+    // 0.4.40: skip entirely on GMGN — was the main jank vs 0.4.22.
+    if (isGmgnHost()) return;
+
     const until = Date.now() + SPA_LIST_RETURN_KEEPALIVE_MS;
     const tick = () => {
       listReturnKeepAliveId = null;
@@ -1751,23 +1772,23 @@
       if (vis >= SPA_LIST_RETURN_ENOUGH_BADGES && shouldCancelSpaListProgressive()) {
         return;
       }
-      // Extend soft window so Tax seeds stay preferred.
-      spaListReturnUntil = Math.max(spaListReturnUntil, Date.now() + 900);
+      spaListReturnUntil = Math.max(spaListReturnUntil, Date.now() + 700);
       spaQuietUntil = 0;
       try {
         fastPaintListReturnViewport();
       } catch (_err) {
         // ignore
       }
+      // Idle force — never stack immediate longtasks every tick.
       scheduleScan(0, {
         force: true,
-        immediate: true,
+        immediate: false,
         light: false,
         bypassForceGap: true
       });
       listReturnKeepAliveId = window.setTimeout(tick, SPA_LIST_RETURN_KEEPALIVE_TICK_MS);
     };
-    listReturnKeepAliveId = window.setTimeout(tick, 200);
+    listReturnKeepAliveId = window.setTimeout(tick, 400);
   }
 
   /**
@@ -2175,13 +2196,14 @@
    * Used by Debot + GMGN click-arm (0.4.37 GMGN 回战壕加速).
    */
   function armListReturnSoftWindow(reason) {
-    spaListReturnUntil = Date.now() + SPA_LIST_RETURN_SOFT_MS;
+    const softMs = listReturnSoftDurationMs();
+    spaListReturnUntil = Date.now() + softMs;
     spaListReturnCacheOnlyUntil = Date.now() + SPA_LIST_RETURN_CACHE_ONLY_MS;
     spaQuietUntil = 0;
     spaSettleFromToken = true;
     armListReturnDomWatch();
-    armListReturnKeepAlive();
-    const kick = (ms) => {
+    armListReturnKeepAlive(); // no-op on GMGN
+    const kick = (ms, immediate) => {
       window.setTimeout(() => {
         if (!isExtensionContextValid() || !isTabVisible()) return;
         if (isTokenDetailRoute()) return;
@@ -2191,35 +2213,44 @@
           // ignore
         }
         spaQuietUntil = 0;
-        spaListReturnUntil = Date.now() + SPA_LIST_RETURN_SOFT_MS;
+        spaListReturnUntil = Date.now() + softMs;
         try {
           fastPaintListReturnViewport();
         } catch (_err) {
           // ignore
         }
-        // Immediate micro full scan every kick (0.4.39: was idle-only → 5s blackout).
+        // 0.4.40 / 0.4.22: only first kick immediate; later yield to site paint.
         scheduleScan(0, {
           force: true,
-          immediate: true,
+          immediate: immediate === true,
           light: false,
           bypassForceGap: true
         });
       }, ms);
     };
-    kick(0);
-    kick(80);
-    kick(200);
-    kick(450);
-    kick(900);
-    kick(1600);
-    kick(2800);
+    if (isGmgnHost()) {
+      // 0.4.22-like: few kicks
+      kick(0, true);
+      kick(400, false);
+      kick(1100, false);
+      kick(2000, false);
+    } else {
+      kick(0, true);
+      kick(120, false);
+      kick(400, false);
+      kick(1000, false);
+      kick(2000, false);
+    }
   }
 
   /** When war-room columns mount late after token→list, re-fastPaint (throttled). */
   function armListReturnDomWatch() {
     stopListReturnDomWatch();
-    listReturnDomObsUntil = Date.now() + LIST_RETURN_DOM_WATCH_MS;
+    const watchMs = listReturnDomWatchMs();
+    listReturnDomObsUntil = Date.now() + watchMs;
     listReturnDomObsLastAt = 0;
+    // GMGN: throttle harder — mutation flood + fastPaint was jank (0.4.40).
+    const throttleMs = isGmgnHost() ? 400 : 200;
     try {
       listReturnDomObs = new MutationObserver(() => {
         if (!isExtensionContextValid()) {
@@ -2231,9 +2262,9 @@
           return;
         }
         const now = Date.now();
-        if (now - listReturnDomObsLastAt < 160) return;
+        if (now - listReturnDomObsLastAt < throttleMs) return;
         listReturnDomObsLastAt = now;
-        spaListReturnUntil = Math.max(spaListReturnUntil, now + 900);
+        spaListReturnUntil = Math.max(spaListReturnUntil, now + 600);
         spaQuietUntil = 0;
         try {
           fastPaintListReturnViewport();
@@ -2246,7 +2277,7 @@
         childList: true,
         subtree: true
       });
-      window.setTimeout(() => stopListReturnDomWatch(), LIST_RETURN_DOM_WATCH_MS + 80);
+      window.setTimeout(() => stopListReturnDomWatch(), watchMs + 80);
     } catch (_err) {
       listReturnDomObs = null;
     }
@@ -2578,8 +2609,12 @@
     // Route key already updated before settle — use current location.
     if (isDebotTokenPage()) return SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS;
     if (isTokenDetailRoute()) return SPA_NAV_SCAN_OFFSETS_TOKEN_MS;
-    // token→list is the heavy jank path (js-mcp) — fewer passes, snappy first.
-    if (fromTokenReturn) return SPA_NAV_SCAN_OFFSETS_LIST_RETURN_MS;
+    // token→list: GMGN = 0.4.22 light curve; Debot denser.
+    if (fromTokenReturn) {
+      return isGmgnHost()
+        ? SPA_NAV_SCAN_OFFSETS_LIST_RETURN_GMGN_MS
+        : SPA_NAV_SCAN_OFFSETS_LIST_RETURN_MS;
+    }
     return SPA_NAV_SCAN_OFFSETS_LIST_MS;
   }
 
@@ -2635,12 +2670,12 @@
 
     // token→list: soft viewport window (immediacy on first screen, no offscreen thrash).
     if (listReturn) {
-      spaListReturnUntil = Date.now() + SPA_LIST_RETURN_SOFT_MS;
+      spaListReturnUntil = Date.now() + listReturnSoftDurationMs();
       spaListReturnCacheOnlyUntil = Date.now() + SPA_LIST_RETURN_CACHE_ONLY_MS;
       // List return quiet shorter — first badge paint feels instant.
       spaQuietUntil = Date.now() + SPA_NAV_QUIET_LIST_RETURN_MS;
       armListReturnDomWatch();
-      armListReturnKeepAlive();
+      armListReturnKeepAlive(); // GMGN no-op
     } else if (!softSameToken) {
       spaListReturnUntil = 0;
       spaListReturnCacheOnlyUntil = 0;
@@ -2790,12 +2825,12 @@
             tryPaintGmgnTokenHeader("spa-progressive-later");
           }
         } else if (listReturn || isSpaListReturnSoft()) {
-          // 0.4.39: always immediate — idle delayed GMGN return to ~6s (js-mcp).
-          scheduleScan(index === 0 ? 0 : 0, {
+          // 0.4.40 / 0.4.22: first pass immediate; later idle so GMGN chart/list can paint.
+          scheduleScan(0, {
             force: true,
-            immediate: true,
+            immediate: index === 0,
             light: false,
-            bypassForceGap: true
+            bypassForceGap: index === 0
           });
         } else {
           scheduleScan(0, {
