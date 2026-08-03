@@ -3,58 +3,70 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>技术瓜FlapFeeInfo</title>
+    <title>TechMelon FlapFeeInfo</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
     <header class="head">
-      <div class="title">技术瓜FlapFeeInfo</div>
-      <div class="sub">徽章显示 · 主题 · 位置</div>
+      <div class="head-row">
+        <div>
+          <div class="title" data-i18n="appTitle">技术瓜FlapFeeInfo</div>
+          <div class="sub" data-i18n="appSub">徽章显示 · 主题 · 位置</div>
+        </div>
+        <button type="button" class="lang-btn" id="langToggle" title="Language">EN</button>
+      </div>
     </header>
 
     <section class="section">
-      <div class="section-title">颜色主题</div>
-      <div class="theme-seg" role="group" aria-label="徽章颜色主题">
+      <div class="section-title" data-i18n="themeSection">颜色主题</div>
+      <div class="theme-seg" role="group" aria-label="badge theme" id="themeGroup">
         <button type="button" class="theme-btn" data-theme="dark" id="themeDark">
           <span class="theme-dot theme-dot-dark"></span>
-          深色
-          <span class="theme-tag">默认</span>
+          <span data-i18n="themeDark">深色</span>
+          <span class="theme-tag" data-i18n="themeDefault">默认</span>
         </button>
         <button type="button" class="theme-btn" data-theme="light" id="themeLight">
           <span class="theme-dot theme-dot-light"></span>
-          高对比
+          <span data-i18n="themeHighContrast">高对比</span>
         </button>
       </div>
       <label class="row drag-row theme-opt-row" for="solidDarkToggle" id="solidDarkRow">
         <input type="checkbox" id="solidDarkToggle" />
         <span class="emoji">◼</span>
         <div class="label">
-          <strong>深色背景</strong>
-          <span>仅「深色」主题可调：勾选=实心深底；默认=半透明配色</span>
+          <strong data-i18n="solidDarkTitle">深色背景</strong>
+          <span data-i18n="solidDarkDesc">仅「深色」主题可调：勾选=实心深底；默认=半透明配色</span>
         </div>
       </label>
-      <p class="theme-hint" id="themeHint">深色可调背景；「高对比」固定实心深底+彩色字（不可调透明）。</p>
-    </section>
-
-    <section class="section">
-      <div class="section-title">显示项（默认全部开启）</div>
-      <div class="list" id="prefList"></div>
-    </section>
-
-    <section class="section">
-      <div class="section-title">徽章位置</div>
-      <p class="theme-hint offset-hint">
-        <strong>默认</strong>：贴合税率（Tax）旁，无需配置。<br />
-        <strong>卡片坐标 / 拖拽</strong>：GMGN 首页战壕与 <strong>K 线页左侧战壕列表</strong>共用同一套坐标；Debot/Gungnir /meme 另存。<strong>K 线顶栏总税率</strong>始终贴合，不走坐标。<br />
-        坐标相对小卡片左上角。Robinhood 等非 bsc 链不扫描。
+      <p class="theme-hint" id="themeHint" data-i18n="themeHintDefault">
+        深色可调背景；「高对比」固定实心深底+彩色字（不可调透明）。
       </p>
+    </section>
+
+    <section class="section" id="prefSection">
+      <button type="button" class="collapse-head" id="prefCollapseBtn" aria-expanded="false">
+        <span class="section-title collapse-title" data-i18n="prefSection">显示项（默认全部开启）</span>
+        <span class="collapse-chevron" id="prefChevron">▸</span>
+      </button>
+      <div class="collapse-body" id="prefCollapseBody" hidden>
+        <div class="list" id="prefList"></div>
+        <div class="pref-actions">
+          <button type="button" id="btnAllOn" class="btn" data-i18n="btnAllOn">全部开启</button>
+          <button type="button" id="btnAllOff" class="btn btn-muted" data-i18n="btnAllOff">全部关闭</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-title" data-i18n="posSection">徽章位置</div>
+      <p class="theme-hint offset-hint" id="offsetHint"></p>
 
       <label class="row drag-row" for="dragEditToggle">
         <input type="checkbox" id="dragEditToggle" />
         <span class="emoji">✥</span>
         <div class="label">
-          <strong>页面内拖拽定位</strong>
-          <span>开启后拖一次徽章；松手写入坐标、同步全站并自动关闭拖拽</span>
+          <strong data-i18n="dragTitle">页面内拖拽定位</strong>
+          <span data-i18n="dragDesc">开启后拖一次徽章；松手写入坐标、同步全站并自动关闭拖拽</span>
         </div>
       </label>
 
@@ -63,7 +75,7 @@
           <div class="offset-site-title">GMGN</div>
           <label class="offset-enable">
             <input type="checkbox" class="offset-enable-input" data-site="gmgn" />
-            使用卡片坐标
+            <span data-i18n="useCardCoords">使用卡片坐标</span>
           </label>
         </div>
         <div class="offset-row">
@@ -93,7 +105,7 @@
           <div class="offset-site-title">Debot / Gungnir</div>
           <label class="offset-enable">
             <input type="checkbox" class="offset-enable-input" data-site="debot" />
-            使用卡片坐标
+            <span data-i18n="useCardCoords">使用卡片坐标</span>
           </label>
         </div>
         <div class="offset-row">
@@ -119,16 +131,16 @@
       </div>
 
       <div class="offset-actions">
-        <button type="button" id="btnOffsetReset" class="btn btn-muted">恢复默认（贴税率旁）</button>
+        <button type="button" id="btnOffsetReset" class="btn btn-muted" data-i18n="btnResetOffset">
+          恢复默认（贴税率旁）
+        </button>
       </div>
       <p class="status" id="offsetStatus" aria-live="polite"></p>
     </section>
 
-    <footer class="foot">
-      <button type="button" id="btnAllOn" class="btn">全部开启</button>
-      <button type="button" id="btnAllOff" class="btn btn-muted">全部关闭</button>
-    </footer>
-    <p class="hint">主题/显示项即时刷新。坐标模式关闭时徽章贴 Tax；开启后相对卡片左上角绝对定位。</p>
+    <p class="hint" data-i18n="footerHint">
+      主题/显示项即时刷新。坐标模式关闭时徽章贴 Tax；开启后相对卡片左上角绝对定位。
+    </p>
 
     <script src="popup.js"></script>
   </body>

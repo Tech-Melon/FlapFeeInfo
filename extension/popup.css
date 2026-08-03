@@ -39,6 +39,13 @@ body {
   margin-bottom: 10px;
 }
 
+.head-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .title {
   font-weight: 700;
   font-size: 14px;
@@ -48,6 +55,24 @@ body {
   color: var(--muted);
   font-size: 12px;
   margin-top: 2px;
+}
+
+.lang-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+.lang-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .section {
@@ -60,6 +85,51 @@ body {
   color: var(--muted);
   margin: 0 2px 6px;
   letter-spacing: 0.02em;
+}
+
+.collapse-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: inherit;
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.collapse-head:hover {
+  border-color: var(--accent);
+}
+
+.collapse-title {
+  margin: 0 !important;
+  color: var(--text) !important;
+  font-size: 12px !important;
+}
+
+.collapse-chevron {
+  color: var(--muted);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.collapse-body {
+  margin-top: 8px;
+}
+
+.pref-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.pref-actions .btn {
+  flex: 1;
 }
 
 .theme-seg {

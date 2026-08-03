@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.23: popup EN/ZH + display prefs collapsed by default.
   // 0.4.22: K-line side 战壕 rows share home trench absolute coords (header stays Tax).
   // 0.4.21: K-line side board — prioritize unpainted, higher light caps, light continue.
   // 0.4.20: light→高对比; token settled still light-scan dialog/side boards; drag auto-off.
