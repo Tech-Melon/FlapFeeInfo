@@ -5,6 +5,7 @@
   // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
+  // 0.4.42: GMGN 列表 mutation 禁止 force 扫（对齐 0.4.22 900ms 限流）+ href-only 候选 + roots≤3.
   // 0.4.41: GMGN 彻底对齐 0.4.22 — 关 soft/DOM-watch/click-arm 风暴；K 线 settled 不扫三列.
   // 0.4.40: GMGN 回 0.4.22 轻量 progressive（砍 keep-alive/Tax 狂扫）；Debot 仍用加速路径.
   // 0.4.39: js-mcp — GMGN K→战壕 Tax@1.1s 但徽章@~6s：list-return 锚点+续扫+禁止 22px 假卡.
@@ -365,12 +366,18 @@
   installBadgeDragHandlers();
   startPipelineWatchdog();
   installHistoryHooks();
-  installPageWorldSpaHook();
+  // 0.4.42: page-hook only on Debot/Gungnir (GMGN history wrap enough; inject+postMessage adds noise).
+  if (!location.hostname.endsWith("gmgn.ai")) {
+    installPageWorldSpaHook();
+  }
   installDebotTokenClickArm();
   installGmgnSpaClickArm();
   installOverlayOpenArm();
   startRoutePoller();
-  startDebotTokenGuardian();
+  // Guardian is Debot-only work; skip timer on GMGN entirely.
+  if (!location.hostname.endsWith("gmgn.ai")) {
+    startDebotTokenGuardian();
+  }
 
   function createSiteStrategy() {
     if (location.hostname.endsWith("gmgn.ai")) return createGmgnStrategy();
@@ -456,11 +463,13 @@
     if (!(node instanceof HTMLElement)) return false;
     try {
       if (node.closest?.('[role="dialog"], [role="alertdialog"]')) return true;
-      // GMGN search/history often has no role=dialog — still need short-row climb.
-      const panel = findGmgnSearchPanelRoot();
-      if (panel && panel.contains(node)) return true;
       // Debot/Gungnir: MUI modal paper without role sometimes.
       if (node.closest?.(".MuiModal-root, .MuiDialog-root, [class*='Modal']")) return true;
+      // GMGN panel climb is expensive — only when overlay window is active (0.4.42).
+      if (isOverlayFast() || (overlayDetectCache.open && Date.now() - overlayDetectCache.at < 2000)) {
+        const panel = findGmgnSearchPanelRoot();
+        if (panel && panel.contains(node)) return true;
+      }
     } catch (_err) {
       return false;
     }
@@ -1494,6 +1503,8 @@
     if (isOverlayFast()) return OVERLAY_MAX_CARDS;
     // token→list soft window: smaller slices so list repaint does not freeze UI (0.4.30).
     if (isSpaListReturnSoft()) return SPA_LIST_RETURN_CARDS;
+    // GMGN: smaller per-scan budget (0.4.42) — more slices, less longtask.
+    if (isGmgnHost()) return 28;
     // Full budget otherwise — stable cards free; 3-col lists still finish via progressive.
     return MAX_CARDS_PER_SCAN;
   }
@@ -3608,8 +3619,8 @@
     }
 
     // Per-card safety net only (same CA in 三栏 = multiple badges OK).
-    // list-return soft: skip full-page dedupe (geometry walks were part of the 0.8s spike).
-    if (!listReturnSoft) {
+    // list-return soft / GMGN: skip full-page dedupe every scan (0.4.42 jank).
+    if (!listReturnSoft && !(isGmgnHost() && scanGeneration % 4 !== 0)) {
       dedupeBadgesByToken();
     }
 
@@ -4027,7 +4038,8 @@
             });
         }
       } else {
-        // Home / war room
+        // Home / war room — keep only top 3 tall columns (selector matches ~40 nested shells).
+        const candidates = [];
         document
           .querySelectorAll(
             "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
@@ -4035,15 +4047,19 @@
           .forEach((el) => {
             if (!(el instanceof HTMLElement)) return;
             const r = el.getBoundingClientRect();
-            if (r.width >= 240 && r.height >= 200) roots.push(el);
+            if (r.width >= 240 && r.height >= 200 && r.top < window.innerHeight) {
+              candidates.push({ el, area: r.width * r.height, top: r.top });
+            }
           });
-        // Fallback: largest overflow pane when no columns matched
-        if (!roots.length) {
-          document.querySelectorAll("div.overflow-auto, div.overflow-hidden").forEach((el) => {
-            if (!(el instanceof HTMLElement)) return;
-            const r = el.getBoundingClientRect();
-            if (r.width >= 400 && r.height >= 400 && r.top < window.innerHeight) roots.push(el);
-          });
+        candidates.sort((a, b) => b.area - a.area);
+        // Prefer three distinct horizontal columns (left/mid/right).
+        for (let i = 0; i < candidates.length && roots.length < 3; i += 1) {
+          const c = candidates[i];
+          const overlap = roots.some((r) => r.contains(c.el) || c.el.contains(r));
+          if (!overlap) roots.push(c.el);
+        }
+        if (!roots.length && candidates.length) {
+          roots.push(candidates[0].el);
         }
       }
     } else if (host.endsWith("debot.ai") || host.endsWith("gungnir.bot")) {
@@ -4262,6 +4278,7 @@
       else offscreen.push(item);
     };
 
+    const gmgnLite = isGmgnHost() && !overlayOnly;
     const collectFromRoot = (root) => {
       if (!root || !root.querySelectorAll) return;
       const candCap = overlayOnly
@@ -4270,7 +4287,9 @@
           ? SPA_LIST_RETURN_CANDIDATES
           : lightOnly
             ? LIGHT_MAX_CANDIDATES * 2
-            : MAX_CANDIDATES_PER_SCAN * 2;
+            : gmgnLite
+              ? 64
+              : MAX_CANDIDATES_PER_SCAN * 2;
       // Prefer site token routes over external flap.sh icons (js-mcp: flap.sh 18×18 noise).
       root
         .querySelectorAll(
@@ -4278,7 +4297,16 @@
             "a[href*='/bsc/token/'][href*='8888'], a[href*='/bsc/token/'][href*='7777']"
         )
         .forEach((n) => addNode(n, 2));
-      // list-return: href-only — skip SUFFIX + leaf walks (main cost of GMGN return).
+      // 0.4.42 GMGN: also CA hrefs (flap/site) but NEVER leaf textContent walks.
+      if (gmgnLite && !listReturnSoft) {
+        root.querySelectorAll("a[href*='8888'], a[href*='7777']").forEach((n) => {
+          const href = (n.getAttribute && n.getAttribute("href")) || "";
+          if (/flap\.sh|bscscan|etherscan/i.test(href)) addNode(n, 1);
+          else addNode(n, 2);
+        });
+        return;
+      }
+      // list-return: href-only — skip SUFFIX + leaf walks.
       if (listReturnSoft && !overlayOnly) return;
       root.querySelectorAll(SUFFIX_SELECTORS).forEach((n) => {
         const href = (n.getAttribute && n.getAttribute("href")) || "";
@@ -4286,9 +4314,7 @@
         if (/flap\.sh|bscscan|etherscan/i.test(href)) addNode(n, 0);
         else addNode(n, 1);
       });
-      // Short CA text in compact leaves (raise cap on light — virtual list new rows).
-      // Debot/Gungnir: pure short CA is often a leaf DIV (js-mcp), not only a/span.
-      // Overlay history rows: also walk div leaves (short CA only).
+      // Short CA text in compact leaves — Debot/overlay only (GMGN href-only).
       const leafBudget = overlayOnly
         ? OVERLAY_MAX_CANDIDATES
         : lightOnly
@@ -4297,6 +4323,7 @@
       if (inView.length < leafBudget) {
         const hn = location.hostname || "";
         const debotHost = hn.endsWith("debot.ai") || hn.endsWith("gungnir.bot");
+        if (!debotHost && !overlayOnly) return;
         const leafSel = debotHost || overlayOnly ? "a, span, div" : "a, span";
         const leaves = root.querySelectorAll(leafSel);
         const maxCheck = Math.min(
@@ -4309,7 +4336,6 @@
           const t = (el.textContent || "").trim();
           if (t.length > 24 || t.length < 8) continue;
           if (!TARGET_SHORT_TOKEN_RE.test(t)) continue;
-          // Skip fat wrappers that only contain the short CA among other chrome.
           if (el.tagName === "DIV" && el.children && el.children.length > 2) continue;
           addNode(el, overlayOnly ? 3 : 1);
         }
@@ -4327,15 +4353,17 @@
         ? SPA_LIST_RETURN_CANDIDATES
         : lightOnly
           ? LIGHT_MAX_CANDIDATES * 2
-          : MAX_CANDIDATES_PER_SCAN * 2;
+          : gmgnLite
+            ? 48
+            : MAX_CANDIDATES_PER_SCAN * 2;
     for (const root of roots) {
       if (inView.length + offscreen.length >= maxCand) break;
       collectFromRoot(root);
     }
 
-    // SPA hole-fill: if roots empty/wrong, scan body once.
-    // Never on light / overlay-fast / list-return soft / settled token pages.
+    // SPA hole-fill: body once. NEVER on GMGN (body walk = main cold-load jank).
     if (
+      !gmgnLite &&
       !lightOnly &&
       !overlayOnly &&
       !listReturnSoft &&
@@ -6710,8 +6738,14 @@
         tryPaintGmgnTokenHeader("mutation-scan");
         return;
       }
+      // 0.4.42 / 0.4.22: GMGN list mutations use NON-force scan (SCAN_INTERVAL 900ms gate).
+      // force:true every mut was continuous jank while virtual list thrash.
       pendingLightScan = false;
-      scheduleScan(0, { force: true, immediate: false, light: false });
+      if (isGmgnHost()) {
+        scheduleScan(0, { force: false, immediate: false, light: false });
+      } else {
+        scheduleScan(0, { force: true, immediate: false, light: false });
+      }
     }, debounceMs);
   });
 
@@ -6722,7 +6756,8 @@
 
   try {
     ensureDocumentObserver();
-    getScanRoots(true);
+    // 0.4.42: delay root probe on GMGN so first paint of host is not competing.
+    if (!isGmgnHost()) getScanRoots(true);
   } catch (_err) {
     ensureDocumentObserver();
   }
@@ -6768,5 +6803,10 @@
     hardResetPipeline("init-was-discarded");
   }
 
-  scheduleScan(100, { force: true, immediate: true });
+  // 0.4.42: GMGN first scan idle + delayed — do not compete with host hydration (user: 刷新 5s 卡).
+  if (isGmgnHost()) {
+    scheduleScan(500, { force: true, immediate: false });
+  } else {
+    scheduleScan(100, { force: true, immediate: true });
+  }
 })();
