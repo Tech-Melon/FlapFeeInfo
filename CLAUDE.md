@@ -372,6 +372,16 @@ python tools/ctl.py watchdog-run
   - `0.4.6`：稳定卡不占 budget（Debot 右列饿死修复）；未画优先；即时性参数回调  
   - `0.4.7`：SPA 渐进补扫 + 禁 height>200 误清列表卡  
   - `0.4.8`：js-mcp 复现 token→home 0 徽章 — 独立路由轮询、Observer 永挂 documentElement、禁 body mark、token 链优先  
+  - `0.4.43`：GMGN-only 流畅 — 滚动冷却 + mutation 相关性过滤 + 稳定卡/Tax 挂载缓存（Debot 逻辑不变）  
+  - `0.4.44`：GMGN K→战壕即时徽章 — 轻量 soft + cache-first fastPaint + 紧 progressive（无 keep-alive；Debot 不变）  
+  - `0.4.45`：GMGN 仅首屏可视 ~10–12 卡（禁屏外/Tax 叶扫/dedupe）；回战壕 <1s 铺满；Debot 不变  
+  - `0.4.46`：GMGN 回战壕对标 Debot — 首扫禁 force（避 host 500ms+ longtask）+ rAF/DOM-watch 密快绘  
+  - `0.4.47`：Debot K 线顶栏徽章修复 — 登录侧栏导致 short CA 漏扫，改 title/ca-text 顶栏定位  
+  - `0.4.48`：Debot 坐标模式嵌套双徽章去重；100% 份额只显示类型图标（💎 而非 💎100%）  
+  - `0.4.49`：GMGN K 线徽章挂 short CA 旁；回战壕防 early-stop 卡 10~12 枚 + 600/1200/2000 补洞  
+  - `0.4.50`：GMGN K 线强制 short CA afterend（禁总税率兜底；税率旁已挂则迁移到地址旁）  
+  - `0.4.51`：GMGN/Debot 三列同 CA 各显徽章（list-return 禁 token 级 dedupe）；单卡仍防双徽章  
+  - `0.5.0`：里程碑 — GMGN 战壕流畅与 K 线地址旁挂载、三列同 CA 各显；Debot K 线顶栏/坐标双徽章；100% 仅类型图标；回战壕 ~0.5s 铺满  
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`
