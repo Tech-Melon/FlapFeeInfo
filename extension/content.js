@@ -5,6 +5,7 @@
   // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
+  // 0.4.34: Debot「使用卡片坐标」时 K 线顶栏仍强制贴合（不走 absolute，修登录无徽章）.
   // 0.4.33: Debot login K-line badge + list-return mount pos; GMGN return first-frame fast-only.
   // 0.4.32: GMGN token→home — cache-first 6–8 card burst + 6ms slices (kill ~0.8s longtask).
   // 0.4.31: js-mcp report — Debot token dwell jank + 0 badge; GMGN return still ~0.6–0.8s.
@@ -670,12 +671,18 @@
   function canUseTrenchAbsoluteCoords(card) {
     if (!isAllowedScanChain()) return false;
     if (card && isGmgnTokenHeaderCard(card)) return false;
-    // Debot/Gungnir token detail header-ish full page mount: keep default if card is page shell
-    if (card && isDebotTokenPage() && isDebotTokenHeaderLike(card)) return false;
+    // Debot/Gungnir K-line top strip: ALWAYS natural mount (popup: 不走坐标).
+    // User may enable「使用卡片坐标」for 战壕 list only — if header zone uses absolute
+    // (x=91,y=35 on a short row), badge is clipped / invisible until hard refresh.
+    if (isDebotTokenPage()) {
+      if (!card) return false;
+      if (isDebotTokenHeaderZoneCard(card) || isDebotTokenHeaderLike(card)) return false;
+      // Side boards / residual list rows on token page may still use absolute.
+      return true;
+    }
     if (isTrenchListPage()) return true;
-    // Token page: list cards only (side boards / dialog rows)
+    // GMGN token page: side boards only (header already excluded above for gmgn)
     if (isTokenDetailRoute() && card) return true;
-    // No card context (global remount flags): allow if home trench or token page has boards
     if (!card && (isTrenchListPage() || isTokenDetailRoute())) return true;
     return false;
   }
@@ -689,6 +696,33 @@
       if (r.width > window.innerWidth * 0.55 && r.height > window.innerHeight * 0.35) {
         return true;
       }
+    } catch (_err) {
+      return false;
+    }
+    return false;
+  }
+
+  /**
+   * Debot/Gungnir token page top strip (name + short CA + action icons).
+   * Any mount in this zone must NOT use absolute card coords — even if user
+   * enabled「使用卡片坐标」for 战壕 lists (0.4.34).
+   */
+  function isDebotTokenHeaderZoneCard(card) {
+    if (!(card instanceof HTMLElement) || !isDebotTokenPage()) return false;
+    if (isDebotTokenHeaderCard(card)) return true;
+    try {
+      const r = card.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return false;
+      // Tall Mui list cards are not header even if top is high.
+      if (
+        (card.classList?.contains("MuiCard-root") ||
+          card.classList?.contains("MuiPaper-root")) &&
+        r.height >= 160
+      ) {
+        return false;
+      }
+      // Top strip: short CA row / title / stats (~y < 240, short height).
+      if (r.top >= -20 && r.top < 240 && r.height < 180) return true;
     } catch (_err) {
       return false;
     }
@@ -1992,14 +2026,15 @@
 
     const entry = resolveEntry(urlTok);
     if (entry) {
-      // Prefer force-append beside short CA (Tax/absolute path flaky on Debot header SPA).
+      // Header always natural mount — strip any absolute styles from prior list-return.
+      // Prefer force-append beside short CA (absolute 91,35 on short row = invisible).
       let ok = forceAppendDebotHeaderBadge(header, urlTok, entry);
       if (!ok || !hasDebotTokenHeaderBadge()) {
         ok = renderMode(header, urlTok, entry, { forceRemount: true }) || ok;
-      }
-      // Second force-append if renderMode left invisible badge.
-      if (!hasDebotTokenHeaderBadge()) {
-        ok = forceAppendDebotHeaderBadge(header, urlTok, entry) || ok;
+        // If renderMode still applied absolute (old card zone miss), rewrite to after short CA.
+        if (!hasDebotTokenHeaderBadge() || headerHasAbsoluteHeaderBadge(urlTok)) {
+          ok = forceAppendDebotHeaderBadge(header, urlTok, entry) || ok;
+        }
       }
       if (ok || hasDebotTokenHeaderBadge()) {
         debotHeaderMissStreak = 0;
@@ -2014,6 +2049,26 @@
     }
     recoverStuckBatch(false);
     scheduleBatchFlush({ immediate: true, delayMs: 0 });
+    return false;
+  }
+
+  /** True if a same-token badge near top still has absolute positioning (should not on K-line). */
+  function headerHasAbsoluteHeaderBadge(token) {
+    if (!token) return false;
+    try {
+      const icons = document.querySelectorAll(
+        `[${ICON_DATA}="1"][data-fee-token="${token}"]`
+      );
+      for (let i = 0; i < icons.length; i += 1) {
+        const icon = icons[i];
+        if (icon.dataset.feePosMode === "absolute") {
+          const r = icon.getBoundingClientRect();
+          if (r.top >= 0 && r.top < 220) return true;
+        }
+      }
+    } catch (_err) {
+      return false;
+    }
     return false;
   }
 
@@ -4074,6 +4129,10 @@
   function getActiveBadgePosition(card) {
     const key = getSiteOffsetKey();
     const o = badgeOffsets[key] || DEFAULT_BADGE_OFFSETS[key];
+    // Belt: Debot K-line top zone never absolute (config may have debot.enabled=true).
+    if (card && isDebotTokenPage() && isDebotTokenHeaderZoneCard(card)) {
+      return { enabled: false, x: 0, y: 0 };
+    }
     if (!canUseTrenchAbsoluteCoords(card || null)) {
       return { enabled: false, x: 0, y: 0 };
     }
