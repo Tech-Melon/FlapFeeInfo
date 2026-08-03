@@ -221,3 +221,95 @@ body {
   color: var(--ok);
   min-height: 1em;
 }
+
+.offset-hint {
+  margin-bottom: 8px;
+}
+
+.offset-site {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.offset-site-title {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0 2px 8px;
+}
+
+.offset-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.offset-row:last-child {
+  margin-bottom: 0;
+}
+
+.offset-axis {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.offset-input {
+  width: 64px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 5px 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.offset-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.offset-unit {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.offset-step {
+  display: flex;
+  gap: 4px;
+}
+
+.btn-step {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.btn-step:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.offset-actions {
+  margin-top: 2px;
+}
+
+.offset-actions .btn {
+  width: 100%;
+}

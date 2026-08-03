@@ -33,11 +33,68 @@
       <div class="list" id="prefList"></div>
     </section>
 
+    <section class="section">
+      <div class="section-title">徽章位置（相对默认挂载点）</div>
+      <p class="theme-hint offset-hint">
+        在卡片原有挂载基础上微调偏移；同一站点所有徽章共用一套坐标。GMGN 与 Debot/Gungnir 分开保存。非拖拽实时重绘，改完后写入本地，下一轮绘制或刷新生效。
+      </p>
+      <div class="offset-site" data-site="gmgn">
+        <div class="offset-site-title">GMGN</div>
+        <div class="offset-row">
+          <label class="offset-axis">X
+            <input type="number" class="offset-input" data-site="gmgn" data-axis="x" min="-200" max="200" step="1" value="0" />
+            <span class="offset-unit">px</span>
+          </label>
+          <div class="offset-step">
+            <button type="button" class="btn-step" data-site="gmgn" data-axis="x" data-delta="-4">−</button>
+            <button type="button" class="btn-step" data-site="gmgn" data-axis="x" data-delta="4">+</button>
+          </div>
+        </div>
+        <div class="offset-row">
+          <label class="offset-axis">Y
+            <input type="number" class="offset-input" data-site="gmgn" data-axis="y" min="-200" max="200" step="1" value="0" />
+            <span class="offset-unit">px</span>
+          </label>
+          <div class="offset-step">
+            <button type="button" class="btn-step" data-site="gmgn" data-axis="y" data-delta="-4">−</button>
+            <button type="button" class="btn-step" data-site="gmgn" data-axis="y" data-delta="4">+</button>
+          </div>
+        </div>
+      </div>
+      <div class="offset-site" data-site="debot">
+        <div class="offset-site-title">Debot / Gungnir</div>
+        <div class="offset-row">
+          <label class="offset-axis">X
+            <input type="number" class="offset-input" data-site="debot" data-axis="x" min="-200" max="200" step="1" value="0" />
+            <span class="offset-unit">px</span>
+          </label>
+          <div class="offset-step">
+            <button type="button" class="btn-step" data-site="debot" data-axis="x" data-delta="-4">−</button>
+            <button type="button" class="btn-step" data-site="debot" data-axis="x" data-delta="4">+</button>
+          </div>
+        </div>
+        <div class="offset-row">
+          <label class="offset-axis">Y
+            <input type="number" class="offset-input" data-site="debot" data-axis="y" min="-200" max="200" step="1" value="0" />
+            <span class="offset-unit">px</span>
+          </label>
+          <div class="offset-step">
+            <button type="button" class="btn-step" data-site="debot" data-axis="y" data-delta="-4">−</button>
+            <button type="button" class="btn-step" data-site="debot" data-axis="y" data-delta="4">+</button>
+          </div>
+        </div>
+      </div>
+      <div class="offset-actions">
+        <button type="button" id="btnOffsetReset" class="btn btn-muted">重置全部偏移</button>
+      </div>
+      <p class="status" id="offsetStatus" aria-live="polite"></p>
+    </section>
+
     <footer class="foot">
       <button type="button" id="btnAllOn" class="btn">全部开启</button>
       <button type="button" id="btnAllOff" class="btn btn-muted">全部关闭</button>
     </footer>
-    <p class="hint">修改后当前页徽章会即时刷新，无需重载扩展。</p>
+    <p class="hint">主题/显示项即时刷新；位置偏移写入后由页面侧下一轮绘制应用（已打开页会同步 CSS 偏移）。</p>
 
     <script src="popup.js"></script>
   </body>

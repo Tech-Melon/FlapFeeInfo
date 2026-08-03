@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.12: K-line — stop mutation scans after badge; cache 总税率 lookup; per-site badge offset.
   // 0.4.11: SPA progressive scans cut to ~1.3–2s (was 6× up to 3s) — fix home→K-line jank.
   // Debot/GMGN list boards still get 4 light passes; token pages 3 + early-stop when badge exists.
   // 0.4.10: pool quote prefer API quote_symbol.
@@ -36,8 +37,12 @@
   const PERSISTENT_CACHE_MAX_ENTRIES = 800;
   // Mutation → scan debounce (ms). Snappy enough for list refresh, still coalesces thrash.
   const MUTATION_SCAN_DEBOUNCE_MS = 400;
+  // Token/K-line while badge still loading: longer coalesce against chart Mutation flood.
+  const MUTATION_SCAN_DEBOUNCE_TOKEN_LOADING_MS = 900;
   // SPA: swallow mutation flood while host rebuilds (chart/list); progressive scans fill holes.
   const SPA_NAV_QUIET_MS = 650;
+  // Cache header "总税率" node — avoid document-wide span/div walks every root refresh.
+  const TAX_LABEL_CACHE_MS = 20000;
   // Coalesce multi pushState/replaceState during one navigation.
   const SPA_NAV_COALESCE_MS = 40;
   // Progressive hole-fill offsets from quiet end (ms). Shorter than 0.4.10's 6×/2800ms.
@@ -69,6 +74,15 @@
   // Badge color theme: dark (default, for dark sites) | light (solid soft chips for contrast).
   const BADGE_THEME_KEY = "flapFeeInfo.badgeTheme.v1";
   const DEFAULT_BADGE_THEME = "dark";
+  // Per-site badge nudge from natural placement (px relative to card/base flow origin).
+  // gmgn vs debot(+gungnir) stored separately; applied on next paint / storage change (CSS only).
+  const BADGE_OFFSET_KEY = "flapFeeInfo.badgeOffset.v1";
+  const DEFAULT_BADGE_OFFSETS = {
+    gmgn: { x: 0, y: 0 },
+    debot: { x: 0, y: 0 }
+  };
+  const BADGE_OFFSET_MIN = -200;
+  const BADGE_OFFSET_MAX = 200;
   const DEBUG_PREFIX = "[FlapFeeInfo]";
   const CARD_MARK = "gmgnFeeModeCard";
   const ICON_MARK = "gmgnFeeModeIcon";
@@ -141,6 +155,13 @@
   let displayPrefs = { ...DEFAULT_DISPLAY_PREFS };
   /** dark | light — badge chrome colors */
   let badgeTheme = DEFAULT_BADGE_THEME;
+  /** { gmgn: {x,y}, debot: {x,y} } — CSS nudge from natural placeIcon base */
+  let badgeOffsets = {
+    gmgn: { ...DEFAULT_BADGE_OFFSETS.gmgn },
+    debot: { ...DEFAULT_BADGE_OFFSETS.debot }
+  };
+  /** Cached GMGN "总税率" label node (invalidated on SPA). */
+  let taxRateLabelCache = { el: null, at: 0 };
   let pipelineWatchdogId = null;
   /** Scan timers scheduled with force (must not leave scanScheduled stuck). */
   let scanTimerIds = [];
@@ -170,6 +191,7 @@
   hydratePersistentCache();
   hydrateDisplayPrefs();
   hydrateBadgeTheme();
+  hydrateBadgeOffsets();
   watchDisplayPrefs();
   startPipelineWatchdog();
   installHistoryHooks();
@@ -392,19 +414,77 @@
   }
 
   function findGmgnTaxRateLabel() {
-    const nodes = document.querySelectorAll("span, div");
-    for (let i = 0; i < nodes.length; i += 1) {
-      const el = nodes[i];
-      const t = (el.textContent || "").replace(/\s+/g, " ").trim();
-      // Prefer exact title leaf "总税率" (not long sentences).
-      if (t === "总税率") return el;
+    const now = Date.now();
+    const cached = taxRateLabelCache.el;
+    if (
+      cached instanceof HTMLElement &&
+      cached.isConnected &&
+      now - taxRateLabelCache.at < TAX_LABEL_CACHE_MS
+    ) {
+      const ct = (cached.textContent || "").replace(/\s+/g, " ").trim();
+      if (ct === "总税率" || (ct.startsWith("总税率") && ct.length <= 16)) {
+        return cached;
+      }
     }
-    for (let i = 0; i < nodes.length; i += 1) {
-      const el = nodes[i];
-      const t = (el.textContent || "").replace(/\s+/g, " ").trim();
-      if (t.startsWith("总税率") && t.length <= 16) return el;
+
+    // Prefer near-top header band — chart body churns DOM; avoid whole-document when possible.
+    let found = null;
+    const roots = [];
+    try {
+      const main =
+        document.querySelector("main") ||
+        document.querySelector("#__next") ||
+        document.querySelector("[class*='chakra']");
+      if (main) roots.push(main);
+    } catch (_err) {
+      // ignore
     }
-    return null;
+    if (!roots.length && document.body) roots.push(document.body);
+
+    for (const root of roots) {
+      if (!root?.querySelectorAll) continue;
+      const nodes = root.querySelectorAll("span, div");
+      const max = Math.min(nodes.length, 800);
+      for (let i = 0; i < max; i += 1) {
+        const el = nodes[i];
+        const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+        if (t === "总税率") {
+          found = el;
+          break;
+        }
+      }
+      if (found) break;
+      for (let i = 0; i < max; i += 1) {
+        const el = nodes[i];
+        const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+        if (t.startsWith("总税率") && t.length <= 16) {
+          found = el;
+          break;
+        }
+      }
+      if (found) break;
+    }
+
+    taxRateLabelCache = { el: found, at: now };
+    return found;
+  }
+
+  /** Token detail URL with a CA that is NOT 8888/7777 — no fee badge work needed. */
+  function isNonTargetTokenPage() {
+    if (!isTokenDetailRoute()) return false;
+    const m = String(location.pathname || "").match(/0x[a-fA-F0-9]{40}/i);
+    if (!m) return false;
+    return !TARGET_TOKEN_RE.test(m[0].toLowerCase());
+  }
+
+  /** Token/K-line page already has at least one painted badge. */
+  function isTokenPageSettledWithBadge() {
+    if (!isTokenDetailRoute()) return false;
+    try {
+      return !!document.querySelector(`[${ICON_DATA}="1"]`);
+    } catch (_err) {
+      return false;
+    }
   }
 
   /**
@@ -667,6 +747,8 @@
   /** Token page: stop further SPA force-scans once any badge is painted (header enough). */
   function shouldCancelSpaProgressive() {
     if (!isTokenDetailRoute()) return false;
+    // Non-8888/7777 token pages never need progressive hole-fill.
+    if (isNonTargetTokenPage()) return true;
     try {
       return !!document.querySelector(`[${ICON_DATA}="1"]`);
     } catch (_err) {
@@ -686,6 +768,7 @@
     debotMountCache = new WeakMap();
     cardTokenCache = new WeakMap();
     scanRootsCache = { at: 0, roots: [] };
+    taxRateLabelCache = { el: null, at: 0 };
 
     // Cheap full reset of OUR marks only (including body/chakra shells from token page).
     resetOurDomMarks();
@@ -908,6 +991,14 @@
           !forceRemount
         ) {
           if (existing.dataset.feeSig && existing.textContent === existing.dataset.feeSig) {
+            // Cheap: keep CSS offset in sync if prefs changed before storage listener ran.
+            const off = getActiveBadgeOffset();
+            if (
+              existing.dataset.feeOx !== String(off.x) ||
+              existing.dataset.feeOy !== String(off.y)
+            ) {
+              applyBadgeOffset(existing);
+            }
             skippedCached += 1;
             rendered += 1;
             continue;
@@ -916,6 +1007,7 @@
           const { label, className, title } = computeBadgePresentation(entry, quoteSymbol);
           if (label && existing.textContent === label && existing.className === className) {
             existing.dataset.feeSig = label;
+            applyBadgeOffset(existing);
             skippedCached += 1;
             rendered += 1;
             continue;
@@ -926,6 +1018,7 @@
             existing.className = className;
             existing.dataset.feeToken = token;
             existing.dataset.feeSig = label;
+            applyBadgeOffset(existing);
             skippedCached += 1;
             rendered += 1;
             continue;
@@ -1410,9 +1503,17 @@
       collectFromRoot(root);
     }
 
-    // SPA hole-fill: if roots empty/wrong, scan body once (cheap after root miss).
+    // SPA hole-fill: if roots empty/wrong, scan body once.
+    // 0.4.12: never full-body walk on settled/non-target token pages (chart DOM thrash).
     if (inView.length + offscreen.length < 8 && document.body) {
-      collectFromRoot(document.body);
+      if (
+        !(
+          isTokenDetailRoute() &&
+          (isTokenPageSettledWithBadge() || isNonTargetTokenPage())
+        )
+      ) {
+        collectFromRoot(document.body);
+      }
     }
 
     const sortPri = (a, b) => b.priority - a.priority;
@@ -2149,6 +2250,77 @@
     }
   }
 
+  function clampBadgeOffset(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return 0;
+    return Math.max(BADGE_OFFSET_MIN, Math.min(BADGE_OFFSET_MAX, Math.round(v)));
+  }
+
+  function normalizeBadgeOffsets(raw) {
+    const out = {
+      gmgn: { ...DEFAULT_BADGE_OFFSETS.gmgn },
+      debot: { ...DEFAULT_BADGE_OFFSETS.debot }
+    };
+    if (!raw || typeof raw !== "object") return out;
+    for (const site of ["gmgn", "debot"]) {
+      const o = raw[site];
+      if (o && typeof o === "object") {
+        out[site] = {
+          x: clampBadgeOffset(o.x),
+          y: clampBadgeOffset(o.y)
+        };
+      }
+    }
+    return out;
+  }
+
+  function getSiteOffsetKey() {
+    return siteStrategy && siteStrategy.name === "debot" ? "debot" : "gmgn";
+  }
+
+  function getActiveBadgeOffset() {
+    const key = getSiteOffsetKey();
+    const o = badgeOffsets[key] || DEFAULT_BADGE_OFFSETS[key];
+    return {
+      x: clampBadgeOffset(o?.x),
+      y: clampBadgeOffset(o?.y)
+    };
+  }
+
+  /**
+   * Nudge badge from natural placeIcon base (flow layout origin).
+   * Not absolute card coordinates — same delta for every badge on this site family.
+   */
+  function applyBadgeOffset(icon) {
+    if (!(icon instanceof HTMLElement)) return;
+    const { x, y } = getActiveBadgeOffset();
+    icon.style.position = "relative";
+    icon.style.left = `${x}px`;
+    icon.style.top = `${y}px`;
+    icon.dataset.feeOx = String(x);
+    icon.dataset.feeOy = String(y);
+  }
+
+  function applyOffsetToAllIcons() {
+    document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => {
+      applyBadgeOffset(icon);
+    });
+  }
+
+  function hydrateBadgeOffsets() {
+    if (!isExtensionContextValid() || !chrome.storage?.local) return;
+    try {
+      chrome.storage.local.get([BADGE_OFFSET_KEY], (items) => {
+        if (!isExtensionContextValid() || chrome.runtime.lastError) return;
+        badgeOffsets = normalizeBadgeOffsets(items?.[BADGE_OFFSET_KEY]);
+        // CSS-only refresh — no remount / re-place (next full paint also re-applies).
+        applyOffsetToAllIcons();
+      });
+    } catch {
+      // ignore
+    }
+  }
+
   function watchDisplayPrefs() {
     if (!isExtensionContextValid() || !chrome.storage?.onChanged) return;
     try {
@@ -2162,6 +2334,11 @@
         if (changes[BADGE_THEME_KEY]) {
           badgeTheme = normalizeBadgeTheme(changes[BADGE_THEME_KEY].newValue);
           dirty = true;
+        }
+        if (changes[BADGE_OFFSET_KEY]) {
+          badgeOffsets = normalizeBadgeOffsets(changes[BADGE_OFFSET_KEY].newValue);
+          // Offset only: CSS nudge, no full badge recompute.
+          applyOffsetToAllIcons();
         }
         if (dirty) rerenderAllBadges();
       });
@@ -2341,6 +2518,7 @@
         existing.className = className;
         existing.dataset.feeToken = token;
         existing.dataset.feeSig = label;
+        applyBadgeOffset(existing);
         return true;
       }
     }
@@ -2365,6 +2543,7 @@
     icon.textContent = label;
     icon.title = `${title}${token}`;
     icon.className = className;
+    applyBadgeOffset(icon);
     return true;
   }
 
@@ -2969,7 +3148,7 @@
     }, delay);
   }
 
-  // Observe list roots (or document during SPA) — not thrashing full scans.
+  // Observe documentElement (roots detach after SPA). Chart thrash is filtered below.
   const mutationObserver = new MutationObserver(() => {
     if (!isTabVisible()) return;
     if (!isExtensionContextValid()) return;
@@ -2978,7 +3157,16 @@
       spaDomDirty = true;
       return;
     }
+    // 0.4.12: non-8888/7777 token page — chart noise must not schedule scans.
+    if (isNonTargetTokenPage()) return;
+    // 0.4.12: token/K-line already painted — stop mutation-driven full-page scans.
+    if (isTokenPageSettledWithBadge()) return;
+
     if (mutationDebounceTimer) return;
+    // Longer debounce while token badge still loading (chart keeps mutating).
+    const debounceMs = isTokenDetailRoute()
+      ? MUTATION_SCAN_DEBOUNCE_TOKEN_LOADING_MS
+      : MUTATION_SCAN_DEBOUNCE_MS;
     mutationDebounceTimer = window.setTimeout(() => {
       mutationDebounceTimer = null;
       if (!isTabVisible()) return;
@@ -2986,8 +3174,9 @@
         spaDomDirty = true;
         return;
       }
-      scheduleScan(MUTATION_SCAN_DEBOUNCE_MS);
-    }, MUTATION_SCAN_DEBOUNCE_MS);
+      if (isNonTargetTokenPage() || isTokenPageSettledWithBadge()) return;
+      scheduleScan(debounceMs);
+    }, debounceMs);
   });
 
   function rebindMutationObserver() {

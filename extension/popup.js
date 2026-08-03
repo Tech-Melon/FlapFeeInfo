@@ -1,7 +1,14 @@
 (() => {
   const PREFS_KEY = "flapFeeInfo.displayPrefs.v1";
   const THEME_KEY = "flapFeeInfo.badgeTheme.v1";
+  const OFFSET_KEY = "flapFeeInfo.badgeOffset.v1";
   const DEFAULT_THEME = "dark";
+  const DEFAULT_OFFSETS = {
+    gmgn: { x: 0, y: 0 },
+    debot: { x: 0, y: 0 }
+  };
+  const OFFSET_MIN = -200;
+  const OFFSET_MAX = 200;
 
   /** @type {Array<{ key: string, emoji: string, title: string, desc: string }>} */
   const PREF_DEFS = [
@@ -22,6 +29,23 @@
   const btnAllOff = document.getElementById("btnAllOff");
   const themeDark = document.getElementById("themeDark");
   const themeLight = document.getElementById("themeLight");
+  const btnOffsetReset = document.getElementById("btnOffsetReset");
+  const offsetStatus = document.getElementById("offsetStatus");
+  const offsetInputs = Array.from(document.querySelectorAll(".offset-input"));
+  const offsetSteps = Array.from(document.querySelectorAll(".btn-step"));
+
+  /** @type {{ gmgn: {x:number,y:number}, debot: {x:number,y:number} }} */
+  let offsets = {
+    gmgn: { ...DEFAULT_OFFSETS.gmgn },
+    debot: { ...DEFAULT_OFFSETS.debot }
+  };
+  let saveTimer = null;
+
+  function clampOffset(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return 0;
+    return Math.max(OFFSET_MIN, Math.min(OFFSET_MAX, Math.round(v)));
+  }
 
   function normalizePrefs(raw) {
     const out = { ...DEFAULT_PREFS };
@@ -37,21 +61,48 @@
     return raw === "light" ? "light" : DEFAULT_THEME;
   }
 
+  function normalizeOffsets(raw) {
+    const out = {
+      gmgn: { ...DEFAULT_OFFSETS.gmgn },
+      debot: { ...DEFAULT_OFFSETS.debot }
+    };
+    if (!raw || typeof raw !== "object") return out;
+    for (const site of ["gmgn", "debot"]) {
+      const o = raw[site];
+      if (o && typeof o === "object") {
+        out[site] = {
+          x: clampOffset(o.x),
+          y: clampOffset(o.y)
+        };
+      }
+    }
+    return out;
+  }
+
   function loadAll() {
     return new Promise((resolve) => {
       try {
-        chrome.storage.local.get([PREFS_KEY, THEME_KEY], (items) => {
+        chrome.storage.local.get([PREFS_KEY, THEME_KEY, OFFSET_KEY], (items) => {
           if (chrome.runtime.lastError) {
-            resolve({ prefs: { ...DEFAULT_PREFS }, theme: DEFAULT_THEME });
+            resolve({
+              prefs: { ...DEFAULT_PREFS },
+              theme: DEFAULT_THEME,
+              offsets: normalizeOffsets(null)
+            });
             return;
           }
           resolve({
             prefs: normalizePrefs(items?.[PREFS_KEY]),
-            theme: normalizeTheme(items?.[THEME_KEY])
+            theme: normalizeTheme(items?.[THEME_KEY]),
+            offsets: normalizeOffsets(items?.[OFFSET_KEY])
           });
         });
       } catch {
-        resolve({ prefs: { ...DEFAULT_PREFS }, theme: DEFAULT_THEME });
+        resolve({
+          prefs: { ...DEFAULT_PREFS },
+          theme: DEFAULT_THEME,
+          offsets: normalizeOffsets(null)
+        });
       }
     });
   }
@@ -80,6 +131,55 @@
         resolve();
       }
     });
+  }
+
+  function saveOffsets(next) {
+    const normalized = normalizeOffsets(next);
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.set({ [OFFSET_KEY]: normalized }, () => {
+          void chrome.runtime?.lastError;
+          resolve(normalized);
+        });
+      } catch {
+        resolve(normalized);
+      }
+    });
+  }
+
+  function scheduleSaveOffsets() {
+    if (saveTimer) window.clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(async () => {
+      saveTimer = null;
+      offsets = await saveOffsets(offsets);
+      if (offsetStatus) {
+        offsetStatus.textContent = `已保存 · GMGN(${offsets.gmgn.x},${offsets.gmgn.y}) Debot(${offsets.debot.x},${offsets.debot.y})`;
+      }
+    }, 180);
+  }
+
+  function fillOffsetInputs(data) {
+    for (const input of offsetInputs) {
+      const site = input.dataset.site;
+      const axis = input.dataset.axis;
+      if (!site || !axis || !data[site]) continue;
+      input.value = String(data[site][axis] ?? 0);
+    }
+  }
+
+  function readOffsetsFromInputs() {
+    const next = {
+      gmgn: { ...offsets.gmgn },
+      debot: { ...offsets.debot }
+    };
+    for (const input of offsetInputs) {
+      const site = input.dataset.site;
+      const axis = input.dataset.axis;
+      if (!site || !axis || !next[site]) continue;
+      next[site][axis] = clampOffset(input.value);
+      input.value = String(next[site][axis]);
+    }
+    return next;
   }
 
   function renderTheme(theme) {
@@ -140,8 +240,40 @@
   btnAllOn.addEventListener("click", () => setAll(true));
   btnAllOff.addEventListener("click", () => setAll(false));
 
-  loadAll().then(({ prefs, theme }) => {
+  for (const input of offsetInputs) {
+    input.addEventListener("change", () => {
+      offsets = readOffsetsFromInputs();
+      scheduleSaveOffsets();
+    });
+    input.addEventListener("input", () => {
+      offsets = readOffsetsFromInputs();
+      scheduleSaveOffsets();
+    });
+  }
+
+  for (const btn of offsetSteps) {
+    btn.addEventListener("click", () => {
+      const site = btn.dataset.site;
+      const axis = btn.dataset.axis;
+      const delta = Number(btn.dataset.delta) || 0;
+      if (!site || !axis || !offsets[site]) return;
+      offsets[site][axis] = clampOffset((Number(offsets[site][axis]) || 0) + delta);
+      fillOffsetInputs(offsets);
+      scheduleSaveOffsets();
+    });
+  }
+
+  btnOffsetReset?.addEventListener("click", async () => {
+    offsets = normalizeOffsets(null);
+    fillOffsetInputs(offsets);
+    await saveOffsets(offsets);
+    if (offsetStatus) offsetStatus.textContent = "已重置为 (0, 0)";
+  });
+
+  loadAll().then(({ prefs, theme, offsets: loadedOffsets }) => {
     renderTheme(theme);
     renderPrefs(prefs);
+    offsets = loadedOffsets;
+    fillOffsetInputs(offsets);
   });
 })();
