@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.31: js-mcp report — Debot token dwell jank + 0 badge; GMGN return still ~0.6–0.8s.
   // 0.4.30: token↔list return — viewport-first soft rescan (jank↓, first-paint still snappy).
   // 0.4.29: cut SPA force-scan storm (meme→K-line jank) — coalesce + fewer progressive.
   // 0.4.28: Debot SPA — normalize route key (id_0x), click-arm, no thrash reset, paint in quiet.
@@ -77,38 +78,40 @@
   // Progressive hole-fill offsets from quiet end (ms).
   // List/meme boards (cold / generic): 3 passes — 0.4.30 cut 4th to save main thread.
   const SPA_NAV_SCAN_OFFSETS_LIST_MS = [0, 400, 1100];
-  // token→list return (js-mcp heavy path): snappy first paint + 1 hole-fill only.
-  const SPA_NAV_SCAN_OFFSETS_LIST_RETURN_MS = [0, 320, 900];
+  // token→list return (js-mcp heavy path): snappy first paint + hole-fill.
+  const SPA_NAV_SCAN_OFFSETS_LIST_RETURN_MS = [0, 280, 800];
   // Token / K-line page (GMGN): few passes, early-stop when header badge exists.
-  const SPA_NAV_SCAN_OFFSETS_TOKEN_MS = [0, 550, 1400];
-  // Debot SPA token: header paint is cheap; full-scan storm was the jank (js-mcp 0.4.29).
-  const SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS = [0, 600, 1800, 4000];
+  const SPA_NAV_SCAN_OFFSETS_TOKEN_MS = [0, 500, 1300];
+  // Debot SPA token: prefer tryPaint; at most 2 progressive full scans.
+  const SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS = [0, 900, 2500];
   // Quiet shorter when returning to list — user expects badges ASAP (immediacy).
-  const SPA_NAV_QUIET_LIST_RETURN_MS = 320;
+  const SPA_NAV_QUIET_LIST_RETURN_MS = 280;
   // After token→list: viewport-first soft window (ms) — smaller budget, skip offscreen.
-  const SPA_LIST_RETURN_SOFT_MS = 2800;
-  // Cards to really work per scan during list-return soft window (stable free).
-  const SPA_LIST_RETURN_CARDS = 22;
+  const SPA_LIST_RETURN_SOFT_MS = 2400;
+  // Cards per slice during list-return (js-mcp: 22 still caused ~600ms longtask on GMGN).
+  const SPA_LIST_RETURN_CARDS = 12;
   // Candidates cap during list-return soft window.
-  const SPA_LIST_RETURN_CANDIDATES = 56;
+  const SPA_LIST_RETURN_CANDIDATES = 40;
   // Cancel further list progressive once this many visible badges painted.
-  const SPA_LIST_RETURN_ENOUGH_BADGES = 10;
-  // Dedicated header paint watch after meme→token SPA (ms). DOM often late.
-  // 0.4.29: longer tick, shorter window — paint-only, rare full scan.
-  const DEBOT_TOKEN_HEADER_WATCH_MS = 12000;
-  const DEBOT_TOKEN_HEADER_TICK_MS = 450;
-  // Always-on guardian: paint-only most ticks; full scan throttled separately.
-  const DEBOT_TOKEN_GUARDIAN_MS = 900;
+  const SPA_LIST_RETURN_ENOUGH_BADGES = 6;
+  // Soft scan time budget per frame (ms) — hard stop mid-loop to avoid longtask.
+  const SPA_LIST_RETURN_SLICE_MS = 9;
+  // Dedicated header paint watch after meme→token SPA (ms).
+  const DEBOT_TOKEN_HEADER_WATCH_MS = 10000;
+  const DEBOT_TOKEN_HEADER_TICK_MS = 600;
+  // Always-on guardian base interval; backs off while header missing (0.4.31).
+  const DEBOT_TOKEN_GUARDIAN_MS = 1200;
   // After user clicks a /token/ link, keep header tryPaint this long (ms).
-  const DEBOT_TOKEN_CLICK_ARM_MS = 12000;
+  const DEBOT_TOKEN_CLICK_ARM_MS = 10000;
   // Independent route poll — sites often capture native history before our wrap.
-  // 0.4.29: 250ms (150ms was burning main thread with getRouteKey+settle checks).
-  const ROUTE_POLL_MS = 250;
-  // Guardian/watch may schedule full scan at most this often while header missing.
-  const DEBOT_HEADER_FULL_SCAN_GAP_MS = 2000;
+  const ROUTE_POLL_MS = 300;
+  // Guardian/watch full scan gap while header missing (backs off further).
+  const DEBOT_HEADER_FULL_SCAN_GAP_MS = 3500;
   // Cache findDebotTokenHeaderCard / positive header-badge (ms).
-  const DEBOT_HEADER_FIND_CACHE_MS = 350;
-  const DEBOT_HEADER_BADGE_OK_CACHE_MS = 280;
+  // null find: short TTL so late DOM is not missed (0.4.31).
+  const DEBOT_HEADER_FIND_CACHE_MS = 400;
+  const DEBOT_HEADER_FIND_NULL_CACHE_MS = 90;
+  const DEBOT_HEADER_BADGE_OK_CACHE_MS = 400;
   // Expensive mark cleanup only every N scans (0.3.4 never re-extracted every tick).
   const CLEANUP_EVERY_N_SCANS = 10;
   // Console spam costs main-thread time on Debot/GMGN — off by default.
@@ -290,6 +293,10 @@
   let spaListReturnUntil = 0;
   /** Prev route was token detail (for settle classification). */
   let spaSettleFromToken = false;
+  /** Consecutive Debot header miss ticks (guardian backoff). */
+  let debotHeaderMissStreak = 0;
+  /** Wall time when Debot header miss streak started. */
+  let debotHeaderMissSince = 0;
 
   hydratePersistentCache();
   hydrateDisplayPrefs();
@@ -495,13 +502,21 @@
    */
   function findDebotTokenHeaderCard() {
     const cacheKey = getRouteKey();
+    const ttl =
+      debotHeaderFindCache.el == null
+        ? DEBOT_HEADER_FIND_NULL_CACHE_MS
+        : DEBOT_HEADER_FIND_CACHE_MS;
     if (
-      debotHeaderFindCache.el &&
       debotHeaderFindCache.key === cacheKey &&
-      Date.now() - debotHeaderFindCache.at < DEBOT_HEADER_FIND_CACHE_MS &&
-      document.contains(debotHeaderFindCache.el)
+      Date.now() - debotHeaderFindCache.at < ttl
     ) {
-      return debotHeaderFindCache.el;
+      if (
+        debotHeaderFindCache.el &&
+        document.contains(debotHeaderFindCache.el)
+      ) {
+        return debotHeaderFindCache.el;
+      }
+      if (debotHeaderFindCache.el == null) return null;
     }
 
     const found = findDebotTokenHeaderCardUncached();
@@ -1282,30 +1297,64 @@
    */
   function startDebotTokenGuardian() {
     if (debotTokenGuardianId) return;
-    debotTokenGuardianId = window.setInterval(() => {
-      if (!isExtensionContextValid() || !isTabVisible()) return;
+    const scheduleNext = (ms) => {
+      debotTokenGuardianId = window.setTimeout(runGuardianTick, ms);
+    };
+    const runGuardianTick = () => {
+      debotTokenGuardianId = null;
+      let nextMs = DEBOT_TOKEN_GUARDIAN_MS;
       try {
-        // Keep route key in sync even if all hooks miss (belt + suspenders).
+        if (!isExtensionContextValid()) return;
+        if (!isTabVisible()) {
+          scheduleNext(DEBOT_TOKEN_GUARDIAN_MS);
+          return;
+        }
         const rk = getRouteKey();
         if (rk !== lastRouteKey) {
           onSpaRouteChange("guardian-route");
-          // Fall through — do not wait another tick to paint header.
         }
-        if (!isDebotTokenPage()) return;
-        const urlTok = extractTokenFromUrl();
-        if (!urlTok) return;
-        if (hasDebotTokenHeaderBadge()) return;
-        // Paint-only most ticks (0.4.29) — full scan was the SPA jank source.
-        tryPaintDebotTokenHeader(
-          Date.now() < debotTokenClickArmUntil ? "guardian-click-arm" : "guardian"
-        );
-        if (!hasDebotTokenHeaderBadge()) {
-          maybeScheduleDebotHeaderFullScan("guardian");
+        if (!isDebotTokenPage()) {
+          debotHeaderMissStreak = 0;
+          debotHeaderMissSince = 0;
+          nextMs = DEBOT_TOKEN_GUARDIAN_MS;
+        } else {
+          const urlTok = extractTokenFromUrl();
+          if (!urlTok) {
+            debotHeaderMissStreak = 0;
+            debotHeaderMissSince = 0;
+          } else if (hasDebotTokenHeaderBadge()) {
+            debotHeaderMissStreak = 0;
+            debotHeaderMissSince = 0;
+            nextMs = DEBOT_TOKEN_GUARDIAN_MS * 2;
+          } else {
+            if (!debotHeaderMissSince) debotHeaderMissSince = Date.now();
+            debotHeaderMissStreak += 1;
+            const missAge = Date.now() - debotHeaderMissSince;
+            // Ensure API in flight (js-mcp: 0 badge often = never queued / stuck batch).
+            queueToken(urlTok);
+            if (debotHeaderMissStreak === 1 || debotHeaderMissStreak % 3 === 0) {
+              recoverStuckBatch(false);
+              scheduleBatchFlush({ immediate: true, delayMs: 0 });
+            }
+            tryPaintDebotTokenHeader(
+              Date.now() < debotTokenClickArmUntil ? "guardian-click-arm" : "guardian"
+            );
+            // Full scan only in first 5s of miss — later paint-only (dwell jank fix).
+            if (missAge < 5000 && !hasDebotTokenHeaderBadge()) {
+              maybeScheduleDebotHeaderFullScan("guardian");
+            }
+            // Backoff while missing: stop thrashing K-line for 30s dwell.
+            if (missAge > 12000) nextMs = 4000;
+            else if (missAge > 5000) nextMs = 2500;
+            else nextMs = DEBOT_TOKEN_GUARDIAN_MS;
+          }
         }
       } catch (_err) {
         // ignore
       }
-    }, DEBOT_TOKEN_GUARDIAN_MS);
+      if (isExtensionContextValid()) scheduleNext(nextMs);
+    };
+    scheduleNext(DEBOT_TOKEN_GUARDIAN_MS);
   }
 
   /**
@@ -1498,6 +1547,19 @@
     // ALWAYS observe documentElement — list roots detach on SPA and go silent (js-mcp).
     ensureDocumentObserver();
 
+    // Entering Debot token: prime fee fetch immediately (js-mcp: 0 badge + no /modes).
+    if (isDebotTokenPage()) {
+      const enterTok = extractTokenFromUrl();
+      if (enterTok) {
+        debotHeaderMissStreak = 0;
+        debotHeaderMissSince = Date.now();
+        recoverStuckBatch(false);
+        queueToken(enterTok);
+        scheduleBatchFlush({ immediate: true, delayMs: 0 });
+        tryPaintDebotTokenHeader("settle-enter");
+      }
+    }
+
     // Soft same-token: header already painted → skip progressive storm.
     if (softSameToken && hasDebotTokenHeaderBadge()) {
       spaQuietUntil = 0;
@@ -1613,8 +1675,10 @@
         return;
       }
       tryPaintDebotTokenHeader("watch-tick");
-      // Rare full scan only — never every tick (0.4.29 jank fix).
-      if (!hasDebotTokenHeaderBadge()) {
+      // Full scan only early in the watch window.
+      const watchAge =
+        DEBOT_TOKEN_HEADER_WATCH_MS - (debotTokenHeaderWatchUntil - Date.now());
+      if (watchAge < 4000 && !hasDebotTokenHeaderBadge()) {
         maybeScheduleDebotHeaderFullScan("watch-tick");
       }
     }, DEBOT_TOKEN_HEADER_TICK_MS);
@@ -1624,6 +1688,39 @@
   function hasDebotTokenHeaderBadge() {
     if (Date.now() < debotHeaderBadgeOkUntil) return true;
     try {
+      const urlTok = extractTokenFromUrl();
+      // Cheap path first — avoid findDebotTokenHeaderCard walk every guardian tick.
+      if (urlTok) {
+        const icons = document.querySelectorAll(
+          `[${ICON_DATA}="1"][data-fee-token="${urlTok}"]`
+        );
+        for (let i = 0; i < icons.length; i += 1) {
+          const icon = icons[i];
+          const listCard = icon.closest?.(".MuiCard-root, .MuiPaper-root.MuiCard-root");
+          if (listCard) {
+            const lr = listCard.getBoundingClientRect();
+            if (lr.height >= 120) continue;
+          }
+          const r = icon.getBoundingClientRect();
+          if (r.width < 2 || r.height < 2 || r.top < 0 || r.top >= 180) continue;
+          const mount = icon.closest?.("[data-flap-mount]");
+          if (mount && /token-header|token-stats/.test(mount.dataset.flapMount || "")) {
+            debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
+            return true;
+          }
+          const hostText = (icon.parentElement?.textContent || "").slice(0, 80);
+          const shortHit = hostText.match(SHORT_TOKEN_RE);
+          if (shortHit && tokenMatchesShort(urlTok, shortHit[0])) {
+            debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
+            return true;
+          }
+          // Top strip badge without mount mark still counts.
+          if (r.top < 160) {
+            debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
+            return true;
+          }
+        }
+      }
       const header = findDebotTokenHeaderCard();
       if (header) {
         const icon =
@@ -1631,51 +1728,18 @@
           (header.parentElement && header.parentElement.querySelector(`[${ICON_DATA}="1"]`));
         if (icon) {
           const r = icon.getBoundingClientRect();
-          // Must be on/near the header strip, not a deep list residual contained by a huge shell.
           if (r.width >= 2 && r.height >= 2 && r.top >= 0 && r.top < 200) {
-            // Reject badges inside tall list cards still under a page shell.
             const listCard = icon.closest?.(".MuiCard-root, .MuiPaper-root.MuiCard-root");
             if (!listCard) {
               debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
               return true;
             }
             const lr = listCard.getBoundingClientRect();
-            // Real list cards are tall; header mounts are short.
             if (lr.height < 120) {
               debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
               return true;
             }
           }
-        }
-      }
-      const urlTok = extractTokenFromUrl();
-      if (!urlTok) return false;
-      // Badge next to pure short CA in top bar (js-mcp: parent stack ~y=120).
-      const icons = document.querySelectorAll(
-        `[${ICON_DATA}="1"][data-fee-token="${urlTok}"]`
-      );
-      for (let i = 0; i < icons.length; i += 1) {
-        const icon = icons[i];
-        const listCard = icon.closest?.(".MuiCard-root, .MuiPaper-root.MuiCard-root");
-        if (listCard) {
-          const lr = listCard.getBoundingClientRect();
-          if (lr.height >= 120) continue;
-        }
-        const r = icon.getBoundingClientRect();
-        if (r.width < 2 || r.height < 2 || r.top < 0 || r.top >= 160) continue;
-        // Prefer icons whose nearby text contains matching short CA.
-        const host = icon.parentElement;
-        const hostText = (host?.textContent || "").slice(0, 80);
-        const shortHit = hostText.match(SHORT_TOKEN_RE);
-        if (shortHit && tokenMatchesShort(urlTok, shortHit[0])) {
-          debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
-          return true;
-        }
-        // Or icon is in top strip with flapMount token-header/stats
-        const mount = icon.closest?.("[data-flap-mount]");
-        if (mount && /token-header|token-stats/.test(mount.dataset.flapMount || "")) {
-          debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
-          return true;
         }
       }
     } catch (_err) {
@@ -1694,12 +1758,15 @@
     if (!urlTok) return false;
     if (hasDebotTokenHeaderBadge()) return true;
 
+    // Always ensure fee data is requested (js-mcp: SPA token often never hit /modes).
+    queueToken(urlTok);
+
     let header = findDebotTokenHeaderCard();
     if (!header) {
       // Last resort: pure short CA leaf / its parent row near top.
       try {
         const leaves = document.querySelectorAll("span, a, div");
-        for (let i = 0; i < Math.min(leaves.length, 400); i += 1) {
+        for (let i = 0; i < Math.min(leaves.length, 280); i += 1) {
           const el = leaves[i];
           const t = (el.textContent || "").trim();
           if (!TARGET_SHORT_TOKEN_RE.test(t) || t.length > 22) continue;
@@ -1715,18 +1782,27 @@
         // ignore
       }
     }
-    if (!(header instanceof HTMLElement)) return false;
+    if (!(header instanceof HTMLElement)) {
+      // No DOM yet — still flush API so entry is ready when header appears.
+      recoverStuckBatch(false);
+      scheduleBatchFlush({ immediate: true, delayMs: 0 });
+      return false;
+    }
 
     // Prefer the compact short-CA row as card (stable mount for token-header).
     try {
       const short =
         findDebotShortAddressNode(header) ||
-        (TARGET_SHORT_TOKEN_RE.test((header.textContent || "").trim()) ? header : null);
+        (TARGET_SHORT_TOKEN_RE.test((header.textContent || "").trim()) &&
+        (header.textContent || "").trim().length <= 22
+          ? header
+          : null);
       if (short) {
         const row = findDebotShortAddressRow(header) || short.parentElement || short;
         if (row instanceof HTMLElement) {
           const rr = row.getBoundingClientRect();
-          if (rr.width >= 80 && rr.height >= 12 && rr.height <= 80) header = row;
+          // js-mcp: short leaf ~68px wide; parent row is the mount.
+          if (rr.width >= 60 && rr.height >= 12 && rr.height <= 100) header = row;
         }
       }
     } catch (_err) {
@@ -1743,21 +1819,27 @@
 
     const entry = resolveEntry(urlTok);
     if (entry) {
-      let ok = renderMode(header, urlTok, entry, { forceRemount: true });
-      // Mount target may still be missing mid-SPA — force-append next to short CA leaf.
+      // Prefer force-append beside short CA (Tax/absolute path flaky on Debot header SPA).
+      let ok = forceAppendDebotHeaderBadge(header, urlTok, entry);
       if (!ok || !hasDebotTokenHeaderBadge()) {
+        ok = renderMode(header, urlTok, entry, { forceRemount: true }) || ok;
+      }
+      // Second force-append if renderMode left invisible badge.
+      if (!hasDebotTokenHeaderBadge()) {
         ok = forceAppendDebotHeaderBadge(header, urlTok, entry) || ok;
       }
-      if (ok) {
+      if (ok || hasDebotTokenHeaderBadge()) {
+        debotHeaderMissStreak = 0;
+        debotHeaderMissSince = 0;
         debugInfo("debot:header-paint", {
           reason,
           token: urlTok.slice(0, 12),
           settled: hasDebotTokenHeaderBadge()
         });
       }
-      return !!ok || hasDebotTokenHeaderBadge();
+      return hasDebotTokenHeaderBadge() || !!ok;
     }
-    queueToken(urlTok);
+    recoverStuckBatch(false);
     scheduleBatchFlush({ immediate: true, delayMs: 0 });
     return false;
   }
@@ -2076,8 +2158,15 @@
     });
 
     let truncated = false;
+    const sliceBudgetMs = listReturnSoft ? SPA_LIST_RETURN_SLICE_MS : 0;
+    const sliceStarted = sliceBudgetMs > 0 ? performance.now() : 0;
     for (const card of needWork) {
       if (touched >= budget) {
+        truncated = true;
+        break;
+      }
+      // Hard time slice — prevent single longtask ~600ms on GMGN return (js-mcp 0.4.31).
+      if (sliceBudgetMs > 0 && performance.now() - sliceStarted > sliceBudgetMs) {
         truncated = true;
         break;
       }
