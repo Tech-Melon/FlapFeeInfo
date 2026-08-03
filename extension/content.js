@@ -4,6 +4,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}\.{2,}(8888|7777)/i;
+  // 0.4.29: cut SPA force-scan storm (meme→K-line jank) — coalesce + fewer progressive.
   // 0.4.28: Debot SPA — normalize route key (id_0x), click-arm, no thrash reset, paint in quiet.
   // 0.4.27: Debot SPA cross-browser — page-world history hook + always-on header guardian.
   // 0.4.26: Debot SPA meme→token — header watch + div short-CA + Release zip.
@@ -25,6 +26,8 @@
   // Debot/GMGN list boards still get 4 light passes; token pages 3 + early-stop when badge exists.
   // 0.4.10: pool quote prefer API quote_symbol.
   const SCAN_INTERVAL_MS = 900;
+  // 0.4.29: even force full-scans must coalesce (guardian/watch/progressive stacked = jank).
+  const FORCE_FULL_SCAN_MIN_GAP_MS = 480;
   const REQUEST_TIMEOUT_MS = 28000;
   // Background tabs freeze timers; if a batch never finishes, unblock after this wall time.
   const BATCH_STUCK_MS = 30000;
@@ -64,28 +67,36 @@
   const LIGHT_MAX_CANDIDATES = 96;
   const LIGHT_MAX_OFFSCREEN = 24;
   // SPA: swallow mutation flood while host rebuilds (chart/list); progressive scans fill holes.
-  const SPA_NAV_QUIET_MS = 650;
+  // 0.4.29: slightly longer quiet so chart paints first (was competing with force-scan storm).
+  const SPA_NAV_QUIET_MS = 800;
   // Cache header "总税率" node — avoid document-wide span/div walks every root refresh.
   const TAX_LABEL_CACHE_MS = 20000;
   // Coalesce multi pushState/replaceState during one navigation.
   const SPA_NAV_COALESCE_MS = 40;
-  // Progressive hole-fill offsets from quiet end (ms). Shorter than 0.4.10's 6×/2800ms.
+  // Progressive hole-fill offsets from quiet end (ms).
   // List/meme boards (Debot 3-col + GMGN home): 4 passes, last ~2s.
-  const SPA_NAV_SCAN_OFFSETS_LIST_MS = [0, 400, 1100, 2000];
-  // Token / K-line page: fewer passes, early-stop when header badge exists.
-  const SPA_NAV_SCAN_OFFSETS_TOKEN_MS = [0, 500, 1300];
-  // Debot SPA token detail mounts slowly — extra late passes (meme→token).
-  const SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS = [0, 200, 500, 900, 1400, 2200, 3500, 5500, 8000, 12000];
+  const SPA_NAV_SCAN_OFFSETS_LIST_MS = [0, 450, 1200, 2200];
+  // Token / K-line page (GMGN): few passes, early-stop when header badge exists.
+  const SPA_NAV_SCAN_OFFSETS_TOKEN_MS = [0, 600, 1600];
+  // Debot SPA token: header paint is cheap; full-scan storm was the jank (js-mcp 0.4.29).
+  // Keep 4 passes max; tryPaint covers holes without 10× force scans.
+  const SPA_NAV_SCAN_OFFSETS_DEBOT_TOKEN_MS = [0, 700, 2000, 4500];
   // Dedicated header paint watch after meme→token SPA (ms). DOM often late.
-  const DEBOT_TOKEN_HEADER_WATCH_MS = 20000;
-  const DEBOT_TOKEN_HEADER_TICK_MS = 250;
-  // Always-on guardian while on Debot token page without header badge (cross-browser SPA).
-  const DEBOT_TOKEN_GUARDIAN_MS = 500;
-  // After user clicks a /token/ link, keep force-painting header this long (ms).
-  const DEBOT_TOKEN_CLICK_ARM_MS = 25000;
+  // 0.4.29: longer tick, shorter window — paint-only, rare full scan.
+  const DEBOT_TOKEN_HEADER_WATCH_MS = 12000;
+  const DEBOT_TOKEN_HEADER_TICK_MS = 450;
+  // Always-on guardian: paint-only most ticks; full scan throttled separately.
+  const DEBOT_TOKEN_GUARDIAN_MS = 900;
+  // After user clicks a /token/ link, keep header tryPaint this long (ms).
+  const DEBOT_TOKEN_CLICK_ARM_MS = 12000;
   // Independent route poll — sites often capture native history before our wrap.
-  // 0.4.28: 150ms — Debot may change URL without pushState (js-mcp eventCount=0).
-  const ROUTE_POLL_MS = 150;
+  // 0.4.29: 250ms (150ms was burning main thread with getRouteKey+settle checks).
+  const ROUTE_POLL_MS = 250;
+  // Guardian/watch may schedule full scan at most this often while header missing.
+  const DEBOT_HEADER_FULL_SCAN_GAP_MS = 2000;
+  // Cache findDebotTokenHeaderCard / positive header-badge (ms).
+  const DEBOT_HEADER_FIND_CACHE_MS = 350;
+  const DEBOT_HEADER_BADGE_OK_CACHE_MS = 280;
   // Expensive mark cleanup only every N scans (0.3.4 never re-extracted every tick).
   const CLEANUP_EVERY_N_SCANS = 10;
   // Console spam costs main-thread time on Debot/GMGN — off by default.
@@ -250,6 +261,16 @@
   let debotTokenClickArmUntil = 0;
   /** Throttle immediate mutation header paint. */
   let debotHeaderMutPaintAt = 0;
+  /** Wall time of last force full-scan (not light). */
+  let lastForceFullScanAt = 0;
+  /** Coalesce timer for deferred force full-scan. */
+  let forceFullScanCoalesceTimer = null;
+  /** Last full-scan from guardian/watch while header missing. */
+  let lastDebotHeaderFullScanAt = 0;
+  /** findDebotTokenHeaderCard short cache. */
+  let debotHeaderFindCache = { at: 0, key: "", el: null };
+  /** Positive hasDebotTokenHeaderBadge short cache. */
+  let debotHeaderBadgeOkUntil = 0;
 
   hydratePersistentCache();
   hydrateDisplayPrefs();
@@ -451,8 +472,25 @@
   /**
    * Stable top header strip on Debot/Gungnir token page (name + short CA + badge row).
    * js-mcp 0.4.26: pure short CA is often a leaf DIV (not span/a), row height ~14–20px.
+   * 0.4.29: short TTL cache — called from guardian/watch/mutation many times/sec.
    */
   function findDebotTokenHeaderCard() {
+    const cacheKey = getRouteKey();
+    if (
+      debotHeaderFindCache.el &&
+      debotHeaderFindCache.key === cacheKey &&
+      Date.now() - debotHeaderFindCache.at < DEBOT_HEADER_FIND_CACHE_MS &&
+      document.contains(debotHeaderFindCache.el)
+    ) {
+      return debotHeaderFindCache.el;
+    }
+
+    const found = findDebotTokenHeaderCardUncached();
+    debotHeaderFindCache = { at: Date.now(), key: cacheKey, el: found };
+    return found;
+  }
+
+  function findDebotTokenHeaderCardUncached() {
     const urlTok = extractTokenFromUrl();
     // 1) Pure short CA leaf near top of viewport (textContent length ≤22)
     try {
@@ -460,7 +498,8 @@
       if (!body) return null;
       const shorts = body.querySelectorAll("span, a, div, p, button");
       const topShorts = [];
-      const max = Math.min(shorts.length, 400);
+      // 0.4.29: cap walk — full 400× getBoundingClientRect on every call was SPA jank.
+      const max = Math.min(shorts.length, 220);
       for (let i = 0; i < max; i += 1) {
         const el = shorts[i];
         // Prefer pure leaf text — nested parents have long textContent and must be skipped.
@@ -944,10 +983,31 @@
     const force = options.force === true;
     const immediate = options.immediate === true;
     const light = options.light === true;
+    const bypassForceGap = options.bypassForceGap === true;
     // Avoid burning CPU/network while the tab is fully hidden (timers are frozen anyway).
     if (!isTabVisible() && !force) return;
     // chain=Robinhood / non-allowed pages: never schedule work.
     if (!isScanPageAllowed()) return;
+
+    // 0.4.29: coalesce stacked force full-scans (SPA progressive + guardian + click-arm).
+    if (force && !light && !bypassForceGap) {
+      const gapLeft = FORCE_FULL_SCAN_MIN_GAP_MS - (Date.now() - lastForceFullScanAt);
+      if (gapLeft > 0) {
+        if (!forceFullScanCoalesceTimer) {
+          forceFullScanCoalesceTimer = window.setTimeout(() => {
+            forceFullScanCoalesceTimer = null;
+            scheduleScan(0, {
+              force: true,
+              immediate: false,
+              light: false,
+              bypassForceGap: true
+            });
+          }, gapLeft);
+        }
+        return;
+      }
+    }
+
     // Non-force coalesces; force always schedules (but clear stuck flag first).
     if (scanScheduled && !force) return;
     if (force) {
@@ -972,7 +1032,10 @@
         return;
       }
       lastScanAt = now;
-      runWhenIdle(scanVisibleCards, { immediate: immediate || force });
+      if (force && !pendingLightScan) lastForceFullScanAt = Date.now();
+      // 0.4.29: force no longer implies immediate — chart needs idle slots.
+      // Only explicit immediate (first SPA pass / user-visible overlay) skips idle.
+      runWhenIdle(scanVisibleCards, { immediate: immediate === true });
     }, delay);
     scanTimerIds.push(timerId);
     // Bound list
@@ -980,6 +1043,15 @@
       const old = scanTimerIds.shift();
       if (old) window.clearTimeout(old);
     }
+  }
+
+  /** Full page scan at most every DEBOT_HEADER_FULL_SCAN_GAP_MS while header missing. */
+  function maybeScheduleDebotHeaderFullScan(reason) {
+    if (Date.now() - lastDebotHeaderFullScanAt < DEBOT_HEADER_FULL_SCAN_GAP_MS) return;
+    lastDebotHeaderFullScanAt = Date.now();
+    pendingLightScan = false;
+    scheduleScan(0, { force: true, immediate: false, light: false });
+    debugInfo("debot:header-full-scan", { reason });
   }
 
   function runWhenIdle(fn, options = {}) {
@@ -1165,12 +1237,13 @@
         const urlTok = extractTokenFromUrl();
         if (!urlTok) return;
         if (hasDebotTokenHeaderBadge()) return;
-        // Header paint is allowed even during SPA quiet (quiet only swallows full mutation scans).
-        pendingLightScan = false;
+        // Paint-only most ticks (0.4.29) — full scan was the SPA jank source.
         tryPaintDebotTokenHeader(
           Date.now() < debotTokenClickArmUntil ? "guardian-click-arm" : "guardian"
         );
-        scheduleScan(0, { force: true, immediate: true, light: false });
+        if (!hasDebotTokenHeaderBadge()) {
+          maybeScheduleDebotHeaderFullScan("guardian");
+        }
       } catch (_err) {
         // ignore
       }
@@ -1199,8 +1272,8 @@
           const m = href.match(/0x[a-fA-F0-9]{40}/i);
           if (m && !TARGET_TOKEN_RE.test(m[0].toLowerCase())) return;
           debotTokenClickArmUntil = Date.now() + DEBOT_TOKEN_CLICK_ARM_MS;
-          // Nudge route detect + paint after router applies location (next frames).
-          const kick = (ms, reason) => {
+          // Few paint kicks only (0.4.29: was 6× force full-scan = jank).
+          const kick = (ms, reason, fullScan) => {
             window.setTimeout(() => {
               if (!isExtensionContextValid() || !isTabVisible()) return;
               try {
@@ -1209,18 +1282,16 @@
                 // ignore
               }
               if (isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge()) {
-                pendingLightScan = false;
                 tryPaintDebotTokenHeader(reason);
-                scheduleScan(0, { force: true, immediate: true, light: false });
+                if (fullScan && !hasDebotTokenHeaderBadge()) {
+                  maybeScheduleDebotHeaderFullScan(reason);
+                }
               }
             }, ms);
           };
-          kick(0, "click-arm-0");
-          kick(100, "click-arm-100");
-          kick(350, "click-arm-350");
-          kick(800, "click-arm-800");
-          kick(1600, "click-arm-1600");
-          kick(3000, "click-arm-3000");
+          kick(50, "click-arm-50", false);
+          kick(400, "click-arm-400", true);
+          kick(1200, "click-arm-1200", true);
         } catch (_err) {
           // ignore
         }
@@ -1287,7 +1358,8 @@
         spaDomDirty = false;
         pendingLightScan = false;
         if (isDebotTokenPage()) tryPaintDebotTokenHeader("quiet-flush");
-        scheduleScan(0, { force: true, immediate: true, light: false });
+        // Idle full scan once — not immediate (chart still settling).
+        scheduleScan(0, { force: true, immediate: false, light: false, bypassForceGap: true });
       }
     }, SPA_NAV_QUIET_MS + 80);
   }
@@ -1382,24 +1454,39 @@
           // ignore
         }
         ensureDocumentObserver();
-        lastScanAt = 0;
-        // Debot token SPA: never light-scan during progressive (need full header inject).
-        if (isDebotTokenPage()) pendingLightScan = false;
-        // Only first pass immediate — later passes yield to host chart/list paint (js-mcp).
-        scheduleScan(0, { force: true, immediate: index === 0 || isDebotTokenPage() });
+        // 0.4.29: do NOT zero lastScanAt every pass — that defeated scan rate limits.
 
-        // Debot: also try dedicated header paint each progressive tick.
+        // Debot: cheap header paint first; may cancel remaining progressive without full scan.
         if (isDebotTokenPage()) {
           tryPaintDebotTokenHeader("spa-progressive");
+          if (hasDebotTokenHeaderBadge() && index > 0) {
+            clearSpaNavScanTimers();
+            return;
+          }
+          pendingLightScan = false;
+        }
+
+        // First pass: immediate force. Later: idle force (let chart run).
+        // Debot later passes: tryPaint-only if header still missing after gap.
+        if (isDebotTokenPage() && index > 0) {
+          if (!hasDebotTokenHeaderBadge()) {
+            maybeScheduleDebotHeaderFullScan("spa-progressive");
+          }
+        } else {
+          scheduleScan(0, {
+            force: true,
+            immediate: index === 0,
+            light: false,
+            bypassForceGap: index === 0
+          });
         }
 
         // After first paint on token page, cancel pending progressive only if header settled.
-        // Debot SPA: DOM late — do not cancel after 80ms (was killing remaining passes).
-        if (index === 0 && isTokenDetailRoute() && !isDebotTokenPage()) {
+        if (index === 0 && isTokenDetailRoute()) {
           const checkId = window.setTimeout(() => {
             spaNavScanTimers = spaNavScanTimers.filter((id) => id !== checkId);
             if (shouldCancelSpaProgressive()) clearSpaNavScanTimers();
-          }, 80);
+          }, isDebotTokenPage() ? 200 : 80);
           spaNavScanTimers.push(checkId);
         }
       }, base + offset);
@@ -1407,7 +1494,7 @@
     });
 
     // Debot/Gungnir meme→token: arm continuous header watch (DOM often late after SPA).
-    if (isDebotTokenPage()) {
+    if (isDebotTokenPage() && extractTokenFromUrl()) {
       armDebotTokenHeaderWatch();
     }
   }
@@ -1444,14 +1531,16 @@
         return;
       }
       tryPaintDebotTokenHeader("watch-tick");
-      // Also nudge a full (non-light) scan so queue/API path runs.
-      pendingLightScan = false;
-      scheduleScan(0, { force: true, immediate: true, light: false });
+      // Rare full scan only — never every tick (0.4.29 jank fix).
+      if (!hasDebotTokenHeaderBadge()) {
+        maybeScheduleDebotHeaderFullScan("watch-tick");
+      }
     }, DEBOT_TOKEN_HEADER_TICK_MS);
   }
 
   /** True only if badge sits on Debot token header strip (not meme list residual). */
   function hasDebotTokenHeaderBadge() {
+    if (Date.now() < debotHeaderBadgeOkUntil) return true;
     try {
       const header = findDebotTokenHeaderCard();
       if (header) {
@@ -1464,10 +1553,16 @@
           if (r.width >= 2 && r.height >= 2 && r.top >= 0 && r.top < 200) {
             // Reject badges inside tall list cards still under a page shell.
             const listCard = icon.closest?.(".MuiCard-root, .MuiPaper-root.MuiCard-root");
-            if (!listCard) return true;
+            if (!listCard) {
+              debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
+              return true;
+            }
             const lr = listCard.getBoundingClientRect();
             // Real list cards are tall; header mounts are short.
-            if (lr.height < 120) return true;
+            if (lr.height < 120) {
+              debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
+              return true;
+            }
           }
         }
       }
@@ -1490,10 +1585,16 @@
         const host = icon.parentElement;
         const hostText = (host?.textContent || "").slice(0, 80);
         const shortHit = hostText.match(SHORT_TOKEN_RE);
-        if (shortHit && tokenMatchesShort(urlTok, shortHit[0])) return true;
+        if (shortHit && tokenMatchesShort(urlTok, shortHit[0])) {
+          debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
+          return true;
+        }
         // Or icon is in top strip with flapMount token-header/stats
         const mount = icon.closest?.("[data-flap-mount]");
-        if (mount && /token-header|token-stats/.test(mount.dataset.flapMount || "")) return true;
+        if (mount && /token-header|token-stats/.test(mount.dataset.flapMount || "")) {
+          debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
+          return true;
+        }
       }
     } catch (_err) {
       return false;
@@ -1666,6 +1767,8 @@
 
   /** Remove all our badge marks/icons from the document (SPA leave/enter). */
   function resetOurDomMarks() {
+    debotHeaderBadgeOkUntil = 0;
+    debotHeaderFindCache = { at: 0, key: "", el: null };
     try {
       document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => {
         try {
@@ -4842,11 +4945,10 @@
     if (!isExtensionContextValid()) return;
     if (!isScanPageAllowed()) return;
 
-    // 0.4.28: Debot token header paint is NOT blocked by spa quiet.
-    // Host re-renders wipe our badge; must re-attach as soon as short CA appears.
+    // 0.4.29: Debot header re-attach via tryPaint only (throttled); no full-scan on every mut.
     if (isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge()) {
       const now = Date.now();
-      if (now - debotHeaderMutPaintAt >= 180) {
+      if (now - debotHeaderMutPaintAt >= 400) {
         debotHeaderMutPaintAt = now;
         try {
           tryPaintDebotTokenHeader("mutation");
@@ -4854,17 +4956,12 @@
           // ignore
         }
       }
-      // Still mark dirty / continue into scan scheduling below when not quiet.
     }
 
-    // During SPA rebuild: mark dirty only; progressive scans + quiet-end handle paint.
-    // Debot unsettled header: do not early-return forever — allow throttled full scans.
+    // During SPA rebuild: mark dirty only; progressive + quiet-end handle full paint.
     if (isSpaQuiet()) {
       spaDomDirty = true;
-      if (!(isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge())) {
-        return;
-      }
-      // Fall through to schedule a forced non-light scan (debounced).
+      return;
     }
     // 0.4.12: non-8888/7777 token page — chart noise must not schedule scans.
     if (isNonTargetTokenPage()) return;
@@ -4888,18 +4985,18 @@
     }
 
     // Longer debounce while token badge still loading (chart keeps mutating).
-    // Debot click-arm / unsettled: faster.
+    // Debot unsettled: tryPaint already ran; full scan rare via maybeScheduleDebotHeaderFullScan.
     const debotUnsettled =
       isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge();
     const debounceMs = debotUnsettled
-      ? 220
+      ? 700
       : isTokenDetailRoute()
         ? MUTATION_SCAN_DEBOUNCE_TOKEN_LOADING_MS
         : MUTATION_SCAN_DEBOUNCE_MS;
     mutationDebounceTimer = window.setTimeout(() => {
       mutationDebounceTimer = null;
       if (!isTabVisible()) return;
-      if (isSpaQuiet() && !(isDebotTokenPage() && !hasDebotTokenHeaderBadge())) {
+      if (isSpaQuiet()) {
         spaDomDirty = true;
         return;
       }
@@ -4909,9 +5006,13 @@
         scheduleScan(0, { force: true, light: true });
         return;
       }
+      if (isDebotTokenPage()) {
+        tryPaintDebotTokenHeader("mutation-scan");
+        if (!hasDebotTokenHeaderBadge()) maybeScheduleDebotHeaderFullScan("mutation-scan");
+        return;
+      }
       pendingLightScan = false;
-      if (isDebotTokenPage()) tryPaintDebotTokenHeader("mutation-scan");
-      scheduleScan(0, { force: true, immediate: true, light: false });
+      scheduleScan(0, { force: true, immediate: false, light: false });
     }, debounceMs);
   });
 

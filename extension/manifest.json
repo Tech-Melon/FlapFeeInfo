@@ -1,7 +1,7 @@
 ﻿{
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.4.28",
+  "version": "0.4.29",
   "description": "Show Flap tax allocation + quote pool (e.g. 🪙BNB | 💎90%→BNB) on GMGN, Debot and Gungnir cards. EN/ZH UI.",
   "icons": {
     "16": "icons/flap-16.png",

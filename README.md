@@ -142,14 +142,15 @@ FlapFeeInfo\extension
 - 等列表加载完或刷新页面  
 - 确认 token 尾号是 `8888` 或 `7777`  
 - 扩展已重新加载，且页面已硬刷新  
-- Debot / Gungnir **从 meme 点进 token 详情**：请使用 **0.4.28+**（SPA 不刷新时顶栏徽章）  
+- Debot / Gungnir **从 meme 点进 token 详情**：请使用 **0.4.29+**（SPA 顶栏徽章 + 进 K 线不卡顿）  
 
 ### 2b. 已更新但仍像旧版
 
-- 产品站 / Releases 请确认 zip 文件名版本号 ≥ 你要的版本（例如 `FlapFeeInfo-extension-v0.4.28.zip`）  
+- 产品站 / Releases 请确认 zip 文件名版本号 ≥ 你要的版本（例如 `FlapFeeInfo-extension-v0.4.29.zip`）  
 - `chrome://extensions` 卡片上的版本号必须一致；改文件后要点 **重新加载**  
 - Debot 页必须 **硬刷新**（Ctrl+F5），否则仍跑旧 content script  
-- Debot 可能改写路径 `/token/bsc/0x…` → `/token/bsc/249218_0x…`；0.4.28 已归一化，避免反复清空徽章  
+- Debot 可能改写路径 `/token/bsc/0x…` → `/token/bsc/249218_0x…`；0.4.28+ 已归一化  
+- **进 K 线卡顿**：0.4.29 收敛 SPA force-scan 风暴（guardian/watch/progressive 不再叠加强制全扫）  
 
 ### 3. 有 fee 但没有 🪙BNB / 🪙USD1
 
