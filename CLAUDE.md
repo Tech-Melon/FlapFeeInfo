@@ -389,6 +389,17 @@ python tools/ctl.py watchdog-run
   - `0.5.6`–`0.5.7`：内联战壕开时勿误选左侧 short CA；全宽恢复顶栏地址  
   - `0.5.8`：顶栏成功仅认真锁，左侧同 CA 列表徽章不冒充顶栏  
   - `0.5.9`：优先 `#token-base-address`/`data-addr`；地址行 DOM 重绘后 observer 补挂  
+  - `0.5.10`：GMGN/Debot/Gungnir K 线地址行徽章加 header lock 与锚点校验；React 整行替换后定向即时补挂
+  - `0.5.11`：Debot/Gungnir 三列虚拟列表滚动冷却；过滤插件自身 Mutation 反馈环；续扫与去重改为低成本局部路径
+  - `0.5.12`：Debot/GMGN 进入 K 线时冻结离场战壕 DOM；真实地址行挂载后再绘制 header 徽章；token 路由取消 full scan
+  - `0.5.13`：K 线返回战壕增加真实列表 DOM 门禁；健康 guardian/后台恢复取消周期性列表扫描与全量 remount
+  - `0.5.14`：修复 Debot/GMGN 虚拟列表将卡片复用为非 7777/8888 地址后旧徽章残留；返回快绘复用前强校验当前卡片地址
+  - `0.5.15`：Debot/GMGN token→token 改为原站路由提交后再绘制；请求失败静默退避且无数据不扫 DOM；新地址就绪后清理旧 header 徽章
+  - `0.5.16`：GMGN 启用 main-world 路由提交通知；战壕门禁不再依赖 7777/8888 分布且从真实就绪时启动补绘；目标 token 切到非目标 token 时同步清理旧 header
+  - `0.5.17`：GMGN 回战壕门禁识别无 token `<a>` 的虚拟卡片；三列短 CA/Tax row 就绪即按列 cache-first 快绘
+  - `0.5.18`：GMGN K 线内嵌战壕改为 `TokenItem` dirty-card 定向更新（最多 16 张可见卡），并过滤常驻隐藏 dialog / 顶部搜索框造成的弹层误判；搜索弹层取消 fastPaint + full scan 重复遍历，徽章固定挂在短 CA 旁
+  - `0.5.19`：GMGN 搜索徽章改挂 `V/Fees` 列后；Debot/Gungnir 搜索徽章改挂代币名称行末尾；严格定位失败时不回退到其他挂载点
+  - `0.5.20`：GMGN 常规战壕候选按三列与视觉卡片 round-robin 去重；用跨轮次行游标覆盖「已开盘」下方卡片，同时维持每轮 12 卡预算
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`

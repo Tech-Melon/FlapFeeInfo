@@ -5,6 +5,17 @@
   // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
+  const GMGN_TRENCH_ROOT_SELECTOR =
+    "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100";
+  // 0.5.18: GMGN embedded TokenItem dirty queue + single-pass search overlay/address mount.
+  // 0.5.17: GMGN list readiness + fast paint also recognize virtual rows without token <a>.
+  // 0.5.16: GMGN post-commit SPA signal + structural list gate; clear badge on non-target routes.
+  // 0.5.15: fail-open network handling; route-committed header paint; no pre-click work.
+  // 0.5.14: reject stale badges when virtual rows recycle to non-7777/8888 tokens.
+  // 0.5.13: gate K-line -> trench paint on real list DOM; trim steady/resume maintenance.
+  // 0.5.12: freeze outgoing trench DOM until the real token header mounts.
+  // 0.5.11: Debot virtual-list scroll cooldown + mutation feedback-loop suppression.
+  // 0.5.10: GMGN/Debot/Gungnir header lock + current-address validation + targeted React repair.
   // 0.5.9: GMGN 顶栏优先 #token-base-address / [data-addr]；DOM 被 React 重绘后 observer 补挂.
   // 0.5.8: 顶栏成功判定仅 fee-header 真锁；勿把左侧同 CA 列表徽章当顶栏已挂好；cache ready 强制补画.
   // 0.5.7: short CA 定位 — 仅在内联战壕打开时排除左侧列；全宽 K 线恢复左顶栏地址.
@@ -67,13 +78,11 @@
   // On tab resume, force-kill in-flight fetch if older than this (avoid Abort cascade on short blurs).
   const RESUME_FORCE_MIN_AGE_MS = 8000;
   // After long background ONLY: brief force remount window (short blur must NOT remount).
-  const RESUME_FORCE_REMOUNT_MS = 3500;
   // Hidden longer than this → soft/hard pipeline revive + force remount.
   const RESUME_LONG_HIDDEN_MS = 10000;
   // While tab is visible, periodic self-heal ONLY when unhealthy (never full remount).
   const PIPELINE_WATCHDOG_MS = 45000;
   // If no successful scan for this long while visible, force one (watchdog).
-  const SCAN_STALE_MS = 120000;
   // Cap *real work* per scan (stable badges do not count). Debot 3 cols ≈ 40+ cards.
   const MAX_CANDIDATES_PER_SCAN = 120;
   const MAX_CARDS_PER_SCAN = 56;
@@ -81,6 +90,8 @@
   const BATCH_FLUSH_MS = 350;
   const RETRY_BASE_MS = 900;
   const RETRY_MAX_MS = 12000;
+  const MISSING_RETRY_BASE_MS = 15000;
+  const MISSING_RETRY_MAX_MS = 5 * 60 * 1000;
   const PERSISTENT_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
   // Debot mount result cache (avoids getComputedStyle thrash every scan).
   const DEBOT_MOUNT_CACHE_MS = 4000;
@@ -89,6 +100,12 @@
   // GMGN: while user scrolls columns, suppress mutation-driven full scans (resume after settle).
   const GMGN_SCROLL_COOLDOWN_MS = 280;
   const GMGN_SCROLL_RESUME_SCAN_MS = 340;
+  // Debot/Gungnir virtual lists recycle many rows per wheel tick. Let the host finish
+  // scrolling, then fill the newly visible rows in one idle slice.
+  const DEBOT_SCROLL_COOLDOWN_MS = 420;
+  const DEBOT_SCROLL_RESUME_SCAN_MS = 520;
+  const DEBOT_SCROLL_CARDS_BUDGET = 8;
+  const DEBOT_STEADY_CARDS_BUDGET = 18;
   // GMGN list mutation debounce (longer than Debot 400 — host virtual list thrash).
   const MUTATION_SCAN_DEBOUNCE_GMGN_MS = 700;
   // GMGN cold first scan delay (host hydration first; was 500).
@@ -176,6 +193,10 @@
   const GMGN_STEADY_CARDS_BUDGET = 12;
   // GMGN steady-state candidate cap (in-view only; no offscreen take).
   const GMGN_STEADY_CANDIDATES = 18;
+  // GMGN token pages keep a live embedded trench. Only process TokenItem rows that
+  // actually changed; chart/ticker mutations must never reopen a full-page scan.
+  const GMGN_EMBEDDED_DIRTY_DEBOUNCE_MS = 180;
+  const GMGN_EMBEDDED_DIRTY_CARD_LIMIT = 16;
   // Dedicated header paint watch after meme→token SPA (ms). Logged-in DOM is slower.
   const DEBOT_TOKEN_HEADER_WATCH_MS = 20000;
   const DEBOT_TOKEN_HEADER_TICK_MS = 400;
@@ -194,6 +215,17 @@
   const DEBOT_TOKEN_GUARDIAN_MS = 1200;
   // After user clicks a /token/ link, keep header tryPaint this long (ms).
   const DEBOT_TOKEN_CLICK_ARM_MS = 10000;
+  // Token URLs can commit before the outgoing trench DOM unmounts. Freeze list writes
+  // during that gap so removing badges cannot reflow the page being left.
+  const TOKEN_ENTER_TRANSITION_MS = 4000;
+  // Give the host the first navigation/render slice. Targeted DOM mutations may paint sooner.
+  const TOKEN_ENTER_PAINT_GRACE_MS = 350;
+  // URL returns before the K-line React subtree leaves. Wait for a real multi-row trench
+  // surface before any list paint so the old embedded sidebar cannot be mistaken for home.
+  const LIST_RETURN_TRANSITION_MS = 2500;
+  // Healthy guardians only validate route/header state. Mutation observers own repairs.
+  const TOKEN_GUARDIAN_HEALTHY_MS = 5000;
+  const TOKEN_GUARDIAN_HIDDEN_MS = 10000;
   // Independent route poll — sites often capture native history before our wrap.
   // 0.4.41: back to 0.4.22 500ms (300ms was busy-checking SPA every tick).
   const ROUTE_POLL_MS = 500;
@@ -248,6 +280,8 @@
   const DEBUG_PREFIX = "[FlapFeeInfo]";
   const CARD_MARK = "gmgnFeeModeCard";
   const ICON_MARK = "gmgnFeeModeIcon";
+  const GMGN_OVERLAY_INPUT_SELECTOR =
+    'input[placeholder*="搜名称"], input[placeholder*="KOL"], input[placeholder*="推特号"]';
   const CARD_DATA = `data-${toKebab(CARD_MARK)}`;
   const ICON_DATA = `data-${toKebab(ICON_MARK)}`;
   // Pool/quote prefix (coin) — do not hide site pool icons; show all quotes including BNB.
@@ -302,17 +336,17 @@
   /** Tokens currently inside an in-flight /modes request (re-queue on force recover). */
   let activeBatchTokens = [];
   let consecutiveFails = 0;
+  /** Per-token backoff for API soft misses; prevents a zero-delay /modes loop. */
+  const missingRetryState = new Map();
   let scanScheduled = false;
   let lastScanAt = 0;
   /** Wall clock of last completed scanVisibleCards (watchdog uses this). */
-  let lastScanWallMs = 0;
   let persistentCacheReady = false;
   let persistentCacheReadyWaiters = [];
   let lastResumeAt = 0;
   /** performance.now() / Date when tab became hidden (0 if visible). */
   let hiddenSinceMs = 0;
   /** Until this timestamp, always remount badges (skip idempotent short-circuit). */
-  let resumeForceRemountUntil = 0;
   /** Live display toggles from popup (chrome.storage). */
   let displayPrefs = { ...DEFAULT_DISPLAY_PREFS };
   /** dark | light — badge chrome colors */
@@ -328,6 +362,7 @@
   let badgeDragEdit = false;
   /** Active pointer drag state (one badge only). */
   let badgeDragState = null;
+  let badgeDragHandlersInstalled = false;
   /** Cached GMGN "总税率" label node (invalidated on SPA). */
   let taxRateLabelCache = { el: null, at: 0 };
   let pipelineWatchdogId = null;
@@ -343,6 +378,9 @@
   let gmgnScrollQuietUntil = 0;
   /** GMGN only: one-shot scan after scroll stops. */
   let gmgnScrollResumeTimer = null;
+  /** Debot/Gungnir: suppress mutation scans while virtual rows are recycling. */
+  let debotScrollQuietUntil = 0;
+  let debotScrollResumeTimer = null;
   let lastPersistWallMs = 0;
   let mutationDebounceTimer = null;
   /** Route key for SPA detection (ignore volatile ref=). */
@@ -359,6 +397,8 @@
   const SCAN_ROOTS_TTL_MS = 6000;
   /** Count completed scans — run expensive cleanup sparsely. */
   let scanGeneration = 0;
+  /** GMGN home: next visible row index for three-column round-robin hole filling. */
+  let gmgnSteadyRoundRobinRow = 0;
   /** Last bound observer roots (skip rebind when identity unchanged). */
   let lastObserverRoots = [];
   /** Next scan only walks dialog + side-board roots (skip K-line header thrash). */
@@ -379,6 +419,15 @@
   let spaQuietFlushTimer = null;
   /** After click on /token/ — keep header force-paint until this time. */
   let debotTokenClickArmUntil = 0;
+  /** Freeze outgoing list writes until the real token header accepts a badge. */
+  let tokenEnterTransitionUntil = 0;
+  /** Never run speculative header scans in the host's first route-render slice. */
+  let tokenEnterPaintAfter = 0;
+  /** Freeze list writes after token -> list URL commit until real trench cards mount. */
+  let listReturnTransitionUntil = 0;
+  let listReturnTransitionTimer = null;
+  /** Short-lived GMGN transition probe cache; prevents repeated layout reads during mount bursts. */
+  let gmgnTrenchProbeCache = { at: 0, roots: [], ready: false };
   /** Throttle immediate mutation header paint. */
   let debotHeaderMutPaintAt = 0;
   /** Wall time of last force full-scan (not light). */
@@ -391,6 +440,7 @@
   let debotHeaderFindCache = { at: 0, key: "", el: null };
   /** Positive hasDebotTokenHeaderBadge short cache. */
   let debotHeaderBadgeOkUntil = 0;
+  let debotHeaderBadgeOkEl = null;
   /**
    * token→list SPA soft window: viewport-first, smaller budget, no offscreen thrash.
    * Wall-clock until this time (0 = inactive).
@@ -417,9 +467,16 @@
   /** GMGN token multi-panel: keep header + left trench painting (cross-browser). */
   let gmgnTokenGuardianId = null;
   let gmgnHeaderMissSince = 0;
-  /** Watch token-base-address parent — React often wipes afterend badge. */
-  let gmgnHeaderDomObs = null;
-  let gmgnHeaderDomObsLastAt = 0;
+  /** Coalesced header repairs after React replaces the address row. */
+  let gmgnHeaderRepairTimer = null;
+  let debotHeaderRepairTimer = null;
+  /** GMGN token-page TokenItem rows changed since the last targeted pass. */
+  const gmgnEmbeddedDirtyCards = new Set();
+  let gmgnEmbeddedDirtyTimer = null;
+  /** Coalesced GMGN search-overlay pass and its one allowed late-DOM retry. */
+  let gmgnOverlayPaintTimer = null;
+  let gmgnOverlayRetryTimer = null;
+  let lastOverlayFastStats = { painted: 0, queued: 0, seen: 0 };
 
   hydratePersistentCache();
   hydrateDisplayPrefs();
@@ -428,15 +485,13 @@
   hydrateBadgeOffsets();
   hydrateBadgeDragEdit();
   watchDisplayPrefs();
-  installBadgeDragHandlers();
   startPipelineWatchdog();
   installHistoryHooks();
-  // 0.4.42: page-hook only on Debot/Gungnir (GMGN history wrap enough; inject+postMessage adds noise).
-  if (!location.hostname.endsWith("gmgn.ai")) {
-    installPageWorldSpaHook();
-  }
-  installDebotTokenClickArm();
-  installGmgnSpaClickArm();
+  // Main-world history notification fires only after the host commits push/replaceState.
+  // This avoids GMGN's random 0-500ms route-poller delay without touching click events.
+  installPageWorldSpaHook();
+  // Route hooks + the 500ms poller observe navigation after the host commits it. Do not
+  // run extension work in the capture phase of the site's token-link click handlers.
   installOverlayOpenArm();
   startRoutePoller();
   if (location.hostname.endsWith("gmgn.ai")) {
@@ -470,6 +525,12 @@
         return climbGmgnListCard(node);
       },
       extractToken(card) {
+        if (card?.dataset?.flapOverlayCard === "1") {
+          return (
+            normalizeToken(card.getAttribute?.("href") || "") ||
+            extractCardTokenFromAttrs(card)
+          );
+        }
         // URL CA only for the token-page header root — never paint list rows with page CA.
         if (isGmgnTokenPage() && isGmgnTokenHeaderCard(card)) {
           return extractTokenFromUrl() || extractCardTokenFromAttrs(card);
@@ -477,14 +538,25 @@
         return extractCardTokenFromAttrs(card);
       },
       findIconTarget(card) {
+        if (card?.dataset?.flapOverlayCard === "1") {
+          return findGmgnOverlayVolumeMount(card);
+        }
         if (isGmgnTokenPage() && isGmgnTokenHeaderCard(card)) {
           // 0.4.50: address ONLY — never 总税率 (user: 徽章必须在地址旁).
           return findGmgnHeaderAddressMount();
+        }
+        if (isInsideOverlayDialog(card)) {
+          return findGmgnOverlayVolumeMount(card);
         }
         // List / search dialog: Tax chip first; compact row fallback (no Tax in history modal).
         return findTaxTag(card) || findCompactRowMount(card);
       },
       placeIcon(target, icon) {
+        if (target?.dataset?.flapMount === "gmgn-overlay-volume") {
+          icon.dataset.feeOverlayPos = "volume";
+          target.insertAdjacentElement("afterend", icon);
+          return;
+        }
         if (isGmgnTokenPage() && target?.dataset?.flapMount) {
           placeGmgnTokenIcon(target, icon);
           return;
@@ -522,6 +594,7 @@
 
   function isGmgnTokenHeaderCard(card) {
     if (!(card instanceof HTMLElement) || !isGmgnTokenPage()) return false;
+    if (card.dataset.flapOverlayCard === "1") return false;
     const root = findGmgnTokenPageRoot();
     return !!(root && card === root);
   }
@@ -561,9 +634,7 @@
     }
     let best = null;
     try {
-      const inputs = document.querySelectorAll(
-        'input[placeholder*="搜索"], input[placeholder*="合约"], input[placeholder*="KOL"]'
-      );
+      const inputs = document.querySelectorAll(GMGN_OVERLAY_INPUT_SELECTOR);
       for (let i = 0; i < Math.min(inputs.length, 8); i += 1) {
         const inp = inputs[i];
         if (!(inp instanceof HTMLElement)) continue;
@@ -632,11 +703,49 @@
     kick(650);
   }
 
+  function cancelGmgnOverlayPaint() {
+    if (gmgnOverlayPaintTimer) window.clearTimeout(gmgnOverlayPaintTimer);
+    if (gmgnOverlayRetryTimer) window.clearTimeout(gmgnOverlayRetryTimer);
+    gmgnOverlayPaintTimer = null;
+    gmgnOverlayRetryTimer = null;
+  }
+
+  /** One cache-first GMGN overlay pass; retry once only when result rows mounted late. */
+  function scheduleGmgnOverlayPaint(reason, delayMs = 150, allowLateDomRetry = true) {
+    if (!isGmgnHost()) return;
+    if (gmgnOverlayPaintTimer) window.clearTimeout(gmgnOverlayPaintTimer);
+    if (allowLateDomRetry && gmgnOverlayRetryTimer) {
+      window.clearTimeout(gmgnOverlayRetryTimer);
+      gmgnOverlayRetryTimer = null;
+    }
+    gmgnOverlayPaintTimer = window.setTimeout(() => {
+      gmgnOverlayPaintTimer = null;
+      if (!isExtensionContextValid() || !isTabVisible() || !quickHasOpenOverlay()) {
+        cancelGmgnOverlayPaint();
+        return;
+      }
+      overlayFastUntil = Date.now() + OVERLAY_FAST_MS;
+      try {
+        fastPaintOverlayFromCache();
+      } catch (_err) {
+        return;
+      }
+      debugInfo("overlay:gmgn-pass", { reason, ...lastOverlayFastStats });
+      if (allowLateDomRetry && lastOverlayFastStats.seen === 0) {
+        gmgnOverlayRetryTimer = window.setTimeout(() => {
+          gmgnOverlayRetryTimer = null;
+          scheduleGmgnOverlayPaint(`${reason}-late-dom`, 0, false);
+        }, 240);
+      }
+    }, Math.max(0, delayMs));
+  }
+
   /**
    * Cache-first paint for open search/history rows (no full trench walk).
    * @returns {number} painted count
    */
   function fastPaintOverlayFromCache() {
+    lastOverlayFastStats = { painted: 0, queued: 0, seen: 0 };
     if (!isExtensionContextValid() || !quickHasOpenOverlay()) return 0;
     const t0 = performance.now();
     const roots = [];
@@ -665,16 +774,25 @@
         if (!(a instanceof HTMLElement)) continue;
         const token = normalizeToken(a.getAttribute("href") || a.href || "");
         if (!token) continue;
-        const card =
-          (siteStrategy.findCard && siteStrategy.findCard(a)) ||
-          quickClimbCardFromTokenLink(a);
+        // GMGN search rows have a stable outer token link. Never fall through to
+        // the generic page scanner here: on token pages that fallback also probes
+        // the K-line header and forces layout while the search results are mounting.
+        const card = isGmgnHost()
+          ? findGmgnOverlayCard(a)
+          : (siteStrategy.findCard && siteStrategy.findCard(a)) ||
+            quickClimbCardFromTokenLink(a);
         // 0.4.51: dedupe by card only — same CA may appear on multiple overlay rows.
         if (!(card instanceof HTMLElement) || seen.has(card)) continue;
-        if (!isInsideOverlayDialog(card) && !roots.some((r) => r.contains(card))) {
+        if (
+          !isGmgnHost() &&
+          !isInsideOverlayDialog(card) &&
+          !roots.some((r) => r.contains(card))
+        ) {
           // Prefer rows clearly in overlay; skip trench ghosts under the panel.
           const cr = card.getBoundingClientRect();
           if (cr.top < 40 || cr.height > 200) continue;
         }
+        if (isGmgnHost()) card.dataset.flapOverlayCard = "1";
         seen.add(card);
         const entry = resolveEntry(token);
         if (!entry) {
@@ -701,12 +819,16 @@
           if (!(el instanceof HTMLElement)) continue;
           const t = (el.textContent || "").trim();
           if (t.length > 22 || !TARGET_SHORT_TOKEN_RE.test(t)) continue;
-          const card =
-            (siteStrategy.findCard && siteStrategy.findCard(el)) ||
-            quickClimbCardFromTokenLink(el);
+          const card = isGmgnHost()
+            ? findGmgnOverlayCard(el)
+            : (siteStrategy.findCard && siteStrategy.findCard(el)) ||
+              quickClimbCardFromTokenLink(el);
           if (!(card instanceof HTMLElement) || seen.has(card)) continue;
           seen.add(card);
-          const token = siteStrategy.extractToken(card);
+          if (isGmgnHost()) card.dataset.flapOverlayCard = "1";
+          const token = isGmgnHost()
+            ? normalizeToken(card.getAttribute("href") || "")
+            : siteStrategy.extractToken(card);
           if (!token) continue;
           const entry = resolveEntry(token);
           if (!entry) {
@@ -733,6 +855,7 @@
       queued,
       ms: Math.round(performance.now() - t0)
     });
+    lastOverlayFastStats = { painted, queued, seen: seen.size };
     return painted;
   }
 
@@ -863,6 +986,28 @@
    * js-mcp 0.4.47: left sidebar + ticker make document-order first-220 miss the header CA
    * (`0xe2...7777` lives under title row; full CA is on [title="0x…"]). Prefer title/ca-text.
    */
+  function isLargeTokenLinkCardNode(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    try {
+      const link = el.closest?.('a[href*="/token/"]');
+      if (link instanceof HTMLElement) {
+        const r = link.getBoundingClientRect();
+        // Debot war-room rows are large token links (about 500x129 in the 3-col board).
+        if (r.width >= 180 && r.height >= 64) return true;
+      }
+      const card = el.closest?.(
+        ".MuiCard-root, .MuiPaper-root, [class*='Card'], article, li"
+      );
+      if (card instanceof HTMLElement && card.querySelector?.('a[href*="/token/"]')) {
+        const r = card.getBoundingClientRect();
+        if (r.width >= 180 && r.height >= 64) return true;
+      }
+    } catch (_err) {
+      return false;
+    }
+    return false;
+  }
+
   function findDebotHeaderShortCaLeaf(urlTok) {
     const inTopBand = (el) => {
       try {
@@ -871,8 +1016,8 @@
           r.width > 0 &&
           r.height > 0 &&
           r.height <= 48 &&
-          r.top >= 0 &&
-          r.top < 220 &&
+          r.bottom > 0 &&
+          r.top < Math.min(window.innerHeight, 360) &&
           r.left >= 0 &&
           r.left < window.innerWidth
         );
@@ -889,7 +1034,13 @@
       const maxT = Math.min(titled.length, 40);
       for (let i = 0; i < maxT; i += 1) {
         const el = titled[i];
-        if (!(el instanceof HTMLElement) || !inTopBand(el)) continue;
+        if (
+          !(el instanceof HTMLElement) ||
+          !inTopBand(el) ||
+          isLargeTokenLinkCardNode(el)
+        ) {
+          continue;
+        }
         const titleTok = normalizeToken(el.getAttribute("title") || "");
         if (urlTok && titleTok && titleTok !== urlTok) continue;
         if (urlTok && !titleTok) {
@@ -925,7 +1076,13 @@
       const maxC = Math.min(caNodes.length, 30);
       for (let i = 0; i < maxC; i += 1) {
         const el = caNodes[i];
-        if (!(el instanceof HTMLElement) || !inTopBand(el)) continue;
+        if (
+          !(el instanceof HTMLElement) ||
+          !inTopBand(el) ||
+          isLargeTokenLinkCardNode(el)
+        ) {
+          continue;
+        }
         const t = (el.textContent || "").trim();
         const titleTok = normalizeToken(el.getAttribute("title") || "");
         if (urlTok) {
@@ -964,7 +1121,7 @@
         if (t.length > 28 || t.length < 8) continue;
         if (!TARGET_SHORT_TOKEN_RE.test(t) && !SHORT_TOKEN_RE.test(t)) continue;
         if (el.children && el.children.length > 2) continue;
-        if (!inTopBand(el)) continue;
+        if (!inTopBand(el) || isLargeTokenLinkCardNode(el)) continue;
         checked += 1;
         if (t.length > 22) continue;
         if (!TARGET_SHORT_TOKEN_RE.test(t)) continue;
@@ -985,6 +1142,7 @@
 
   function climbDebotHeaderRowFromShort(short) {
     if (!(short instanceof HTMLElement)) return null;
+    if (isLargeTokenLinkCardNode(short)) return null;
     let p = short;
     for (let d = 0; p && d < 10; d += 1) {
       if (!(p instanceof HTMLElement)) break;
@@ -996,8 +1154,8 @@
         r.width < window.innerWidth * 0.98 &&
         r.height >= 14 &&
         r.height <= 120 &&
-        r.top >= 0 &&
-        r.top < 220
+        r.bottom > 0 &&
+        r.top < Math.min(window.innerHeight, 360)
       ) {
         // Prefer flex row holding short CA (not full 1460px strip when too early).
         if (r.height <= 56 || d >= 2) return p;
@@ -1020,12 +1178,19 @@
     }
     // 2) Stats panel with 价格+流动性 (right of header strip)
     const stats = findDebotTokenPageMount(document);
-    if (stats) {
+    if (stats && !isLargeTokenLinkCardNode(stats)) {
       let p = stats;
       for (let d = 0; p && d < 6; d += 1) {
         if (!(p instanceof HTMLElement)) break;
         const r = p.getBoundingClientRect();
-        if (r.width >= 200 && r.height <= 200 && r.top < 220) return p;
+        if (
+          r.width >= 200 &&
+          r.height <= 200 &&
+          r.bottom > 0 &&
+          r.top < Math.min(window.innerHeight, 360)
+        ) {
+          return p;
+        }
         p = p.parentElement;
       }
       return stats;
@@ -1042,7 +1207,12 @@
     // Large shell near top with URL short match
     try {
       const r = card.getBoundingClientRect();
-      if (r.top >= 0 && r.top < 180 && r.width > 300 && r.height < 140) {
+      if (
+        r.bottom > 0 &&
+        r.top < Math.min(window.innerHeight, 360) &&
+        r.width > 300 &&
+        r.height < 140
+      ) {
         const urlTok = extractTokenFromUrl();
         if (urlTok && cardStillMatchesToken(card, urlTok)) return true;
       }
@@ -1100,6 +1270,9 @@
    */
   function canUseTrenchAbsoluteCoords(card) {
     if (!isAllowedScanChain()) return false;
+    // Search results always use their natural short-address row. Besides keeping
+    // placement stable, this avoids probing the K-line header during overlay paint.
+    if (card?.dataset?.flapOverlayCard === "1") return false;
     if (card && isGmgnTokenHeaderCard(card)) return false;
     // Debot/Gungnir K-line top strip: ALWAYS natural mount (popup: 不走坐标).
     // User may enable「使用卡片坐标」for 战壕 list only — if header zone uses absolute
@@ -1372,7 +1545,9 @@
    */
   function hasGmgnTokenHeaderBadge() {
     try {
-      return !!findGmgnHeaderBadgeEl(extractTokenFromUrl());
+      const found = !!findGmgnHeaderBadgeEl(extractTokenFromUrl());
+      if (found) finishTokenEnterTransition();
+      return found;
     } catch (_err) {
       return false;
     }
@@ -1459,12 +1634,21 @@
     try {
       const byId = document.getElementById("token-base-address");
       if (byId instanceof HTMLElement) {
+        if (isLargeTokenLinkCardNode(byId)) return null;
         const addr = normalizeToken(byId.getAttribute("data-addr") || byId.getAttribute("title") || "");
         const text = (byId.textContent || "").trim();
         if ((!addr || addr === urlTok) && (!text || tokenMatchesShort(urlTok, text.match(SHORT_TOKEN_RE)?.[0] || text) || TARGET_SHORT_TOKEN_RE.test(text))) {
           if (!isInsideGmgnSideTrench(byId)) {
             const r = byId.getBoundingClientRect();
-            if (r.width > 0 && r.height > 0 && r.top >= 40 && r.top < 220) return byId;
+            if (
+              r.width > 0 &&
+              r.height > 0 &&
+              r.height <= 48 &&
+              r.bottom > 0 &&
+              r.top < Math.min(window.innerHeight, 360)
+            ) {
+              return byId;
+            }
           }
         }
       }
@@ -1473,10 +1657,11 @@
       for (let i = 0; i < nodes.length; i += 1) {
         const el = nodes[i];
         if (!(el instanceof HTMLElement)) continue;
+        if (isLargeTokenLinkCardNode(el)) continue;
         if (isInsideGmgnSideTrench(el)) continue;
         const r = el.getBoundingClientRect();
-        if (r.width <= 0 || r.height <= 0 || r.height > 40) continue;
-        if (r.top < 40 || r.top >= 220) continue;
+        if (r.width <= 0 || r.height <= 0 || r.height > 48) continue;
+        if (r.bottom <= 0 || r.top >= Math.min(window.innerHeight, 360)) continue;
         return el;
       }
     } catch (_err) {
@@ -1498,6 +1683,7 @@
       // 0.5.7/0.5.9: multi-panel skip left trench; full-width keep header band leaves.
       const pushIfOk = (el) => {
         if (!(el instanceof HTMLElement) || hits.includes(el)) return;
+        if (isLargeTokenLinkCardNode(el)) return;
         if (multiPanel && isInsideGmgnSideTrench(el)) return;
         const r = el.getBoundingClientRect();
         if (r.width <= 0 || r.height <= 0 || r.height > 36) return;
@@ -1576,13 +1762,21 @@
   function isGmgnBadgeBesideAddress(icon, urlTok) {
     if (!(icon instanceof HTMLElement)) return false;
     try {
+      if (isLargeTokenLinkCardNode(icon)) return false;
       const r = icon.getBoundingClientRect();
-      if (r.width < 2 || r.height < 2 || r.top < 0 || r.top >= 240) return false;
+      if (
+        r.width < 2 ||
+        r.height < 2 ||
+        r.bottom <= 0 ||
+        r.top >= Math.min(window.innerHeight, 360)
+      ) {
+        return false;
+      }
       if (isInsideGmgnSideTrench(icon)) return false;
-      // Locked header badge in top band: trust.
+      // Header lock identifies intent, but the badge must still be beside the current address.
+      // React can leave an old connected row while replacing #token-base-address.
       if (icon.dataset.feeHeader === "1") {
         if (urlTok && icon.dataset.feeToken && icon.dataset.feeToken !== urlTok) return false;
-        if (r.top >= 40 && r.top < 200) return true;
       }
       const mount = icon.closest?.("[data-flap-mount]");
       const mk = mount?.dataset?.flapMount || "";
@@ -1678,6 +1872,7 @@
           // ignore
         }
       }
+      finishTokenEnterTransition();
       return true;
     }
 
@@ -1689,16 +1884,15 @@
     }
 
     const addrLeaf = findGmgnHeaderAddressMount();
-    // Host for CARD_MARK: climb from address leaf, else root (still place on leaf).
-    const host =
-      (addrLeaf && climbGmgnHeaderCardFromLeaf(addrLeaf)) ||
-      findGmgnTokenPageRoot() ||
-      addrLeaf;
-    if (!(host instanceof HTMLElement) && !(addrLeaf instanceof HTMLElement)) {
+    // A committed token URL is not sufficient: wait for the official address row.
+    // Falling back to the page root can mount into the outgoing trench subtree.
+    if (!(addrLeaf instanceof HTMLElement) || isLargeTokenLinkCardNode(addrLeaf)) {
       recoverStuckBatch(false);
       scheduleBatchFlush({ immediate: true, delayMs: 0 });
       return false;
     }
+    removeStaleTokenHeaderBadges(urlTok);
+    const host = climbGmgnHeaderCardFromLeaf(addrLeaf) || addrLeaf;
     const markHost = host instanceof HTMLElement ? host : addrLeaf;
     markHost.dataset[CARD_MARK] = urlTok;
     try {
@@ -1728,6 +1922,7 @@
       }, 120);
     }
     if (ok || findGmgnHeaderBadgeEl(urlTok)) {
+      finishTokenEnterTransition();
       armGmgnHeaderDomWatch();
       debugInfo("gmgn:header-paint", {
         reason,
@@ -1755,25 +1950,13 @@
       for (let i = 0; i < nodes.length; i += 1) {
         const el = nodes[i];
         if (!(el instanceof HTMLElement) || !document.contains(el)) continue;
-        // Must be explicit header lock.
+        // Must be explicit header lock and still belong to the current address row.
         if (el.dataset.feeHeader !== "1") continue;
-        // Not left 战壕 column.
         if (isInsideGmgnSideTrench(el)) continue;
         const r = el.getBoundingClientRect();
         if (r.width < 2 || r.height < 2) continue;
-        if (r.top < 40 || r.top >= 200) continue;
-        // Prefer next to short CA text when present.
-        const prev = el.previousElementSibling;
-        const pt = (prev?.textContent || "").trim();
-        if (pt && SHORT_TOKEN_RE.test(pt) && pt.length <= 22) {
-          if (!tokenMatchesShort(urlTok, pt.match(SHORT_TOKEN_RE)?.[0] || pt)) {
-            // Wrong short neighbor — still accept if mount mark says header.
-            const mk = el.closest?.("[data-flap-mount]")?.dataset?.flapMount || "";
-            if (mk !== "gmgn-header-address" && mk !== "gmgn-header-address-leaf") {
-              continue;
-            }
-          }
-        }
+        if (r.bottom <= 0 || r.top >= Math.min(window.innerHeight, 360)) continue;
+        if (!isGmgnBadgeBesideAddress(el, urlTok)) continue;
         return el;
       }
     } catch (_err) {
@@ -1791,13 +1974,7 @@
     const urlTok = extractTokenFromUrl();
     if (!urlTok) return false;
     if (el.dataset.feeToken && el.dataset.feeToken !== urlTok) return false;
-    try {
-      const r = el.getBoundingClientRect();
-      if (r.top < 40 || r.top >= 220) return false;
-    } catch (_err) {
-      return false;
-    }
-    return true;
+    return isGmgnBadgeBesideAddress(el, urlTok);
   }
 
   /** Climb from short CA leaf to a reasonable header card host (for CARD_MARK only). */
@@ -1846,6 +2023,7 @@
         already.dataset.feeSig = label;
         already.dataset.feeHeader = "1";
         already.dataset.feePosMode = "default";
+        if (gmgnEmbeddedDirtyCards.size > 0) scheduleGmgnEmbeddedDirtyPass();
         return true;
       }
 
@@ -1932,7 +2110,9 @@
         return false;
       }
       const r = icon.getBoundingClientRect();
-      return r.width >= 2 && r.height >= 2;
+      const visible = r.width >= 2 && r.height >= 2;
+      if (visible && gmgnEmbeddedDirtyCards.size > 0) scheduleGmgnEmbeddedDirtyPass();
+      return visible;
     } catch (_err) {
       return false;
     }
@@ -1969,17 +2149,17 @@
       for (let i = 0; i < dialogs.length; i += 1) {
         const el = dialogs[i];
         if (!(el instanceof HTMLElement)) continue;
+        if (isExplicitlyHiddenOverlay(el)) continue;
         const r = el.getBoundingClientRect();
         if (r.width >= 280 && r.height >= 120 && r.top < window.innerHeight && r.bottom > 0) {
           open = true;
           break;
         }
       }
-      if (!open) {
-        // GMGN search/history: input visible with 搜索/合约 placeholder
-        const inputs = document.querySelectorAll(
-          'input[placeholder*="搜索"], input[placeholder*="合约"], input[placeholder*="KOL"]'
-        );
+      if (!open && isGmgnHost()) {
+        // The permanent header input also contains 搜索/合约. Only the modal's
+        // richer placeholder is authoritative, otherwise the trench queue pauses forever.
+        const inputs = document.querySelectorAll(GMGN_OVERLAY_INPUT_SELECTOR);
         for (let i = 0; i < Math.min(inputs.length, 6); i += 1) {
           const inp = inputs[i];
           if (!(inp instanceof HTMLElement)) continue;
@@ -2101,6 +2281,193 @@
     return document.visibilityState === "visible";
   }
 
+  function isTokenEnterTransitionActive() {
+    if (!tokenEnterTransitionUntil) return false;
+    if (Date.now() < tokenEnterTransitionUntil) return true;
+    tokenEnterTransitionUntil = 0;
+    return false;
+  }
+
+  function isTokenEnterPaintGraceActive() {
+    return tokenEnterPaintAfter > 0 && Date.now() < tokenEnterPaintAfter;
+  }
+
+  function armTokenEnterTransition() {
+    listReturnTransitionUntil = 0;
+    if (listReturnTransitionTimer) {
+      window.clearTimeout(listReturnTransitionTimer);
+      listReturnTransitionTimer = null;
+    }
+    tokenEnterTransitionUntil = Date.now() + TOKEN_ENTER_TRANSITION_MS;
+    tokenEnterPaintAfter = Date.now() + TOKEN_ENTER_PAINT_GRACE_MS;
+    // Cancel work already queued for the outgoing trench. Direct header painters do not
+    // use scheduleScan, so they can still mount once the real token header exists.
+    scanTimerIds.forEach((id) => window.clearTimeout(id));
+    scanTimerIds = [];
+    scanScheduled = false;
+    pendingLightScan = false;
+    if (forceFullScanCoalesceTimer) {
+      window.clearTimeout(forceFullScanCoalesceTimer);
+      forceFullScanCoalesceTimer = null;
+    }
+    if (mutationDebounceTimer) {
+      window.clearTimeout(mutationDebounceTimer);
+      mutationDebounceTimer = null;
+    }
+  }
+
+  function finishTokenEnterTransition() {
+    tokenEnterTransitionUntil = 0;
+    tokenEnterPaintAfter = 0;
+  }
+
+  function isListReturnTransitionActive() {
+    if (!listReturnTransitionUntil) return false;
+    if (Date.now() < listReturnTransitionUntil) return true;
+    listReturnTransitionUntil = 0;
+    return false;
+  }
+
+  /**
+   * A token URL can disappear while its K-line and embedded sidebar are still mounted.
+   * A desktop trench is considered ready only when card-sized token rows span at least
+   * two viewport columns. This rejects the single left sidebar shown on GMGN K-line.
+   */
+  function hasMountedTrenchSurface() {
+    if (isTokenDetailRoute() || !document.body) return false;
+    if (isGmgnHost()) {
+      const now = Date.now();
+      if (
+        now - gmgnTrenchProbeCache.at < 48 &&
+        gmgnTrenchProbeCache.roots.every((root) => root?.isConnected)
+      ) {
+        return gmgnTrenchProbeCache.ready;
+      }
+      const roots = getMountedGmgnTrenchRoots();
+      const columns = new Set(roots.map((root) => listColumnBucket(root)));
+      const ready = roots.length >= 2 && columns.size >= 2;
+      gmgnTrenchProbeCache = { at: now, roots, ready };
+      return ready;
+    }
+    const columns = new Set();
+    const cards = new Set();
+    try {
+      const links = document.querySelectorAll(
+        "a[href*='/token/'][href*='0x'], a[href*='/bsc/token/'][href*='0x']"
+      );
+      const max = Math.min(links.length, 80);
+      for (let i = 0; i < max; i += 1) {
+        const link = links[i];
+        if (!(link instanceof HTMLElement) || !isNearViewport(link, false)) continue;
+        const card = quickClimbCardFromTokenLink(link);
+        if (!(card instanceof HTMLElement) || cards.has(card)) continue;
+        const r = card.getBoundingClientRect();
+        if (r.width < 180 || r.height < 56 || r.height > 420) continue;
+        cards.add(card);
+        columns.add(listColumnBucket(card));
+        if (window.innerWidth < 900 && cards.size >= 2) return true;
+        if (cards.size >= 3 && columns.size >= 2) return true;
+      }
+    } catch (_err) {
+      return false;
+    }
+    return false;
+  }
+
+  /** Remove only token-header artifacts; never tear down list-card badges. */
+  function clearTokenHeaderArtifacts() {
+    const owners = new Set();
+    try {
+      document.querySelectorAll(`[${ICON_DATA}="1"][data-fee-header="1"]`).forEach((icon) => {
+        let owner = icon.parentElement;
+        for (let depth = 0; owner instanceof HTMLElement && depth < 5; depth += 1) {
+          if (owner.dataset.flapMount === "token-header" || owner.hasAttribute(CARD_DATA)) {
+            owners.add(owner);
+          }
+          owner = owner.parentElement;
+        }
+        icon.remove();
+      });
+      document.querySelectorAll('[data-flap-mount="token-header"]').forEach((owner) => {
+        if (owner instanceof HTMLElement) owners.add(owner);
+      });
+      owners.forEach((owner) => {
+        delete owner.dataset.flapMount;
+        delete owner.dataset[CARD_MARK];
+        owner.removeAttribute(CARD_DATA);
+      });
+    } catch (_err) {
+      // The old React subtree may already be detached.
+    }
+    debotHeaderBadgeOkUntil = 0;
+    debotHeaderBadgeOkEl = null;
+    debotHeaderFindCache = { at: 0, key: "", el: null };
+  }
+
+  function finishListReturnTransition(reason, force = false) {
+    if (!listReturnTransitionUntil) return true;
+    if (isTokenDetailRoute()) return false;
+    if (!force && !hasMountedTrenchSurface()) return false;
+    listReturnTransitionUntil = 0;
+    if (listReturnTransitionTimer) {
+      window.clearTimeout(listReturnTransitionTimer);
+      listReturnTransitionTimer = null;
+    }
+    clearTokenHeaderArtifacts();
+    armListReturnDomWatch();
+    if (isGmgnHost()) {
+      // Start recovery clocks from actual trench readiness. Starting them at URL
+      // commit wasted every early tick when GMGN mounted columns late.
+      armGmgnListReturnFastBurst();
+      armGmgnListReturnFillTicks();
+    } else {
+      armListReturnKeepAlive();
+    }
+    const readyKick = window.setTimeout(() => {
+      spaNavScanTimers = spaNavScanTimers.filter((id) => id !== readyKick);
+      if (!isExtensionContextValid() || isTokenDetailRoute()) return;
+      fastPaintListReturnViewport();
+      scheduleScan(0, { force: false, immediate: false, light: false });
+    }, 0);
+    spaNavScanTimers.push(readyKick);
+    debugInfo("list-return:ready", { reason, force });
+    return true;
+  }
+
+  function tryFinishListReturnTransition(reason) {
+    if (!isListReturnTransitionActive()) return true;
+    return finishListReturnTransition(reason, false);
+  }
+
+  function armListReturnTransition(reason) {
+    finishTokenEnterTransition();
+    listReturnTransitionUntil = Date.now() + LIST_RETURN_TRANSITION_MS;
+    gmgnTrenchProbeCache = { at: 0, roots: [], ready: false };
+    stopListReturnDomWatch();
+    scanTimerIds.forEach((id) => window.clearTimeout(id));
+    scanTimerIds = [];
+    scanScheduled = false;
+    pendingLightScan = false;
+    if (forceFullScanCoalesceTimer) {
+      window.clearTimeout(forceFullScanCoalesceTimer);
+      forceFullScanCoalesceTimer = null;
+    }
+    if (mutationDebounceTimer) {
+      window.clearTimeout(mutationDebounceTimer);
+      mutationDebounceTimer = null;
+    }
+    if (listReturnTransitionTimer) window.clearTimeout(listReturnTransitionTimer);
+    listReturnTransitionTimer = window.setTimeout(() => {
+      listReturnTransitionTimer = null;
+      if (!isExtensionContextValid() || !isTabVisible()) return;
+      if (isTokenDetailRoute()) {
+        listReturnTransitionUntil = 0;
+        return;
+      }
+      finishListReturnTransition(`${reason}:timeout`, true);
+    }, LIST_RETURN_TRANSITION_MS);
+  }
+
   function scheduleScan(delay = 250, options = {}) {
     const force = options.force === true;
     const immediate = options.immediate === true;
@@ -2110,6 +2477,10 @@
     if (!isTabVisible() && !force) return;
     // chain=Robinhood / non-allowed pages: never schedule work.
     if (!isScanPageAllowed()) return;
+    // The outgoing trench can remain visible after the token URL commits. Any scan in
+    // this window can repaint/reposition its badges and compete with K-line mounting.
+    if (isTokenEnterTransitionActive()) return;
+    if (!tryFinishListReturnTransition("schedule-scan")) return;
 
     // 0.4.29: coalesce stacked force full-scans (SPA progressive + guardian + click-arm).
     if (force && !light && !bypassForceGap) {
@@ -2146,6 +2517,7 @@
       scanScheduled = false;
       if (!isTabVisible() && !force) return;
       if (!isExtensionContextValid()) return;
+      if (isDebotScrollCooling() && !pendingLightScan && !isOverlayFast()) return;
       const now = performance.now();
       // Light scans use shorter min interval (overlay UX).
       const minGap = pendingLightScan ? 450 : SCAN_INTERVAL_MS;
@@ -2167,13 +2539,13 @@
     }
   }
 
-  /** Full page scan at most every DEBOT_HEADER_FULL_SCAN_GAP_MS while header missing. */
+  /** Header-only retry. A missing optional badge must never trigger a K-line page scan. */
   function maybeScheduleDebotHeaderFullScan(reason) {
     if (Date.now() - lastDebotHeaderFullScanAt < DEBOT_HEADER_FULL_SCAN_GAP_MS) return;
+    const token = extractTokenFromUrl();
+    if (!token || !resolveEntry(token)) return;
     lastDebotHeaderFullScanAt = Date.now();
-    pendingLightScan = false;
-    scheduleScan(0, { force: true, immediate: false, light: false });
-    debugInfo("debot:header-full-scan", { reason });
+    scheduleDebotHeaderRepair(`header-retry:${reason}`, 120);
   }
 
   function runWhenIdle(fn, options = {}) {
@@ -2208,8 +2580,10 @@
     }
     // GMGN scroll settle: tiny budget if a force/overlay scan still runs.
     if (isGmgnHost() && isGmgnScrollCooling()) return GMGN_SCROLL_CARDS_BUDGET;
+    if (isDebotHost() && isDebotScrollCooling()) return DEBOT_SCROLL_CARDS_BUDGET;
     // 0.4.45 GMGN: only first-screen ~10–12 cards (was 28 → thrash + late paint).
     if (isGmgnHost()) return GMGN_STEADY_CARDS_BUDGET;
+    if (isDebotHost()) return DEBOT_STEADY_CARDS_BUDGET;
     // Full budget otherwise — stable cards free; 3-col lists still finish via progressive.
     return MAX_CARDS_PER_SCAN;
   }
@@ -2267,6 +2641,38 @@
     }, GMGN_SCROLL_RESUME_SCAN_MS);
   }
 
+  function isDebotScrollCooling() {
+    return isDebotHost() && debotScrollQuietUntil > 0 && Date.now() < debotScrollQuietUntil;
+  }
+
+  function noteDebotScrollActivity() {
+    if (!isDebotHost()) return;
+    if (!isTabVisible() || !isExtensionContextValid()) return;
+    const overlayKnownOpen =
+      overlayDetectCache.open && Date.now() - overlayDetectCache.at < 500;
+    if (isOverlayFast() || overlayKnownOpen) return;
+    debotScrollQuietUntil = Date.now() + DEBOT_SCROLL_COOLDOWN_MS;
+    if (mutationDebounceTimer) {
+      window.clearTimeout(mutationDebounceTimer);
+      mutationDebounceTimer = null;
+    }
+    if (debotScrollResumeTimer) {
+      window.clearTimeout(debotScrollResumeTimer);
+      debotScrollResumeTimer = null;
+    }
+    debotScrollResumeTimer = window.setTimeout(() => {
+      debotScrollResumeTimer = null;
+      if (!isDebotHost() || !isTabVisible() || !isExtensionContextValid()) return;
+      if (isSpaQuiet() || isNonTargetTokenPage()) return;
+      if (isDebotTokenPage() && !hasDebotTokenHeaderBadge()) {
+        tryPaintDebotTokenHeader("scroll-settle");
+        return;
+      }
+      pendingLightScan = false;
+      scheduleScan(0, { force: false, immediate: false, light: false });
+    }, DEBOT_SCROLL_RESUME_SCAN_MS);
+  }
+
   /**
    * Cheap badge lookup for one card (card subtree + immediate siblings).
    * Avoids parent-children getBoundingClientRect thrash used by full countBadgesNearCard.
@@ -2315,6 +2721,121 @@
    * GMGN mutation relevance — skip pure ticker/attr thrash.
    * Returns true when added/removed nodes likely need a badge scan.
    */
+  function isExtensionOnlyMutation(record) {
+    const target = record?.target;
+    if (target instanceof Element && target.closest?.(`[${ICON_DATA}="1"]`)) return true;
+    const changed = [...(record?.addedNodes || []), ...(record?.removedNodes || [])];
+    return (
+      changed.length > 0 &&
+      changed.every((node) => {
+        if (node instanceof Element) {
+          return node.matches?.(`[${ICON_DATA}="1"]`) || !!node.closest?.(`[${ICON_DATA}="1"]`);
+        }
+        return node.parentElement?.closest?.(`[${ICON_DATA}="1"]`) != null;
+      })
+    );
+  }
+
+  /** GMGN search rows already expose an outer /bsc/token/<CA> link. */
+  function findGmgnOverlayCard(node) {
+    if (!(node instanceof HTMLElement)) return null;
+    const link = node.closest?.("a[href*='/bsc/token/0x']");
+    if (!(link instanceof HTMLElement)) return null;
+    const href = link.getAttribute("href") || "";
+    return /\/bsc\/token\/0x[a-fA-F0-9]{40}/.test(href) && normalizeToken(href)
+      ? link
+      : null;
+  }
+
+  function scheduleGmgnEmbeddedDirtyPass() {
+    if (gmgnEmbeddedDirtyTimer) return;
+    gmgnEmbeddedDirtyTimer = window.setTimeout(() => {
+      gmgnEmbeddedDirtyTimer = null;
+      if (
+        !isExtensionContextValid() ||
+        !isTabVisible() ||
+        !isGmgnTokenPage() ||
+        !extractTokenFromUrl()
+      ) {
+        gmgnEmbeddedDirtyCards.clear();
+        return;
+      }
+      // Boot/progressive scans own the unsettled phase. Once the header is stable,
+      // this queue updates only changed trench rows and never wakes the chart scanner.
+      if (isSpaQuiet() || !isTokenPageSettledWithBadge() || quickHasOpenOverlay()) return;
+
+      const cards = Array.from(gmgnEmbeddedDirtyCards);
+      gmgnEmbeddedDirtyCards.clear();
+      let processed = 0;
+      let painted = 0;
+      let queued = 0;
+      for (const card of cards) {
+        if (processed >= GMGN_EMBEDDED_DIRTY_CARD_LIMIT) break;
+        if (!(card instanceof HTMLElement) || !card.isConnected) continue;
+        if (!isNearViewport(card, false) || !isVisible(card)) continue;
+        processed += 1;
+        const token = extractCardTokenFromAttrs(card);
+        if (!token) {
+          if (card.dataset[CARD_MARK] || card.querySelector?.(`[${ICON_DATA}="1"]`)) {
+            clearCardIcon(card);
+          }
+          continue;
+        }
+        card.dataset[CARD_MARK] = token;
+        const entry = resolveEntry(token);
+        if (entry) {
+          if (paintListCardFromCacheFast(card, token, entry)) painted += 1;
+        } else {
+          queueToken(token);
+          queued += 1;
+        }
+      }
+      debugInfo("gmgn:embedded-dirty", { cards: cards.length, processed, painted, queued });
+    }, GMGN_EMBEDDED_DIRTY_DEBOUNCE_MS);
+  }
+
+  /** Collect only GMGN TokenItem roots touched by host mutations. */
+  function collectGmgnEmbeddedDirtyCards(records) {
+    if (!isGmgnTokenPage() || !records?.length) return 0;
+    const selector = '[data-sentry-source-file="TokenItem.tsx"]';
+    let added = 0;
+    let matched = false;
+    const addCard = (node) => {
+      if (!(node instanceof HTMLElement)) return;
+      const card = node.matches(selector) ? node : node.closest?.(selector);
+      if (card instanceof HTMLElement && card.isConnected) {
+        matched = true;
+        if (!gmgnEmbeddedDirtyCards.has(card)) {
+          gmgnEmbeddedDirtyCards.add(card);
+          added += 1;
+        }
+      }
+      if (added >= GMGN_EMBEDDED_DIRTY_CARD_LIMIT) return;
+      const nested = node.querySelectorAll?.(selector) || [];
+      for (let i = 0; i < nested.length && added < GMGN_EMBEDDED_DIRTY_CARD_LIMIT; i += 1) {
+        const item = nested[i];
+        if (!(item instanceof HTMLElement) || !item.isConnected || gmgnEmbeddedDirtyCards.has(item)) {
+          if (item instanceof HTMLElement && item.isConnected) matched = true;
+          continue;
+        }
+        matched = true;
+        gmgnEmbeddedDirtyCards.add(item);
+        added += 1;
+      }
+    };
+    for (const record of records) {
+      if (!record || record.type !== "childList" || isExtensionOnlyMutation(record)) continue;
+      addCard(record.target instanceof HTMLElement ? record.target : record.target?.parentElement);
+      for (const node of record.addedNodes || []) {
+        if (node instanceof HTMLElement) addCard(node);
+        if (added >= GMGN_EMBEDDED_DIRTY_CARD_LIMIT) break;
+      }
+      if (added >= GMGN_EMBEDDED_DIRTY_CARD_LIMIT) break;
+    }
+    if (matched) scheduleGmgnEmbeddedDirtyPass();
+    return added;
+  }
+
   function gmgnMutationLooksRelevant(records) {
     if (!records || !records.length) return true;
     const interestingHref = (href) =>
@@ -2323,8 +2844,11 @@
       (href.includes("7777") || href.includes("8888") || href.includes("/token/"));
     const probeEl = (el) => {
       if (!(el instanceof HTMLElement)) return false;
-      if (el.dataset?.[ICON_MARK] === "1" || el.dataset?.[CARD_MARK]) return true;
-      if (el.matches?.(`[${ICON_DATA}="1"], [${CARD_DATA}]`)) return true;
+      // A direct extension badge insert/remove is our own feedback, not host work.
+      if (el.dataset?.[ICON_MARK] === "1" || el.matches?.(`[${ICON_DATA}="1"]`)) {
+        return false;
+      }
+      if (el.dataset?.[CARD_MARK] || el.matches?.(`[${CARD_DATA}]`)) return true;
       const tag = el.tagName;
       if (tag === "A") {
         const href = el.getAttribute("href") || "";
@@ -2361,6 +2885,52 @@
     return false;
   }
 
+  /**
+   * Debot/Gungnir mutation relevance. Extension-only badge insert/remove records must
+   * not schedule another scan; that feedback loop made virtual-list scrolling unbounded.
+   */
+  function debotMutationLooksRelevant(records) {
+    if (!records || !records.length) return true;
+    const probeEl = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      if (el.dataset?.[ICON_MARK] === "1" || el.matches?.(`[${ICON_DATA}="1"]`)) {
+        return false;
+      }
+      const tag = el.tagName;
+      if (tag === "A") {
+        const href = el.getAttribute("href") || "";
+        if (/\/token\/|\/bsc\/token\//i.test(href) && /(?:7777|8888)/i.test(href)) {
+          return true;
+        }
+      }
+      if (
+        el.querySelector?.(
+          'a[href*="/token/"][href*="7777"], a[href*="/token/"][href*="8888"], ' +
+            'a[href*="/bsc/token/"][href*="7777"], a[href*="/bsc/token/"][href*="8888"]'
+        )
+      ) {
+        return true;
+      }
+      if ((tag === "SPAN" || tag === "DIV") && el.childElementCount <= 3) {
+        const text = (el.textContent || "").trim();
+        if (text.length <= 64 && (TARGET_SHORT_TOKEN_RE.test(text) || hasFeeTag(text))) {
+          return true;
+        }
+      }
+      return false;
+    };
+    for (const record of records) {
+      if (!record || record.type !== "childList") continue;
+      for (const node of record.addedNodes || []) {
+        if (node.nodeType === 1 && probeEl(node)) return true;
+      }
+      for (const node of record.removedNodes || []) {
+        if (node.nodeType === 1 && probeEl(node)) return true;
+      }
+    }
+    return false;
+  }
+
   function isSpaListReturnSoft() {
     return spaListReturnUntil > 0 && Date.now() < spaListReturnUntil && !isTokenDetailRoute();
   }
@@ -2368,6 +2938,11 @@
   /** GMGN needs 0.4.22-light SPA; Debot keeps denser recovery. */
   function isGmgnHost() {
     return (location.hostname || "").endsWith("gmgn.ai");
+  }
+
+  function isDebotHost() {
+    const host = location.hostname || "";
+    return host.endsWith("debot.ai") || host.endsWith("gungnir.bot");
   }
 
   function listReturnSoftDurationMs() {
@@ -2390,6 +2965,12 @@
   function routeKeyWasTokenDetail(routeKey) {
     const s = String(routeKey || "");
     return /\/token\//i.test(s) || /\/bsc\/token\//i.test(s);
+  }
+
+  function routeKeyHasNonTargetToken(routeKey) {
+    if (!routeKeyWasTokenDetail(routeKey)) return false;
+    const token = extractAnyToken(routeKey);
+    return !!token && !TARGET_TOKEN_RE.test(token);
   }
 
   /**
@@ -2439,10 +3020,194 @@
   }
 
   /**
+   * Bounded GMGN row signals inside one known column. Current GMGN virtual rows may
+   * navigate through React handlers and expose only a short CA, so an <a> is optional.
+   */
+  function collectGmgnTrenchRowSignals(root, targetOnly = false, cap = 18) {
+    if (!(root instanceof HTMLElement) || !root.querySelectorAll || cap <= 0) return [];
+    const out = [];
+    const seen = new Set();
+    const push = (el) => {
+      if (!(el instanceof HTMLElement) || seen.has(el) || out.length >= cap) return;
+      seen.add(el);
+      out.push(el);
+    };
+    try {
+      const attrNodes = root.querySelectorAll(
+        "a[href*='0x'], [title*='0x'], [aria-label*='0x'], " +
+          "[data-token*='0x'], [data-address*='0x'], [data-ca*='0x'], [data-contract*='0x']"
+      );
+      const attrMax = Math.min(attrNodes.length, 80);
+      for (let i = 0; i < attrMax && out.length < cap; i += 1) {
+        const el = attrNodes[i];
+        const href = el.getAttribute("href") || "";
+        if (/flap\.sh|bscscan|etherscan/i.test(href)) continue;
+        const values = [
+          href,
+          el.getAttribute("title"),
+          el.getAttribute("aria-label"),
+          el.getAttribute("data-token"),
+          el.getAttribute("data-address"),
+          el.getAttribute("data-ca"),
+          el.getAttribute("data-contract")
+        ];
+        const token = values.map((value) => extractAnyToken(value)).find(Boolean);
+        if (!token || (targetOnly && !TARGET_TOKEN_RE.test(token))) continue;
+        push(el);
+      }
+
+      // Root-scoped and capped: covers div/span rows driven by a React onClick.
+      const leaves = root.querySelectorAll("span, a, div, p");
+      const leafMax = Math.min(leaves.length, 260);
+      const taxFallback = [];
+      for (let i = 0; i < leafMax && out.length < cap; i += 1) {
+        const el = leaves[i];
+        if (!(el instanceof HTMLElement) || el.childElementCount > 2) continue;
+        const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+        if (!text || text.length > 32) continue;
+        const short = text.match(SHORT_TOKEN_RE)?.[0] || "";
+        if (short && (!targetOnly || TARGET_SHORT_TOKEN_RE.test(short))) {
+          push(el);
+          continue;
+        }
+        if (targetOnly && taxFallback.length < 8 && /^Tax(?:\s|$)/i.test(text)) {
+          taxFallback.push(el);
+        }
+      }
+      if (targetOnly && out.length < cap) {
+        for (const el of taxFallback) push(el);
+      }
+    } catch (_err) {
+      return out;
+    }
+    return out;
+  }
+
+  /**
+   * Collect one bounded seed per visible GMGN card. The cap applies after card
+   * resolution, so multiple href/data attributes from one row cannot starve
+   * later rows in the same column.
+   */
+  function collectGmgnVisibleCardSeeds(root, cap = 18) {
+    if (!(root instanceof HTMLElement) || !root.querySelectorAll || cap <= 0) return [];
+    const out = [];
+    const seenCards = new Set();
+    const add = (seed) => {
+      if (!(seed instanceof HTMLElement) || out.length >= cap) return;
+      if (!isNearViewport(seed, false)) return;
+      const card = resolveGmgnTrenchRow(seed);
+      if (!(card instanceof HTMLElement) || seenCards.has(card)) return;
+      seenCards.add(card);
+      out.push({ seed, card });
+    };
+
+    try {
+      const attrs = root.querySelectorAll(SUFFIX_SELECTORS);
+      const attrMax = Math.min(attrs.length, 120);
+      for (let i = 0; i < attrMax && out.length < cap; i += 1) add(attrs[i]);
+
+      if (out.length < cap) {
+        const leaves = root.querySelectorAll("span, a, p");
+        const leafMax = Math.min(leaves.length, 320);
+        for (let i = 0; i < leafMax && out.length < cap; i += 1) {
+          const leaf = leaves[i];
+          if (!(leaf instanceof HTMLElement) || leaf.childElementCount > 1) continue;
+          const text = (leaf.textContent || "").trim();
+          if (text.length < 8 || text.length > 24 || !TARGET_SHORT_TOKEN_RE.test(text)) {
+            continue;
+          }
+          add(leaf);
+        }
+      }
+    } catch (_err) {
+      return out;
+    }
+    return out;
+  }
+
+  /** Locate the compact row containing a CA/Tax signal, never a full column wrapper. */
+  function resolveGmgnTrenchRow(signal) {
+    if (!(signal instanceof HTMLElement)) return null;
+    const card = climbGmgnListCard(signal) || quickClimbCardFromTokenLink(signal);
+    if (!(card instanceof HTMLElement) || !hasShortAddress(card)) return null;
+    try {
+      const r = card.getBoundingClientRect();
+      if (r.width < 180 || r.height < 56 || r.height > 420) return null;
+    } catch (_err) {
+      return null;
+    }
+    return card;
+  }
+
+  /**
+   * Require real card rows in multiple horizontal columns. This rejects the single
+   * embedded trench sidebar that can remain mounted while GMGN leaves the K-line.
+   */
+  function getMountedGmgnTrenchRoots() {
+    const candidates = [];
+    try {
+      document.querySelectorAll(GMGN_TRENCH_ROOT_SELECTOR).forEach((root) => {
+        if (!(root instanceof HTMLElement)) return;
+        const r = root.getBoundingClientRect();
+        if (
+          r.width < 240 ||
+          r.width > window.innerWidth * 0.48 ||
+          r.height < 200 ||
+          r.bottom <= 0 ||
+          r.top >= window.innerHeight
+        ) {
+          return;
+        }
+        const head = (root.textContent || "").slice(0, 120);
+        const titleRank = /新创建|即将打满|已开盘/.test(head) ? 1 : 0;
+        candidates.push({
+          root,
+          titleRank,
+          area: r.width * r.height,
+          bucket: listColumnBucket(root)
+        });
+      });
+    } catch (_err) {
+      return [];
+    }
+    candidates.sort((a, b) => b.titleRank - a.titleRank || b.area - a.area);
+    const byBucket = [[], [], []];
+    for (const candidate of candidates) {
+      const bucket = byBucket[candidate.bucket] || byBucket[1];
+      if (bucket.length < 4) bucket.push(candidate);
+    }
+    const roots = [];
+    for (let depth = 0; depth < 4 && roots.length < 3; depth += 1) {
+      for (let bucket = 0; bucket < 3 && roots.length < 3; bucket += 1) {
+        const candidate = byBucket[bucket][depth];
+        if (!candidate) continue;
+        if (roots.some((root) => root.contains(candidate.root) || candidate.root.contains(root))) {
+          continue;
+        }
+        const signals = collectGmgnTrenchRowSignals(candidate.root, false, 8);
+        if (!signals.some((signal) => resolveGmgnTrenchRow(signal))) continue;
+        roots.push(candidate.root);
+      }
+    }
+    return roots;
+  }
+
+  /**
    * Collect list-return seeds in viewport, round-robin by column.
    * 0.4.39: href tokens + Tax chips + short-CA leaves (js-mcp: href-only climb miss).
    */
-  function collectListReturnAnchorsRoundRobin() {
+  function collectListReturnAnchorsRoundRobin(options = {}) {
+    const requestedCap = Number(options.cap);
+    const cap =
+      Number.isFinite(requestedCap) && requestedCap > 0
+        ? Math.floor(requestedCap)
+        : listReturnCandidateCap();
+    const requestedOffset = Number(options.rowOffset);
+    const rowOffset =
+      Number.isFinite(requestedOffset) && requestedOffset > 0
+        ? Math.floor(requestedOffset)
+        : 0;
+    const forceFreshRoots = options.forceFreshRoots !== false;
     const linkSel =
       "a[href*='/token/'][href*='8888'], a[href*='/token/'][href*='7777'], " +
       "a[href*='/bsc/token/'][href*='8888'], a[href*='/bsc/token/'][href*='7777']";
@@ -2455,25 +3220,31 @@
       if (seenKey.has(k)) return;
       // Skip external explorer icons (flap.sh) — climb to wrong thin hosts.
       const href = (el.getAttribute && el.getAttribute("href")) || "";
-      if (/flap\.sh|bscscan|etherscan/i.test(href)) return;
+      if (/flap\.sh|bscscan|etherscan/i.test(href) && !(key instanceof HTMLElement)) return;
       seenKey.add(k);
       buckets[listColumnBucket(el)].push(el);
     };
     try {
       // Force fresh roots so all 3 Debot MuiCards / GMGN columns are present.
-      const roots = getScanRoots(true);
+      const gmgnRoots = isGmgnHost() && forceFreshRoots ? getMountedGmgnTrenchRoots() : [];
+      const roots = gmgnRoots.length ? gmgnRoots : getScanRoots(forceFreshRoots);
       for (let ri = 0; ri < roots.length; ri += 1) {
         const root = roots[ri];
         if (!root || !root.querySelectorAll) continue;
+        if (isGmgnHost()) {
+          const cards = collectGmgnVisibleCardSeeds(root, 18);
+          for (const item of cards) pushSeed(item.seed, item.card);
+          continue;
+        }
         const found = root.querySelectorAll(linkSel);
         for (let i = 0; i < found.length; i += 1) {
           const a = found[i];
           const href = (a.getAttribute && a.getAttribute("href")) || a.href || "";
-          pushSeed(a, `h:${href.toLowerCase()}`);
+          const key = isGmgnHost() ? resolveGmgnTrenchRow(a) || a : `h:${href.toLowerCase()}`;
+          pushSeed(a, key);
         }
-        // Tax / short seeds ONLY for Debot when href seeds thin.
-        // 0.4.45 GMGN: NEVER walk Tax leaves on list-return (href-only + viewport pad).
         if (!isGmgnHost()) {
+          // Debot fallback when href seeds are thin.
           const hrefCount = buckets[0].length + buckets[1].length + buckets[2].length;
           if (hrefCount < 10) {
             const leaves = root.querySelectorAll("span, a");
@@ -2500,9 +3271,11 @@
     }
     // Round-robin: col0, col1, col2, col0, ...
     const out = [];
-    let idx = 0;
-    const cap = listReturnCandidateCap();
-    while (out.length < cap) {
+    const maxRows = Math.max(buckets[0].length, buckets[1].length, buckets[2].length);
+    const startRow = maxRows > 0 ? rowOffset % maxRows : 0;
+    let visitedRows = 0;
+    while (out.length < cap && visitedRows < maxRows) {
+      const idx = (startRow + visitedRows) % maxRows;
       let added = false;
       for (let b = 0; b < 3; b += 1) {
         if (idx < buckets[b].length) {
@@ -2512,7 +3285,7 @@
         }
       }
       if (!added) break;
-      idx += 1;
+      visitedRows += 1;
     }
     return out;
   }
@@ -2577,6 +3350,7 @@
    */
   function fastPaintListReturnViewport() {
     if (isTokenDetailRoute() || !isExtensionContextValid()) return 0;
+    if (!tryFinishListReturnTransition("fast-paint")) return 0;
     const t0 = performance.now();
     let painted = 0;
     let queued = 0;
@@ -2687,7 +3461,7 @@
       const { label, title, className } = computeBadgePresentation(entry, q);
       if (!label) return false;
 
-      card.dataset[CARD_MARK] = token;
+      if (card.dataset[CARD_MARK] !== token) card.dataset[CARD_MARK] = token;
       try {
         card.setAttribute(CARD_DATA, token);
       } catch (_err) {
@@ -2989,14 +3763,22 @@
   /** Independent of history hooks / mutation observer (survives detached roots). */
   function startRoutePoller() {
     if (routePollId) return;
-    routePollId = window.setInterval(() => {
-      if (!isExtensionContextValid() || !isTabVisible()) return;
-      try {
-        onSpaRouteChange("route-poll");
-      } catch (_err) {
-        // ignore
+    const tick = () => {
+      routePollId = null;
+      if (!isExtensionContextValid()) return;
+      if (isTabVisible()) {
+        try {
+          onSpaRouteChange("route-poll");
+        } catch (_err) {
+          // ignore
+        }
       }
-    }, ROUTE_POLL_MS);
+      routePollId = window.setTimeout(
+        tick,
+        isTabVisible() ? ROUTE_POLL_MS : TOKEN_GUARDIAN_HIDDEN_MS
+      );
+    };
+    routePollId = window.setTimeout(tick, ROUTE_POLL_MS);
   }
 
   /**
@@ -3013,60 +3795,63 @@
    * 0.5.9: Watch the official token-base-address row. GMGN React often replaces
    * children and drops our afterend badge — re-paint without full list thrash.
    */
+  function nodeMatchesOrContains(node, selector) {
+    if (!(node instanceof Element)) return false;
+    try {
+      return node.matches?.(selector) || !!node.querySelector?.(selector);
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  function gmgnHeaderMutationLooksRelevant(records, token) {
+    if (!records || !records.length || !token) return false;
+    const badgeSelector =
+      `[${ICON_DATA}="1"][data-fee-header="1"][data-fee-token="${token}"]`;
+    const addressSelector =
+      `#token-base-address, [data-addr="${token}"], [data-addr="${token.toLowerCase()}"]`;
+    for (const record of records) {
+      const target = record?.target;
+      if (nodeMatchesOrContains(target, addressSelector)) return true;
+      for (const node of record?.removedNodes || []) {
+        if (
+          nodeMatchesOrContains(node, badgeSelector) ||
+          nodeMatchesOrContains(node, addressSelector)
+        ) {
+          return true;
+        }
+      }
+      for (const node of record?.addedNodes || []) {
+        if (nodeMatchesOrContains(node, addressSelector)) return true;
+      }
+    }
+    return false;
+  }
+
+  function scheduleGmgnHeaderRepair(reason, delay = 0) {
+    if (gmgnHeaderRepairTimer) return;
+    gmgnHeaderRepairTimer = window.setTimeout(() => {
+      gmgnHeaderRepairTimer = null;
+      if (!isExtensionContextValid() || !isTabVisible() || !isGmgnTokenPage()) return;
+      if (hasGmgnTokenHeaderBadge()) return;
+      tryPaintGmgnTokenHeader(reason);
+    }, delay);
+  }
+
   function armGmgnHeaderDomWatch() {
     if (!isGmgnHost() || !isGmgnTokenPage()) return;
     const urlTok = extractTokenFromUrl();
     if (!urlTok) return;
-    const leaf =
-      findGmgnOfficialTokenBaseAddress(urlTok) || findGmgnHeaderShortCaLeaf(urlTok);
-    if (!(leaf instanceof HTMLElement)) return;
-    const host = leaf.parentElement || leaf;
-    try {
-      if (gmgnHeaderDomObs) {
-        gmgnHeaderDomObs.disconnect();
-        gmgnHeaderDomObs = null;
-      }
-      gmgnHeaderDomObs = new MutationObserver(() => {
-        if (!isExtensionContextValid() || !isTabVisible()) return;
-        if (!isGmgnTokenPage()) {
-          stopGmgnHeaderDomWatch();
-          return;
-        }
-        const now = Date.now();
-        if (now - gmgnHeaderDomObsLastAt < 120) return;
-        gmgnHeaderDomObsLastAt = now;
-        if (hasGmgnTokenHeaderBadge()) return;
-        try {
-          tryPaintGmgnTokenHeader("header-dom-watch");
-        } catch (_err) {
-          // ignore
-        }
-      });
-      gmgnHeaderDomObs.observe(host, { childList: true, subtree: true });
-      // Also observe a bit higher so header strip rebuilds are caught.
-      const strip = host.parentElement;
-      if (strip && strip !== host) {
-        try {
-          gmgnHeaderDomObs.observe(strip, { childList: true, subtree: true });
-        } catch (_err2) {
-          // ignore
-        }
-      }
-    } catch (_err) {
-      gmgnHeaderDomObs = null;
-    }
+    // The always-on document observer owns targeted header repair. Keeping a second
+    // document-wide observer here doubled mutation delivery on chart-heavy token pages.
+    if (!hasGmgnTokenHeaderBadge()) scheduleGmgnHeaderRepair("header-watch-arm", 80);
   }
 
   function stopGmgnHeaderDomWatch() {
-    if (gmgnHeaderDomObs) {
-      try {
-        gmgnHeaderDomObs.disconnect();
-      } catch (_err) {
-        // ignore
-      }
-      gmgnHeaderDomObs = null;
+    if (gmgnHeaderRepairTimer) {
+      window.clearTimeout(gmgnHeaderRepairTimer);
+      gmgnHeaderRepairTimer = null;
     }
-    gmgnHeaderDomObsLastAt = 0;
   }
 
   function startGmgnTokenGuardian() {
@@ -3081,7 +3866,7 @@
       try {
         if (!isExtensionContextValid()) return;
         if (!isTabVisible()) {
-          scheduleNext(BASE_MS);
+          scheduleNext(TOKEN_GUARDIAN_HIDDEN_MS);
           return;
         }
         const rk = getRouteKey();
@@ -3095,7 +3880,7 @@
         if (!isGmgnTokenPage()) {
           gmgnHeaderMissSince = 0;
           stopGmgnHeaderDomWatch();
-          nextMs = BASE_MS * 2;
+          nextMs = TOKEN_GUARDIAN_HEALTHY_MS;
         } else {
           const urlTok = extractTokenFromUrl();
           if (!urlTok) {
@@ -3104,26 +3889,25 @@
             gmgnHeaderMissSince = 0;
             armGmgnHeaderDomWatch();
             // Header OK — still light-kick left trench occasionally.
-            nextMs = BASE_MS * 3;
-            scheduleScan(0, { force: false, immediate: false, light: false });
+            nextMs = TOKEN_GUARDIAN_HEALTHY_MS;
           } else {
             if (!gmgnHeaderMissSince) gmgnHeaderMissSince = Date.now();
             const missAge = Date.now() - gmgnHeaderMissSince;
             queueToken(urlTok);
-            recoverStuckBatch(false);
-            scheduleBatchFlush({ immediate: true, delayMs: 0 });
-            tryPaintGmgnTokenHeader("gmgn-guardian");
-            armGmgnHeaderDomWatch();
-            // Also ensure list column scan runs.
-            scheduleScan(0, {
-              force: true,
-              immediate: false,
-              light: false,
-              bypassForceGap: true
-            });
-            if (missAge > 15000) nextMs = 2800;
-            else if (missAge > 6000) nextMs = 1200;
-            else nextMs = BASE_MS;
+            const entry = resolveEntry(urlTok);
+            if (!entry) {
+              recoverStuckBatch(false);
+              scheduleBatchFlush({ immediate: true, delayMs: 0 });
+              nextMs = missAge > 6000 ? 4000 : 1800;
+            } else if (isTokenEnterPaintGraceActive()) {
+              nextMs = Math.max(100, tokenEnterPaintAfter - Date.now() + 20);
+            } else {
+              tryPaintGmgnTokenHeader("gmgn-guardian");
+              armGmgnHeaderDomWatch();
+              if (missAge > 15000) nextMs = 2800;
+              else if (missAge > 6000) nextMs = 1200;
+              else nextMs = BASE_MS;
+            }
           }
         }
       } catch (_err) {
@@ -3145,7 +3929,7 @@
       try {
         if (!isExtensionContextValid()) return;
         if (!isTabVisible()) {
-          scheduleNext(DEBOT_TOKEN_GUARDIAN_MS);
+          scheduleNext(TOKEN_GUARDIAN_HIDDEN_MS);
           return;
         }
         const rk = getRouteKey();
@@ -3155,7 +3939,7 @@
         if (!isDebotTokenPage()) {
           debotHeaderMissStreak = 0;
           debotHeaderMissSince = 0;
-          nextMs = DEBOT_TOKEN_GUARDIAN_MS;
+          nextMs = TOKEN_GUARDIAN_HEALTHY_MS;
         } else {
           const urlTok = extractTokenFromUrl();
           if (!urlTok) {
@@ -3164,7 +3948,7 @@
           } else if (hasDebotTokenHeaderBadge()) {
             debotHeaderMissStreak = 0;
             debotHeaderMissSince = 0;
-            nextMs = DEBOT_TOKEN_GUARDIAN_MS * 2;
+            nextMs = TOKEN_GUARDIAN_HEALTHY_MS;
           } else {
             if (!debotHeaderMissSince) debotHeaderMissSince = Date.now();
             debotHeaderMissStreak += 1;
@@ -3175,17 +3959,18 @@
               recoverStuckBatch(false);
               scheduleBatchFlush({ immediate: true, delayMs: 0 });
             }
-            tryPaintDebotTokenHeader(
-              Date.now() < debotTokenClickArmUntil ? "guardian-click-arm" : "guardian"
-            );
-            // Full scan only in first 5s of miss — later paint-only (dwell jank fix).
-            if (missAge < 5000 && !hasDebotTokenHeaderBadge()) {
-              maybeScheduleDebotHeaderFullScan("guardian");
+            const entry = resolveEntry(urlTok);
+            if (!entry) {
+              nextMs = missAge > 5000 ? 4000 : 1800;
+            } else if (isTokenEnterPaintGraceActive()) {
+              nextMs = Math.max(100, tokenEnterPaintAfter - Date.now() + 20);
+            } else {
+              tryPaintDebotTokenHeader("guardian");
+              // Backoff while the real address row is still missing.
+              if (missAge > 12000) nextMs = 4000;
+              else if (missAge > 5000) nextMs = 2500;
+              else nextMs = DEBOT_TOKEN_GUARDIAN_MS;
             }
-            // Backoff while missing: stop thrashing K-line for 30s dwell.
-            if (missAge > 12000) nextMs = 4000;
-            else if (missAge > 5000) nextMs = 2500;
-            else nextMs = DEBOT_TOKEN_GUARDIAN_MS;
           }
         }
       } catch (_err) {
@@ -3206,9 +3991,10 @@
     if (!host.endsWith("debot.ai") && !host.endsWith("gungnir.bot")) return;
 
     const armTokenPaint = (reasonPrefix) => {
+      armTokenEnterTransition();
       debotTokenClickArmUntil = Date.now() + DEBOT_TOKEN_CLICK_ARM_MS;
       armDebotHeaderDomWatch();
-      const kick = (ms, reason, fullScan) => {
+      const kick = (ms, reason) => {
         window.setTimeout(() => {
           if (!isExtensionContextValid() || !isTabVisible()) return;
           try {
@@ -3225,25 +4011,14 @@
           }
           armDebotTokenHeaderWatch();
           tryPaintDebotTokenHeader(`${reasonPrefix}:${reason}`);
-          if (fullScan && !hasDebotTokenHeaderBadge()) {
-            pendingLightScan = false;
-            scheduleScan(0, {
-              force: true,
-              immediate: true,
-              light: false,
-              bypassForceGap: true
-            });
-          }
         }, ms);
       };
-      // Dense early kicks — SPA header DOM often late when logged in.
-      kick(0, "0", false);
-      kick(80, "80", false);
-      kick(250, "250", true);
-      kick(600, "600", true);
-      kick(1200, "1200", true);
-      kick(2200, "2200", true);
-      kick(4000, "4000", false);
+      // Header-only retries; the outgoing trench is left untouched.
+      kick(280, "280");
+      kick(700, "700");
+      kick(1200, "1200");
+      kick(2200, "2200");
+      kick(4000, "4000");
     };
 
     const armListReturnPaint = () => {
@@ -3255,6 +4030,12 @@
       (event) => {
         try {
           if (!isExtensionContextValid()) return;
+          if (
+            event instanceof MouseEvent &&
+            (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey)
+          ) {
+            return;
+          }
           const t = event.target;
           if (!(t instanceof Element)) return;
 
@@ -3309,14 +4090,13 @@
   function armListReturnSoftWindow(reason) {
     // 0.4.41: GMGN never uses soft-window kicks — pure 0.4.22 progressive via route settle.
     if (isGmgnHost()) return;
+    armListReturnTransition(reason);
 
     const softMs = listReturnSoftDurationMs();
     spaListReturnUntil = Date.now() + softMs;
     spaListReturnCacheOnlyUntil = Date.now() + SPA_LIST_RETURN_CACHE_ONLY_MS;
     spaQuietUntil = 0;
     spaSettleFromToken = true;
-    armListReturnDomWatch();
-    armListReturnKeepAlive();
     const kick = (ms, immediate) => {
       window.setTimeout(() => {
         if (!isExtensionContextValid() || !isTabVisible()) return;
@@ -3420,12 +4200,12 @@
     const armGmgnListReturnFromClick = () => {
       // Only when leaving a token/K-line page.
       if (!isGmgnTokenPage() && !routeKeyWasTokenDetail(lastRouteKey)) return;
+      armListReturnTransition("gmgn-list-return-click");
       const softMs = listReturnSoftDurationMs();
       spaListReturnUntil = Date.now() + softMs;
       spaListReturnCacheOnlyUntil = Date.now() + SPA_LIST_RETURN_CACHE_ONLY_MS;
       spaQuietUntil = 0;
       spaSettleFromToken = true;
-      armListReturnDomWatch();
       // Immediate + delayed fastPaint only (0.4.46: no force scan on click — host longtask peak).
       const paintKick = (ms) => {
         window.setTimeout(() => {
@@ -3465,6 +4245,12 @@
       (event) => {
         try {
           if (!isExtensionContextValid()) return;
+          if (
+            event instanceof MouseEvent &&
+            (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey)
+          ) {
+            return;
+          }
           const t = event.target;
           if (!(t instanceof Element)) return;
 
@@ -3498,6 +4284,7 @@
           if (!href || !/\/token\//i.test(href)) return;
           const m = href.match(/0x[a-fA-F0-9]{40}/i);
           if (m && !TARGET_TOKEN_RE.test(m[0].toLowerCase())) return;
+          armTokenEnterTransition();
           window.setTimeout(() => {
             if (!isExtensionContextValid() || !isTabVisible()) return;
             if (!isGmgnTokenPage()) return;
@@ -3581,10 +4368,7 @@
           overlayFastUntil = Date.now() + OVERLAY_FAST_MS;
           overlayDetectCache = { at: 0, open: false };
           if (isGmgnHost()) {
-            window.setTimeout(() => {
-              if (!isExtensionContextValid() || !quickHasOpenOverlay()) return;
-              scheduleScan(0, { force: true, light: true, immediate: false, bypassForceGap: true });
-            }, 150);
+            scheduleGmgnOverlayPaint("click-search", 150, true);
             return;
           }
           window.setTimeout(() => {
@@ -3617,6 +4401,10 @@
             return;
           }
           overlayFastUntil = Date.now() + OVERLAY_FAST_MS;
+          if (isGmgnHost()) {
+            scheduleGmgnOverlayPaint("focus-search", 150, true);
+            return;
+          }
           window.setTimeout(() => {
             if (quickHasOpenOverlay()) armOverlayFastScan("focus-search");
           }, 80);
@@ -3629,36 +4417,76 @@
   }
 
   /** Observe DOM until Debot token header badge is painted (SPA activation chain). */
+  function debotNodeHasTokenSignal(node, token) {
+    if (!(node instanceof Element) || !token) return false;
+    const accepts = (el) => {
+      if (!(el instanceof Element)) return false;
+      const values = [
+        el.getAttribute("href"),
+        el.getAttribute("title"),
+        el.getAttribute("data-addr"),
+        el.getAttribute("data-token"),
+        el.getAttribute("data-address")
+      ];
+      if (values.some((value) => normalizeToken(value) === token)) return true;
+      if (el.childElementCount <= 2) {
+        const text = (el.textContent || "").trim();
+        const short = text.match(SHORT_TOKEN_RE)?.[0];
+        if (short && text.length <= 28 && tokenMatchesShort(token, short)) return true;
+      }
+      return false;
+    };
+    if (accepts(node)) return true;
+    try {
+      const candidates = node.querySelectorAll(
+        'a[href*="0x"], [title*="0x"], [data-addr*="0x"], [data-token*="0x"], [data-address*="0x"]'
+      );
+      for (let i = 0; i < Math.min(candidates.length, 24); i += 1) {
+        if (accepts(candidates[i])) return true;
+      }
+    } catch (_err) {
+      return false;
+    }
+    return false;
+  }
+
+  function debotHeaderMutationLooksRelevant(records, token) {
+    if (!records || !records.length || !token) return false;
+    const badgeSelector =
+      `[${ICON_DATA}="1"][data-fee-header="1"][data-fee-token="${token}"]`;
+    for (const record of records) {
+      if (debotNodeHasTokenSignal(record?.target, token)) return true;
+      for (const node of record?.removedNodes || []) {
+        if (nodeMatchesOrContains(node, badgeSelector) || debotNodeHasTokenSignal(node, token)) {
+          return true;
+        }
+      }
+      for (const node of record?.addedNodes || []) {
+        if (debotNodeHasTokenSignal(node, token)) return true;
+      }
+    }
+    return false;
+  }
+
+  function scheduleDebotHeaderRepair(reason, delay = 0) {
+    if (debotHeaderRepairTimer) return;
+    debotHeaderRepairTimer = window.setTimeout(() => {
+      debotHeaderRepairTimer = null;
+      if (!isExtensionContextValid() || !isTabVisible() || !isDebotTokenPage()) return;
+      if (hasDebotTokenHeaderBadge()) return;
+      tryPaintDebotTokenHeader(reason);
+    }, delay);
+  }
+
   function armDebotHeaderDomWatch() {
     stopDebotHeaderDomWatch();
     if (!isDebotTokenPage() && !debotTokenClickArmUntil) return;
-    try {
-      debotHeaderDomObs = new MutationObserver(() => {
-        if (!isExtensionContextValid()) {
-          stopDebotHeaderDomWatch();
-          return;
-        }
-        if (!isDebotTokenPage()) return;
-        if (hasDebotTokenHeaderBadge()) {
-          stopDebotHeaderDomWatch();
-          return;
-        }
-        const now = Date.now();
-        if (now - debotHeaderDomObsLastPaintAt < 180) return;
-        debotHeaderDomObsLastPaintAt = now;
-        tryPaintDebotTokenHeader("dom-watch");
-      });
-      debotHeaderDomObs.observe(document.documentElement, {
-        childList: true,
-        subtree: true
-      });
-      // Auto-stop after watch window
-      window.setTimeout(() => {
-        if (hasDebotTokenHeaderBadge()) stopDebotHeaderDomWatch();
-      }, DEBOT_TOKEN_HEADER_WATCH_MS);
-    } catch (_err) {
-      debotHeaderDomObs = null;
-    }
+    const token = extractTokenFromUrl();
+    if (!token || !resolveEntry(token)) return;
+    // The always-on document observer already filters mutations to the current address.
+    // A second document-wide observer multiplied chart mutation delivery, and never
+    // stopped when the optional API request failed.
+    scheduleDebotHeaderRepair("header-watch-arm", TOKEN_ENTER_PAINT_GRACE_MS);
   }
 
   function stopDebotHeaderDomWatch() {
@@ -3671,6 +4499,10 @@
       debotHeaderDomObs = null;
     }
     debotHeaderDomObsLastPaintAt = 0;
+    if (debotHeaderRepairTimer) {
+      window.clearTimeout(debotHeaderRepairTimer);
+      debotHeaderRepairTimer = null;
+    }
   }
 
   function clearSpaNavScanTimers() {
@@ -3688,9 +4520,22 @@
     if (nextKey === lastRouteKey) return;
     const prevKey = lastRouteKey;
     lastRouteKey = nextKey;
+    // Cover keyboard/programmatic navigation that bypasses the card click listener.
+    // Freeze immediately at route detection, before the 40ms settle coalescer runs.
+    if (routeKeyWasTokenDetail(nextKey)) armTokenEnterTransition();
+    if (routeKeyWasTokenDetail(prevKey) && !routeKeyWasTokenDetail(nextKey)) {
+      armListReturnTransition(`${reason}:route-return`);
+    }
+    if (routeKeyHasNonTargetToken(nextKey)) {
+      // React may reuse the old address row on token -> token navigation. Remove only
+      // extension-owned header artifacts after URL commit; never wait for a new painter.
+      stopDebotTokenHeaderWatch();
+      stopDebotHeaderDomWatch();
+      stopGmgnHeaderDomWatch();
+      clearTokenHeaderArtifacts();
+    }
 
-    // SPA nav is not tab-background freeze.
-    resumeForceRemountUntil = 0;
+    // SPA navigation is independent from tab lifecycle recovery.
     // Site-specific quiet: Debot/GMGN token short; list return applied in settle.
     const quietMs = spaNavQuietMs();
     spaQuietUntil = Date.now() + quietMs;
@@ -3701,6 +4546,10 @@
     scanTimerIds = [];
     scanScheduled = false;
     lastScanAt = 0;
+    if (gmgnEmbeddedDirtyTimer) window.clearTimeout(gmgnEmbeddedDirtyTimer);
+    gmgnEmbeddedDirtyTimer = null;
+    gmgnEmbeddedDirtyCards.clear();
+    cancelGmgnOverlayPaint();
     clearSpaNavScanTimers();
     if (spaQuietFlushTimer) {
       window.clearTimeout(spaQuietFlushTimer);
@@ -3738,8 +4587,16 @@
         pendingLightScan = false;
         if (isDebotTokenPage()) tryPaintDebotTokenHeader("quiet-flush");
         if (isGmgnTokenPage()) tryPaintGmgnTokenHeader("quiet-flush");
-        // Idle full scan once — not immediate (chart still settling). Header-only roots while unsettled.
-        scheduleScan(0, { force: true, immediate: false, light: false, bypassForceGap: true });
+        // Token pages use direct header painters. A page-wide scan can still hit the
+        // outgoing trench while the SPA is swapping route subtrees.
+        if (!isTokenDetailRoute()) {
+          scheduleScan(0, {
+            force: true,
+            immediate: false,
+            light: false,
+            bypassForceGap: true
+          });
+        }
       }
     }, quietMs + 80);
   }
@@ -3805,6 +4662,8 @@
     const fromToken = routeKeyWasTokenDetail(prevKey);
     const toList = !isTokenDetailRoute();
     const listReturn = fromToken && toList;
+    const enteringToken = isTokenDetailRoute() && !softSameToken;
+    if (toList) finishTokenEnterTransition();
     spaSettleFromToken = listReturn;
 
     // Fresh caches — virtual list reuses nodes with stale token/mount mapping.
@@ -3812,6 +4671,8 @@
     gmgnTaxMountCache = new WeakMap();
     cardTokenCache = new WeakMap();
     scanRootsCache = { at: 0, roots: [] };
+    gmgnSteadyRoundRobinRow = 0;
+    gmgnTrenchProbeCache = { at: 0, roots: [], ready: false };
     taxRateLabelCache = { el: null, at: 0 };
     // GMGN scroll quiet should not block SPA progressive settle.
     if (isGmgnHost()) {
@@ -3821,11 +4682,33 @@
         gmgnScrollResumeTimer = null;
       }
     }
+    if (isDebotHost()) {
+      debotScrollQuietUntil = 0;
+      if (debotScrollResumeTimer) {
+        window.clearTimeout(debotScrollResumeTimer);
+        debotScrollResumeTimer = null;
+      }
+    }
 
     if (!softSameToken) {
       stopDebotTokenHeaderWatch();
-      // Cheap full reset of OUR marks only (including body/chakra shells from token page).
-      resetOurDomMarks();
+      if (enteringToken) {
+        armTokenEnterTransition();
+        // Keep outgoing trench badges untouched. React will remove them with its old
+        // subtree; synchronous removal here caused a visible reflow before K-line mount.
+        debotHeaderBadgeOkUntil = 0;
+        debotHeaderBadgeOkEl = null;
+        debotHeaderFindCache = { at: 0, key: "", el: null };
+      } else if (listReturn) {
+        // Keep the old token header untouched until the real trench DOM is ready.
+        // Removing it while the K-line subtree is still visible causes a flash/residual.
+        debotHeaderBadgeOkUntil = 0;
+        debotHeaderBadgeOkEl = null;
+        debotHeaderFindCache = { at: 0, key: "", el: null };
+      } else {
+        // List return / non-token navigation still resets our route-owned marks.
+        resetOurDomMarks();
+      }
     }
 
     // token→list soft window:
@@ -3835,8 +4718,6 @@
       spaListReturnUntil = Date.now() + listReturnSoftDurationMs();
       spaListReturnCacheOnlyUntil = Date.now() + SPA_LIST_RETURN_CACHE_ONLY_MS;
       spaQuietUntil = Date.now() + SPA_NAV_QUIET_LIST_RETURN_MS;
-      armListReturnDomWatch();
-      armListReturnKeepAlive();
     } else if (listReturn && isGmgnHost()) {
       spaListReturnUntil = Date.now() + listReturnSoftDurationMs();
       spaListReturnCacheOnlyUntil = Date.now() + SPA_LIST_RETURN_CACHE_ONLY_MS;
@@ -3847,7 +4728,6 @@
         window.clearTimeout(listReturnKeepAliveId);
         listReturnKeepAliveId = null;
       }
-      armListReturnDomWatch();
     } else if (!softSameToken) {
       spaListReturnUntil = 0;
       spaListReturnCacheOnlyUntil = 0;
@@ -3856,6 +4736,12 @@
         window.clearTimeout(listReturnKeepAliveId);
         listReturnKeepAliveId = null;
       }
+    }
+    if (listReturn && !isListReturnTransitionActive()) {
+      armListReturnDomWatch();
+      if (!isGmgnHost()) armListReturnKeepAlive();
+    } else if (listReturn) {
+      tryFinishListReturnTransition("route-settle");
     }
 
     // ALWAYS observe documentElement — list roots detach on SPA and go silent (js-mcp).
@@ -3870,17 +4756,9 @@
         recoverStuckBatch(false);
         queueToken(enterTok);
         scheduleBatchFlush({ immediate: true, delayMs: 0 });
-        armDebotHeaderDomWatch();
+        // Data/DOM readiness owns painting. Do not search the outgoing header while the
+        // host is switching between token routes.
         armDebotTokenHeaderWatch();
-        tryPaintDebotTokenHeader("settle-enter");
-        // Immediate one full scan (not only tryPaint) — mimics hard refresh path.
-        pendingLightScan = false;
-        scheduleScan(0, {
-          force: true,
-          immediate: true,
-          light: false,
-          bypassForceGap: true
-        });
       }
     } else {
       stopDebotHeaderDomWatch();
@@ -3893,15 +4771,9 @@
         recoverStuckBatch(false);
         queueToken(enterTok);
         scheduleBatchFlush({ immediate: true, delayMs: 0 });
-        tryPaintGmgnTokenHeader("settle-enter");
-        // One delayed header-scoped scan if mount not ready yet.
-        pendingLightScan = false;
-        scheduleScan(60, {
-          force: true,
-          immediate: false,
-          light: false,
-          bypassForceGap: true
-        });
+        if (resolveEntry(enterTok)) {
+          scheduleGmgnHeaderRepair("settle-enter", TOKEN_ENTER_PAINT_GRACE_MS);
+        }
       }
     }
 
@@ -3931,36 +4803,17 @@
       } catch (_err) {
         // ignore
       }
-      if (isGmgnHost()) {
-        armGmgnListReturnFastBurst();
-        armGmgnListReturnFillTicks();
-        // rAF double-kick: host often mounts columns 1–2 frames after route settle.
-        try {
-          window.requestAnimationFrame(() => {
-            if (!isExtensionContextValid() || isTokenDetailRoute()) return;
-            try {
-              fastPaintListReturnViewport();
-            } catch (_err2) {
-              // ignore
-            }
-            window.requestAnimationFrame(() => {
-              if (!isExtensionContextValid() || isTokenDetailRoute()) return;
-              try {
-                fastPaintListReturnViewport();
-              } catch (_err3) {
-                // ignore
-              }
-            });
-          });
-        } catch (_errRaf) {
-          // ignore
-        }
-      }
+      // GMGN recovery timers start in finishListReturnTransition, after the real
+      // trench surface passes the structural gate.
     }
     offsets.forEach((offset, index) => {
       const timerId = window.setTimeout(() => {
         spaNavScanTimers = spaNavScanTimers.filter((id) => id !== timerId);
         if (!isTabVisible() || !isExtensionContextValid()) return;
+
+        // Navigation is already committed, but the host still owns its first render slice.
+        // The targeted MutationObserver may paint sooner when the real address row appears.
+        if (isTokenDetailRoute() && isTokenEnterPaintGraceActive()) return;
 
         // Early-stop: token header settled OR list first-screen enough badges.
         if (index > 0 && shouldCancelSpaProgressive()) {
@@ -3974,7 +4827,7 @@
         spaDomDirty = false;
         // Refresh roots each pass (home columns vs token header / Debot cards).
         // 0.4.46 GMGN list-return: NEVER force getScanRoots on pass 0 (stacks with host 500ms+ longtask).
-        if (!(isGmgnHost() && listReturn && index === 0)) {
+        if (!isTokenDetailRoute() && !(isGmgnHost() && listReturn && index === 0)) {
           if (!isGmgnHost() || index === 0) {
             scanRootsCache = { at: 0, roots: [] };
             try {
@@ -4024,16 +4877,12 @@
           }
         }
 
-        // 0.4.22 style: first immediate; later idle. GMGN token later: tryPaint only.
-        if (isDebotTokenPage() && index > 0) {
-          if (!hasDebotTokenHeaderBadge()) {
-            maybeScheduleDebotHeaderFullScan("spa-progressive");
-          }
-        } else if (isGmgnTokenPage() && index > 0) {
-          if (!hasGmgnTokenHeaderBadge()) {
-            tryPaintGmgnTokenHeader("spa-progressive-later");
-          }
-          // no scheduleScan — chart must not get force-scan stack
+        // Token pages are header-only on every progressive pass. The direct painters
+        // validate the real address mount and do not traverse/repaint list cards.
+        if (isDebotTokenPage()) {
+          if (!hasDebotTokenHeaderBadge()) tryPaintDebotTokenHeader("spa-progressive-later");
+        } else if (isGmgnTokenPage()) {
+          if (!hasGmgnTokenHeaderBadge()) tryPaintGmgnTokenHeader("spa-progressive-later");
         } else if ((listReturn || isSpaListReturnSoft()) && isGmgnHost()) {
           // 0.4.46: pass 0 = fastPaint only (no force scan during host rebuild longtask).
           // Later passes: idle force only if first screen still incomplete.
@@ -4099,9 +4948,13 @@
     if (!isDebotTokenPage()) return;
     const urlTok = extractTokenFromUrl();
     if (!urlTok) return; // non-8888/7777 — nothing to paint
+    if (!resolveEntry(urlTok)) {
+      queueToken(urlTok);
+      scheduleBatchFlush({ immediate: true, delayMs: 0 });
+      return;
+    }
     debotTokenHeaderWatchUntil = Date.now() + DEBOT_TOKEN_HEADER_WATCH_MS;
-    // Immediate attempt
-    tryPaintDebotTokenHeader("watch-arm");
+    scheduleDebotHeaderRepair("watch-arm", TOKEN_ENTER_PAINT_GRACE_MS);
     debotTokenHeaderWatchId = window.setInterval(() => {
       if (!isExtensionContextValid()) {
         stopDebotTokenHeaderWatch();
@@ -4117,78 +4970,131 @@
         stopDebotTokenHeaderWatch();
         return;
       }
-      tryPaintDebotTokenHeader("watch-tick");
-      // Full scan only early in the watch window.
-      const watchAge =
-        DEBOT_TOKEN_HEADER_WATCH_MS - (debotTokenHeaderWatchUntil - Date.now());
-      if (watchAge < 4000 && !hasDebotTokenHeaderBadge()) {
-        maybeScheduleDebotHeaderFullScan("watch-tick");
+      if (!resolveEntry(urlTok)) {
+        stopDebotTokenHeaderWatch();
+        return;
       }
+      tryPaintDebotTokenHeader("watch-tick");
     }, DEBOT_TOKEN_HEADER_TICK_MS);
   }
 
-  /** True only if badge sits on Debot token header strip (not meme list residual). */
-  function hasDebotTokenHeaderBadge() {
-    if (Date.now() < debotHeaderBadgeOkUntil) return true;
+  function isDebotBadgeBesideCurrentAddress(icon, token) {
+    if (!(icon instanceof HTMLElement) || !token) return false;
     try {
-      const urlTok = extractTokenFromUrl();
-      // Cheap path first — avoid findDebotTokenHeaderCard walk every guardian tick.
-      if (urlTok) {
-        const icons = document.querySelectorAll(
-          `[${ICON_DATA}="1"][data-fee-token="${urlTok}"]`
-        );
-        for (let i = 0; i < icons.length; i += 1) {
-          const icon = icons[i];
-          const listCard = icon.closest?.(".MuiCard-root, .MuiPaper-root.MuiCard-root");
-          if (listCard) {
-            const lr = listCard.getBoundingClientRect();
-            if (lr.height >= 120) continue;
-          }
-          const r = icon.getBoundingClientRect();
-          if (r.width < 2 || r.height < 2 || r.top < 0 || r.top >= 180) continue;
-          const mount = icon.closest?.("[data-flap-mount]");
-          if (mount && /token-header|token-stats/.test(mount.dataset.flapMount || "")) {
-            debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
-            return true;
-          }
-          const hostText = (icon.parentElement?.textContent || "").slice(0, 80);
-          const shortHit = hostText.match(SHORT_TOKEN_RE);
-          if (shortHit && tokenMatchesShort(urlTok, shortHit[0])) {
-            debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
-            return true;
-          }
-          // Top strip badge without mount mark still counts.
-          if (r.top < 160) {
-            debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
-            return true;
-          }
-        }
+      if (isLargeTokenLinkCardNode(icon)) return false;
+      const r = icon.getBoundingClientRect();
+      if (
+        r.width < 2 ||
+        r.height < 2 ||
+        r.bottom <= 0 ||
+        r.top >= Math.min(window.innerHeight, 360)
+      ) {
+        return false;
       }
+
+      const listCard = icon.closest?.(".MuiCard-root, .MuiPaper-root.MuiCard-root");
+      if (listCard) {
+        const lr = listCard.getBoundingClientRect();
+        if (lr.height >= 120) return false;
+      }
+
+      const short = findDebotHeaderShortCaLeaf(token);
+      if (short instanceof HTMLElement && short.isConnected) {
+        if (
+          icon.previousElementSibling === short ||
+          short.nextElementSibling === icon ||
+          icon.parentElement === short.parentElement
+        ) {
+          return true;
+        }
+        const sr = short.getBoundingClientRect();
+        if (
+          Math.abs(r.top - sr.top) <= 36 &&
+          r.left >= sr.left - 12 &&
+          r.left <= sr.right + 320
+        ) {
+          return true;
+        }
+        return false;
+      }
+
+      // Header DOM can appear one frame before the short-CA leaf. Accept only an explicit
+      // token-header mount inside the current header, never a generic top-strip badge.
+      const mount = icon.closest?.("[data-flap-mount]");
+      const kind = mount?.dataset?.flapMount || "";
+      if (!/token-header/.test(kind)) return false;
       const header = findDebotTokenHeaderCard();
-      if (header) {
-        const icon =
-          header.querySelector(`[${ICON_DATA}="1"]`) ||
-          (header.parentElement && header.parentElement.querySelector(`[${ICON_DATA}="1"]`));
-        if (icon) {
-          const r = icon.getBoundingClientRect();
-          if (r.width >= 2 && r.height >= 2 && r.top >= 0 && r.top < 200) {
-            const listCard = icon.closest?.(".MuiCard-root, .MuiPaper-root.MuiCard-root");
-            if (!listCard) {
-              debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
-              return true;
-            }
-            const lr = listCard.getBoundingClientRect();
-            if (lr.height < 120) {
-              debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
-              return true;
-            }
-          }
-        }
-      }
+      return !!(
+        header &&
+        (header.contains(icon) || header.parentElement?.contains(icon))
+      );
     } catch (_err) {
       return false;
     }
-    return false;
+  }
+
+  function findDebotHeaderBadgeEl(token) {
+    if (!token) return null;
+    try {
+      const icons = document.querySelectorAll(
+        `[${ICON_DATA}="1"][data-fee-token="${token}"]`
+      );
+      for (let i = 0; i < icons.length; i += 1) {
+        const icon = icons[i];
+        if (!(icon instanceof HTMLElement) || !icon.isConnected) continue;
+        if (!isDebotBadgeBesideCurrentAddress(icon, token)) continue;
+        // Upgrade legacy in-page badges so later mutation recovery has an exact signal.
+        icon.dataset.feeHeader = "1";
+        icon.dataset.feePosMode = "default";
+        return icon;
+      }
+    } catch (_err) {
+      return null;
+    }
+    return null;
+  }
+
+  /** Remove only our previous token header after the new address row is confirmed. */
+  function removeStaleTokenHeaderBadges(currentToken) {
+    if (!currentToken) return;
+    try {
+      document
+        .querySelectorAll(`[${ICON_DATA}="1"][data-fee-header="1"]`)
+        .forEach((icon) => {
+          if (!(icon instanceof HTMLElement)) return;
+          if (icon.dataset.feeToken === currentToken) return;
+          icon.remove();
+        });
+    } catch (_err) {
+      // Optional UI cleanup must never affect the host route.
+    }
+  }
+
+  /** True only if badge remains beside the current Debot/Gungnir header address. */
+  function hasDebotTokenHeaderBadge() {
+    try {
+      const urlTok = extractTokenFromUrl();
+      if (!urlTok) return false;
+      if (
+        Date.now() < debotHeaderBadgeOkUntil &&
+        debotHeaderBadgeOkEl instanceof HTMLElement &&
+        debotHeaderBadgeOkEl.isConnected &&
+        debotHeaderBadgeOkEl.dataset.feeToken === urlTok &&
+        isDebotBadgeBesideCurrentAddress(debotHeaderBadgeOkEl, urlTok)
+      ) {
+        return true;
+      }
+      debotHeaderBadgeOkUntil = 0;
+      debotHeaderBadgeOkEl = null;
+      const icon = findDebotHeaderBadgeEl(urlTok);
+      if (!icon) return false;
+      debotHeaderBadgeOkEl = icon;
+      debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
+      finishTokenEnterTransition();
+      return true;
+    } catch (_err) {
+      return false;
+    }
   }
 
   /**
@@ -4199,16 +5105,25 @@
     if (!isDebotTokenPage() || !isExtensionContextValid()) return false;
     const urlTok = extractTokenFromUrl();
     if (!urlTok) return false;
-    if (hasDebotTokenHeaderBadge()) return true;
+    if (hasDebotTokenHeaderBadge()) {
+      finishTokenEnterTransition();
+      return true;
+    }
 
     // Always ensure fee data is requested (js-mcp: SPA token often never hit /modes).
     queueToken(urlTok);
+    const entry = resolveEntry(urlTok);
+    if (!entry) {
+      recoverStuckBatch(false);
+      scheduleBatchFlush({ immediate: true, delayMs: 0 });
+      return false;
+    }
 
     let header = findDebotTokenHeaderCard();
     if (!header) {
       // Logged-in Debot: header chrome denser — use top short leaf as mount host.
       const topShort = findDebotTopShortLeaf(urlTok, document.body);
-      if (topShort) {
+      if (topShort && !isLargeTokenLinkCardNode(topShort)) {
         header =
           (topShort.parentElement instanceof HTMLElement &&
           topShort.parentElement.parentElement instanceof HTMLElement
@@ -4222,6 +5137,10 @@
       scheduleBatchFlush({ immediate: true, delayMs: 0 });
       return false;
     }
+    // URL can already be /token/ while the clicked war-room row is still mounted.
+    // Never reinterpret that outgoing row as the K-line header.
+    if (isLargeTokenLinkCardNode(header)) return false;
+    removeStaleTokenHeaderBadges(urlTok);
 
     // Prefer the compact short-CA row as card (stable mount for token-header).
     try {
@@ -4251,32 +5170,27 @@
       // ignore
     }
 
-    const entry = resolveEntry(urlTok);
-    if (entry) {
-      // Header always natural mount — strip any absolute styles from prior list-return.
-      // Prefer force-append beside short CA (absolute 91,35 on short row = invisible).
-      let ok = forceAppendDebotHeaderBadge(header, urlTok, entry);
-      if (!ok || !hasDebotTokenHeaderBadge()) {
-        ok = renderMode(header, urlTok, entry, { forceRemount: true }) || ok;
-        // If renderMode still applied absolute (old card zone miss), rewrite to after short CA.
-        if (!hasDebotTokenHeaderBadge() || headerHasAbsoluteHeaderBadge(urlTok)) {
-          ok = forceAppendDebotHeaderBadge(header, urlTok, entry) || ok;
-        }
+    // Header always natural mount — strip any absolute styles from prior list-return.
+    // Prefer force-append beside short CA (absolute 91,35 on short row = invisible).
+    let ok = forceAppendDebotHeaderBadge(header, urlTok, entry);
+    if (!ok || !hasDebotTokenHeaderBadge()) {
+      ok = renderMode(header, urlTok, entry, { forceRemount: true }) || ok;
+      // If renderMode still applied absolute (old card zone miss), rewrite to after short CA.
+      if (!hasDebotTokenHeaderBadge() || headerHasAbsoluteHeaderBadge(urlTok)) {
+        ok = forceAppendDebotHeaderBadge(header, urlTok, entry) || ok;
       }
-      if (ok || hasDebotTokenHeaderBadge()) {
-        debotHeaderMissStreak = 0;
-        debotHeaderMissSince = 0;
-        debugInfo("debot:header-paint", {
-          reason,
-          token: urlTok.slice(0, 12),
-          settled: hasDebotTokenHeaderBadge()
-        });
-      }
-      return hasDebotTokenHeaderBadge() || !!ok;
     }
-    recoverStuckBatch(false);
-    scheduleBatchFlush({ immediate: true, delayMs: 0 });
-    return false;
+    if (ok || hasDebotTokenHeaderBadge()) {
+      finishTokenEnterTransition();
+      debotHeaderMissStreak = 0;
+      debotHeaderMissSince = 0;
+      debugInfo("debot:header-paint", {
+        reason,
+        token: urlTok.slice(0, 12),
+        settled: hasDebotTokenHeaderBadge()
+      });
+    }
+    return hasDebotTokenHeaderBadge() || !!ok;
   }
 
   /** True if a same-token badge near top still has absolute positioning (should not on K-line). */
@@ -4326,7 +5240,12 @@
             return TARGET_SHORT_TOKEN_RE.test(t) && t.length <= 22;
           }) || el;
         const r = leaf.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0 && r.top >= 0 && r.top < 220) {
+        if (
+          r.width > 0 &&
+          r.height > 0 &&
+          r.bottom > 0 &&
+          r.top < Math.min(window.innerHeight, 360)
+        ) {
           return leaf instanceof HTMLElement ? leaf : el;
         }
       }
@@ -4342,7 +5261,7 @@
         if (token && !tokenMatchesShort(token, t.match(SHORT_TOKEN_RE)?.[0] || t)) continue;
         const r = el.getBoundingClientRect();
         if (r.width <= 0 || r.height <= 0 || r.height > 48) continue;
-        if (r.top < 0 || r.top > 220) continue;
+        if (r.bottom <= 0 || r.top >= Math.min(window.innerHeight, 360)) continue;
         return el;
       }
     } catch (_err) {
@@ -4366,6 +5285,19 @@
       const { label, title, className } = computeBadgePresentation(entry, q);
       if (!label) return false;
 
+      const existing = findDebotHeaderBadgeEl(token);
+      if (existing) {
+        existing.textContent = label;
+        existing.title = `${title}${token}`;
+        existing.className = className;
+        existing.dataset.feeSig = label;
+        existing.dataset.feeHeader = "1";
+        existing.dataset.feePosMode = "default";
+        debotHeaderBadgeOkEl = existing;
+        debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
+        return true;
+      }
+
       let short =
         findDebotShortAddressNode(header) ||
         findDebotTopShortLeaf(token, header) ||
@@ -4378,22 +5310,35 @@
         header;
       const anchor = mountRow instanceof HTMLElement ? mountRow : header;
 
-      // Remove old badges only on this anchor/header (keep other cards).
-      removeAllBadgesForCard(header, token);
-      if (anchor !== header) removeAllBadgesForCard(anchor, token);
-      // Also drop same-token orphans in top strip (login SPA leftovers).
-      try {
-        document.querySelectorAll(`[${ICON_DATA}="1"][data-fee-token="${token}"]`).forEach((n) => {
+      // Header repair must stay local. removeAllBadgesForCard performs a document-wide
+      // orphan pass and becomes quadratic when many cards arrive together.
+      const clearLocal = (root) => {
+        if (!(root instanceof HTMLElement)) return;
+        root.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
           if (!(n instanceof HTMLElement)) return;
-          const r = n.getBoundingClientRect();
-          if (r.top >= 0 && r.top < 200) {
+          if (n.dataset.feeToken && n.dataset.feeToken !== token) return;
+          try {
+            n.remove();
+          } catch (_err) {
+            // ignore
+          }
+        });
+      };
+      clearLocal(header);
+      if (anchor !== header) clearLocal(anchor);
+      // Drop only explicit stale header badges for this token. List-card badges remain.
+      try {
+        document
+          .querySelectorAll(
+            `[${ICON_DATA}="1"][data-fee-header="1"][data-fee-token="${token}"]`
+          )
+          .forEach((n) => {
             try {
               n.remove();
             } catch (_err) {
               // ignore
             }
-          }
-        });
+          });
       } catch (_err) {
         // ignore
       }
@@ -4403,6 +5348,7 @@
       icon.dataset.feeToken = token;
       icon.dataset.feeSig = label;
       icon.dataset.feePosMode = "default";
+      icon.dataset.feeHeader = "1";
       icon.textContent = label;
       icon.title = `${title}${token}`;
       icon.className = className;
@@ -4414,6 +5360,7 @@
         anchor.append(icon);
       }
       if (short?.parentElement instanceof HTMLElement) {
+        short.parentElement.dataset.flapMount = "token-header";
         short.parentElement.dataset[CARD_MARK] = token;
         try {
           short.parentElement.setAttribute(CARD_DATA, token);
@@ -4421,6 +5368,7 @@
           // ignore
         }
       }
+      anchor.dataset.flapMount = "token-header";
       anchor.dataset[CARD_MARK] = token;
       try {
         anchor.setAttribute(CARD_DATA, token);
@@ -4433,8 +5381,11 @@
       } catch (_err) {
         // ignore
       }
-      const r = icon.getBoundingClientRect();
-      return r.width >= 2 && r.height >= 2;
+      const painted = findDebotHeaderBadgeEl(token);
+      if (painted !== icon) return false;
+      debotHeaderBadgeOkEl = icon;
+      debotHeaderBadgeOkUntil = Date.now() + DEBOT_HEADER_BADGE_OK_CACHE_MS;
+      return true;
     } catch (_err) {
       return false;
     }
@@ -4459,6 +5410,7 @@
   /** Remove all our badge marks/icons from the document (SPA leave/enter). */
   function resetOurDomMarks() {
     debotHeaderBadgeOkUntil = 0;
+    debotHeaderBadgeOkEl = null;
     debotHeaderFindCache = { at: 0, key: "", el: null };
     // Drop GMGN Tax mount cache with marks (nodes are gone / recycled).
     gmgnTaxMountCache = new WeakMap();
@@ -4590,11 +5542,7 @@
       // Virtual list recycle: only re-check token when href is cheaply available.
       // Skip for header (multiple 0x links in ticker/share row).
       if (!(existing.dataset.feeHeader === "1" || isGmgnHeaderMarkedCard(card))) {
-        const hrefEl = card.querySelector?.("a[href*='0x']");
-        if (hrefEl) {
-          const hrefToken = normalizeToken(hrefEl.getAttribute("href"));
-          if (hrefToken && hrefToken !== marked) return false;
-        }
+        if (!cardStillMatchesToken(card, marked)) return false;
       }
       return true;
     }
@@ -4630,6 +5578,9 @@
   }
 
   function scanVisibleCards() {
+    // Also guard idle callbacks that were queued before the click transition was armed.
+    if (isTokenEnterTransitionActive()) return;
+    if (!tryFinishListReturnTransition("idle-scan")) return;
     if (!persistentCacheReady) {
       scheduleScan(100);
       return;
@@ -4659,7 +5610,6 @@
     }
 
     recoverStuckBatch();
-    lastScanWallMs = Date.now();
     scanGeneration += 1;
 
     // Capture before getCandidateNodes consumes pendingLightScan.
@@ -4680,7 +5630,7 @@
     const listReturnCacheOnly = isSpaListReturnCacheOnly();
     const overlayFast = isOverlayFast();
     // Overlay open: cache-first burst before full card loop (0.4.38).
-    if (overlayFast || quickHasOpenOverlay()) {
+    if (!isGmgnHost() && (overlayFast || quickHasOpenOverlay())) {
       try {
         fastPaintOverlayFromCache();
       } catch (_err) {
@@ -4694,7 +5644,6 @@
     let queued = 0;
     let skippedCached = 0;
     const budget = cardsPerScanBudget();
-    const forceRemount = isResumeForceRemount();
     // list-return / overlay / GMGN: tight viewport only (first screen; skip offscreen cost).
     // Debot token side boards may use loose; GMGN never (0.4.45).
     const looseView =
@@ -4707,9 +5656,9 @@
     if (
       !listReturnSoft &&
       !(isGmgnHost() && isGmgnScrollCooling()) &&
-      (forceRemount || scanGeneration % CLEANUP_EVERY_N_SCANS === 0)
+      scanGeneration % CLEANUP_EVERY_N_SCANS === 0
     ) {
-      cleanupMarkedCards({ deep: forceRemount && !isGmgnHost() });
+      cleanupMarkedCards({ deep: false });
     }
 
     // Collect unique visible cards first, then prioritize unpainted (Debot 右列饿死修复).
@@ -4782,7 +5731,7 @@
         continue;
       }
 
-      if (!listReturnSoft && isStablePaintedCard(card, forceRemount)) {
+      if (!listReturnSoft && isStablePaintedCard(card, false)) {
         // 0.4.10: stale feeSig may keep wrong 🪙BNB after API has 币安人生 — cheap recheck.
         const marked = card.dataset[CARD_MARK];
         const existing = marked ? card.querySelector(`[${ICON_DATA}="1"]`) : null;
@@ -4794,14 +5743,22 @@
           // Stable cards do NOT consume budget — left/mid columns must not starve 已开盘.
         }
       } else if (listReturnSoft) {
-        // Already has visible badge → skip
+        // Virtual rows may retain our DOM while React swaps the underlying token.
+        // Reuse only when the badge still belongs to the card's live address.
         const existing = card.querySelector(`[${ICON_DATA}="1"]`);
         if (existing) {
           const er = existing.getBoundingClientRect();
-          if (er.width >= 2 && er.height >= 2) {
+          const existingToken = existing.dataset.feeToken || "";
+          if (
+            er.width >= 2 &&
+            er.height >= 2 &&
+            existingToken &&
+            cardStillMatchesToken(card, existingToken)
+          ) {
             skippedCached += 1;
             continue;
           }
+          clearCardIcon(card);
         }
         needWork.push(card);
       } else {
@@ -4900,8 +5857,7 @@
         if (
           existing &&
           document.contains(existing) &&
-          existing.dataset.feeToken === token &&
-          !forceRemount
+          existing.dataset.feeToken === token
         ) {
           if (existing.dataset.feeSig && existing.textContent === existing.dataset.feeSig) {
             // Keep absolute coords in sync; mode mismatch → fall through to remount.
@@ -4947,7 +5903,7 @@
           }
         }
         if (badgeNeedsUpdate(card, token, entry)) {
-          renderMode(card, token, entry, { forceRemount });
+          renderMode(card, token, entry);
         }
         rendered += 1;
       } else {
@@ -4987,7 +5943,9 @@
         // Steady GMGN: never immediate force storm — idle slice only.
         scheduleScan(120, { force: false, immediate: false, light: keepLight });
       } else {
-        scheduleScan(60, { force: true, immediate: true, light: keepLight });
+        // Debot/Gungnir used to force an immediate full scan every 60ms while truncated.
+        // The scan's own badge mutations retriggered the document observer and starved UI.
+        scheduleScan(120, { force: false, immediate: false, light: keepLight });
       }
     } else if (queued > 0 && requestQueue.size > 0 && !batchActive && !batchTimer) {
       scheduleBatchFlush({ immediate: true });
@@ -4996,12 +5954,8 @@
     // 0.4.51: always per-card double-badge cleanup (GMGN+Debot).
     // Never collapse same feeToken across different cards (三栏同 CA).
     if (!listReturnSoft) {
-      if (isGmgnHost()) {
-        dedupeBadgesPerCardOnly(outerCards);
-      } else {
-        dedupeBadgesByToken();
-      }
-    } else if (isGmgnHost()) {
+      dedupeBadgesPerCardOnly(outerCards);
+    } else if (isGmgnHost() || isDebotHost()) {
       // Soft return still risks double mount on one card after forceAppend/Tax.
       dedupeBadgesPerCardOnly(outerCards);
     }
@@ -5174,39 +6128,6 @@
     }
   }
 
-  function isResumeForceRemount() {
-    return Date.now() < resumeForceRemountUntil;
-  }
-
-  /** Re-paint badges from memory after tab wake (DOM often recycled). Always remount. */
-  function reapplyCachedIconsOnPage() {
-    let applied = 0;
-    let missing = 0;
-    let failedMount = 0;
-    document.querySelectorAll(`[${CARD_DATA}]`).forEach((card) => {
-      if (!(card instanceof HTMLElement)) return;
-      const token = card.dataset[CARD_MARK];
-      if (!token) return;
-      const liveToken = siteStrategy.extractToken(card);
-      // Soft: live extract miss after wake ≠ wrong token (attrs may lag).
-      if (liveToken && liveToken !== token) {
-        clearCardIcon(card);
-        return;
-      }
-      const entry = resolveEntry(token);
-      if (entry) {
-        // Force remount: SPA may keep an invisible/orphaned badge node after freeze.
-        const ok = renderMode(card, token, entry, { forceRemount: true });
-        if (ok) applied += 1;
-        else failedMount += 1;
-      } else {
-        queueToken(token);
-        missing += 1;
-      }
-    });
-    debugInfo("icons:reapply", { applied, missing, failedMount });
-  }
-
   /**
    * Full pipeline revive after long tab freeze.
    * batchActive zombies prevent scheduleBatchFlush → new tokens never show (user: must refresh).
@@ -5251,6 +6172,7 @@
     // MutationObserver can go silent after SPA document swaps / freeze.
     try {
       scanRootsCache = { at: 0, roots: [] };
+      gmgnSteadyRoundRobinRow = 0;
       if (typeof mutationObserver !== "undefined" && mutationObserver) {
         rebindMutationObserver();
       }
@@ -5288,11 +6210,6 @@
         unhealthy = true;
       }
 
-      // No completed scan for a long time while visible
-      if (lastScanWallMs > 0 && Date.now() - lastScanWallMs >= SCAN_STALE_MS) {
-        unhealthy = true;
-      }
-
       // 0.4.0 bug: force full XPath scan every 12s → 用户反馈「超级卡」. Only scan when unhealthy.
       if (unhealthy) {
         scheduleScan(0, { force: true, immediate: true });
@@ -5318,12 +6235,13 @@
     const inferredHidden = hiddenMs > 0 ? hiddenMs : 0;
     hiddenSinceMs = 0;
     const ageMs = batchStartedAt ? now - batchStartedAt : 0;
-    const longHidden = inferredHidden >= RESUME_LONG_HIDDEN_MS || !!document.wasDiscarded;
+    const longHidden = inferredHidden >= RESUME_LONG_HIDDEN_MS;
     const pipelineDirty =
       batchActive ||
       requestQueue.size > 0 ||
       activeBatchTokens.length > 0 ||
-      consecutiveFails > 0 ||
+      (consecutiveFails > 0 &&
+        (requestQueue.size > 0 || activeBatchTokens.length > 0)) ||
       (scanScheduled && scanTimerIds.length === 0);
 
     debugInfo("tab:resume", {
@@ -5355,33 +6273,13 @@
       return;
     }
 
-    // Long freeze / discarded tab: revive pipeline + brief remount window.
-    if (pipelineDirty || document.wasDiscarded) {
-      hardResetPipeline(
-        document.wasDiscarded ? "resume-was-discarded" : "resume-long-hidden",
-        { noisy: pipelineDirty }
-      );
-    } else {
-      scanTimerIds.forEach((id) => window.clearTimeout(id));
-      scanTimerIds = [];
-      scanScheduled = false;
-      lastScanAt = 0;
-      if (batchTimer) {
-        window.clearTimeout(batchTimer);
-        batchTimer = null;
-      }
-      debugInfo("pipeline:idle-resume", { reason, hiddenMs: inferredHidden });
+    // Long freeze: revive only dirty queue state. Stable DOM is left untouched.
+    if (pipelineDirty) {
+      hardResetPipeline("resume-long-hidden", { noisy: true });
     }
-
-    resumeForceRemountUntil = now + RESUME_FORCE_REMOUNT_MS;
-    lastScanAt = 0;
-    scanScheduled = false;
-    reapplyCachedIconsOnPage();
-    scheduleBatchFlush({ immediate: true });
-    // Two scans only (mutations cover late virtual-list paint).
-    [0, 1200].forEach((ms) => {
-      scheduleScan(ms, { force: true, immediate: true });
-    });
+    if (requestQueue.size > 0) scheduleBatchFlush({ immediate: true });
+    // One idle, idempotent visible-card pass is enough. Mutations repair later rows.
+    scheduleScan(80, { force: false, immediate: false });
   }
 
   function abortActiveRequest(reason) {
@@ -5482,9 +6380,7 @@
         // 0.5.2 / 0.4.24: always include left 战壕 / side columns on token multi-panel.
         // Waiting for header settled (0.4.37) left both header+left empty when mount failed.
         document
-          .querySelectorAll(
-            "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
-          )
+          .querySelectorAll(GMGN_TRENCH_ROOT_SELECTOR)
           .forEach((el) => {
             if (!(el instanceof HTMLElement)) return;
             const r = el.getBoundingClientRect();
@@ -5502,9 +6398,7 @@
         // Home / war room — keep only top 3 tall columns (selector matches ~40 nested shells).
         const candidates = [];
         document
-          .querySelectorAll(
-            "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
-          )
+          .querySelectorAll(GMGN_TRENCH_ROOT_SELECTOR)
           .forEach((el) => {
             if (!(el instanceof HTMLElement)) return;
             const r = el.getBoundingClientRect();
@@ -5609,6 +6503,17 @@
     return role === "dialog" || role === "alertdialog";
   }
 
+  function isExplicitlyHiddenOverlay(el) {
+    if (!(el instanceof HTMLElement)) return true;
+    return (
+      el.hidden ||
+      el.getAttribute("aria-hidden") === "true" ||
+      el.style.display === "none" ||
+      el.style.visibility === "hidden" ||
+      el.style.opacity === "0"
+    );
+  }
+
   /**
    * Visible open dialogs (role=dialog) + GMGN search/history panels (no role).
    * Cap total overlay roots — never whole document.
@@ -5619,6 +6524,7 @@
     const pushIfOk = (el) => {
       if (added >= 3) return;
       if (!(el instanceof HTMLElement) || !el.isConnected) return;
+      if (isExplicitlyHiddenOverlay(el)) return;
       if (roots.includes(el)) return;
       const r = el.getBoundingClientRect();
       if (r.width < 260 || r.height < 100) return;
@@ -5676,9 +6582,7 @@
     }
     if (host.endsWith("gmgn.ai")) {
       document
-        .querySelectorAll(
-          "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100"
-        )
+        .querySelectorAll(GMGN_TRENCH_ROOT_SELECTOR)
         .forEach((el) => {
           if (!(el instanceof HTMLElement)) return;
           const r = el.getBoundingClientRect();
@@ -5714,6 +6618,26 @@
     if (listReturnSoft && !overlayOnly) {
       const anchors = collectListReturnAnchorsRoundRobin();
       return anchors.slice(0, listReturnCandidateCap());
+    }
+
+    // Collect one seed per visual card across all three columns before applying
+    // the cap. Advance by the real card budget so the next scan fills later rows.
+    if (
+      isGmgnHost() &&
+      !isGmgnTokenPage() &&
+      !lightOnly &&
+      !overlayOnly &&
+      !quickHasOpenOverlay()
+    ) {
+      const anchors = collectListReturnAnchorsRoundRobin({
+        cap: GMGN_STEADY_CANDIDATES,
+        rowOffset: gmgnSteadyRoundRobinRow,
+        forceFreshRoots: false
+      });
+      gmgnSteadyRoundRobinRow =
+        (gmgnSteadyRoundRobinRow + Math.max(1, Math.floor(GMGN_STEADY_CARDS_BUDGET / 3))) %
+        1000000;
+      if (anchors.length) return anchors;
     }
 
     const addNode = (node, priority = 0) => {
@@ -5920,6 +6844,48 @@
     return null;
   }
 
+  /** GMGN search overlay: mount between the V/Fees column and the L column. */
+  function findGmgnOverlayVolumeMount(card) {
+    if (
+      !(card instanceof HTMLElement) ||
+      (card.dataset.flapOverlayCard !== "1" && !isInsideOverlayDialog(card))
+    ) {
+      return null;
+    }
+
+    const hasLeafLabel = (scope, label) =>
+      Array.from(scope.querySelectorAll("span, div, p")).some(
+        (el) => el.childElementCount === 0 && (el.textContent || "").trim() === label
+      );
+    const directChildren = Array.from(card.children).filter(
+      (el) => el instanceof HTMLElement && el.dataset?.[ICON_MARK] !== "1"
+    );
+
+    for (const column of directChildren) {
+      if (!hasLeafLabel(column, "V") || !hasLeafLabel(column, "Fees")) continue;
+
+      // Confirm the expected V/Fees -> L relationship without depending on class hashes.
+      let sibling = column.nextElementSibling;
+      let checked = 0;
+      let hasLiquidityColumn = false;
+      while (sibling && checked < 2) {
+        if (sibling instanceof HTMLElement && sibling.dataset?.[ICON_MARK] !== "1") {
+          checked += 1;
+          if (hasLeafLabel(sibling, "L")) {
+            hasLiquidityColumn = true;
+            break;
+          }
+        }
+        sibling = sibling.nextElementSibling;
+      }
+      if (!hasLiquidityColumn) continue;
+
+      column.dataset.flapMount = "gmgn-overlay-volume";
+      return column;
+    }
+    return null;
+  }
+
   /** Match full CA against truncated UI form like 0x65...7777 */
   function tokenMatchesShort(fullToken, shortAddress) {
     if (!shortAddress) return true;
@@ -5936,7 +6902,13 @@
   }
 
   function extractCardTokenFromAttrs(card) {
-    const shortAddress = findTargetShortAddress(card);
+    const shortAddress = findCardShortAddress(card);
+    // A visible non-target short CA is authoritative. Virtual lists reuse the same
+    // HTMLElement, so accepting its previous cache entry paints the old badge on a new row.
+    if (shortAddress && !TARGET_SHORT_TOKEN_RE.test(shortAddress)) {
+      cardTokenCache.delete(card);
+      return null;
+    }
     // Prefer short 8888/7777 presence; still allow pure full-CA cards without short UI.
 
     const accept = (token) => {
@@ -5947,7 +6919,12 @@
 
     // Fast path: card already resolved this short form.
     const cached = cardTokenCache.get(card);
-    if (cached && cached.token && (!shortAddress || cached.short === shortAddress)) {
+    if (
+      cached &&
+      cached.token &&
+      cached.short === (shortAddress || "") &&
+      cardStillMatchesToken(card, cached.token)
+    ) {
       return cached.token;
     }
 
@@ -6028,11 +7005,16 @@
     return null;
   }
 
-  function normalizeToken(value) {
+  function extractAnyToken(value) {
     if (!value) return null;
     const full = String(value).match(TOKEN_RE)?.[0];
     if (!full) return null;
-    const token = full.toLowerCase();
+    return full.toLowerCase();
+  }
+
+  function normalizeToken(value) {
+    const token = extractAnyToken(value);
+    if (!token) return null;
     return TARGET_TOKEN_RE.test(token) ? token : null;
   }
 
@@ -6048,12 +7030,14 @@
     return SHORT_TOKEN_RE.test(text.slice(0, 4000));
   }
 
-  function findTargetShortAddress(card) {
+  function findCardShortAddress(card) {
     const text = card.textContent || "";
     if (!text) return null;
     const slice = text.length > 8000 ? text.slice(0, 5000) : text;
-    const match = slice.match(TARGET_SHORT_TOKEN_RE);
-    return match ? match[0] : null;
+    const targetMatch = slice.match(TARGET_SHORT_TOKEN_RE);
+    if (targetMatch) return targetMatch[0];
+    const anyMatch = slice.match(SHORT_TOKEN_RE);
+    return anyMatch ? anyMatch[0] : null;
   }
 
   function isVisible(el) {
@@ -6094,28 +7078,49 @@
     if (!card || !token) return false;
     const text = card.textContent || "";
     const shortSlice = text.length > 6000 ? text.slice(0, 4000) : text;
-    const shortMatch = shortSlice.match(TARGET_SHORT_TOKEN_RE);
-    if (shortMatch) return tokenMatchesShort(token, shortMatch[0]);
+    const targetShortMatch = shortSlice.match(TARGET_SHORT_TOKEN_RE);
+    if (targetShortMatch) return tokenMatchesShort(token, targetShortMatch[0]);
+    // A visible short CA with a different suffix means the virtual row changed identity.
+    if (SHORT_TOKEN_RE.test(shortSlice)) return false;
 
-    // Token detail / full CA in href only
-    const hrefEl = card.querySelector?.("a[href*='0x']");
+    // A token-route href is authoritative even when it points to a non-target CA.
+    const hrefEl = card.querySelector?.(
+      "a[href*='/token/'][href*='0x'], a[href*='/bsc/token/'][href*='0x']"
+    );
     if (hrefEl) {
-      const hrefToken = normalizeToken(hrefEl.getAttribute("href"));
+      const hrefToken = extractAnyToken(hrefEl.getAttribute("href"));
       if (hrefToken) return hrefToken === token;
     }
-    const dataToken = normalizeToken(
-      card.getAttribute("data-token") ||
-        card.getAttribute("data-address") ||
-        card.getAttribute("data-ca")
-    );
-    if (dataToken) return dataToken === token;
+    for (const value of [
+      card.getAttribute("data-token"),
+      card.getAttribute("data-address"),
+      card.getAttribute("data-ca"),
+      card.getAttribute("data-contract")
+    ]) {
+      const dataToken = extractAnyToken(value);
+      if (dataToken) return dataToken === token;
+    }
 
     // No short/href signal — keep badge (safer than wipe on temporary empty paint).
     return true;
   }
 
+  function deferTokenRetry(token) {
+    const normalized = String(token || "").toLowerCase();
+    if (!normalized || modeCache.has(normalized)) return;
+    const previous = missingRetryState.get(normalized);
+    const attempts = Math.min(8, (previous?.attempts || 0) + 1);
+    const delayMs = Math.min(
+      MISSING_RETRY_MAX_MS,
+      MISSING_RETRY_BASE_MS * 2 ** (attempts - 1)
+    );
+    missingRetryState.set(normalized, { attempts, retryAt: Date.now() + delayMs });
+  }
+
   function queueToken(token) {
     if (modeCache.has(token) || isPersistentCacheHit(token) || requestQueue.has(token)) return;
+    const missingState = missingRetryState.get(token);
+    if (missingState && Date.now() < missingState.retryAt) return;
     requestQueue.add(token);
     debugInfo("queue", { token });
     // Overlay UX: flush immediately (was BATCH_FLUSH_MS 350 + idle → multi-second wait).
@@ -6211,24 +7216,39 @@
         upstreamError: data.upstream_error || null
       });
       const confirmed = [];
-      Object.entries(data.results || {}).forEach(([token, result]) => {
+      Object.entries(data.results || {}).forEach(([rawToken, result]) => {
+        const token = String(rawToken).toLowerCase();
         const entry = normalizeResult(result);
         if (!entry) return;
         modeCache.set(token, entry);
+        missingRetryState.delete(String(token).toLowerCase());
         confirmed.push([token, entry]);
-        applyModeToKnownCards(token, entry);
       });
       if (confirmed.length > 0) {
+        const cardsByToken = new Map();
+        document.querySelectorAll(`[${CARD_DATA}]`).forEach((card) => {
+          if (!(card instanceof HTMLElement)) return;
+          const marked = card.dataset[CARD_MARK] || card.getAttribute(CARD_DATA) || "";
+          if (!marked) return;
+          if (!cardsByToken.has(marked)) cardsByToken.set(marked, []);
+          cardsByToken.get(marked).push(card);
+        });
+        confirmed.forEach(([token, entry]) => {
+          applyModeToKnownCards(token, entry, cardsByToken.get(token) || []);
+        });
         persistConfirmedModes(confirmed);
+        const currentToken = extractTokenFromUrl();
+        if (currentToken && confirmed.some(([token]) => token === currentToken)) {
+          if (isDebotTokenPage()) {
+            scheduleDebotHeaderRepair("request-ok", 0);
+          } else if (isGmgnTokenPage()) {
+            scheduleGmgnHeaderRepair("request-ok", 0);
+          }
+        }
       }
-      // Soft-miss: put back so later scans / resume can retry without full reload.
-      (data.missing || []).forEach((token) => {
-        if (!modeCache.has(token)) requestQueue.add(String(token).toLowerCase());
-      });
-      // 0.4.21: after API returns, light-scan side boards so new rows get badges quickly.
-      if (isTokenDetailRoute() && isTokenPageSettledWithBadge()) {
-        scheduleScan(40, { force: true, light: true, immediate: true });
-      }
+      // Soft-miss: retry on a later scan with token-level backoff. Re-adding immediately
+      // made successful batches loop at zero delay when upstream had no result.
+      (data.missing || []).forEach(deferTokenRetry);
     } catch (error) {
       if (generation !== batchGeneration) return;
       if (isContextInvalidError(error)) {
@@ -6239,8 +7259,9 @@
         return;
       }
 
-      // Re-queue for retry; do not scream AbortError (normal when timeout/supersede).
-      tokens.forEach((token) => requestQueue.add(token));
+      // Fail open: a badge request must never create a retry loop beside the host's
+      // navigation/render work. Future scans may retry after per-token backoff.
+      tokens.forEach(deferTokenRetry);
       activeBatchTokens = [];
 
       if (isAbortError(error)) {
@@ -6250,14 +7271,14 @@
         });
       } else if (isTransientNetworkError(error)) {
         consecutiveFails += 1;
-        debugWarn("request:failed-transient", {
+        debugInfo("request:failed-transient", {
           tokens,
           fails: consecutiveFails,
           error: normalizeError(error)
         });
       } else {
         consecutiveFails += 1;
-        debugWarn("request:failed", {
+        debugInfo("request:failed", {
           tokens,
           fails: consecutiveFails,
           error: normalizeError(error)
@@ -6320,7 +7341,7 @@
       });
       const data = await res.json().catch(() => null);
       if (!res.ok || !data?.ok) {
-        debugWarn("request:bad-response", {
+        debugInfo("request:bad-response", {
           status: res.status,
           body: data
         });
@@ -6328,10 +7349,8 @@
       }
       return data;
     } catch (error) {
-      // Abort/network are expected under tab freeze; only hard errors at error level.
-      if (!isContextInvalidError(error) && !isAbortError(error) && !isTransientNetworkError(error)) {
-        debugError("request:error", error);
-      }
+      // Badge lookup is optional. The batch owner applies quiet backoff; never surface an
+      // extension error that could be mistaken for a host-page navigation failure.
       throw error;
     } finally {
       window.clearTimeout(timeout);
@@ -6377,8 +7396,9 @@
     };
   }
 
-  function applyModeToKnownCards(token, entry) {
-    document.querySelectorAll(`[${CARD_DATA}="${token}"]`).forEach((card) => {
+  function applyModeToKnownCards(token, entry, knownCards = null) {
+    const cards = knownCards || document.querySelectorAll(`[${CARD_DATA}="${token}"]`);
+    cards.forEach((card) => {
       if (!(card instanceof HTMLElement)) return;
       // Soft match after SPA: trust mark if short CA still matches (avoid full extract thrash).
       const live = siteStrategy.extractToken(card);
@@ -6410,17 +7430,21 @@
       // Search/history overlay: paint as soon as fee returns (0.4.38).
       if (quickHasOpenOverlay()) {
         overlayFastUntil = Math.max(overlayFastUntil, Date.now() + 2000);
-        try {
-          fastPaintOverlayFromCache();
-        } catch (_err2) {
-          // ignore
+        if (isGmgnHost()) {
+          scheduleGmgnOverlayPaint("api-apply", 0, false);
+        } else {
+          try {
+            fastPaintOverlayFromCache();
+          } catch (_err2) {
+            // ignore
+          }
+          scheduleScan(0, {
+            force: true,
+            immediate: true,
+            light: true,
+            bypassForceGap: true
+          });
         }
-        scheduleScan(0, {
-          force: true,
-          immediate: true,
-          light: true,
-          bypassForceGap: true
-        });
       }
     } catch (_err) {
       // ignore
@@ -6917,9 +7941,11 @@
     // 0.4.51: NEVER remove badges owned by another marked card (三栏同 CA 必留).
     // Geometry gate: only wipe orphans visually on THIS card (Tax sibling mounts).
     if (token) {
-      document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
+      const escapedToken = globalThis.CSS?.escape ? CSS.escape(token) : token;
+      document
+        .querySelectorAll(`[${ICON_DATA}="1"][data-fee-token="${escapedToken}"]`)
+        .forEach((n) => {
         if (!(n instanceof HTMLElement)) return;
-        if (n.dataset.feeToken !== token) return;
         if (!canRemove(n)) return;
         // Keep if already inside this card (should have been cleared above).
         if (card.contains(n)) {
@@ -6956,7 +7982,7 @@
         } catch (_err2) {
           // ignore
         }
-      });
+        });
     }
   }
 
@@ -7186,6 +8212,8 @@
 
   function setBadgeDragEdit(on) {
     badgeDragEdit = on === true;
+    if (badgeDragEdit) installBadgeDragHandlers();
+    else uninstallBadgeDragHandlers();
     try {
       document.documentElement.classList.toggle("flap-fee-drag-edit", badgeDragEdit);
       document.body?.classList?.toggle("flap-fee-drag-edit", badgeDragEdit);
@@ -7222,11 +8250,30 @@
   }
 
   function installBadgeDragHandlers() {
+    if (badgeDragHandlersInstalled) return;
+    badgeDragHandlersInstalled = true;
     // Capture so we beat site click handlers on the card.
     document.addEventListener("pointerdown", onBadgePointerDown, true);
     document.addEventListener("pointermove", onBadgePointerMove, true);
     document.addEventListener("pointerup", onBadgePointerUp, true);
     document.addEventListener("pointercancel", onBadgePointerUp, true);
+  }
+
+  function uninstallBadgeDragHandlers() {
+    if (!badgeDragHandlersInstalled) return;
+    badgeDragHandlersInstalled = false;
+    document.removeEventListener("pointerdown", onBadgePointerDown, true);
+    document.removeEventListener("pointermove", onBadgePointerMove, true);
+    document.removeEventListener("pointerup", onBadgePointerUp, true);
+    document.removeEventListener("pointercancel", onBadgePointerUp, true);
+    if (badgeDragState) {
+      try {
+        badgeDragState.icon?.classList?.remove("is-dragging");
+      } catch (_err) {
+        // ignore
+      }
+      badgeDragState = null;
+    }
   }
 
   function onBadgePointerDown(e) {
@@ -7523,8 +8570,6 @@
 
   /** True when badge is missing, wrong token/label, or detached from preferred Debot mount. */
   function badgeNeedsUpdate(card, token, entry) {
-    // After long background, always remount (ghost nodes / wrong parent / display:none wrappers).
-    if (isResumeForceRemount()) return true;
     // Doubles / orphans near card → always remount.
     if (countBadgesNearCard(card, token) !== 1) return true;
 
@@ -7550,7 +8595,7 @@
   }
 
   function renderMode(card, token, entry, options = {}) {
-    const forceRemount = options.forceRemount === true || isResumeForceRemount();
+    const forceRemount = options.forceRemount === true;
     const quoteSymbol = resolveQuoteSymbol(card, entry);
     const { label, title, className } = computeBadgePresentation(entry, quoteSymbol);
     const pos = getActiveBadgePosition(card);
@@ -7784,6 +8829,26 @@
    */
   function findDebotIconTarget(card) {
     const cached = debotMountCache.get(card);
+    const inOverlay = isInsideOverlayDialog(card);
+
+    // Search overlays have their own strict mount. Never reuse/fall through to an
+    // older metrics or address mount because that can place the badge over host UI.
+    if (inOverlay) {
+      if (
+        cached &&
+        cached.el instanceof HTMLElement &&
+        cached.el.dataset.flapMount === "overlay-title" &&
+        card.contains(cached.el) &&
+        document.contains(cached.el) &&
+        Date.now() - cached.at < DEBOT_MOUNT_CACHE_MS
+      ) {
+        return cached.el;
+      }
+      const titleMount = findDebotOverlayTitleMount(card);
+      if (titleMount) debotMountCache.set(card, { at: Date.now(), el: titleMount });
+      return titleMount;
+    }
+
     if (
       cached &&
       cached.el &&
@@ -7840,12 +8905,47 @@
     return el;
   }
 
+  /** Debot/Gungnir search overlay: append after the final token-name row item. */
+  function findDebotOverlayTitleMount(card) {
+    if (!(card instanceof HTMLElement) || !isInsideOverlayDialog(card)) return null;
+    const shortNode = findDebotShortAddressNode(card);
+    if (!(shortNode instanceof HTMLElement)) return null;
+
+    let addressRow = shortNode;
+    for (let depth = 0; addressRow && depth < 5; depth += 1) {
+      if (!(addressRow instanceof HTMLElement) || addressRow === card) break;
+      const titleRow = addressRow.previousElementSibling;
+      if (titleRow instanceof HTMLElement) {
+        const addressRect = addressRow.getBoundingClientRect();
+        const titleRect = titleRow.getBoundingClientRect();
+        const titleText = (titleRow.textContent || "").replace(/\s+/g, " ").trim();
+        const hasShortAddress = TARGET_SHORT_TOKEN_RE.test(titleText);
+        const sameStack = titleRow.parentElement === addressRow.parentElement;
+        const compactRows =
+          addressRect.width > 0 &&
+          addressRect.width <= 240 &&
+          addressRect.height >= 12 &&
+          addressRect.height <= 32 &&
+          titleRect.width > 0 &&
+          titleRect.width <= 280 &&
+          titleRect.height >= 12 &&
+          titleRect.height <= 32;
+        const titleAboveAddress = titleRect.top <= addressRect.top && titleRect.bottom <= addressRect.top + 4;
+        if (sameStack && compactRows && titleAboveAddress && titleText && !hasShortAddress) {
+          return markDebotMount(titleRow, "overlay-title");
+        }
+      }
+      addressRow = addressRow.parentElement;
+    }
+    return null;
+  }
+
   function markDebotMount(el, kind, buyWrap) {
     if (!(el instanceof HTMLElement)) return el;
-    el.dataset.flapMount = kind;
+    if (el.dataset.flapMount !== kind) el.dataset.flapMount = kind;
     if (buyWrap instanceof HTMLElement) {
-      el.dataset.flapBuyId = "1";
-      buyWrap.dataset.flapBuyWrap = "1";
+      if (el.dataset.flapBuyId !== "1") el.dataset.flapBuyId = "1";
+      if (buyWrap.dataset.flapBuyWrap !== "1") buyWrap.dataset.flapBuyWrap = "1";
     }
     return el;
   }
@@ -8004,8 +9104,9 @@
       });
     }
 
-    // Token header / stats: append to the right of the title row.
-    if (kind === "token-header" || kind === "token-stats") {
+    // Token header / stats / search title: append to the right of the row.
+    if (kind === "token-header" || kind === "token-stats" || kind === "overlay-title") {
+      if (kind === "overlay-title") icon.dataset.feeOverlayPos = "title";
       target.append(icon);
       return;
     }
@@ -8333,7 +9434,30 @@
     if (!isTabVisible()) return;
     if (!isExtensionContextValid()) return;
     if (!isScanPageAllowed()) return;
+    if (!tryFinishListReturnTransition("document-mutation")) return;
 
+    // Header badges live inside React-owned rows. Repair only when the current address row
+    // or an explicitly locked header badge was replaced; unrelated chart ticks are ignored.
+    if (isGmgnTokenPage()) {
+      const token = extractTokenFromUrl();
+      if (
+        token &&
+        !hasGmgnTokenHeaderBadge() &&
+        gmgnHeaderMutationLooksRelevant(records, token)
+      ) {
+        scheduleGmgnHeaderRepair("document-mutation");
+      }
+    } else if (isDebotTokenPage()) {
+      const token = extractTokenFromUrl();
+      if (
+        token &&
+        !hasDebotTokenHeaderBadge() &&
+        debotHeaderMutationLooksRelevant(records, token)
+      ) {
+        scheduleDebotHeaderRepair("document-mutation");
+      }
+    }
+    if (isGmgnTokenPage()) collectGmgnEmbeddedDirtyCards(records);
     // Debot header only (throttled). GMGN uses progressive/click-once — not every chart mut.
     if (isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge()) {
       const now = Date.now();
@@ -8360,9 +9484,15 @@
     if (isGmgnScrollCooling() && !isOverlayFast() && !isSpaListReturnSoft()) {
       return;
     }
+    if (isDebotScrollCooling() && !isOverlayFast() && !isSpaListReturnSoft()) {
+      return;
+    }
 
     // 0.4.43 GMGN: ignore pure ticker / attr / unrelated node churn.
     if (isGmgnHost() && !gmgnMutationLooksRelevant(records)) {
+      return;
+    }
+    if (isDebotHost() && !debotMutationLooksRelevant(records)) {
       return;
     }
 
@@ -8376,11 +9506,7 @@
       lastOverlayOpen = true;
       // Debot denser; GMGN single light schedule (no armOverlayFast multi-kick).
       if (isGmgnHost()) {
-        mutationDebounceTimer = window.setTimeout(() => {
-          mutationDebounceTimer = null;
-          if (!quickHasOpenOverlay()) return;
-          scheduleScan(0, { force: true, light: true, immediate: false, bypassForceGap: true });
-        }, 200);
+        scheduleGmgnOverlayPaint("mutation-open", 120, true);
       } else {
         armOverlayFastScan("mutation-open");
       }
@@ -8389,27 +9515,33 @@
     if (!overlayNow && lastOverlayOpen) {
       lastOverlayOpen = false;
       overlayFastUntil = 0;
+      if (isGmgnHost()) {
+        cancelGmgnOverlayPaint();
+        if (gmgnEmbeddedDirtyCards.size > 0) scheduleGmgnEmbeddedDirtyPass();
+      }
     }
 
     if (overlayNow) {
+      if (isGmgnHost()) {
+        scheduleGmgnOverlayPaint("mutation-update", 180, false);
+        return;
+      }
       mutationDebounceTimer = window.setTimeout(() => {
         mutationDebounceTimer = null;
         if (!isTabVisible() || !isExtensionContextValid()) return;
         if (!quickHasOpenOverlay()) return;
-        if (!isGmgnHost()) {
-          try {
-            fastPaintOverlayFromCache();
-          } catch (_err) {
-            // ignore
-          }
+        try {
+          fastPaintOverlayFromCache();
+        } catch (_err) {
+          // ignore
         }
         scheduleScan(0, {
           force: true,
           light: true,
-          immediate: !isGmgnHost(),
+          immediate: true,
           bypassForceGap: true
         });
-      }, isGmgnHost() ? 220 : MUTATION_SCAN_DEBOUNCE_HOME_OVERLAY_MS);
+      }, MUTATION_SCAN_DEBOUNCE_HOME_OVERLAY_MS);
       return;
     }
 
@@ -8448,6 +9580,7 @@
       if (isNonTargetTokenPage()) return;
       // Scroll may have started during debounce window (list-return soft still runs).
       if (isGmgnScrollCooling() && !isOverlayFast() && !isSpaListReturnSoft()) return;
+      if (isDebotScrollCooling() && !isOverlayFast() && !isSpaListReturnSoft()) return;
       if (isTokenPageSettledWithBadge()) {
         // 0.5.2: settled K-line still needs light/non-force scan so left 战壕 keeps badges
         // (was full skip on GMGN token → multi-panel left column starved).
@@ -8477,7 +9610,7 @@
       if (isGmgnHost()) {
         scheduleScan(0, { force: false, immediate: false, light: false });
       } else {
-        scheduleScan(0, { force: true, immediate: false, light: false });
+        scheduleScan(0, { force: false, immediate: false, light: false });
       }
     }, debounceMs);
   });
@@ -8496,20 +9629,20 @@
   }
 
   // 0.4.5: do NOT full-scan on every scroll (was main jank vs 0.3.4).
-  // 0.4.43 GMGN-only: passive scroll/wheel marks cooldown; one resume scan after settle.
-  // Debot: still mutation-only (user verified no jank).
-  if (isGmgnHost()) {
-    const onGmgnScroll = () => {
+  // Virtual-list hosts: passive scroll/wheel marks cooldown; one resume scan after settle.
+  if (isGmgnHost() || isDebotHost()) {
+    const onListScroll = () => {
       try {
-        noteGmgnScrollActivity();
+        if (isGmgnHost()) noteGmgnScrollActivity();
+        else noteDebotScrollActivity();
       } catch (_err) {
         // ignore
       }
     };
-    window.addEventListener("scroll", onGmgnScroll, { passive: true, capture: true });
-    window.addEventListener("wheel", onGmgnScroll, { passive: true, capture: true });
+    window.addEventListener("scroll", onListScroll, { passive: true, capture: true });
+    window.addEventListener("wheel", onListScroll, { passive: true, capture: true });
     // Touch drag on columns (mobile / trackpad-less).
-    window.addEventListener("touchmove", onGmgnScroll, { passive: true, capture: true });
+    window.addEventListener("touchmove", onListScroll, { passive: true, capture: true });
   }
 
   window.addEventListener(
@@ -8547,7 +9680,6 @@
   });
   // Chromium: tab discarded for memory then restored — same as long background freeze.
   if ("wasDiscarded" in document && document.wasDiscarded) {
-    resumeForceRemountUntil = Date.now() + RESUME_FORCE_REMOUNT_MS;
     hardResetPipeline("init-was-discarded");
   }
 

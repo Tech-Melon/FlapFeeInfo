@@ -91,6 +91,19 @@
   margin-right: 6px;
 }
 
+/* Search overlays: use only the space intended by the verified host row. */
+.gmgn-fee-mode-icon--gmgn[data-fee-token][data-fee-overlay-pos="volume"] {
+  align-self: center;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+.gmgn-fee-mode-icon--debot[data-fee-overlay-pos="title"] {
+  align-self: center;
+  margin-left: 4px;
+  margin-right: 0;
+}
+
 /* Token detail: sit after 总税率 cell in header metrics strip */
 .gmgn-fee-mode-icon--gmgn[data-fee-token] {
   margin-left: 8px;
