@@ -168,6 +168,7 @@ FlapFeeInfo\extension
 - **GMGN 回战壕徽章延迟 / 内嵌战壕后续卡片不更新 / 搜索弹层卡顿**：请使用 **0.5.18+**（`TokenItem` 变动采用可见卡片定向队列；过滤常驻隐藏 dialog 与顶部搜索框的弹层误判；搜索弹层仅做单次 cache-first 绘制并将徽章挂在短地址旁；非目标 token 同步清理旧徽章）
 - **搜索结果徽章位置**：请使用 **0.5.19+**（GMGN 挂在 `V/Fees` 列后；Debot/Gungnir 挂在代币名称行末尾；定位失败时静默跳过）
 - **GMGN「已开盘」下方目标卡片缺徽章**：请使用 **0.5.20+**（常规扫描按三列及视觉卡片 round-robin 去重，后续轮次用轻量游标继续补洞，不再由左/中列重复候选挤占右列）
+- **GMGN 新创建徽章慢 / 几十秒才出**：请使用 **0.5.21+**（仅 GMGN：更短 mutation 防抖与 miss 前两次重试；Debot 逻辑不变）
 - **战壕→K 线 SPA**：0.4.35+ 激活链加固  
 - **GMGN 进出 K 线减负 + 回战壕加速**：0.4.37（header-only token scan + list-return DOM watch + click-arm）  
 - **搜索/历史弹层 ≤1s 级徽章**：0.4.38（dialog-first + cache 直绘 + 矮行 climb + 即时 batch）  

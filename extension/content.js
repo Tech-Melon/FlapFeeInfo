@@ -7,6 +7,7 @@
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
   const GMGN_TRENCH_ROOT_SELECTOR =
     "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100";
+  // 0.5.21: GMGN-only new-card latency (soft debounce / early miss retry / cache paint); Debot untouched.
   // 0.5.18: GMGN embedded TokenItem dirty queue + single-pass search overlay/address mount.
   // 0.5.17: GMGN list readiness + fast paint also recognize virtual rows without token <a>.
   // 0.5.16: GMGN post-commit SPA signal + structural list gate; clear badge on non-target routes.
@@ -88,10 +89,15 @@
   const MAX_CARDS_PER_SCAN = 56;
   const MAX_BATCH_TOKENS = 48;
   const BATCH_FLUSH_MS = 350;
+  // GMGN list only: slightly snappier batch coalesce (overlay still uses 0).
+  const GMGN_LIST_BATCH_FLUSH_MS = 180;
   const RETRY_BASE_MS = 900;
   const RETRY_MAX_MS = 12000;
   const MISSING_RETRY_BASE_MS = 15000;
   const MISSING_RETRY_MAX_MS = 5 * 60 * 1000;
+  // GMGN early miss/fail retries (first two) — avoid 15s lock on brand-new cards.
+  // Later attempts fall back to the global 15s exponential curve.
+  const GMGN_MISSING_RETRY_EARLY_MS = [2000, 5000];
   const PERSISTENT_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
   // Debot mount result cache (avoids getComputedStyle thrash every scan).
   const DEBOT_MOUNT_CACHE_MS = 4000;
@@ -106,12 +112,17 @@
   const DEBOT_SCROLL_RESUME_SCAN_MS = 520;
   const DEBOT_SCROLL_CARDS_BUDGET = 8;
   const DEBOT_STEADY_CARDS_BUDGET = 18;
-  // GMGN list mutation debounce (longer than Debot 400 — host virtual list thrash).
-  const MUTATION_SCAN_DEBOUNCE_GMGN_MS = 700;
-  // GMGN cold first scan delay (host hydration first; was 500).
-  const GMGN_FIRST_SCAN_DELAY_MS = 900;
+  // GMGN list mutation debounce (0.5.21: 700→380; still ≥ Debot thrash floor, snappier new cards).
+  const MUTATION_SCAN_DEBOUNCE_GMGN_MS = 380;
+  // GMGN list non-force scan min gap (home/meme only). Token pages keep SCAN_INTERVAL_MS.
+  const GMGN_LIST_SCAN_MIN_GAP_MS = 560;
+  // GMGN cold first scan delay (host hydration first; was 900).
+  const GMGN_FIRST_SCAN_DELAY_MS = 650;
   // GMGN per-scan card budget while scroll-cooling (smaller slices).
   const GMGN_SCROLL_CARDS_BUDGET = 12;
+  // After /modes hits on GMGN list: cache-first viewport paint (cards, ms) — no network.
+  const GMGN_POST_API_PAINT_CARDS = 10;
+  const GMGN_POST_API_PAINT_MS = 10;
   // chrome.storage rewrite throttle + max entries (LRU by fetchedAt).
   const PERSIST_MIN_INTERVAL_MS = 10000;
   const PERSISTENT_CACHE_MAX_ENTRIES = 800;
@@ -338,6 +349,8 @@
   let consecutiveFails = 0;
   /** Per-token backoff for API soft misses; prevents a zero-delay /modes loop. */
   const missingRetryState = new Map();
+  /** GMGN only: one deferred requeue timer per token after miss/fail. */
+  const gmgnMissingRequeueTimers = new Map();
   let scanScheduled = false;
   let lastScanAt = 0;
   /** Wall clock of last completed scanVisibleCards (watchdog uses this). */
@@ -2520,7 +2533,13 @@
       if (isDebotScrollCooling() && !pendingLightScan && !isOverlayFast()) return;
       const now = performance.now();
       // Light scans use shorter min interval (overlay UX).
-      const minGap = pendingLightScan ? 450 : SCAN_INTERVAL_MS;
+      // GMGN list only: slightly tighter non-force gap so new 新创建 rows fill sooner
+      // without the old force-scan storm (token pages still use full SCAN_INTERVAL).
+      const minGap = pendingLightScan
+        ? 450
+        : isGmgnHost() && !isTokenDetailRoute()
+          ? GMGN_LIST_SCAN_MIN_GAP_MS
+          : SCAN_INTERVAL_MS;
       if (!force && now - lastScanAt < minGap) {
         scheduleScan(minGap - (now - lastScanAt), { light: pendingLightScan });
         return;
@@ -7110,11 +7129,53 @@
     if (!normalized || modeCache.has(normalized)) return;
     const previous = missingRetryState.get(normalized);
     const attempts = Math.min(8, (previous?.attempts || 0) + 1);
-    const delayMs = Math.min(
-      MISSING_RETRY_MAX_MS,
-      MISSING_RETRY_BASE_MS * 2 ** (attempts - 1)
-    );
+    // GMGN: first two misses use short delays (new cards often land before KV/chain).
+    // Debot/Gungnir keep the conservative 15s curve unchanged.
+    let delayMs;
+    if (isGmgnHost() && attempts <= GMGN_MISSING_RETRY_EARLY_MS.length) {
+      delayMs = GMGN_MISSING_RETRY_EARLY_MS[attempts - 1];
+    } else {
+      const expBase = isGmgnHost()
+        ? Math.max(0, attempts - 1 - GMGN_MISSING_RETRY_EARLY_MS.length)
+        : attempts - 1;
+      delayMs = Math.min(MISSING_RETRY_MAX_MS, MISSING_RETRY_BASE_MS * 2 ** expBase);
+    }
     missingRetryState.set(normalized, { attempts, retryAt: Date.now() + delayMs });
+    if (isGmgnHost()) scheduleGmgnMissingRequeue(normalized, delayMs);
+  }
+
+  /**
+   * GMGN only: when miss/fail backoff ends, re-queue if the card is still marked.
+   * Avoids waiting for the next 560–900ms scan tick after the lock expires.
+   */
+  function scheduleGmgnMissingRequeue(token, delayMs) {
+    if (!token || !isGmgnHost()) return;
+    const prev = gmgnMissingRequeueTimers.get(token);
+    if (prev) {
+      try {
+        window.clearTimeout(prev);
+      } catch (_err) {
+        // ignore
+      }
+    }
+    const wait = Math.max(40, Number(delayMs) || 0) + 30;
+    const timerId = window.setTimeout(() => {
+      gmgnMissingRequeueTimers.delete(token);
+      if (!isExtensionContextValid() || !isTabVisible()) return;
+      if (!isGmgnHost() || modeCache.has(token) || isPersistentCacheHit(token)) return;
+      const state = missingRetryState.get(token);
+      if (state && Date.now() < state.retryAt) return;
+      // Only requeue for cards we already discovered (no blind network storm).
+      let hasMarked = false;
+      try {
+        hasMarked = !!document.querySelector(`[${CARD_DATA}="${token}"]`);
+      } catch (_err) {
+        hasMarked = false;
+      }
+      if (!hasMarked) return;
+      queueToken(token);
+    }, wait);
+    gmgnMissingRequeueTimers.set(token, timerId);
   }
 
   function queueToken(token) {
@@ -7126,9 +7187,70 @@
     // Overlay UX: flush immediately (was BATCH_FLUSH_MS 350 + idle → multi-second wait).
     if (isOverlayFast() || quickHasOpenOverlay()) {
       scheduleBatchFlush({ immediate: true, delayMs: 0 });
+    } else if (isGmgnHost() && !isTokenDetailRoute()) {
+      // GMGN 新创建: slightly faster coalesce; Debot stays at BATCH_FLUSH_MS.
+      scheduleBatchFlush({ delayMs: GMGN_LIST_BATCH_FLUSH_MS });
     } else {
       scheduleBatchFlush();
     }
+  }
+
+  /**
+   * GMGN list only: after /modes returns, paint viewport cards that already have
+   * modeCache (bounded time/cards). No network, no force scan — avoids waiting a
+   * full scan interval for brand-new rows that just got fee data.
+   */
+  function paintGmgnCachedViewportCards(reason) {
+    if (!isGmgnHost() || isTokenDetailRoute()) return 0;
+    if (!isExtensionContextValid() || !isTabVisible()) return 0;
+    if (isTokenEnterTransitionActive()) return 0;
+    if (!tryFinishListReturnTransition(`post-api:${reason || "paint"}`)) return 0;
+    if (isGmgnScrollCooling()) return 0;
+    const t0 = performance.now();
+    let painted = 0;
+    let queued = 0;
+    const seen = new Set();
+    try {
+      const seeds = collectListReturnAnchorsRoundRobin({
+        cap: GMGN_POST_API_PAINT_CARDS + 4,
+        forceFreshRoots: false
+      });
+      for (let i = 0; i < seeds.length; i += 1) {
+        if (painted >= GMGN_POST_API_PAINT_CARDS) break;
+        if (performance.now() - t0 > GMGN_POST_API_PAINT_MS) break;
+        const resolved = resolveListReturnSeed(seeds[i]);
+        if (!resolved) continue;
+        const { card, token } = resolved;
+        if (!token || !(card instanceof HTMLElement) || seen.has(card)) continue;
+        seen.add(card);
+        if (!isVisible(card)) continue;
+        if (isStablePaintedCard(card, false)) continue;
+        const entry = resolveEntry(token);
+        if (!entry) {
+          // Do not spam queue here — scan path owns discovery; only light nudge if marked.
+          if (card.dataset[CARD_MARK] === token) {
+            queueToken(token);
+            queued += 1;
+          }
+          continue;
+        }
+        card.dataset[CARD_MARK] = token;
+        try {
+          card.setAttribute(CARD_DATA, token);
+        } catch (_errAttr) {
+          // ignore
+        }
+        if (paintListCardFromCacheFast(card, token, entry) || renderMode(card, token, entry)) {
+          painted += 1;
+        }
+      }
+    } catch (_err) {
+      // ignore
+    }
+    if (painted || queued) {
+      debugInfo("gmgn:post-api-paint", { reason: reason || "", painted, queued });
+    }
+    return painted;
   }
 
   function scheduleBatchFlush(options = {}) {
@@ -7222,6 +7344,15 @@
         if (!entry) return;
         modeCache.set(token, entry);
         missingRetryState.delete(String(token).toLowerCase());
+        const missTimer = gmgnMissingRequeueTimers.get(String(token).toLowerCase());
+        if (missTimer) {
+          try {
+            window.clearTimeout(missTimer);
+          } catch (_errT) {
+            // ignore
+          }
+          gmgnMissingRequeueTimers.delete(String(token).toLowerCase());
+        }
         confirmed.push([token, entry]);
       });
       if (confirmed.length > 0) {
@@ -7243,6 +7374,15 @@
             scheduleDebotHeaderRepair("request-ok", 0);
           } else if (isGmgnTokenPage()) {
             scheduleGmgnHeaderRepair("request-ok", 0);
+          }
+        }
+        // GMGN list: paint newly-cached viewport rows immediately (bounded).
+        // Debot already applies via known marks; skip to avoid extra main-thread work.
+        if (isGmgnHost() && !isTokenDetailRoute()) {
+          try {
+            paintGmgnCachedViewportCards("request-ok");
+          } catch (_errPaint) {
+            // ignore
           }
         }
       }

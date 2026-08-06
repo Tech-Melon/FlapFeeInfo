@@ -124,9 +124,11 @@ if lpBps > 0:        💧
 
 最大份额段始终标注 →SYMBOL（与池子 quote 相同也不省略）
   holder → dividendToken（空则 quote/WBNB）
-  creator/gift/lp → quoteToken（空则 WBNB）
+  gift（vault）→ dividendToken（税info「分红 Token」；空则 quote/WBNB）
+  creator/lp → quoteToken（空则 WBNB）
   burn → taxToken 自身
   并列 bps 时优先级: holder > gift > creator > burn > lp
+  注：币股篮子成分（NVDA/SPCX）属 vault 内部，不进 →SYMBOL
 ```
 
 插件侧可用 bps **本地再拼紧凑 label**（去空格）+ `top_payout_symbol` 补 `→`；后端 `label`/`title` 仍以 API 为准。
@@ -167,8 +169,10 @@ if lpBps > 0:        💧
 
 缓存：
 
-- 后端：内存 + SQLite `payload` JSON；**无完整 payload 的旧行当 miss**  
-- Worker：内存 + KV；**缺 label/bps/top_payout_* 的旧条目当 miss**  
+- 后端：内存 + SQLite `payload` JSON；**无完整 payload 的旧行当 miss**；连接按事务显式关闭，过期行默认每 6 小时清理，短批次响应缓存上限 128；HTTP 槽位满时默认短等 250ms 再决定是否返回 503
+- Worker：isolate 内存 + KV；**缺 label/bps/top_payout_* 的旧条目当 miss**；vault gift 仍 `top_payout≠dividend_token` 的旧 →BNB 行当 miss；回源结果用 `ctx.waitUntil()` 异步落 KV；25s 总预算内对瞬时 429/5xx/网络失败及部分 `missing` 做 250/750ms 温和重试，且只重试缺失 token
+- 后端 SQLite：同上 stale gift 规则强制回源
+
 - 插件：`chrome.storage` key `flapFeeInfo.modeCache.v3`
 
 ### 4.4 插件站点策略
@@ -400,6 +404,7 @@ python tools/ctl.py watchdog-run
   - `0.5.18`：GMGN K 线内嵌战壕改为 `TokenItem` dirty-card 定向更新（最多 16 张可见卡），并过滤常驻隐藏 dialog / 顶部搜索框造成的弹层误判；搜索弹层取消 fastPaint + full scan 重复遍历，徽章固定挂在短 CA 旁
   - `0.5.19`：GMGN 搜索徽章改挂 `V/Fees` 列后；Debot/Gungnir 搜索徽章改挂代币名称行末尾；严格定位失败时不回退到其他挂载点
   - `0.5.20`：GMGN 常规战壕候选按三列与视觉卡片 round-robin 去重；用跨轮次行游标覆盖「已开盘」下方卡片，同时维持每轮 12 卡预算
+  - `0.5.21`：GMGN-only 新卡徽章时效 — mutation 防抖 380ms、列表扫间隔 560ms、batch 180ms、miss 前两次 2s/5s + 到期自动重入队、/modes 回包后有界 cache-first 视口补画；Debot/Gungnir 不变
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`
