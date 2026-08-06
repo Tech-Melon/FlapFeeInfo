@@ -267,8 +267,18 @@
     burn: true,
     lp: true,
     payoutArrow: true,
-    unknown: true
+    unknown: true,
+    // 币股篮子：vault 底层 SPCX/TSLA…（独立开关）
+    basket: true,
+    // 点击徽章打开 flap taxinfo（lang 跟随插件中英文）
+    openTaxinfo: true
   };
+  const FLAP_TAXINFO_BASE = "https://flap.sh/bnb";
+  // Popup language (zh|en) — tooltip copy follows this.
+  const UI_LANG_KEY = "flapFeeInfo.uiLang.v1";
+  // Stock / index vault segment emoji (replaces 🎁 when basket present).
+  const STOCK_EMOJI = "📈";
+  const GIFT_EMOJI = "🎁";
   // Badge color theme: dark (default, for dark sites) | light (solid soft chips for contrast).
   const BADGE_THEME_KEY = "flapFeeInfo.badgeTheme.v1";
   const DEFAULT_BADGE_THEME = "dark";
@@ -335,12 +345,41 @@
   };
   const confirmedModes = new Set(Object.keys(modeMeta));
 
+  const TIP_I18N = {
+    zh: {
+      taxAlloc: "税收分配",
+      buySell: "买卖税",
+      basket: "币股分红资产",
+      pool: "底池",
+      token: "合约",
+      emptyBasket: "暂无篮子成分",
+      moreAssets: "全部成分"
+    },
+    en: {
+      taxAlloc: "Tax allocation",
+      buySell: "Buy / sell tax",
+      basket: "Equity basket",
+      pool: "Pool",
+      token: "Token",
+      emptyBasket: "No basket assets",
+      moreAssets: "All assets"
+    }
+  };
+
   const siteStrategy = createSiteStrategy();
   if (!siteStrategy) return;
 
   // token -> full allocation result
   const modeCache = new Map();
   const persistentCache = new Map();
+  /** @type {WeakMap<HTMLElement, { tipModel: object }>} */
+  const badgeTipData = new WeakMap();
+  let uiLang = "zh";
+  /** @type {HTMLElement | null} */
+  let feeTooltipEl = null;
+  /** @type {HTMLElement | null} */
+  let feeTooltipAnchor = null;
+  let feeTooltipHideTimer = 0;
   const requestQueue = new Set();
   let batchTimer = null;
   /** Delay of the pending batchTimer (ms); prefer shorter reschedules (hot tokens). */
@@ -1879,12 +1918,13 @@
           const q =
             normalizeQuoteSymbol(entryHit.quote_symbol || "", { allowCjk: true }) ||
             "BNB";
-          const { label, title, className } = computeBadgePresentation(entryHit, q);
-          if (label && existingGood.textContent !== label) {
-            existingGood.textContent = label;
-            existingGood.title = `${title}${urlTok}`;
-            existingGood.className = className;
-            existingGood.dataset.feeSig = label;
+          const presentation = computeBadgePresentation(entryHit, q);
+          if (presentation.label) {
+            const textEl = existingGood.querySelector(".gmgn-fee-mode-icon__text");
+            const shown = textEl ? textEl.textContent : existingGood.textContent;
+            if (shown !== presentation.label || existingGood.className !== presentation.className) {
+              applyBadgeUi(existingGood, presentation, urlTok);
+            }
           }
         } catch (_err) {
           // ignore
@@ -2029,16 +2069,14 @@
         normalizeQuoteSymbol(entry.quote_symbol || "", { allowCjk: true }) ||
         (host instanceof HTMLElement ? resolveQuoteSymbol(host, entry) : "") ||
         "BNB";
-      const { label, title, className } = computeBadgePresentation(entry, q);
+      const presentation = computeBadgePresentation(entry, q);
+      const { label } = presentation;
       if (!label) return false;
 
       // Already correct → in-place update only (0.5.3/0.5.4 flash fix).
       const already = findGmgnHeaderBadgeEl(token);
       if (already) {
-        already.textContent = label;
-        already.title = `${title}${token}`;
-        already.className = className;
-        already.dataset.feeSig = label;
+        applyBadgeUi(already, presentation, token);
         already.dataset.feeHeader = "1";
         already.dataset.feePosMode = "default";
         if (gmgnEmbeddedDirtyCards.size > 0) scheduleGmgnEmbeddedDirtyPass();
@@ -2086,14 +2124,10 @@
 
       const icon = document.createElement("span");
       icon.dataset[ICON_MARK] = "1";
-      icon.dataset.feeToken = token;
-      icon.dataset.feeSig = label;
       icon.dataset.feePosMode = "default";
       // 0.5.4: lock header badge so list remount / isStable thrash cannot delete it.
       icon.dataset.feeHeader = "1";
-      icon.textContent = label;
-      icon.title = `${title}${token}`;
-      icon.className = className;
+      applyBadgeUi(icon, presentation, token);
 
       leaf.dataset.flapMount = "gmgn-header-address-leaf";
       leaf.insertAdjacentElement("afterend", icon);
@@ -3482,7 +3516,8 @@
     try {
       const q =
         normalizeQuoteSymbol(entry.quote_symbol || "", { allowCjk: true }) || "BNB";
-      const { label, title, className } = computeBadgePresentation(entry, q);
+      const presentation = computeBadgePresentation(entry, q);
+      const { label } = presentation;
       if (!label) return false;
 
       if (card.dataset[CARD_MARK] !== token) card.dataset[CARD_MARK] = token;
@@ -3496,10 +3531,7 @@
       if (icon && icon.dataset.feeToken === token) {
         const er = icon.getBoundingClientRect();
         if (er.width >= 2 && er.height >= 2) {
-          icon.textContent = label;
-          icon.title = `${title}${token}`;
-          icon.className = className;
-          icon.dataset.feeSig = label;
+          applyBadgeUi(icon, presentation, token);
           return true;
         }
       }
@@ -3520,12 +3552,8 @@
           removeAllBadgesForCard(card, token);
           icon = document.createElement("span");
           icon.dataset[ICON_MARK] = "1";
-          icon.dataset.feeToken = token;
-          icon.dataset.feeSig = label;
           icon.dataset.feePosMode = "default";
-          icon.textContent = label;
-          icon.title = `${title}${token}`;
-          icon.className = className;
+          applyBadgeUi(icon, presentation, token);
           try {
             if (typeof placeBesideTaxChip === "function") {
               placeBesideTaxChip(fallback, icon);
@@ -3551,11 +3579,7 @@
       removeAllBadgesForCard(card, token);
       icon = document.createElement("span");
       icon.dataset[ICON_MARK] = "1";
-      icon.dataset.feeToken = token;
-      icon.dataset.feeSig = label;
-      icon.textContent = label;
-      icon.title = `${title}${token}`;
-      icon.className = className;
+      applyBadgeUi(icon, presentation, token);
       ensureCardPositioning(card);
       card.appendChild(icon);
       applyAbsoluteBadgeStyles(icon, pos.x, pos.y);
@@ -5306,15 +5330,13 @@
         normalizeQuoteSymbol(entry.quote_symbol || "", { allowCjk: true }) ||
         resolveQuoteSymbol(header, entry) ||
         "BNB";
-      const { label, title, className } = computeBadgePresentation(entry, q);
+      const presentation = computeBadgePresentation(entry, q);
+      const { label } = presentation;
       if (!label) return false;
 
       const existing = findDebotHeaderBadgeEl(token);
       if (existing) {
-        existing.textContent = label;
-        existing.title = `${title}${token}`;
-        existing.className = className;
-        existing.dataset.feeSig = label;
+        applyBadgeUi(existing, presentation, token);
         existing.dataset.feeHeader = "1";
         existing.dataset.feePosMode = "default";
         debotHeaderBadgeOkEl = existing;
@@ -5369,13 +5391,9 @@
 
       const icon = document.createElement("span");
       icon.dataset[ICON_MARK] = "1";
-      icon.dataset.feeToken = token;
-      icon.dataset.feeSig = label;
       icon.dataset.feePosMode = "default";
       icon.dataset.feeHeader = "1";
-      icon.textContent = label;
-      icon.title = `${title}${token}`;
-      icon.className = className;
+      applyBadgeUi(icon, presentation, token);
 
       if (short && short.isConnected) {
         // Place immediately after short CA leaf (user expects badge by address).
@@ -5902,8 +5920,24 @@
             }
           }
           const quoteSymbol = resolveQuoteSymbol(card, entry);
-          const { label, className, title } = computeBadgePresentation(entry, quoteSymbol);
-          if (label && existing.textContent === label && existing.className === className) {
+          const presentation = computeBadgePresentation(entry, quoteSymbol);
+          const { label, className, basketCount } = presentation;
+          const textEl = existing.querySelector(".gmgn-fee-mode-icon__text");
+          const shown = textEl ? textEl.textContent : existing.textContent;
+          const countEl = existing.querySelector(".gmgn-fee-mode-icon__count");
+          const haveCount = countEl ? countEl.textContent || "" : "";
+          const wantCount = (basketCount || 0) >= 3 ? String(basketCount) : "";
+          const wantClick = isOpenTaxinfoEnabled();
+          const wantClass = wantClick
+            ? `${className} gmgn-fee-mode-icon--clickable`.trim()
+            : className;
+          if (
+            label &&
+            shown === label &&
+            existing.className === wantClass &&
+            (existing.dataset.feeOpenTaxinfo === "1") === wantClick &&
+            haveCount === wantCount
+          ) {
             existing.dataset.feeSig = label;
             const pos = getActiveBadgePosition(card);
             if (pos.enabled) applyAbsoluteBadgeStyles(existing, pos.x, pos.y);
@@ -5913,11 +5947,7 @@
             continue;
           }
           if (label) {
-            existing.textContent = label;
-            existing.title = `${title}${token}`;
-            existing.className = className;
-            existing.dataset.feeToken = token;
-            existing.dataset.feeSig = label;
+            applyBadgeUi(existing, presentation, token);
             const pos = getActiveBadgePosition(card);
             if (pos.enabled) applyAbsoluteBadgeStyles(existing, pos.x, pos.y);
             else syncBadgeDragCursor(existing);
@@ -7590,6 +7620,29 @@
     }
   }
 
+  function compactDisplaySymbol(symbol) {
+    const raw = String(symbol || "")
+      .replace(/[^a-zA-Z0-9]/g, "")
+      .toUpperCase();
+    if (!raw) return "";
+    if (raw === "WBNB") return "BNB";
+    return raw.length > 4 ? raw.slice(0, 4) : raw;
+  }
+
+  function normalizeBasketAssets(raw) {
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    for (const row of raw) {
+      if (!row || typeof row !== "object") continue;
+      const address = typeof row.address === "string" ? row.address.toLowerCase() : "";
+      const symbol = compactDisplaySymbol(row.symbol || row.name || "");
+      const name = String(row.name || symbol || "").trim().slice(0, 48);
+      if (!symbol && !name) continue;
+      out.push({ address, symbol: symbol || compactDisplaySymbol(name), name: name || symbol });
+    }
+    return out;
+  }
+
   function normalizeResult(result) {
     if (!result || !confirmedModes.has(result.mode)) return null;
     const label =
@@ -7622,6 +7675,9 @@
       dividend_symbol:
         typeof result.dividend_symbol === "string" ? result.dividend_symbol : "",
       quote_symbol: typeof result.quote_symbol === "string" ? result.quote_symbol : "",
+      vault_address:
+        typeof result.vault_address === "string" ? result.vault_address.toLowerCase() : "",
+      basket_assets: normalizeBasketAssets(result.basket_assets),
       fetched_at: typeof result.fetched_at === "number" ? result.fetched_at : null
     };
   }
@@ -7999,13 +8055,29 @@
   function hydrateDisplayPrefs() {
     if (!isExtensionContextValid() || !chrome.storage?.local) return;
     try {
-      chrome.storage.local.get([DISPLAY_PREFS_KEY], (items) => {
+      chrome.storage.local.get([DISPLAY_PREFS_KEY, UI_LANG_KEY], (items) => {
         if (!isExtensionContextValid() || chrome.runtime.lastError) return;
         displayPrefs = normalizeDisplayPrefs(items?.[DISPLAY_PREFS_KEY]);
+        uiLang = items?.[UI_LANG_KEY] === "en" ? "en" : "zh";
         rerenderAllBadges();
       });
     } catch {
       // Extension reloaded mid-flight.
+    }
+  }
+
+  function hydrateUiLang() {
+    if (!isExtensionContextValid() || !chrome.storage?.local) return;
+    try {
+      chrome.storage.local.get([UI_LANG_KEY], (items) => {
+        if (!isExtensionContextValid() || chrome.runtime.lastError) return;
+        const next = items?.[UI_LANG_KEY] === "en" ? "en" : "zh";
+        if (next === uiLang) return;
+        uiLang = next;
+        if (feeTooltipAnchor) showFeeTooltip(feeTooltipAnchor);
+      });
+    } catch {
+      // ignore
     }
   }
 
@@ -8650,6 +8722,10 @@
           displayPrefs = normalizeDisplayPrefs(changes[DISPLAY_PREFS_KEY].newValue);
           dirty = true;
         }
+        if (changes[UI_LANG_KEY]) {
+          uiLang = changes[UI_LANG_KEY].newValue === "en" ? "en" : "zh";
+          dirty = true;
+        }
         if (changes[BADGE_THEME_KEY]) {
           badgeTheme = normalizeBadgeTheme(changes[BADGE_THEME_KEY].newValue);
           dirty = true;
@@ -8689,20 +8765,42 @@
     });
   }
 
+  function getBasketAssetsForDisplay(entry) {
+    const prefs = displayPrefs || DEFAULT_DISPLAY_PREFS;
+    if (prefs.basket === false) return [];
+    return normalizeBasketAssets(entry?.basket_assets);
+  }
+
+  function basketPairText(assets) {
+    const syms = (assets || []).map((a) => compactDisplaySymbol(a.symbol)).filter(Boolean);
+    if (syms.length >= 2) return `${syms[0]}&${syms[1]}`;
+    if (syms.length === 1) return syms[0];
+    return "";
+  }
+
   /**
    * Compact fee allocation from bps, filtered by displayPrefs.
    * When payoutArrow is on, annotate the single largest *visible* segment with →SYMBOL
    * (never omit when equals pool quote — user wants explicit payout).
+   * Index vault gift: 📈 + first two basket symbols (not →IB-xxx).
    */
   function buildFeeLabel(entry) {
     const prefs = displayPrefs || DEFAULT_DISPLAY_PREFS;
+    const basketAssets = getBasketAssetsForDisplay(entry);
+    const basketPair = basketPairText(basketAssets);
+    const useStockGift = Boolean(entry.is_vault && basketPair);
     const candidates = [];
     if ((entry.dividend_bps || 0) > 0 && prefs.holder !== false) {
       candidates.push({ kind: "holder", emoji: "💎", bps: entry.dividend_bps, pri: 0 });
     }
     if ((entry.market_bps || 0) > 0) {
       if (entry.is_vault && prefs.gift !== false) {
-        candidates.push({ kind: "gift", emoji: "🎁", bps: entry.market_bps, pri: 1 });
+        candidates.push({
+          kind: "gift",
+          emoji: useStockGift ? STOCK_EMOJI : GIFT_EMOJI,
+          bps: entry.market_bps,
+          pri: 1
+        });
       } else if (!entry.is_vault && prefs.creator !== false) {
         candidates.push({ kind: "creator", emoji: "👨‍🍳", bps: entry.market_bps, pri: 2 });
       }
@@ -8733,12 +8831,16 @@
     // Resolve →SYMBOL for the *visible* top only (don't reuse API top symbol on another kind).
     let topSym = "";
     if (prefs.payoutArrow !== false && top) {
-      if (top === entry.top_segment) {
-        topSym = String(entry.top_payout_symbol || "").trim();
+      if (top === "gift" && useStockGift) {
+        topSym = ""; // basket pair appended without arrow / IB-xxx
+      } else if (top === entry.top_segment) {
+        topSym = compactDisplaySymbol(entry.top_payout_symbol || "");
       } else if (top === "holder") {
-        topSym = String(entry.dividend_symbol || entry.top_payout_symbol || "").trim();
+        topSym = compactDisplaySymbol(
+          entry.dividend_symbol || entry.top_payout_symbol || ""
+        );
       } else if (top === "creator" || top === "gift" || top === "lp") {
-        topSym = String(entry.quote_symbol || "").trim();
+        topSym = compactDisplaySymbol(entry.quote_symbol || "");
       }
       // burn: tax symbol not always cached client-side — omit arrow if unknown
     }
@@ -8749,6 +8851,9 @@
     const parts = candidates.map((c) => {
       // 0.4.48: 100% → icon only (💎 not 💎100%); partial still shows percent.
       const base = formatSegmentBase(c.emoji, c.bps);
+      if (c.kind === "gift" && useStockGift) {
+        return `${base}${basketPair}`;
+      }
       if (c.kind === top && topSym) return `${base}→${topSym}`;
       return base;
     });
@@ -8768,16 +8873,52 @@
     return fee;
   }
 
+  function tipT(key) {
+    const pack = TIP_I18N[uiLang] || TIP_I18N.zh;
+    return pack[key] != null ? pack[key] : TIP_I18N.zh[key] || key;
+  }
+
+  function bpsToPercentLabel(bps) {
+    const n = Number(bps) || 0;
+    if (n % 100 === 0) return `${n / 100}%`;
+    const v = n / 100;
+    return `${String(v.toFixed(1)).replace(/\.0$/, "")}%`;
+  }
+
+  function buildTipModel(entry, quoteSymbol, label) {
+    const basket = getBasketAssetsForDisplay(entry);
+    return {
+      label: label || "",
+      quoteSymbol: quoteSymbol || "",
+      buyTax: bpsToPercentLabel(entry.buy_tax_bps),
+      sellTax: bpsToPercentLabel(entry.sell_tax_bps),
+      titleLines: String(entry.title || "")
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .slice(0, 6),
+      basket
+    };
+  }
+
   function computeBadgePresentation(entry, quoteSymbol) {
     const meta = modeMeta[entry.mode] || modeMeta.unknown;
     const label = buildDisplayLabel(entry, quoteSymbol);
+    const basketAssets = getBasketAssetsForDisplay(entry);
+    const basketCount = basketAssets.length;
+    // For muted "&" between first two symbols (e.g. SPCX&TSLA).
+    const pairSyms = basketAssets
+      .map((a) => compactDisplaySymbol(a.symbol))
+      .filter(Boolean);
+    const basketPair =
+      pairSyms.length >= 2 && label.includes(`${pairSyms[0]}&${pairSyms[1]}`)
+        ? { left: pairSyms[0], right: pairSyms[1] }
+        : null;
     const segmentCount =
       Number((entry.dividend_bps || 0) > 0) +
       Number((entry.market_bps || 0) > 0) +
       Number((entry.deflation_bps || 0) > 0) +
       Number((entry.lp_bps || 0) > 0);
-    const poolLine = quoteSymbol ? `底池: ${quoteSymbol}\n` : "";
-    const title = `${poolLine}${entry.title || meta.title}\n`;
     const theme = badgeTheme === "light" ? "light" : "dark";
     // Light: never translucent / never honor solidDark toggle — CSS forces solid dark chip.
     // Dark: optional solid-dark class when user checks 深色背景.
@@ -8791,11 +8932,296 @@
       `gmgn-fee-mode-icon--${siteStrategy.name}`,
       segmentCount >= 3 ? "gmgn-fee-mode-icon--wide" : "",
       segmentCount >= 2 ? "gmgn-fee-mode-icon--multi" : "",
-      quoteSymbol && displayPrefs.pool !== false ? "gmgn-fee-mode-icon--with-pool" : ""
+      quoteSymbol && displayPrefs.pool !== false ? "gmgn-fee-mode-icon--with-pool" : "",
+      basketCount >= 3 ? "gmgn-fee-mode-icon--has-count" : "",
+      basketCount > 0 ? "gmgn-fee-mode-icon--basket" : ""
     ]
       .filter(Boolean)
       .join(" ");
-    return { label, title, className, meta };
+    const tipModel = buildTipModel(entry, quoteSymbol, label);
+    // Legacy plain title kept for rare code paths; UI uses custom tooltip.
+    const title = tipModel.titleLines.join("\n");
+    return { label, title, className, meta, basketCount, tipModel, basketPair };
+  }
+
+  /** Fill label node; mute "&" between basket tickers so SPCX / TSLA stand out. */
+  function fillBadgeLabelText(textEl, label, basketPair) {
+    textEl.textContent = "";
+    const text = String(label || "");
+    if (!basketPair?.left || !basketPair?.right) {
+      textEl.textContent = text;
+      return;
+    }
+    const pair = `${basketPair.left}&${basketPair.right}`;
+    const idx = text.indexOf(pair);
+    if (idx < 0) {
+      textEl.textContent = text;
+      return;
+    }
+    if (idx > 0) {
+      textEl.appendChild(document.createTextNode(text.slice(0, idx)));
+    }
+    const leftEl = document.createElement("span");
+    leftEl.className = "gmgn-fee-mode-icon__sym";
+    leftEl.textContent = basketPair.left;
+    textEl.appendChild(leftEl);
+    const ampEl = document.createElement("span");
+    ampEl.className = "gmgn-fee-mode-icon__amp";
+    ampEl.textContent = "&";
+    ampEl.setAttribute("aria-hidden", "true");
+    textEl.appendChild(ampEl);
+    const rightEl = document.createElement("span");
+    rightEl.className = "gmgn-fee-mode-icon__sym";
+    rightEl.textContent = basketPair.right;
+    textEl.appendChild(rightEl);
+    if (idx + pair.length < text.length) {
+      textEl.appendChild(document.createTextNode(text.slice(idx + pair.length)));
+    }
+  }
+
+  function ensureFeeTooltip() {
+    if (feeTooltipEl && document.contains(feeTooltipEl)) return feeTooltipEl;
+    const el = document.createElement("div");
+    el.className = "gmgn-fee-mode-tooltip";
+    el.setAttribute("role", "tooltip");
+    el.hidden = true;
+    el.addEventListener("mouseenter", () => {
+      if (feeTooltipHideTimer) {
+        window.clearTimeout(feeTooltipHideTimer);
+        feeTooltipHideTimer = 0;
+      }
+    });
+    el.addEventListener("mouseleave", () => {
+      scheduleHideFeeTooltip(80);
+    });
+    (document.documentElement || document.body).appendChild(el);
+    feeTooltipEl = el;
+    return el;
+  }
+
+  function scheduleHideFeeTooltip(ms) {
+    if (feeTooltipHideTimer) window.clearTimeout(feeTooltipHideTimer);
+    feeTooltipHideTimer = window.setTimeout(() => {
+      feeTooltipHideTimer = 0;
+      hideFeeTooltip();
+    }, ms);
+  }
+
+  function hideFeeTooltip() {
+    feeTooltipAnchor = null;
+    if (!feeTooltipEl) return;
+    feeTooltipEl.hidden = true;
+    feeTooltipEl.innerHTML = "";
+  }
+
+  function renderFeeTooltipContent(model) {
+    const theme = badgeTheme === "light" ? "light" : "dark";
+    const root = ensureFeeTooltip();
+    root.className = `gmgn-fee-mode-tooltip gmgn-fee-mode-tooltip--theme-${theme}`;
+    root.innerHTML = "";
+
+    const head = document.createElement("div");
+    head.className = "gmgn-fee-mode-tooltip__head";
+    head.textContent = model.label || tipT("taxAlloc");
+    root.appendChild(head);
+
+    if (model.quoteSymbol) {
+      const row = document.createElement("div");
+      row.className = "gmgn-fee-mode-tooltip__row";
+      row.innerHTML = `<span class="gmgn-fee-mode-tooltip__k">${tipT("pool")}</span><span class="gmgn-fee-mode-tooltip__v">🪙${model.quoteSymbol}</span>`;
+      root.appendChild(row);
+    }
+
+    const taxRow = document.createElement("div");
+    taxRow.className = "gmgn-fee-mode-tooltip__row";
+    taxRow.innerHTML = `<span class="gmgn-fee-mode-tooltip__k">${tipT("buySell")}</span><span class="gmgn-fee-mode-tooltip__v">${model.buyTax} / ${model.sellTax}</span>`;
+    root.appendChild(taxRow);
+
+    if (model.basket && model.basket.length) {
+      const sec = document.createElement("div");
+      sec.className = "gmgn-fee-mode-tooltip__sec";
+      const secTitle = document.createElement("div");
+      secTitle.className = "gmgn-fee-mode-tooltip__sec-title";
+      secTitle.textContent = `${tipT("basket")} · ${model.basket.length}`;
+      sec.appendChild(secTitle);
+      const list = document.createElement("ul");
+      list.className = "gmgn-fee-mode-tooltip__list";
+      for (const asset of model.basket) {
+        const li = document.createElement("li");
+        const name = asset.name || asset.symbol || "—";
+        const sym = asset.symbol || "";
+        li.innerHTML = `<span class="gmgn-fee-mode-tooltip__name">${name}</span><span class="gmgn-fee-mode-tooltip__sym">${sym}</span>`;
+        list.appendChild(li);
+      }
+      sec.appendChild(list);
+      root.appendChild(sec);
+    }
+
+    return root;
+  }
+
+  function positionFeeTooltip(anchor) {
+    const tip = ensureFeeTooltip();
+    if (!anchor || !document.contains(anchor)) return;
+    const ar = anchor.getBoundingClientRect();
+    const pad = 8;
+    tip.hidden = false;
+    // Measure after unhide
+    const tr = tip.getBoundingClientRect();
+    let left = ar.left + ar.width / 2 - tr.width / 2;
+    let top = ar.bottom + 6;
+    if (top + tr.height > window.innerHeight - pad) {
+      top = ar.top - tr.height - 6;
+    }
+    left = Math.max(pad, Math.min(left, window.innerWidth - tr.width - pad));
+    top = Math.max(pad, Math.min(top, window.innerHeight - tr.height - pad));
+    tip.style.left = `${Math.round(left)}px`;
+    tip.style.top = `${Math.round(top)}px`;
+  }
+
+  function showFeeTooltip(anchor) {
+    if (!(anchor instanceof HTMLElement)) return;
+    const data = badgeTipData.get(anchor);
+    if (!data?.tipModel) return;
+    if (feeTooltipHideTimer) {
+      window.clearTimeout(feeTooltipHideTimer);
+      feeTooltipHideTimer = 0;
+    }
+    feeTooltipAnchor = anchor;
+    renderFeeTooltipContent(data.tipModel);
+    positionFeeTooltip(anchor);
+  }
+
+  function bindBadgeTooltip(icon) {
+    if (!(icon instanceof HTMLElement) || icon.dataset.feeTipBound === "1") return;
+    icon.dataset.feeTipBound = "1";
+    icon.addEventListener("mouseenter", () => showFeeTooltip(icon));
+    icon.addEventListener("mouseleave", () => scheduleHideFeeTooltip(120));
+    icon.addEventListener("focus", () => showFeeTooltip(icon));
+    icon.addEventListener("blur", () => scheduleHideFeeTooltip(120));
+  }
+
+  function buildFlapTaxinfoUrl(token) {
+    const ca = String(token || "").toLowerCase();
+    if (!TARGET_TOKEN_RE.test(ca)) return "";
+    const lang = uiLang === "en" ? "en" : "zh";
+    return `${FLAP_TAXINFO_BASE}/${ca}/taxinfo?lang=${lang}`;
+  }
+
+  function openFlapTaxinfo(token) {
+    const url = buildFlapTaxinfoUrl(token);
+    if (!url) return;
+    try {
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (_err) {
+      try {
+        location.assign(url);
+      } catch (_err2) {
+        // ignore
+      }
+    }
+  }
+
+  function isOpenTaxinfoEnabled() {
+    const prefs = displayPrefs || DEFAULT_DISPLAY_PREFS;
+    return prefs.openTaxinfo !== false;
+  }
+
+  /**
+   * Click / Enter → flap taxinfo. Skip when drag-edit or pointer moved (drag).
+   * Bound once per badge node.
+   */
+  function bindBadgeClick(icon) {
+    if (!(icon instanceof HTMLElement) || icon.dataset.feeClickBound === "1") return;
+    icon.dataset.feeClickBound = "1";
+    let ptrDown = null;
+
+    icon.addEventListener(
+      "pointerdown",
+      (e) => {
+        if (e.button != null && e.button !== 0) return;
+        ptrDown = { x: e.clientX, y: e.clientY };
+      },
+      true
+    );
+
+    icon.addEventListener(
+      "click",
+      (e) => {
+        if (!isOpenTaxinfoEnabled()) return;
+        // Drag-to-position mode: never hijack navigation.
+        if (badgeDragEdit || badgeDragState) return;
+        if (ptrDown) {
+          const dx = Math.abs((e.clientX || 0) - ptrDown.x);
+          const dy = Math.abs((e.clientY || 0) - ptrDown.y);
+          ptrDown = null;
+          if (dx > 6 || dy > 6) return;
+        }
+        const token = icon.dataset.feeToken || "";
+        if (!TARGET_TOKEN_RE.test(token)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        openFlapTaxinfo(token);
+      },
+      true
+    );
+
+    icon.addEventListener("keydown", (e) => {
+      if (!isOpenTaxinfoEnabled()) return;
+      if (badgeDragEdit || badgeDragState) return;
+      if (e.key !== "Enter" && e.key !== " ") return;
+      const token = icon.dataset.feeToken || "";
+      if (!TARGET_TOKEN_RE.test(token)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      openFlapTaxinfo(token);
+    });
+  }
+
+  /**
+   * Paint badge DOM: main label + optional basket count chip; custom tooltip (no native title).
+   */
+  function applyBadgeUi(icon, presentation, token) {
+    if (!(icon instanceof HTMLElement) || !presentation) return;
+    const { label, className, basketCount, tipModel } = presentation;
+    const clickable = isOpenTaxinfoEnabled();
+    const finalClass = clickable
+      ? `${className} gmgn-fee-mode-icon--clickable`.trim()
+      : className;
+    icon.className = finalClass;
+    icon.dataset.feeToken = token || icon.dataset.feeToken || "";
+    icon.dataset.feeSig = label || "";
+    icon.dataset.feeBasketCount = String(basketCount || 0);
+    icon.dataset.feeOpenTaxinfo = clickable ? "1" : "0";
+    icon.removeAttribute("title");
+    icon.setAttribute("tabindex", "0");
+    icon.setAttribute("role", clickable ? "link" : "img");
+    const ariaExtra = clickable
+      ? uiLang === "en"
+        ? " — open Flap tax info"
+        : " — 打开 Flap 税收详情"
+      : "";
+    icon.setAttribute("aria-label", `${label || "fee"}${ariaExtra}`);
+
+    icon.textContent = "";
+    const textEl = document.createElement("span");
+    textEl.className = "gmgn-fee-mode-icon__text";
+    fillBadgeLabelText(textEl, label || "", presentation.basketPair || null);
+    icon.appendChild(textEl);
+    if ((basketCount || 0) >= 3) {
+      const countEl = document.createElement("span");
+      countEl.className = "gmgn-fee-mode-icon__count";
+      countEl.textContent = String(basketCount);
+      countEl.setAttribute("aria-hidden", "true");
+      icon.appendChild(countEl);
+    }
+
+    badgeTipData.set(icon, { tipModel: tipModel || { label, basket: [] } });
+    bindBadgeTooltip(icon);
+    bindBadgeClick(icon);
+    if (feeTooltipAnchor === icon) {
+      showFeeTooltip(icon);
+    }
   }
 
   /** True when badge is missing, wrong token/label, or detached from preferred Debot mount. */
@@ -8809,11 +9235,22 @@
 
     // Cheap text/class check first (avoid layout + mount search every scan).
     const quoteSymbol = resolveQuoteSymbol(card, entry);
-    const { label, className, title } = computeBadgePresentation(entry, quoteSymbol);
+    const presentation = computeBadgePresentation(entry, quoteSymbol);
+    const { label, className, basketCount } = presentation;
     if (!label) return true;
-    if (existing.textContent !== label) return true;
-    if (existing.className !== className) return true;
-    if (existing.title !== `${title}${token}`) return true;
+    const textEl = existing.querySelector(".gmgn-fee-mode-icon__text");
+    const shown = textEl ? textEl.textContent : existing.textContent;
+    if (shown !== label) return true;
+    const wantClick = isOpenTaxinfoEnabled();
+    const wantClass = wantClick
+      ? `${className} gmgn-fee-mode-icon--clickable`.trim()
+      : className;
+    if (existing.className !== wantClass) return true;
+    if ((existing.dataset.feeOpenTaxinfo === "1") !== wantClick) return true;
+    const wantCount = (basketCount || 0) >= 3 ? String(basketCount) : "";
+    const countEl = existing.querySelector(".gmgn-fee-mode-icon__count");
+    const haveCount = countEl ? countEl.textContent || "" : "";
+    if (wantCount !== haveCount) return true;
 
     // Not actually painted (0×0) → remount. (single rect read)
     const er = existing.getBoundingClientRect();
@@ -8827,7 +9264,8 @@
   function renderMode(card, token, entry, options = {}) {
     const forceRemount = options.forceRemount === true;
     const quoteSymbol = resolveQuoteSymbol(card, entry);
-    const { label, title, className } = computeBadgePresentation(entry, quoteSymbol);
+    const presentation = computeBadgePresentation(entry, quoteSymbol);
+    const { label } = presentation;
     const pos = getActiveBadgePosition(card);
     const wantMode = pos.enabled ? "absolute" : "default";
 
@@ -8869,11 +9307,7 @@
     ) {
       const er = existing.getBoundingClientRect();
       if (er.width >= 2 && er.height >= 2 && existing.parentElement) {
-        existing.textContent = label;
-        existing.title = `${title}${token}`;
-        existing.className = className;
-        existing.dataset.feeToken = token;
-        existing.dataset.feeSig = label;
+        applyBadgeUi(existing, presentation, token);
         if (wantMode === "absolute") {
           applyAbsoluteBadgeStyles(existing, pos.x, pos.y);
         }
@@ -8899,11 +9333,7 @@
 
     const icon = document.createElement("span");
     icon.dataset[ICON_MARK] = "1";
-    icon.dataset.feeToken = token;
-    icon.dataset.feeSig = label;
-    icon.textContent = label;
-    icon.title = `${title}${token}`;
-    icon.className = className;
+    applyBadgeUi(icon, presentation, token);
 
     if (!placeBadgeOnCard(card, icon)) {
       // Absolute always succeeds if card exists; Tax path missing target.
@@ -9525,6 +9955,9 @@
                 dividend_symbol:
                   typeof value.dividend_symbol === "string" ? value.dividend_symbol : "",
                 quote_symbol: typeof value.quote_symbol === "string" ? value.quote_symbol : "",
+                vault_address:
+                  typeof value.vault_address === "string" ? value.vault_address : "",
+                basket_assets: normalizeBasketAssets(value.basket_assets),
                 fetched_at: Math.floor(value.fetchedAt / 1000)
               });
             });
@@ -9589,6 +10022,8 @@
         top_payout_symbol: entry.top_payout_symbol || "",
         dividend_symbol: entry.dividend_symbol || "",
         quote_symbol: entry.quote_symbol || "",
+        vault_address: entry.vault_address || "",
+        basket_assets: normalizeBasketAssets(entry.basket_assets),
         fetchedAt:
           typeof entry.fetched_at === "number" ? entry.fetched_at * 1000 : Date.now()
       });
@@ -9643,6 +10078,8 @@
           top_payout_symbol: entry.top_payout_symbol || "",
           dividend_symbol: entry.dividend_symbol || "",
           quote_symbol: entry.quote_symbol || "",
+          vault_address: entry.vault_address || "",
+          basket_assets: normalizeBasketAssets(entry.basket_assets),
           fetchedAt
         };
       }
