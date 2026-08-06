@@ -405,6 +405,7 @@ python tools/ctl.py watchdog-run
   - `0.5.19`：GMGN 搜索徽章改挂 `V/Fees` 列后；Debot/Gungnir 搜索徽章改挂代币名称行末尾；严格定位失败时不回退到其他挂载点
   - `0.5.20`：GMGN 常规战壕候选按三列与视觉卡片 round-robin 去重；用跨轮次行游标覆盖「已开盘」下方卡片，同时维持每轮 12 卡预算
   - `0.5.21`：GMGN-only 新卡徽章时效 — mutation 防抖 380ms、列表扫间隔 560ms、batch 180ms、miss 前两次 2s/5s + 到期自动重入队、/modes 回包后有界 cache-first 视口补画；Debot/Gungnir 不变
+  - `0.5.22`：GMGN-only 请求队列 — 顶区未画 token 50ms 优先 flush、batch 按视口/左列排序、截断扫描也触发 flush；Debot 不变
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`

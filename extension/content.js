@@ -7,6 +7,7 @@
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
   const GMGN_TRENCH_ROOT_SELECTOR =
     "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100";
+  // 0.5.22: GMGN-only batch priority for top viewport + flush when scan truncated; Debot untouched.
   // 0.5.21: GMGN-only new-card latency (soft debounce / early miss retry / cache paint); Debot untouched.
   // 0.5.18: GMGN embedded TokenItem dirty queue + single-pass search overlay/address mount.
   // 0.5.17: GMGN list readiness + fast paint also recognize virtual rows without token <a>.
@@ -91,6 +92,8 @@
   const BATCH_FLUSH_MS = 350;
   // GMGN list only: slightly snappier batch coalesce (overlay still uses 0).
   const GMGN_LIST_BATCH_FLUSH_MS = 180;
+  // GMGN top-of-list (新创建 insert band) unpainted tokens: almost-immediate flush.
+  const GMGN_HOT_BATCH_FLUSH_MS = 50;
   const RETRY_BASE_MS = 900;
   const RETRY_MAX_MS = 12000;
   const MISSING_RETRY_BASE_MS = 15000;
@@ -340,6 +343,8 @@
   const persistentCache = new Map();
   const requestQueue = new Set();
   let batchTimer = null;
+  /** Delay of the pending batchTimer (ms); prefer shorter reschedules (hot tokens). */
+  let pendingBatchDelayMs = -1;
   let batchActive = false;
   let batchStartedAt = 0;
   let batchGeneration = 0;
@@ -5959,6 +5964,10 @@
           bypassForceGap: true
         });
       } else if (isGmgnHost()) {
+        // 0.5.22: truncated scans still enqueue tokens — flush them (was only on non-truncated).
+        if (queued > 0 && requestQueue.size > 0 && !batchActive) {
+          scheduleBatchFlush({ delayMs: GMGN_LIST_BATCH_FLUSH_MS });
+        }
         // Steady GMGN: never immediate force storm — idle slice only.
         scheduleScan(120, { force: false, immediate: false, light: keepLight });
       } else {
@@ -7178,6 +7187,74 @@
     gmgnMissingRequeueTimers.set(token, timerId);
   }
 
+  /**
+   * GMGN list: token has a marked card in the top band without a badge yet.
+   * These are the 新创建 insert rows users stare at first.
+   */
+  function isGmgnHotUnpaintedToken(token) {
+    if (!isGmgnHost() || isTokenDetailRoute() || !token) return false;
+    try {
+      if (document.querySelector(`[${ICON_DATA}="1"][data-fee-token="${token}"]`)) {
+        return false;
+      }
+      const cards = document.querySelectorAll(`[${CARD_DATA}="${token}"]`);
+      const lim = Math.min(cards.length, 4);
+      for (let i = 0; i < lim; i += 1) {
+        const card = cards[i];
+        if (!(card instanceof HTMLElement)) continue;
+        const r = card.getBoundingClientRect();
+        // First ~3 rows across columns (header ~150 + 3×124).
+        if (r.width >= 2 && r.height >= 2 && r.top >= 90 && r.top < 560 && r.bottom > 0) {
+          return true;
+        }
+      }
+    } catch (_err) {
+      return false;
+    }
+    return false;
+  }
+
+  /**
+   * GMGN: pull top-viewport / unpainted marked tokens first so 新创建 is not
+   * starved behind a long FIFO of offscreen CA from earlier scans.
+   * Debot keeps insertion order (no sort cost / behavior change).
+   */
+  function orderTokensForBatch(tokens) {
+    if (!isGmgnHost() || isTokenDetailRoute() || !tokens || tokens.length <= 1) {
+      return tokens;
+    }
+    const scored = [];
+    for (let i = 0; i < tokens.length; i += 1) {
+      const token = tokens[i];
+      let score = 0;
+      try {
+        const hasIcon = !!document.querySelector(
+          `[${ICON_DATA}="1"][data-fee-token="${token}"]`
+        );
+        if (!hasIcon) score += 40;
+        const cards = document.querySelectorAll(`[${CARD_DATA}="${token}"]`);
+        const lim = Math.min(cards.length, 3);
+        for (let j = 0; j < lim; j += 1) {
+          const card = cards[j];
+          if (!(card instanceof HTMLElement)) continue;
+          const r = card.getBoundingClientRect();
+          if (r.width < 2 || r.height < 2) continue;
+          if (r.top >= 0 && r.top < window.innerHeight) {
+            // Higher on screen → higher priority (cap 100).
+            score += Math.max(0, 100 - Math.floor(r.top / 8));
+            // Left column (新创建) boost.
+            if (r.left < window.innerWidth / 3) score += 50;
+          }
+        }
+      } catch (_err) {
+        // ignore
+      }
+      scored.push({ token, score, i });
+    }
+    scored.sort((a, b) => b.score - a.score || a.i - b.i);
+    return scored.map((x) => x.token);
+  }
+
   function queueToken(token) {
     if (modeCache.has(token) || isPersistentCacheHit(token) || requestQueue.has(token)) return;
     const missingState = missingRetryState.get(token);
@@ -7188,8 +7265,12 @@
     if (isOverlayFast() || quickHasOpenOverlay()) {
       scheduleBatchFlush({ immediate: true, delayMs: 0 });
     } else if (isGmgnHost() && !isTokenDetailRoute()) {
-      // GMGN 新创建: slightly faster coalesce; Debot stays at BATCH_FLUSH_MS.
-      scheduleBatchFlush({ delayMs: GMGN_LIST_BATCH_FLUSH_MS });
+      // Hot top-band unpainted → near-immediate; else short list coalesce.
+      if (isGmgnHotUnpaintedToken(token)) {
+        scheduleBatchFlush({ delayMs: GMGN_HOT_BATCH_FLUSH_MS });
+      } else {
+        scheduleBatchFlush({ delayMs: GMGN_LIST_BATCH_FLUSH_MS });
+      }
     } else {
       scheduleBatchFlush();
     }
@@ -7273,10 +7354,16 @@
     }
     if (batchActive) return;
     if (batchTimer) {
-      if (!immediate && delayMs >= BATCH_FLUSH_MS) return;
+      // Keep an already-sooner timer (hot 50ms must not be replaced by list 180ms).
+      if (!immediate && pendingBatchDelayMs >= 0 && delayMs >= pendingBatchDelayMs) {
+        return;
+      }
+      if (!immediate && delayMs >= BATCH_FLUSH_MS && pendingBatchDelayMs < 0) return;
       window.clearTimeout(batchTimer);
       batchTimer = null;
+      pendingBatchDelayMs = -1;
     }
+    pendingBatchDelayMs = delayMs;
     batchTimer = window.setTimeout(flushTokenBatch, delayMs);
   }
 
@@ -7291,6 +7378,7 @@
 
   async function flushTokenBatch() {
     batchTimer = null;
+    pendingBatchDelayMs = -1;
     if (!isTabVisible()) return;
     recoverStuckBatch(false);
     if (batchActive) {
@@ -7312,7 +7400,9 @@
       return;
     }
 
-    const tokens = Array.from(requestQueue).slice(0, MAX_BATCH_TOKENS);
+    // GMGN: viewport/top-band unpainted first; Debot: stable insertion order.
+    const ordered = orderTokensForBatch(Array.from(requestQueue));
+    const tokens = ordered.slice(0, MAX_BATCH_TOKENS);
     tokens.forEach((token) => requestQueue.delete(token));
 
     // Supersede any zombie controller (should be rare after recoverStuckBatch).
