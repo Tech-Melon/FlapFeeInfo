@@ -9,7 +9,7 @@
  * ★ 仅 7777/8888；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 46;
+  const HOOK_VER = 47;
   /** 仅当「资金接收方屏蔽」开启时，由插件临时写入，关闭时清理 */
   const OWNED_DISABLE_SW = "flapFeeInfo.ownedDisableShareWorker";
   const PREFS_ATTR = "data-flap-tax-recv";
@@ -540,12 +540,6 @@
           noteRemovedSample(addr, gmgnTal(row), "delta-nc");
           continue;
         }
-        // 存活的税币进 keepPool，供新创建 HTTP 滤空后回填
-        try {
-          if (isGmgnTokenItem(row)) rememberKeepToken(row, "new_creation");
-        } catch (_rk) {
-          // ignore
-        }
         data.t[w++] = row;
       }
       data.t.length = w;
@@ -848,191 +842,12 @@
   }
 
   /**
-   * 服务端 trenches_rank 的 limit 实测硬顶 60（传 280 仍只回 60）。
-   * 新创建列 thr=20 时约 80% 纯 👨‍🍳，滤完只剩 ~12 → 列表「空」。
-   * keepPool：跨响应/WS 记住非屏蔽 7777/8888，滤后回填列到接近原生密度。
+   * 处理列表响应：只删 hide token，不垫旧币、不改请求体。
+   *
+   * 历史坑：
+   * - keepPool 回填会把 1h 前的 CA 塞进「新创建」，时序错乱
+   * - expand limit / softRefresh 重放旧 body 会冲掉 GMGN 原生筛选条件
    */
-  const KEEP_POOL_SS = "flapFeeInfo.taxKeepPool.v1";
-  /** @type {Map<string, { t: object, at: number, col: string }>} */
-  const keepPool = new Map();
-  /** FIFO 地址序，避免热路径 sort 驱逐 */
-  const keepPoolOrder = [];
-  let keepPoolLoaded = false;
-  let keepPoolSaveAt = 0;
-  const KEEP_POOL_SAVE_MIN_MS = 8000;
-  // 仅回填新创建（屏蔽只影响该列）
-  const COL_PAD_TARGET = {
-    new_creation: 52
-  };
-
-  function loadKeepPool() {
-    if (keepPoolLoaded) return;
-    keepPoolLoaded = true;
-    try {
-      const raw = sessionStorage.getItem(KEEP_POOL_SS);
-      if (!raw) return;
-      const arr = JSON.parse(raw);
-      if (!Array.isArray(arr)) return;
-      for (let i = 0; i < arr.length; i++) {
-        const row = arr[i];
-        if (!row || !row.a || !row.tok || typeof row.tok !== "object") continue;
-        const a = String(row.a).toLowerCase();
-        if (!isTargetTaxTokenAddr(a)) continue;
-        if (keepPool.has(a)) continue;
-        keepPool.set(a, {
-          t: row.tok,
-          at: Number(row.at) || 0,
-          col: typeof row.col === "string" ? row.col : ""
-        });
-        keepPoolOrder.push(a);
-      }
-    } catch (_e) {
-      // ignore
-    }
-  }
-
-  function saveKeepPool(force) {
-    const now = Date.now();
-    if (!force && now - keepPoolSaveAt < KEEP_POOL_SAVE_MIN_MS) return;
-    keepPoolSaveAt = now;
-    try {
-      // 只持久化最近 80 条，避免 sessionStorage 大 JSON 卡住主线程
-      const start = Math.max(0, keepPoolOrder.length - 80);
-      const arr = [];
-      for (let i = start; i < keepPoolOrder.length; i++) {
-        const a = keepPoolOrder[i];
-        const v = keepPool.get(a);
-        if (!v || !v.t) continue;
-        arr.push({ a, tok: v.t, at: v.at, col: v.col || "" });
-      }
-      sessionStorage.setItem(KEEP_POOL_SS, JSON.stringify(arr));
-    } catch (_e) {
-      // quota / private mode
-    }
-  }
-
-  function rememberKeepToken(item, col) {
-    if (!item || typeof item !== "object") return;
-    const addr = gmgnAddr(item);
-    if (!isTargetTaxTokenAddr(addr)) return;
-    if (!gmgnTal(item)) return;
-    if (gmgnTokenHide(item)) return;
-    const prev = keepPool.get(addr);
-    const now = Date.now();
-    // 热路径：已在池内且 3s 内只刷新时间戳，避免反复挂大对象/写序
-    if (prev && now - (prev.at || 0) < 3000) {
-      prev.at = now;
-      if (col && !prev.col) prev.col = col;
-      return;
-    }
-    if (!prev) keepPoolOrder.push(addr);
-    keepPool.set(addr, {
-      t: item,
-      at: now,
-      col: col || (prev && prev.col) || ""
-    });
-    // FIFO 驱逐，禁止 sort（滚动时 WS 高频）
-    while (keepPoolOrder.length > 180) {
-      const old = keepPoolOrder.shift();
-      if (old) keepPool.delete(old);
-    }
-  }
-
-  function rememberTokensFromGmgnRoot(root) {
-    if (!root || typeof root !== "object") return;
-    // 屏蔽仅新创建：池子也只记该列，避免把即将打满/已开盘塞进新创建
-    const tokens = root.new_creation && root.new_creation.tokens;
-    if (!Array.isArray(tokens)) return;
-    for (let i = 0; i < tokens.length; i++) {
-      rememberKeepToken(tokens[i], "new_creation");
-    }
-  }
-
-  function padGmgnColumnTokens(tokens, col) {
-    if (!Array.isArray(tokens)) return 0;
-    const target = COL_PAD_TARGET[col] || 48;
-    if (tokens.length >= target) return 0;
-    loadKeepPool();
-    const have = new Set();
-    for (let i = 0; i < tokens.length; i++) {
-      const a = gmgnAddr(tokens[i]);
-      if (a) have.add(a);
-    }
-    let added = 0;
-    // 从新到旧扫 FIFO 尾部，不做全表 sort
-    const tryPad = (sameColOnly) => {
-      for (let i = keepPoolOrder.length - 1; i >= 0; i--) {
-        if (tokens.length >= target) return;
-        const a = keepPoolOrder[i];
-        const v = a ? keepPool.get(a) : null;
-        if (!a || !v || !v.t || have.has(a)) continue;
-        if (gmgnTokenHide(v.t)) {
-          keepPool.delete(a);
-          continue;
-        }
-        if (sameColOnly && v.col && col && v.col !== col) continue;
-        tokens.push(v.t);
-        have.add(a);
-        added += 1;
-      }
-    };
-    tryPad(true);
-    if (tokens.length < target) tryPad(false);
-    return added;
-  }
-
-  function padGmgnTrenchesAfterFilter(json) {
-    if (!json || typeof json !== "object") return { padded: 0 };
-    const root = json.data && (json.data["0"] || json.data[0] || json.data);
-    if (!root || typeof root !== "object") return { padded: 0 };
-    let padded = 0;
-    const per = {};
-    // 只垫新创建
-    const tokens = root.new_creation && root.new_creation.tokens;
-    if (Array.isArray(tokens)) {
-      const n = padGmgnColumnTokens(tokens, "new_creation");
-      per.new_creation = n;
-      padded += n;
-    }
-    if (padded > 0) saveKeepPool();
-    return { padded, per };
-  }
-
-  /** 尝试抬 limit（服务端可能仍顶 60；保留无害） */
-  function expandGmgnTrenchesRequestBody(bodyStr) {
-    if (!prefsOn() || bodyStr == null || typeof bodyStr !== "string" || bodyStr.length < 8) {
-      return bodyStr;
-    }
-    try {
-      const json = JSON.parse(bodyStr);
-      const params = json && Array.isArray(json.params) ? json.params : null;
-      if (!params || !params.length) return bodyStr;
-      let changed = false;
-      // 仅抬新创建 limit（其它列不屏蔽，无需抬）
-      const COL_MIN = {
-        new_creation: 280
-      };
-      for (let i = 0; i < params.length; i++) {
-        const p = params[i];
-        if (!p || typeof p !== "object") continue;
-        for (const col of Object.keys(COL_MIN)) {
-          const block = p[col];
-          if (!block || typeof block !== "object") continue;
-          const want = COL_MIN[col];
-          const cur = Number(block.limit);
-          if (!Number.isFinite(cur) || cur < want) {
-            block.limit = want;
-            changed = true;
-          }
-        }
-      }
-      if (!changed) return bodyStr;
-      return JSON.stringify(json);
-    } catch (_e) {
-      return bodyStr;
-    }
-  }
-
   function processBody(url, text) {
     const kind = urlLooksUseful(url);
     if (!kind || !text || text.length < 2) return null;
@@ -1048,15 +863,11 @@
       return null;
     }
     try {
-      loadKeepPool();
-      // 诊断：新创建 tokens 过滤前后数量
       let colStats = null;
       if (kind === "gmgn") {
         try {
           const root = json && json.data && (json.data["0"] || json.data[0] || json.data);
           if (root && typeof root === "object") {
-            // 滤前：只记新创建非屏蔽税币
-            rememberTokensFromGmgnRoot(root);
             colStats = {};
             const tokens = root.new_creation && root.new_creation.tokens;
             if (Array.isArray(tokens)) colStats.new_creation = { before: tokens.length };
@@ -1066,24 +877,17 @@
         }
       }
       const removed = filterJsonInPlace(json, kind);
-      let padInfo = { padded: 0 };
-      if (kind === "gmgn") {
-        padInfo = padGmgnTrenchesAfterFilter(json);
-        saveKeepPool();
-      }
       if (colStats) {
         try {
           const root = json && json.data && (json.data["0"] || json.data[0] || json.data);
           for (const col of Object.keys(colStats)) {
             const tokens = root && root[col] && root[col].tokens;
             colStats[col].after = Array.isArray(tokens) ? tokens.length : -1;
-            colStats[col].pad = (padInfo.per && padInfo.per[col]) || 0;
           }
           window.__flapFeeTrenchColStats = {
             ...colStats,
             removed,
-            padded: padInfo.padded,
-            pool: keepPool.size,
+            padded: 0,
             t: Date.now()
           };
         } catch (_s2) {
@@ -1095,42 +899,29 @@
         kind,
         channel: "http",
         removed,
-        padded: padInfo.padded || 0,
-        pool: keepPool.size,
         rawLen: text.length,
         thr: taxRecvPrefs.thresholdPct,
         cols: colStats || undefined
       });
-      // 有删除或有回填都要改写 body
-      if (removed <= 0 && !(padInfo.padded > 0)) return null;
+      if (removed <= 0) return null;
       return JSON.stringify(json);
     } catch (_e2) {
       return null;
     }
   }
 
+  /**
+   * 开启屏蔽时：不要用缓存的旧 body 重拉 trenches。
+   * 旧 body 往往不含用户刚改的 GMGN 原生筛选，会表现为「站内筛选失效」。
+   * 列表刷新改由 content 整页 reload / 用户自己的请求管道完成。
+   */
   function softRefreshLists() {
-    // 开启时重拉列表（过滤后写入 React）；关闭时由 content 整页 reload 恢复
+    // intentionally no-op for GMGN request replay
+    // Debot: 仅 revalidate 已记录的 column=new URL（不改 query）
     if (!prefsOn()) return;
     try {
-      if (lastGmgnTrench && lastGmgnTrench.url) {
-        const { url, method } = lastGmgnTrench;
-        let body = lastGmgnTrench.body || "{}";
-        body = expandGmgnTrenchesRequestBody(body) || body;
-        const xhr = new XMLHttpRequest();
-        xhr.open(method || "POST", url);
-        try {
-          xhr.setRequestHeader("Content-Type", "application/json");
-        } catch (_h) {
-          // ignore
-        }
-        xhr.send(body);
-      }
-    } catch (_e) {
-      // ignore
-    }
-    try {
-      for (const u of lastDebotRanksUrls.slice(0, 6)) {
+      for (const u of lastDebotRanksUrls.slice(0, 4)) {
+        if (!isDebotNewCreationRanksUrl(u)) continue;
         window.fetch(u, { credentials: "include", cache: "no-store" }).catch(() => {});
       }
     } catch (_e2) {
@@ -1243,9 +1034,10 @@
     } catch (_t) {
       // ignore
     }
+    // 清掉历史 keepPool（0.6.1 曾写入 sessionStorage，避免用户仍看到旧垫片）
     try {
-      loadKeepPool();
-    } catch (_lp) {
+      sessionStorage.removeItem("flapFeeInfo.taxKeepPool.v1");
+    } catch (_ss) {
       // ignore
     }
 
@@ -1725,20 +1517,12 @@
           }
           const kind = urlLooksUseful(url);
           if (kind === "debot") rememberDebotUrl(url);
-          let nextArgs = args;
+          // 不改写请求体（保留 GMGN 原生筛选/limit）
           if (kind === "gmgn") {
             try {
               let body = null;
               if (init && init.body != null) {
                 body = typeof init.body === "string" ? init.body : null;
-              }
-              if (body && prefsOn()) {
-                const boosted = expandGmgnTrenchesRequestBody(body);
-                if (boosted && boosted !== body) {
-                  const nextInit = Object.assign({}, init || {}, { body: boosted });
-                  nextArgs = [input, nextInit];
-                  body = boosted;
-                }
               }
               lastGmgnTrench = {
                 url,
@@ -1749,7 +1533,7 @@
               // ignore
             }
           }
-          const p = origFetch.apply(this, nextArgs);
+          const p = origFetch.apply(this, args);
           if (!kind || !p || typeof p.then !== "function") return p;
           return p.then(async (res) => {
             try {
@@ -1885,18 +1669,14 @@
           return XO.apply(this, arguments);
         };
         XMLHttpRequest.prototype.send = function (body) {
-          let sendBody = body;
           try {
             const u = this.__flapFeeUrl || "";
             const kind = urlLooksUseful(u);
             if (kind === "gmgn") {
-              if (typeof sendBody === "string" && prefsOn()) {
-                const boosted = expandGmgnTrenchesRequestBody(sendBody);
-                if (boosted && boosted !== sendBody) sendBody = boosted;
-              }
+              // 原样记录，不改 body
               lastGmgnTrench = {
                 url: u,
-                body: typeof sendBody === "string" ? sendBody : lastGmgnTrench?.body || "{}",
+                body: typeof body === "string" ? body : lastGmgnTrench?.body || "{}",
                 method: this.__flapFeeMethod || "POST"
               };
             }
@@ -1912,7 +1692,6 @@
           } catch (_e) {
             // ignore
           }
-          if (sendBody !== body) return XS.call(this, sendBody);
           return XS.apply(this, arguments);
         };
         XMLHttpRequest.prototype.send.__flapFeeTaxRecv = HOOK_VER;

@@ -79,7 +79,7 @@
       taxRecvEnableDesc: "开启后只过滤「新创建」列",
       taxRecvThresholdLabel: "阈值 ≥",
       taxRecvHint2:
-        "仅新创建：7777/8888 且 👨‍🍳 marketing%≥阈值则屏蔽（含 hybrid）；纯 💎/🎁金库不挡。即将打满与已开盘原样显示。"
+        "仅新创建：7777/8888 且 👨‍🍳 marketing%≥阈值则屏蔽（含 hybrid）；纯 💎/🎁金库不挡。即将打满与已开盘原样显示。不垫旧币、不改 GMGN 原生筛选。"
     },
     en: {
       appTitle: "TechMelon FlapFeeInfo",
@@ -145,7 +145,7 @@
       taxRecvEnableDesc: "Only filter the New creation column",
       taxRecvThresholdLabel: "Threshold ≥",
       taxRecvHint2:
-        "New column only: hide 7777/8888 when marketing% ≥ threshold (incl. hybrid). Pure 💎 / vault gift kept. Other columns unchanged."
+        "New column only: hide 7777/8888 when marketing% ≥ threshold (incl. hybrid). Pure 💎 / vault kept. No old-token padding; host filters untouched."
     }
   };
 
