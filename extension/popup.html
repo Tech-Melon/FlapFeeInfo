@@ -43,6 +43,48 @@
       </p>
     </section>
 
+    <section class="section tax-recv-section" id="taxRecvSection">
+      <div class="section-title" data-i18n="taxRecvSection">资金接收方屏蔽</div>
+      <p class="theme-hint" data-i18n="taxRecvHint">
+        仅战壕/Meme 列表生效。监听列表接口过滤（GMGN 自动补位），不额外请求；金库始终显示。默认关闭。
+      </p>
+      <label class="row drag-row" for="taxRecvEnabled">
+        <input type="checkbox" id="taxRecvEnabled" />
+        <span class="emoji">🚫</span>
+        <div class="label">
+          <strong data-i18n="taxRecvEnableTitle">启用屏蔽</strong>
+          <span data-i18n="taxRecvEnableDesc">开启后按下方阈值隐藏列表卡</span>
+        </div>
+      </label>
+      <div class="tax-recv-threshold-row" id="taxRecvThresholdRow">
+        <label class="tax-recv-threshold-label" for="taxRecvThreshold">
+          <span data-i18n="taxRecvThresholdLabel">阈值 ≥</span>
+          <input
+            type="number"
+            id="taxRecvThreshold"
+            class="tax-recv-threshold-input"
+            min="1"
+            max="100"
+            step="1"
+            value="100"
+          />
+          <span class="tax-recv-unit">%</span>
+        </label>
+        <input
+          type="range"
+          id="taxRecvThresholdRange"
+          class="tax-recv-range"
+          min="1"
+          max="100"
+          step="1"
+          value="100"
+        />
+      </div>
+      <p class="theme-hint" data-i18n="taxRecvHint2" id="taxRecvHint2">
+        例：100% = 仅藏「税收钱包 100%」且非金库；50% = 接收方占比 ≥50% 也藏。
+      </p>
+    </section>
+
     <section class="section" id="prefSection">
       <button type="button" class="collapse-head" id="prefCollapseBtn" aria-expanded="false">
         <span class="section-title collapse-title" data-i18n="prefSection">显示项（默认全部开启）</span>

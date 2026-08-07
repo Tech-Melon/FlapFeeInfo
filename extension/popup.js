@@ -6,7 +6,9 @@
   const OFFSET_KEY = "flapFeeInfo.badgeOffset.v2";
   const DRAG_KEY = "flapFeeInfo.badgeDragEdit.v1";
   const UI_LANG_KEY = "flapFeeInfo.uiLang.v1";
+  const TAX_RECV_HIDE_KEY = "flapFeeInfo.taxRecvHide.v1";
   const DEFAULT_THEME = "dark";
+  const DEFAULT_TAX_RECV_HIDE = { enabled: false, thresholdPct: 100 };
   const DEFAULT_OFFSETS = {
     gmgn: { enabled: false, x: 12, y: 8 },
     debot: { enabled: false, x: 12, y: 8 }
@@ -69,7 +71,15 @@
       pref_payoutArrow_title: "分发币种标注",
       pref_payoutArrow_desc: "最大份额 →SYMBOL",
       pref_unknown_title: "未知/未分配",
-      pref_unknown_desc: "链上无有效分配时"
+      pref_unknown_desc: "链上无有效分配时",
+      taxRecvSection: "资金接收方屏蔽",
+      taxRecvHint:
+        "仅战壕/Meme 列表生效（不含 K 线顶栏、搜索弹层、顶栏热榜）。监听列表接口过滤/隐藏，不额外请求；金库始终显示。默认关闭。",
+      taxRecvEnableTitle: "启用屏蔽",
+      taxRecvEnableDesc: "开启后按下方阈值处理战壕卡片",
+      taxRecvThresholdLabel: "阈值 ≥",
+      taxRecvHint2:
+        "默认关闭时零网络钩子。开启后仅 7777/8888：👨‍🍳 marketing%≥阈值则屏蔽（含 💎50%👨‍🍳50% 等 hybrid）；纯 💎 / 🎁金库不屏蔽。例：阈值 50 → 屏蔽 marketing≥50%。"
     },
     en: {
       appTitle: "TechMelon FlapFeeInfo",
@@ -127,7 +137,15 @@
       pref_payoutArrow_title: "Payout symbol",
       pref_payoutArrow_desc: "largest share →SYMBOL",
       pref_unknown_title: "Unknown",
-      pref_unknown_desc: "no valid on-chain split"
+      pref_unknown_desc: "no valid on-chain split",
+      taxRecvSection: "Hide fund recipients",
+      taxRecvHint:
+        "Trench / meme list only (not K-line header, search overlay, or top tickers). Filters list API responses (no extra requests); vaults always shown. Off by default.",
+      taxRecvEnableTitle: "Enable hide",
+      taxRecvEnableDesc: "Apply threshold to trench cards below",
+      taxRecvThresholdLabel: "Threshold ≥",
+      taxRecvHint2:
+        "Off = no hooks. On = hide 7777/8888 when marketing% ≥ threshold (incl. hybrid 💎50%👨‍🍳50%). Pure 💎 / vault gift never hidden."
     }
   };
 
@@ -178,6 +196,10 @@
   const offsetEnables = Array.from(document.querySelectorAll(".offset-enable-input"));
   const offsetSteps = Array.from(document.querySelectorAll(".btn-step"));
   const offsetSites = Array.from(document.querySelectorAll(".offset-site"));
+  const taxRecvEnabled = document.getElementById("taxRecvEnabled");
+  const taxRecvThreshold = document.getElementById("taxRecvThreshold");
+  const taxRecvThresholdRange = document.getElementById("taxRecvThresholdRange");
+  const taxRecvThresholdRow = document.getElementById("taxRecvThresholdRow");
 
   /** @type {{ gmgn: {enabled:boolean,x:number,y:number}, debot: {enabled:boolean,x:number,y:number} }} */
   let offsets = {
@@ -191,6 +213,8 @@
   let prefsState = { ...DEFAULT_PREFS };
   let prefsExpanded = false;
   let saveTimer = null;
+  let taxRecvState = { ...DEFAULT_TAX_RECV_HIDE };
+  let taxRecvSaveTimer = null;
 
   function t(key) {
     const pack = I18N[uiLang] || I18N.zh;
@@ -219,6 +243,17 @@
 
   function normalizeLang(raw) {
     return raw === "en" ? "en" : "zh";
+  }
+
+  function normalizeTaxRecvHide(raw) {
+    const out = { ...DEFAULT_TAX_RECV_HIDE };
+    if (!raw || typeof raw !== "object") return out;
+    out.enabled = raw.enabled === true;
+    const thr = Number(raw.thresholdPct);
+    if (Number.isFinite(thr)) {
+      out.thresholdPct = Math.max(1, Math.min(100, Math.round(thr)));
+    }
+    return out;
   }
 
   function normalizeOffsets(raw) {
@@ -251,7 +286,8 @@
             DARK_TRANSPARENT_KEY_LEGACY,
             OFFSET_KEY,
             DRAG_KEY,
-            UI_LANG_KEY
+            UI_LANG_KEY,
+            TAX_RECV_HIDE_KEY
           ],
           (items) => {
             if (chrome.runtime.lastError) {
@@ -261,7 +297,8 @@
                 solidDark: false,
                 offsets: normalizeOffsets(null),
                 dragEdit: false,
-                lang: "zh"
+                lang: "zh",
+                taxRecv: { ...DEFAULT_TAX_RECV_HIDE }
               });
               return;
             }
@@ -279,7 +316,8 @@
               solidDark: solid,
               offsets: normalizeOffsets(items?.[OFFSET_KEY]),
               dragEdit: items?.[DRAG_KEY] === true,
-              lang: normalizeLang(items?.[UI_LANG_KEY])
+              lang: normalizeLang(items?.[UI_LANG_KEY]),
+              taxRecv: normalizeTaxRecvHide(items?.[TAX_RECV_HIDE_KEY])
             });
           }
         );
@@ -290,9 +328,52 @@
           solidDark: false,
           offsets: normalizeOffsets(null),
           dragEdit: false,
-          lang: "zh"
+          lang: "zh",
+          taxRecv: { ...DEFAULT_TAX_RECV_HIDE }
         });
       }
+    });
+  }
+
+  function saveTaxRecvHide(state) {
+    const normalized = normalizeTaxRecvHide(state);
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.set({ [TAX_RECV_HIDE_KEY]: normalized }, () => {
+          void chrome.runtime?.lastError;
+          resolve(normalized);
+        });
+      } catch {
+        resolve(normalized);
+      }
+    });
+  }
+
+  function scheduleSaveTaxRecv() {
+    if (taxRecvSaveTimer) window.clearTimeout(taxRecvSaveTimer);
+    taxRecvSaveTimer = window.setTimeout(async () => {
+      taxRecvSaveTimer = null;
+      taxRecvState = await saveTaxRecvHide(taxRecvState);
+      renderTaxRecvUI(taxRecvState);
+    }, 120);
+  }
+
+  function renderTaxRecvUI(state) {
+    taxRecvState = normalizeTaxRecvHide(state);
+    if (taxRecvEnabled) taxRecvEnabled.checked = taxRecvState.enabled === true;
+    const thr = String(taxRecvState.thresholdPct);
+    if (taxRecvThreshold) taxRecvThreshold.value = thr;
+    if (taxRecvThresholdRange) taxRecvThresholdRange.value = thr;
+    if (taxRecvThresholdRow) {
+      taxRecvThresholdRow.classList.toggle("is-disabled", taxRecvState.enabled !== true);
+    }
+  }
+
+  function readTaxRecvFromUI() {
+    const thrRaw = Number(taxRecvThreshold?.value ?? taxRecvThresholdRange?.value ?? 100);
+    return normalizeTaxRecvHide({
+      enabled: taxRecvEnabled?.checked === true,
+      thresholdPct: thrRaw
     });
   }
 
@@ -568,7 +649,29 @@
     applyStaticI18n();
     renderTheme(currentTheme);
     renderPrefs(prefsState);
+    renderTaxRecvUI(taxRecvState);
   });
+
+  taxRecvEnabled?.addEventListener("change", () => {
+    taxRecvState = readTaxRecvFromUI();
+    renderTaxRecvUI(taxRecvState);
+    scheduleSaveTaxRecv();
+  });
+
+  const syncTaxRecvThreshold = (fromRange) => {
+    if (fromRange && taxRecvThresholdRange && taxRecvThreshold) {
+      taxRecvThreshold.value = taxRecvThresholdRange.value;
+    } else if (!fromRange && taxRecvThreshold && taxRecvThresholdRange) {
+      taxRecvThresholdRange.value = taxRecvThreshold.value;
+    }
+    taxRecvState = readTaxRecvFromUI();
+    renderTaxRecvUI(taxRecvState);
+    scheduleSaveTaxRecv();
+  };
+  taxRecvThreshold?.addEventListener("change", () => syncTaxRecvThreshold(false));
+  taxRecvThreshold?.addEventListener("input", () => syncTaxRecvThreshold(false));
+  taxRecvThresholdRange?.addEventListener("input", () => syncTaxRecvThreshold(true));
+  taxRecvThresholdRange?.addEventListener("change", () => syncTaxRecvThreshold(true));
 
   prefCollapseBtn?.addEventListener("click", () => {
     setPrefsExpanded(!prefsExpanded);
@@ -646,6 +749,11 @@
         applyStaticI18n();
         renderTheme(currentTheme);
         renderPrefs(prefsState);
+        renderTaxRecvUI(taxRecvState);
+      }
+      if (changes[TAX_RECV_HIDE_KEY]) {
+        taxRecvState = normalizeTaxRecvHide(changes[TAX_RECV_HIDE_KEY].newValue);
+        renderTaxRecvUI(taxRecvState);
       }
       if (changes[PREFS_KEY]) {
         prefsState = normalizePrefs(changes[PREFS_KEY].newValue);
@@ -657,7 +765,15 @@
   }
 
   loadAll().then(
-    ({ prefs, theme, solidDark: loadedSolid, offsets: loadedOffsets, dragEdit: loadedDrag, lang }) => {
+    ({
+      prefs,
+      theme,
+      solidDark: loadedSolid,
+      offsets: loadedOffsets,
+      dragEdit: loadedDrag,
+      lang,
+      taxRecv: loadedTaxRecv
+    }) => {
       uiLang = lang;
       solidDark = loadedSolid === true;
       if (solidDarkToggle) solidDarkToggle.checked = solidDark;
@@ -665,9 +781,11 @@
       dragEdit = loadedDrag;
       if (dragEditToggle) dragEditToggle.checked = dragEdit;
       prefsState = prefs;
+      taxRecvState = normalizeTaxRecvHide(loadedTaxRecv);
       applyStaticI18n();
       renderTheme(theme);
       renderPrefs(prefs);
+      renderTaxRecvUI(taxRecvState);
       // Display items collapsed by default
       setPrefsExpanded(false);
       fillOffsetUI(offsets);

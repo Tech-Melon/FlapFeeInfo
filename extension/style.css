@@ -211,6 +211,38 @@ body .gmgn-fee-mode-icon {
   color: #d0d5dd;
 }
 
+/* /modes 未返回：固定 ⏳待加载，低对比 + 轻脉冲（避免半截 fee 突变） */
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--loading {
+  background-color: rgba(100, 116, 139, 0.22);
+  border-color: rgba(148, 163, 184, 0.45);
+  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+  animation: flap-fee-loading-pulse 1.2s ease-in-out infinite;
+}
+
+.gmgn-fee-mode-icon--theme-light.gmgn-fee-mode-icon--loading {
+  background-color: #1a1f2e !important;
+  border-color: rgba(148, 163, 184, 0.55);
+  color: #94a3b8;
+  animation: flap-fee-loading-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes flap-fee-loading-pulse {
+  0%,
+  100% {
+    opacity: 0.72;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gmgn-fee-mode-icon--loading {
+    animation: none !important;
+  }
+}
+
 /*
  * Dark + 深色背景 (popup checked): solid card-like fill.
  * Matches Debot/GMGN trench card surface (~#0d1110 / pure black).
@@ -608,6 +640,12 @@ body .gmgn-fee-mode-icon {
 .gmgn-fee-mode-icon--basket.gmgn-fee-mode-icon--gift,
 .gmgn-fee-mode-icon--basket.gmgn-fee-mode-icon--hybrid {
   /* colors come from --basket rules above */
+}
+
+/* 资金接收方屏蔽：列表卡 hide（不 remove，避免虚拟列表抖动） */
+.flap-fee-tax-recv-hidden,
+[data-flap-tax-recv-hidden="1"] {
+  display: none !important;
 }
 
 /* 点击打开 flap taxinfo */

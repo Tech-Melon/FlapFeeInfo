@@ -79,6 +79,54 @@ body {
   margin-bottom: 12px;
 }
 
+.tax-recv-section {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  padding: 10px 10px 8px;
+}
+
+.tax-recv-threshold-row {
+  margin-top: 8px;
+  padding: 0 2px 4px;
+}
+
+.tax-recv-threshold-row.is-disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.tax-recv-threshold-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.tax-recv-threshold-input {
+  width: 56px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 4px 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tax-recv-unit {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.tax-recv-range {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 .section-title {
   font-size: 11px;
   font-weight: 600;

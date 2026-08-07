@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.5.25",
-  "description": "Show Flap tax allocation + equity basket; click badge opens flap taxinfo. GMGN/Debot/Gungnir. EN/ZH UI.",
+  "version": "0.6.0",
+  "description": "FlapFeeInfo 0.6: fee badges + tax-recv hide + loading placeholder. EN/ZH.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",
@@ -22,6 +22,30 @@
   "host_permissions": ["https://flap-fee-info.tech-melon.workers.dev/*"],
   "permissions": ["storage"],
   "content_scripts": [
+    {
+      "matches": [
+        "https://gmgn.ai/*",
+        "https://debot.ai/*",
+        "https://*.debot.ai/*",
+        "https://gungnir.bot/*",
+        "https://*.gungnir.bot/*"
+      ],
+      "js": ["tax-recv-bootstrap.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": [
+        "https://gmgn.ai/*",
+        "https://debot.ai/*",
+        "https://*.debot.ai/*",
+        "https://gungnir.bot/*",
+        "https://*.gungnir.bot/*"
+      ],
+      "js": ["page-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
     {
       "matches": [
         "https://gmgn.ai/*",
