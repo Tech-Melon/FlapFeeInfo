@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.6.0",
-  "description": "FlapFeeInfo 0.6: fee badges + tax-recv hide + loading placeholder. EN/ZH.",
+  "version": "0.6.1",
+  "description": "FlapFeeInfo: tax-recv hide only 新创建 column (GMGN/Debot). EN/ZH.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

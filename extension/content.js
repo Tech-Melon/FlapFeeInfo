@@ -8508,6 +8508,46 @@
     return false;
   }
 
+  /**
+   * Debot 三栏：仅「新创建」可 DOM 隐藏。
+   * 优先读列头文案；几何兜底用主区最左列（排除侧栏 left&lt;260）。
+   */
+  function isDebotNewCreationColumnCard(card) {
+    if (!(card instanceof HTMLElement) || !isDebotHost()) return false;
+    try {
+      let el = card;
+      for (let d = 0; d < 14 && el; d += 1) {
+        if (!(el instanceof HTMLElement)) break;
+        let r = null;
+        try {
+          r = el.getBoundingClientRect();
+        } catch (_e) {
+          r = null;
+        }
+        // 列容器：高面板
+        if (r && r.height > 280 && r.width > 260 && r.width < 520) {
+          const head = String(el.innerText || "")
+            .replace(/\s+/g, " ")
+            .slice(0, 48);
+          if (/新创建/.test(head)) return true;
+          if (/即将打满|已迁移|已开盘/.test(head)) return false;
+        }
+        el = el.parentElement;
+      }
+      // 几何兜底：主区三列最左（侧栏已在 isTaxRecvHideScopeCard 排除 left&lt;260）
+      const cr = card.getBoundingClientRect();
+      if (cr.width < 2) return false;
+      const mainLeft = 260;
+      const mainW = Math.max(300, window.innerWidth - mainLeft - 80);
+      const colW = mainW / 3;
+      // 落在第一列中心带
+      if (cr.left >= mainLeft - 20 && cr.left < mainLeft + colW - 40) return true;
+    } catch (_err) {
+      // ignore
+    }
+    return false;
+  }
+
   function shouldHideTaxRecv(entry) {
     if (!taxRecvHidePrefs || taxRecvHidePrefs.enabled !== true) return false;
     if (!entry || typeof entry !== "object") return false;
@@ -8790,6 +8830,11 @@
       if (seen.has(card)) return;
       seen.add(card);
       if (!isTaxRecvHideScopeCard(card)) {
+        setCardTaxRecvHidden(card, false);
+        return;
+      }
+      // Debot：仅「新创建」栏 DOM 隐藏；即将打满/已迁移永不藏
+      if (isDebotHost() && !isDebotNewCreationColumnCard(card)) {
         setCardTaxRecvHidden(card, false);
         return;
       }

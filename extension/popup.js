@@ -74,12 +74,12 @@
       pref_unknown_desc: "链上无有效分配时",
       taxRecvSection: "资金接收方屏蔽",
       taxRecvHint:
-        "仅战壕/Meme 列表生效（不含 K 线顶栏、搜索弹层、顶栏热榜）。监听列表接口过滤/隐藏，不额外请求；金库始终显示。默认关闭。",
+        "仅战壕/Meme「新创建」栏生效（即将打满/已开盘·已迁移不筛）。不含 K 线顶栏、搜索弹层。不额外请求；金库始终显示。默认关闭。",
       taxRecvEnableTitle: "启用屏蔽",
-      taxRecvEnableDesc: "开启后按下方阈值处理战壕卡片",
+      taxRecvEnableDesc: "开启后只过滤「新创建」列",
       taxRecvThresholdLabel: "阈值 ≥",
       taxRecvHint2:
-        "默认关闭时零网络钩子。开启后仅 7777/8888：👨‍🍳 marketing%≥阈值则屏蔽（含 💎50%👨‍🍳50% 等 hybrid）；纯 💎 / 🎁金库不屏蔽。例：阈值 50 → 屏蔽 marketing≥50%。"
+        "仅新创建：7777/8888 且 👨‍🍳 marketing%≥阈值则屏蔽（含 hybrid）；纯 💎/🎁金库不挡。即将打满与已开盘原样显示。"
     },
     en: {
       appTitle: "TechMelon FlapFeeInfo",
@@ -140,12 +140,12 @@
       pref_unknown_desc: "no valid on-chain split",
       taxRecvSection: "Hide fund recipients",
       taxRecvHint:
-        "Trench / meme list only (not K-line header, search overlay, or top tickers). Filters list API responses (no extra requests); vaults always shown. Off by default.",
+        "Only the New/Creation column on trench lists (not Almost full / Completed). No K-line header or search overlay. No extra requests; vaults always shown. Off by default.",
       taxRecvEnableTitle: "Enable hide",
-      taxRecvEnableDesc: "Apply threshold to trench cards below",
+      taxRecvEnableDesc: "Only filter the New creation column",
       taxRecvThresholdLabel: "Threshold ≥",
       taxRecvHint2:
-        "Off = no hooks. On = hide 7777/8888 when marketing% ≥ threshold (incl. hybrid 💎50%👨‍🍳50%). Pure 💎 / vault gift never hidden."
+        "New column only: hide 7777/8888 when marketing% ≥ threshold (incl. hybrid). Pure 💎 / vault gift kept. Other columns unchanged."
     }
   };
 

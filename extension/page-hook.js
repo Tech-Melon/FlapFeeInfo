@@ -9,7 +9,7 @@
  * ★ 仅 7777/8888；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 45;
+  const HOOK_VER = 46;
   /** 仅当「资金接收方屏蔽」开启时，由插件临时写入，关闭时清理 */
   const OWNED_DISABLE_SW = "flapFeeInfo.ownedDisableShareWorker";
   const PREFS_ATTR = "data-flap-tax-recv";
@@ -383,9 +383,117 @@
   }
 
   /**
+   * 资金接收方屏蔽范围：仅「新创建」栏。
+   * GMGN HTTP: new_creation.tokens；fid 如 bsc_nc_*（不含 bsc_ncp_ / bsc_cp_）
+   * Debot HTTP: ranks?column=new（completing/completed 整响应跳过）
+   * Debot WS meme:new upsert：新币插入，仍过滤
+   */
+  function isGmgnNewCreationColumnKey(key) {
+    const k = String(key || "")
+      .trim()
+      .toLowerCase();
+    return k === "new_creation" || k === "newcreation";
+  }
+
+  function isGmgnNewCreationFilterId(fid) {
+    const s = String(fid || "")
+      .trim()
+      .toLowerCase();
+    if (!s) return false;
+    // near_completion = ncp；completed = cp；new_creation = nc
+    if (/(^|_)ncp(_|$)/.test(s)) return false;
+    if (/(^|_)cp(_|$)/.test(s) && !/(^|_)nc(_|$)/.test(s)) return false;
+    if (/(^|_)nc(_|$)/.test(s)) return true;
+    if (s.includes("new_creation") || s.includes("newcreation")) return true;
+    return false;
+  }
+
+  function isDebotNewCreationRanksUrl(url) {
+    const u = String(url || "");
+    if (!u) return false;
+    try {
+      const parsed = new URL(u, "https://debot.ai");
+      const col = String(parsed.searchParams.get("column") || "")
+        .trim()
+        .toLowerCase();
+      if (col) return col === "new" || col === "new_creation" || col === "newcreation";
+    } catch (_e) {
+      // ignore
+    }
+    return /[?&]column=new(?:&|#|$)/i.test(u);
+  }
+
+  function filterTokenArrayInPlace(arr, kind) {
+    if (!Array.isArray(arr)) return 0;
+    const hideFn = (item) => {
+      if (kind === "gmgn") return isGmgnTokenItem(item) && gmgnTokenHide(item);
+      if (kind === "debot") return isDebotTokenItem(item) && debotRowHide(item);
+      return tokenShouldHide(item);
+    };
+    const isTok = (item) => {
+      if (kind === "gmgn") return isGmgnTokenItem(item);
+      if (kind === "debot") return isDebotTokenItem(item);
+      return isGmgnTokenItem(item) || isDebotTokenItem(item);
+    };
+    let removed = 0;
+    let w = 0;
+    for (let i = 0; i < arr.length; i++) {
+      const item = arr[i];
+      if (isTok(item) && hideFn(item)) {
+        removed += 1;
+        try {
+          noteRemovedSample(gmgnAddr(item) || item.contract, gmgnTal(item), "col");
+        } catch (_nr) {
+          // ignore
+        }
+        continue;
+      }
+      arr[w++] = item;
+      // 不深 walk 子数组：列 tokens 已是叶子列表
+    }
+    arr.length = w;
+    return removed;
+  }
+
+  /**
+   * GMGN trenches_rank HTTP：只滤 new_creation.tokens，不动即将打满/已开盘。
+   */
+  function filterGmgnHttpNewCreationInPlace(json) {
+    if (!json || typeof json !== "object") return 0;
+    let removed = 0;
+    const seen = new Set();
+    const tryBlock = (block) => {
+      if (!block || typeof block !== "object" || seen.has(block)) return;
+      seen.add(block);
+      if (Array.isArray(block.tokens)) {
+        removed += filterTokenArrayInPlace(block.tokens, "gmgn");
+      }
+    };
+    const tryObj = (o, depth) => {
+      if (!o || typeof o !== "object" || depth > 6) return;
+      if (Array.isArray(o)) {
+        for (let i = 0; i < Math.min(o.length, 8); i++) tryObj(o[i], depth + 1);
+        return;
+      }
+      if (o.new_creation) tryBlock(o.new_creation);
+      for (const k of Object.keys(o)) {
+        if (isGmgnNewCreationColumnKey(k)) tryBlock(o[k]);
+      }
+      // data.0 / data[0]
+      if (o.data && typeof o.data === "object") {
+        tryObj(o.data, depth + 1);
+        if (o.data["0"]) tryObj(o.data["0"], depth + 1);
+        if (o.data[0]) tryObj(o.data[0], depth + 1);
+      }
+    };
+    tryObj(json, 0);
+    return removed;
+  }
+
+  /**
    * GMGN WSS trenches_delta 专用：
    * { channel, data: { fid, v, a:[addr], r:[addr], t:[{c,a,f:{s_tal}}] } }
-   * 必须同时删 t[] 与 a[]（add 列表），否则 React 仍会按 a 加卡。
+   * 仅当 fid 属新创建（bsc_nc_*）时过滤；ncp/cp 原样放行。
    * @returns {number} removed
    */
   function filterGmgnTrenchesDeltaInPlace(root) {
@@ -403,6 +511,24 @@
     for (let n = 0; n < nodes.length; n++) {
       const data = nodes[n];
       if (!data || !Array.isArray(data.t)) continue;
+      const fid = data.fid || data.filter_id || data.filterId || "";
+      // 无 fid 时：保守不滤（避免误伤即将打满/已开盘增量）
+      // 有 fid 时：仅新创建
+      if (fid) {
+        if (!isGmgnNewCreationFilterId(fid)) continue;
+      } else {
+        // 部分帧只有 t/a 无 fid：若 channel 外壳带 fid 则用外壳
+        const outerFid =
+          root.fid ||
+          root.filter_id ||
+          (root.data && (root.data.fid || root.data.filter_id)) ||
+          "";
+        if (outerFid && !isGmgnNewCreationFilterId(outerFid)) continue;
+        if (!outerFid && !fid) {
+          // 无法判定列 → 不滤 delta（HTTP 首包已管新创建）
+          continue;
+        }
+      }
       const hideAddrs = new Set();
       let w = 0;
       for (let i = 0; i < data.t.length; i++) {
@@ -411,12 +537,12 @@
           removed += 1;
           const addr = gmgnAddr(row);
           if (addr) hideAddrs.add(addr);
-          noteRemovedSample(addr, gmgnTal(row), "delta");
+          noteRemovedSample(addr, gmgnTal(row), "delta-nc");
           continue;
         }
-        // 存活的税币进 keepPool，供 HTTP 滤空后回填
+        // 存活的税币进 keepPool，供新创建 HTTP 滤空后回填
         try {
-          if (isGmgnTokenItem(row)) rememberKeepToken(row, "delta");
+          if (isGmgnTokenItem(row)) rememberKeepToken(row, "new_creation");
         } catch (_rk) {
           // ignore
         }
@@ -441,26 +567,23 @@
 
   /**
    * 原地从数组/对象属性中删除应藏 token。
+   * GMGN：只动 new_creation（HTTP）+ 已判定为 nc 的 delta；不扫即将打满/已开盘。
+   * Debot：仅用于 column=new 的 ranks 响应整包（调用方保证 URL）。
    * @returns {number} removed
    */
   function filterJsonInPlace(json, kind) {
     // 必须用 prefsOn：热路径上 taxRecvEnabled 可能尚未从 attr 同步
     if (!prefsOn() || !json || typeof json !== "object") return 0;
     let removed = 0;
-    // 先走 WSS delta 专用（比通用 walk 更准）
+    // GMGN / auto：delta(nc) + HTTP 仅 new_creation
     if (kind === "gmgn" || kind === "auto") {
       removed += filterGmgnTrenchesDeltaInPlace(json);
+      removed += filterGmgnHttpNewCreationInPlace(json);
+      return removed;
     }
-    const hideFn = (item) => {
-      if (kind === "gmgn") return isGmgnTokenItem(item) && gmgnTokenHide(item);
-      if (kind === "debot") return isDebotTokenItem(item) && debotRowHide(item);
-      return tokenShouldHide(item);
-    };
-    const isTok = (item) => {
-      if (kind === "gmgn") return isGmgnTokenItem(item);
-      if (kind === "debot") return isDebotTokenItem(item);
-      return isGmgnTokenItem(item) || isDebotTokenItem(item);
-    };
+    // Debot ranks（整响应即一列）：深 walk 删 hide token
+    const hideFn = (item) => isDebotTokenItem(item) && debotRowHide(item);
+    const isTok = (item) => isDebotTokenItem(item);
     const walk = (o, depth) => {
       if (!o || depth > 12) return;
       if (Array.isArray(o)) {
@@ -470,7 +593,7 @@
           if (isTok(item) && hideFn(item)) {
             removed += 1;
             try {
-              noteRemovedSample(gmgnAddr(item) || item.contract, gmgnTal(item), "walk");
+              noteRemovedSample(item.contract, null, "debot-walk");
             } catch (_nr) {
               // ignore
             }
@@ -717,6 +840,8 @@
   function rememberDebotUrl(url) {
     const u = String(url || "");
     if (!u) return;
+    // 只记新创建 ranks，softRefresh 不误拉即将打满/已迁移
+    if (!isDebotNewCreationRanksUrl(u)) return;
     lastDebotRanksUrls = lastDebotRanksUrls.filter((x) => x !== u);
     lastDebotRanksUrls.unshift(u);
     if (lastDebotRanksUrls.length > 8) lastDebotRanksUrls.length = 8;
@@ -735,10 +860,9 @@
   let keepPoolLoaded = false;
   let keepPoolSaveAt = 0;
   const KEEP_POOL_SAVE_MIN_MS = 8000;
+  // 仅回填新创建（屏蔽只影响该列）
   const COL_PAD_TARGET = {
-    new_creation: 52,
-    near_completion: 52,
-    completed: 52
+    new_creation: 52
   };
 
   function loadKeepPool() {
@@ -816,12 +940,11 @@
 
   function rememberTokensFromGmgnRoot(root) {
     if (!root || typeof root !== "object") return;
-    for (const col of ["new_creation", "near_completion", "completed"]) {
-      const tokens = root[col] && root[col].tokens;
-      if (!Array.isArray(tokens)) continue;
-      for (let i = 0; i < tokens.length; i++) {
-        rememberKeepToken(tokens[i], col);
-      }
+    // 屏蔽仅新创建：池子也只记该列，避免把即将打满/已开盘塞进新创建
+    const tokens = root.new_creation && root.new_creation.tokens;
+    if (!Array.isArray(tokens)) return;
+    for (let i = 0; i < tokens.length; i++) {
+      rememberKeepToken(tokens[i], "new_creation");
     }
   }
 
@@ -864,11 +987,11 @@
     if (!root || typeof root !== "object") return { padded: 0 };
     let padded = 0;
     const per = {};
-    for (const col of ["new_creation", "near_completion", "completed"]) {
-      const tokens = root[col] && root[col].tokens;
-      if (!Array.isArray(tokens)) continue;
-      const n = padGmgnColumnTokens(tokens, col);
-      per[col] = n;
+    // 只垫新创建
+    const tokens = root.new_creation && root.new_creation.tokens;
+    if (Array.isArray(tokens)) {
+      const n = padGmgnColumnTokens(tokens, "new_creation");
+      per.new_creation = n;
       padded += n;
     }
     if (padded > 0) saveKeepPool();
@@ -885,10 +1008,9 @@
       const params = json && Array.isArray(json.params) ? json.params : null;
       if (!params || !params.length) return bodyStr;
       let changed = false;
+      // 仅抬新创建 limit（其它列不屏蔽，无需抬）
       const COL_MIN = {
-        new_creation: 280,
-        near_completion: 160,
-        completed: 120
+        new_creation: 280
       };
       for (let i = 0; i < params.length; i++) {
         const p = params[i];
@@ -915,6 +1037,10 @@
     const kind = urlLooksUseful(url);
     if (!kind || !text || text.length < 2) return null;
     if (!prefsOn()) return null;
+    // Debot：三列分请求；仅 column=new（新创建）过滤
+    if (kind === "debot" && !isDebotNewCreationRanksUrl(url)) {
+      return null;
+    }
     let json;
     try {
       json = JSON.parse(text);
@@ -923,19 +1049,17 @@
     }
     try {
       loadKeepPool();
-      // 诊断：各列 tokens 过滤前后数量
+      // 诊断：新创建 tokens 过滤前后数量
       let colStats = null;
       if (kind === "gmgn") {
         try {
           const root = json && json.data && (json.data["0"] || json.data[0] || json.data);
           if (root && typeof root === "object") {
-            // 滤前：把本帧非屏蔽税币记入池
+            // 滤前：只记新创建非屏蔽税币
             rememberTokensFromGmgnRoot(root);
             colStats = {};
-            for (const col of ["new_creation", "near_completion", "completed"]) {
-              const tokens = root[col] && root[col].tokens;
-              if (Array.isArray(tokens)) colStats[col] = { before: tokens.length };
-            }
+            const tokens = root.new_creation && root.new_creation.tokens;
+            if (Array.isArray(tokens)) colStats.new_creation = { before: tokens.length };
           }
         } catch (_s) {
           colStats = null;
