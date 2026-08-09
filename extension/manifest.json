@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.6.2",
-  "description": "FlapFeeInfo: tax-recv no old-CA pad; keep host filters. EN/ZH.",
+  "version": "0.6.3",
+  "description": "FlapFeeInfo: new-token badge only after correct /modes (no stale recycle).",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

@@ -7,6 +7,7 @@
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
   const GMGN_TRENCH_ROOT_SELECTOR =
     "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100";
+  // 0.6.3: 新币徽章 — href 优先于 short CA，禁虚拟列表复用旧徽章；无 /modes 仅 ⏳，有正确值才出真徽章.
   // 0.5.22: GMGN-only batch priority for top viewport + flush when scan truncated; Debot untouched.
   // 0.5.21: GMGN-only new-card latency (soft debounce / early miss retry / cache paint); Debot untouched.
   // 0.5.18: GMGN embedded TokenItem dirty queue + single-pass search overlay/address mount.
@@ -378,6 +379,8 @@
   function paintLoadingBadgeAndQueue(card, token) {
     const tok = String(token || "").toLowerCase();
     if (!(card instanceof HTMLElement) || !TARGET_TOKEN_RE.test(tok)) return false;
+    // 有正式缓存时绝不画 ⏳（调用方应走真徽章路径）
+    if (resolveEntry(tok)) return false;
     try {
       card.dataset[CARD_MARK] = tok;
       card.setAttribute(CARD_DATA, tok);
@@ -387,12 +390,20 @@
     queueToken(tok);
     try {
       const existing = card.querySelector(`[${ICON_DATA}="1"]`);
-      if (
-        existing &&
-        existing.dataset.feeToken === tok &&
-        existing.dataset.feeLoading === "1"
-      ) {
-        return true;
+      // 残留别的 CA 真徽章 / 非 loading：必须拆掉再挂 ⏳，禁止「先错后对」
+      if (existing) {
+        const feeTok = existing.dataset.feeToken || "";
+        if (feeTok && feeTok !== tok) {
+          removeAllBadgesForCard(card, feeTok);
+        } else if (
+          feeTok === tok &&
+          existing.dataset.feeLoading === "1"
+        ) {
+          return true;
+        } else if (feeTok === tok && existing.dataset.feeLoading !== "1") {
+          // 同 token 却已有「真徽章」但 resolveEntry 为空 — 脏 DOM，拆掉
+          removeAllBadgesForCard(card, tok);
+        }
       }
     } catch (_e2) {
       // ignore
@@ -3614,9 +3625,11 @@
    */
   function paintListCardFromCacheFast(card, token, entry) {
     if (!(card instanceof HTMLElement) || !token || !entry) return false;
+    // 加载占位禁止走 cache-fast「真徽章」路径
+    if (isFeeLoadingEntry(entry)) return false;
     try {
-      const q =
-        normalizeQuoteSymbol(entry.quote_symbol || "", { allowCjk: true }) || "BNB";
+      // 与 renderMode 一致：API → DOM → 链默认，禁止硬编码 BNB 造成先错后对
+      const q = resolveQuoteSymbol(card, entry);
       const presentation = computeBadgePresentation(entry, q);
       const { label } = presentation;
       if (!label) return false;
@@ -3629,7 +3642,13 @@
       }
 
       let icon = card.querySelector(`[${ICON_DATA}="1"]`);
+      // 虚拟复用：DOM 上仍是别的 CA 的徽章 → 必须重挂，不能 in-place 改文案冒充
+      if (icon && icon.dataset.feeToken && icon.dataset.feeToken !== token) {
+        removeAllBadgesForCard(card, icon.dataset.feeToken);
+        icon = null;
+      }
       if (icon && icon.dataset.feeToken === token) {
+        // 仍是 ⏳ 且已有正式 entry → 允许换成真徽章
         const er = icon.getBoundingClientRect();
         if (er.width >= 2 && er.height >= 2) {
           applyBadgeUi(icon, presentation, token);
@@ -5697,10 +5716,13 @@
           return false;
         }
       }
-      // Virtual list recycle: only re-check token when href is cheaply available.
+      // Virtual list recycle: href/data 与 marked 不一致 → 立刻失稳，禁止保留旧徽章。
       // Skip for header (multiple 0x links in ticker/share row).
       if (!(existing.dataset.feeHeader === "1" || isGmgnHeaderMarkedCard(card))) {
         if (!cardStillMatchesToken(card, marked)) return false;
+        // 额外：href 明确指向其它 CA 时即使 short 巧合匹配也失稳
+        const hrefTok = extractCardHrefToken(card);
+        if (hrefTok && hrefTok !== marked) return false;
       }
       return true;
     }
@@ -5732,6 +5754,8 @@
       }
     }
     if (!cardStillMatchesToken(card, marked)) return false;
+    const hrefTok = extractCardHrefToken(card);
+    if (hrefTok && hrefTok !== marked) return false;
     const er = existing.getBoundingClientRect();
     return er.width >= 2 && er.height >= 2;
   }
@@ -5911,15 +5935,44 @@
         if (existing) {
           const er = existing.getBoundingClientRect();
           const existingToken = existing.dataset.feeToken || "";
+          const liveHref = extractCardHrefToken(card);
+          // href 已是新 CA / 非目标：立刻清旧徽章，禁止「先错后对」
           if (
-            er.width >= 2 &&
-            er.height >= 2 &&
-            existingToken &&
-            cardStillMatchesToken(card, existingToken)
+            liveHref &&
+            (!TARGET_TOKEN_RE.test(liveHref) ||
+              (existingToken && liveHref !== existingToken))
+          ) {
+            clearCardIcon(card);
+            needWork.push(card);
+            continue;
+          }
+          const identityOk =
+            Boolean(existingToken) && cardStillMatchesToken(card, existingToken);
+          // 合法 ⏳：身份仍对且尚无 entry → 保留占位，勿 clear 造成闪烁
+          if (
+            existing.dataset.feeLoading === "1" &&
+            identityOk &&
+            !resolveEntry(existingToken)
           ) {
             skippedCached += 1;
             continue;
           }
+          // ⏳ 且已有正式 entry → 进 needWork 换成真徽章
+          if (existing.dataset.feeLoading === "1" && identityOk && resolveEntry(existingToken)) {
+            needWork.push(card);
+            continue;
+          }
+          if (
+            er.width >= 2 &&
+            er.height >= 2 &&
+            existingToken &&
+            existing.dataset.feeLoading !== "1" &&
+            identityOk
+          ) {
+            skippedCached += 1;
+            continue;
+          }
+          // 身份对不上或残缺节点 → 拆掉重算
           clearCardIcon(card);
         }
         needWork.push(card);
@@ -6027,7 +6080,15 @@
             rendered += 1;
             continue;
           }
-          if (existing.dataset.feeSig && existing.textContent === existing.dataset.feeSig) {
+          // 必须用当前 entry 重算 label；禁止仅凭 feeSig 自洽就跳过（会卡在旧/错徽章）
+          const quoteSymbol = resolveQuoteSymbol(card, entry);
+          const presentation = computeBadgePresentation(entry, quoteSymbol);
+          const { label, className, basketCount } = presentation;
+          if (
+            label &&
+            existing.dataset.feeSig === label &&
+            existing.textContent === existing.dataset.feeSig
+          ) {
             // Keep absolute coords in sync; mode mismatch → fall through to remount.
             const pos = getActiveBadgePosition(card);
             const want = pos.enabled ? "absolute" : "default";
@@ -6045,9 +6106,6 @@
               continue;
             }
           }
-          const quoteSymbol = resolveQuoteSymbol(card, entry);
-          const presentation = computeBadgePresentation(entry, quoteSymbol);
-          const { label, className, basketCount } = presentation;
           const textEl = existing.querySelector(".gmgn-fee-mode-icon__text");
           const shown = textEl ? textEl.textContent : existing.textContent;
           const countEl = existing.querySelector(".gmgn-fee-mode-icon__count");
@@ -7097,10 +7155,60 @@
     return full.startsWith(`0x${head}`) && full.endsWith(tail);
   }
 
+  /**
+   * Token-route href on the card (SPA/virtual-list identity source of truth).
+   * Prefer this over short-CA text, which often lags one paint after row recycle.
+   */
+  function extractCardHrefToken(card) {
+    if (!(card instanceof HTMLElement) || !card.querySelector) return null;
+    const fromEl = (el) => {
+      if (!el) return null;
+      try {
+        return extractAnyToken(el.getAttribute?.("href") || el.href || "");
+      } catch (_err) {
+        return null;
+      }
+    };
+    try {
+      if (card.matches?.("a[href*='/token/'], a[href*='/bsc/token/']")) {
+        const selfTok = fromEl(card);
+        if (selfTok) return selfTok;
+      }
+    } catch (_errSelf) {
+      // ignore
+    }
+    // Prefer explicit token routes (avoid random 0x explorer/share links on the card).
+    const preferred = card.querySelector(
+      "a[href*='/token/'][href*='0x'], a[href*='/bsc/token/'][href*='0x']"
+    );
+    const preferredTok = fromEl(preferred);
+    if (preferredTok) return preferredTok;
+    return null;
+  }
+
   function extractCardTokenFromAttrs(card) {
     const shortAddress = findCardShortAddress(card);
-    // A visible non-target short CA is authoritative. Virtual lists reuse the same
-    // HTMLElement, so accepting its previous cache entry paints the old badge on a new row.
+    const hrefToken = extractCardHrefToken(card);
+
+    // href 已是完整 CA：虚拟列表复用时 short 文本常残留上一行 → href 优先。
+    if (hrefToken) {
+      if (!TARGET_TOKEN_RE.test(hrefToken)) {
+        // 非 7777/8888：明确不是目标币，清缓存并拒绝旧 short 误匹配
+        cardTokenCache.delete(card);
+        return null;
+      }
+      // 目标 href：即使 short 尚未跟上（或仍显示旧 7777），也以 href 为准。
+      // 仅当 short 明确是「另一个」目标尾号且与 href 冲突时仍信 href（React 未刷 short）。
+      cardTokenCache.set(card, {
+        token: hrefToken,
+        short: shortAddress || "",
+        href: hrefToken
+      });
+      return hrefToken;
+    }
+
+    // A visible non-target short CA is authoritative when no href.
+    // Virtual lists reuse the same HTMLElement — old cache must not paint on a new row.
     if (shortAddress && !TARGET_SHORT_TOKEN_RE.test(shortAddress)) {
       cardTokenCache.delete(card);
       return null;
@@ -7113,12 +7221,13 @@
       return token;
     };
 
-    // Fast path: card already resolved this short form.
+    // Fast path: card already resolved this short form (href miss path only).
     const cached = cardTokenCache.get(card);
     if (
       cached &&
       cached.token &&
       cached.short === (shortAddress || "") &&
+      (!cached.href || cached.href === (hrefToken || "")) &&
       cardStillMatchesToken(card, cached.token)
     ) {
       return cached.token;
@@ -7137,7 +7246,7 @@
     for (const value of direct) {
       const token = accept(normalizeToken(value));
       if (token) {
-        cardTokenCache.set(card, { token, short: shortAddress || "" });
+        cardTokenCache.set(card, { token, short: shortAddress || "", href: "" });
         return token;
       }
     }
@@ -7160,7 +7269,7 @@
       for (const value of attrs) {
         const token = accept(normalizeToken(value));
         if (token) {
-          cardTokenCache.set(card, { token, short: shortAddress || "" });
+          cardTokenCache.set(card, { token, short: shortAddress || "", href: "" });
           return token;
         }
       }
@@ -7177,7 +7286,7 @@
         if (!value || value.length < 42 || value.indexOf("0x") === -1) continue;
         const token = accept(normalizeToken(value));
         if (token) {
-          cardTokenCache.set(card, { token, short: shortAddress || "" });
+          cardTokenCache.set(card, { token, short: shortAddress || "", href: "" });
           return token;
         }
       }
@@ -7191,7 +7300,7 @@
       while (match) {
         const token = accept(match[0].toLowerCase());
         if (token) {
-          cardTokenCache.set(card, { token, short: shortAddress || "" });
+          cardTokenCache.set(card, { token, short: shortAddress || "", href: "" });
           return token;
         }
         match = re.exec(blob);
@@ -7268,32 +7377,25 @@
 
   /**
    * Cheap recycle guard for virtual lists (no full extractToken).
-   * True when card still looks like `token` (short CA or href/data match).
+   * True when card still looks like `token`.
+   *
+   * **href first**: SPA/virtual list often updates `a[href]` before short-CA text.
+   * Trusting stale short text first was the main cause of「先旧徽章 → 几秒后才对」.
    */
   function cardStillMatchesToken(card, token) {
     if (!card || !token) return false;
     const want = String(token).toLowerCase();
     // 徽章 token 本身必须是 7777/8888
     if (!TARGET_TOKEN_RE.test(want)) return false;
-    const text = card.textContent || "";
-    const shortSlice = text.length > 6000 ? text.slice(0, 4000) : text;
-    const targetShortMatch = shortSlice.match(TARGET_SHORT_TOKEN_RE);
-    if (targetShortMatch) return tokenMatchesShort(want, targetShortMatch[0]);
-    // A visible short CA with a different suffix means the virtual row changed identity.
-    if (SHORT_TOKEN_RE.test(shortSlice)) return false;
 
-    // A token-route href is authoritative even when it points to a non-target CA.
-    const hrefEl = card.querySelector?.(
-      "a[href*='/token/'][href*='0x'], a[href*='/bsc/token/'][href*='0x']"
-    );
-    if (hrefEl) {
-      const hrefToken = extractAnyToken(hrefEl.getAttribute("href"));
-      if (hrefToken) {
-        // 卡已变成非 7777/8888 → 必须拆徽章
-        if (!TARGET_TOKEN_RE.test(hrefToken)) return false;
-        return hrefToken === want;
-      }
+    // 1) Token-route / any 0x href — authoritative identity during recycle.
+    const hrefToken = extractCardHrefToken(card);
+    if (hrefToken) {
+      if (!TARGET_TOKEN_RE.test(hrefToken)) return false;
+      return hrefToken === want;
     }
+
+    // 2) data-* full CA on the card root.
     for (const value of [
       card.getAttribute("data-token"),
       card.getAttribute("data-address"),
@@ -7306,6 +7408,14 @@
         return dataToken === want;
       }
     }
+
+    // 3) Short CA text (only when href/data missing — weaker, can lag one frame).
+    const text = card.textContent || "";
+    const shortSlice = text.length > 6000 ? text.slice(0, 4000) : text;
+    const targetShortMatch = shortSlice.match(TARGET_SHORT_TOKEN_RE);
+    if (targetShortMatch) return tokenMatchesShort(want, targetShortMatch[0]);
+    // A visible short CA with a different suffix means the virtual row changed identity.
+    if (SHORT_TOKEN_RE.test(shortSlice)) return false;
 
     // No short/href signal — keep badge (safer than wipe on temporary empty paint).
     return true;
