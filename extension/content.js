@@ -8,6 +8,7 @@
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777|ffff)/i;
   const GMGN_TRENCH_ROOT_SELECTOR =
     "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100";
+  // 0.6.15: ffff 徽章点击 → four.meme/zh-TW/token/{ca}；Flap 仍 flap.sh taxinfo.
   // 0.6.14: Four.meme ffff 税币 — 与 Flap 同徽章 schema；后端 Multicall 链上读.
   // 0.6.13: Hot/Steady 双轨 — 视口/新创建未画加速；稳态保持流畅；仅 BSC 链工作.
   // 0.6.12: pending 快重试 / missing 略缓；区分 soft-miss 原因，限制 requeue 定时器数量.
@@ -302,10 +303,12 @@
     unknown: true,
     // 币股篮子：vault 底层 SPCX/TSLA…（独立开关）
     basket: true,
-    // 点击徽章打开 flap taxinfo（lang 跟随插件中英文）
+    // 点击徽章打开详情：Flap→flap.sh taxinfo；Four ffff→four.meme/token
     openTaxinfo: true
   };
   const FLAP_TAXINFO_BASE = "https://flap.sh/bnb";
+  /** Four.meme tax token page (suffix ffff) */
+  const FOUR_TOKEN_PAGE_BASE = "https://four.meme/zh-TW/token";
   // Popup language (zh|en) — tooltip copy follows this.
   const UI_LANG_KEY = "flapFeeInfo.uiLang.v1";
   // Stock / index vault segment emoji (replaces 🎁 when basket present).
@@ -10792,15 +10795,41 @@
     icon.addEventListener("blur", () => scheduleHideFeeTooltip(120));
   }
 
-  function buildFlapTaxinfoUrl(token) {
+  function isFourTaxToken(token) {
     const ca = String(token || "").toLowerCase();
-    if (!TARGET_TOKEN_RE.test(ca)) return "";
-    const lang = uiLang === "en" ? "en" : "zh";
-    return `${FLAP_TAXINFO_BASE}/${ca}/taxinfo?lang=${lang}`;
+    return /^0x[a-f0-9]{36}ffff$/.test(ca);
   }
 
-  function openFlapTaxinfo(token) {
-    const url = buildFlapTaxinfoUrl(token);
+  function isFlapTaxToken(token) {
+    const ca = String(token || "").toLowerCase();
+    return /^0x[a-f0-9]{36}(8888|7777)$/.test(ca);
+  }
+
+  /**
+   * 徽章点击目标：
+   * - Flap 8888/7777 → flap.sh taxinfo
+   * - Four ffff → four.meme 代币页（用户指定 zh-TW/token/{ca}）
+   */
+  function buildTaxDetailUrl(token) {
+    const ca = String(token || "").toLowerCase();
+    if (!TARGET_TOKEN_RE.test(ca)) return "";
+    if (isFourTaxToken(ca)) {
+      return `${FOUR_TOKEN_PAGE_BASE}/${ca}`;
+    }
+    if (isFlapTaxToken(ca)) {
+      const lang = uiLang === "en" ? "en" : "zh";
+      return `${FLAP_TAXINFO_BASE}/${ca}/taxinfo?lang=${lang}`;
+    }
+    return "";
+  }
+
+  function buildFlapTaxinfoUrl(token) {
+    // 兼容旧名：统一走 buildTaxDetailUrl
+    return buildTaxDetailUrl(token);
+  }
+
+  function openTaxDetail(token) {
+    const url = buildTaxDetailUrl(token);
     if (!url) return;
     try {
       window.open(url, "_blank", "noopener,noreferrer");
@@ -10813,14 +10842,18 @@
     }
   }
 
+  function openFlapTaxinfo(token) {
+    openTaxDetail(token);
+  }
+
   function isOpenTaxinfoEnabled() {
     const prefs = displayPrefs || DEFAULT_DISPLAY_PREFS;
     return prefs.openTaxinfo !== false;
   }
 
   /**
-   * Click / Enter → flap taxinfo. Skip when drag-edit or pointer moved (drag).
-   * Bound once per badge node.
+   * Click / Enter → Flap taxinfo 或 Four.meme token 页。
+   * Skip when drag-edit or pointer moved (drag). Bound once per badge node.
    */
   function bindBadgeClick(icon) {
     if (!(icon instanceof HTMLElement) || icon.dataset.feeClickBound === "1") return;
@@ -10852,7 +10885,7 @@
         if (!TARGET_TOKEN_RE.test(token)) return;
         e.preventDefault();
         e.stopPropagation();
-        openFlapTaxinfo(token);
+        openTaxDetail(token);
       },
       true
     );
@@ -10865,7 +10898,7 @@
       if (!TARGET_TOKEN_RE.test(token)) return;
       e.preventDefault();
       e.stopPropagation();
-      openFlapTaxinfo(token);
+      openTaxDetail(token);
     });
   }
 
@@ -10893,8 +10926,12 @@
     icon.setAttribute("role", clickable ? "link" : "img");
     const ariaExtra = clickable
       ? uiLang === "en"
-        ? " — open Flap tax info"
-        : " — 打开 Flap 税收详情"
+        ? isFourTaxToken(token)
+          ? " — open Four.meme tax page"
+          : " — open Flap tax info"
+        : isFourTaxToken(token)
+          ? " — 打开 Four.meme 税收页"
+          : " — 打开 Flap 税收详情"
       : "";
     icon.setAttribute("aria-label", `${label || "fee"}${ariaExtra}`);
 
