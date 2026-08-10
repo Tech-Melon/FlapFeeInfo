@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.6.5",
-  "description": "FlapFeeInfo: CA-unique row identity; no ffff badges; faster 新创建.",
+  "version": "0.6.8",
+  "description": "FlapFeeInfo: batch 3/350ms; CF soft-wait fill; no modes spam.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

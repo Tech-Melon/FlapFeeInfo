@@ -35,17 +35,22 @@
 ```text
 浏览器插件 extension
     POST /modes  { tokens: string[] }
-        ↓
+        ↓  （只等缓存层，不等链）
 Cloudflare Worker  (https://flap-fee-info.tech-melon.workers.dev)
-    内存 L1 → KV L2 → 未命中回源
-        ↓  Bearer + POST /modes
+    ① 立即返回 mem + KV 命中
+    ② miss → pending 标记 + waitUntil 后台回源
+        ↓  Bearer + POST /modes { wait_chain: true }  （仅后台）
 VPS Nginx  (https://flap.jishugua.top)
         ↓
 Python API  (127.0.0.1:8765)
-    内存 LRU → SQLite 30 天 → 并发链上查询
+    默认 wait_chain=false：mem+SQLite 秒回，miss 后台 inflight 上链
+    wait_chain=true（CF 后台）：阻塞到预算内链上完成，供 KV 落盘
         ↓
 BSC RPC / QuickNode
     Helper.getTaxTokenInfoV2(taxToken)
+
+pending 清理：年龄 >5min 或 map 规模 >500（最旧优先淘汰）
+插件对 missing/pending 快轮询（~300/700/1500ms）直到缓存命中
 ```
 
 | 层 | 目录 | 职责 | 禁止 |
@@ -410,6 +415,8 @@ python tools/ctl.py watchdog-run
   - `0.6.3`：新币徽章时序 — href 优先于 short CA，禁虚拟列表复用旧徽章；feeSig 必须对应当前 entry 才跳过重绘
   - `0.6.4`：js-mcp 实锤 GMGN TokenItem 为 `div[href=/bsc/token/…]`（非 `<a>`）— 身份提取读任意 `[href]`，修新创建错徽章残留
   - `0.6.5`：行身份=自身 CA（禁多 href 优先 7777）；ffff 等非目标永不挂徽章；`findCardsByCa`；新创建 miss 重试 400ms/1.2s
+  - `0.6.6`：CF/后端 async-cache-first（缓存秒回 + 后台填 + pending 去重/5min·500 清理）；插件 poll pending
+  - `0.6.7`：后端 QN 走 httpx keep-alive；扫卡 `enforceIdentity` 严禁错徽章（fee≠行 CA 立刻拆）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`

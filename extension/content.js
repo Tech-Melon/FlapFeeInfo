@@ -7,6 +7,9 @@
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
   const GMGN_TRENCH_ROOT_SELECTOR =
     "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100";
+  // 0.6.8: /modes 批：新CA 满3或350ms；0 CA 不请求；CF soft-wait 回填；禁狂刷 503.
+  // 0.6.7: 严禁错徽章 — 扫卡前 enforceIdentity；无身份/fee≠CA 立刻拆；仅 loading 或正确 entry.
+  // 0.6.6: CF/后端 async-cache-first — 插件对 pending/missing 快轮询；回画 findCardsByCa.
   // 0.6.5: 身份=卡片自身 CA（div[href] 唯一）；禁「多 href 优先 7777」导致 ffff 卡挂错徽章；新创建加速.
   // 0.6.4: js-mcp 实锤 GMGN TokenItem 用 div[href=/bsc/token/…] 非 a — extractCardHrefToken 必须读任意 [href].
   // 0.6.3: 新币徽章 — href 优先于 short CA，禁虚拟列表复用旧徽章；无 /modes 仅 ⏳，有正确值才出真徽章.
@@ -92,19 +95,16 @@
   const MAX_CANDIDATES_PER_SCAN = 120;
   const MAX_CARDS_PER_SCAN = 56;
   const MAX_BATCH_TOKENS = 48;
+  // 统一批策略：满 BATCH_MIN_TOKENS 个新 CA，或自首个入队起 BATCH_FLUSH_MS 才 POST /modes。
+  // 禁止 0ms 狂刷（曾打爆 CF/后端 503，徽章永远 待加载）。
   const BATCH_FLUSH_MS = 350;
-  // GMGN list only: snappier batch coalesce (overlay still uses 0).
-  const GMGN_LIST_BATCH_FLUSH_MS = 80;
-  // GMGN top-of-list (新创建 insert band) unpainted tokens: immediate flush.
-  const GMGN_HOT_BATCH_FLUSH_MS = 0;
+  const BATCH_MIN_TOKENS = 3;
   const RETRY_BASE_MS = 900;
   const RETRY_MAX_MS = 12000;
   const MISSING_RETRY_BASE_MS = 15000;
   const MISSING_RETRY_MAX_MS = 5 * 60 * 1000;
-  // GMGN early miss/fail retries (first two) — brand-new cards often miss once on chain/KV.
-  // 0.6.5: 2s/5s → 400ms/1.2s（用户实测 3s+ 空白主要来自 early miss 锁）.
-  // Later attempts fall back to the global 15s exponential curve.
-  const GMGN_MISSING_RETRY_EARLY_MS = [400, 1200];
+  // pending 轮询：与批间隔对齐，勿 300ms 风暴。
+  const GMGN_MISSING_RETRY_EARLY_MS = [400, 900, 2000];
   const PERSISTENT_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
   // Debot mount result cache (avoids getComputedStyle thrash every scan).
   const DEBOT_MOUNT_CACHE_MS = 4000;
@@ -380,11 +380,99 @@
    * 无 /modes 缓存时：入队 + 画固定「⏳待加载」（GMGN/Debot 列表/弹层共用）。
    * @returns {boolean} 是否已挂上占位徽章
    */
+  /**
+   * 扫卡/回画前强制：徽章 feeToken 必须等于行身份 CA。
+   * 仅拆「错徽章」；正确徽章保留（避免每轮全拆闪烁）。
+   * @returns {{ idCa: string|null, allowed: boolean, wiped: boolean }}
+   */
+  function enforceIdentityOnCard(card) {
+    if (!(card instanceof HTMLElement)) {
+      return { idCa: null, allowed: false, wiped: false };
+    }
+    const idCa = extractCardHrefToken(card);
+    let wiped = false;
+
+    const shouldDrop = (icon) => {
+      if (!(icon instanceof HTMLElement)) return false;
+      const fee = (icon.dataset.feeToken || "").toLowerCase();
+      if (!idCa) {
+        // 无完整 CA：任何实心徽章都不可信（⏳ 也拆，避免挂在错误行上）
+        return true;
+      }
+      if (!TARGET_TOKEN_RE.test(idCa)) return true;
+      // fee 空或与行 CA 不一致 → 错徽章
+      return !fee || fee !== idCa;
+    };
+
+    const removeIcon = (icon) => {
+      if (!(icon instanceof HTMLElement)) return;
+      try {
+        icon.remove();
+        wiped = true;
+      } catch (_e) {
+        // ignore
+      }
+    };
+
+    try {
+      card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => {
+        if (shouldDrop(icon)) removeIcon(icon);
+      });
+      for (const sib of [card.previousElementSibling, card.nextElementSibling]) {
+        if (sib instanceof HTMLElement && sib.matches?.(`[${ICON_DATA}="1"]`)) {
+          if (shouldDrop(sib)) removeIcon(sib);
+        }
+      }
+    } catch (_err) {
+      // ignore
+    }
+
+    if (!idCa) {
+      try {
+        if (card.dataset[CARD_MARK]) {
+          delete card.dataset[CARD_MARK];
+          card.removeAttribute(CARD_DATA);
+          wiped = true;
+        }
+      } catch (_e2) {
+        // ignore
+      }
+      cardTokenCache.delete(card);
+      return { idCa: null, allowed: false, wiped };
+    }
+
+    if (!TARGET_TOKEN_RE.test(idCa)) {
+      wipeNonTargetCardBadges(card, idCa);
+      return { idCa, allowed: false, wiped: true };
+    }
+
+    try {
+      const marked = (card.dataset[CARD_MARK] || "").toLowerCase();
+      if (marked && marked !== idCa) {
+        delete card.dataset[CARD_MARK];
+        card.removeAttribute(CARD_DATA);
+        wiped = true;
+      }
+    } catch (_e3) {
+      // ignore
+    }
+
+    return { idCa, allowed: true, wiped };
+  }
+
   function paintLoadingBadgeAndQueue(card, token) {
     const tok = String(token || "").toLowerCase();
     if (!(card instanceof HTMLElement) || !TARGET_TOKEN_RE.test(tok)) return false;
+    // 行身份必须就是 tok，否则禁止画任何东西（包括 ⏳）
+    const idCa = extractCardHrefToken(card);
+    if (idCa && idCa !== tok) {
+      enforceIdentityOnCard(card);
+      return false;
+    }
     // 有正式缓存时绝不画 ⏳（调用方应走真徽章路径）
     if (resolveEntry(tok)) return false;
+    // 先拆光错徽章，再挂 ⏳
+    enforceIdentityOnCard(card);
     try {
       card.dataset[CARD_MARK] = tok;
       card.setAttribute(CARD_DATA, tok);
@@ -394,20 +482,15 @@
     queueToken(tok);
     try {
       const existing = card.querySelector(`[${ICON_DATA}="1"]`);
-      // 残留别的 CA 真徽章 / 非 loading：必须拆掉再挂 ⏳，禁止「先错后对」
+      if (
+        existing &&
+        existing.dataset.feeToken === tok &&
+        existing.dataset.feeLoading === "1"
+      ) {
+        return true;
+      }
       if (existing) {
-        const feeTok = existing.dataset.feeToken || "";
-        if (feeTok && feeTok !== tok) {
-          removeAllBadgesForCard(card, feeTok);
-        } else if (
-          feeTok === tok &&
-          existing.dataset.feeLoading === "1"
-        ) {
-          return true;
-        } else if (feeTok === tok && existing.dataset.feeLoading !== "1") {
-          // 同 token 却已有「真徽章」但 resolveEntry 为空 — 脏 DOM，拆掉
-          removeAllBadgesForCard(card, tok);
-        }
+        removeAllBadgesForCard(card, tok);
       }
     } catch (_e2) {
       // ignore
@@ -3577,7 +3660,7 @@
     } catch (_err) {
       // ignore
     }
-    if (queued > 0) scheduleBatchFlush({ immediate: true, delayMs: 0 });
+    if (queued > 0) maybeFlushRequestQueue("list-return-fast");
     debugInfo("list-return:fast-paint", {
       painted,
       queued,
@@ -3635,6 +3718,10 @@
     if (!(card instanceof HTMLElement) || !token || !entry) return false;
     // 加载占位禁止走 cache-fast「真徽章」路径
     if (isFeeLoadingEntry(entry)) return false;
+    // 行 CA 必须匹配 token，禁止用缓存画错行
+    const idCa = extractCardHrefToken(card);
+    if (idCa && idCa !== token) return false;
+    if (idCa && !TARGET_TOKEN_RE.test(idCa)) return false;
     try {
       // 与 renderMode 一致：API → DOM → 链默认，禁止硬编码 BNB 造成先错后对
       const q = resolveQuoteSymbol(card, entry);
@@ -5915,6 +6002,13 @@
       // Nested mark cleanup: drop CARD_MARK on discarded inner nodes.
       // (handled by only painting outerCards)
 
+      // ★ 0.6.7：任何路径之前先按行 CA 拆错徽章（虚拟列表复用主修）
+      const idGate = enforceIdentityOnCard(card);
+      if (!idGate.allowed) {
+        // 非目标 / 无身份：已拆徽章，不入队不绘制
+        continue;
+      }
+
       // 0.4.48 Debot absolute: skip nested marked hosts — only outermost paints.
       if (
         !listReturnSoft &&
@@ -6036,12 +6130,18 @@
         break;
       }
 
-      // list-return: token from href hint first (skip extractCardToken deep walk).
-      // GMGN: div[href=/bsc/token/…] — must use extractCardHrefToken, not a-only.
-      let token =
-        listReturnTokenHint.get(card) ||
-        (listReturnSoft ? extractCardHrefToken(card) : null);
-      if (!token) token = siteStrategy.extractToken(card);
+      // 身份 CA 唯一：优先行自身 href，禁止 hint/short 覆盖成别的 CA
+      let token = extractCardHrefToken(card);
+      if (!token || !TARGET_TOKEN_RE.test(token)) {
+        token = siteStrategy.extractToken(card);
+      }
+      // hint 仅当与身份一致时可用
+      const hint = listReturnTokenHint.get(card);
+      if (hint && token && hint !== token) {
+        // ignore stale hint
+      } else if (!token && hint && TARGET_TOKEN_RE.test(hint)) {
+        token = hint;
+      }
       if (!token) {
         // 非目标 CA（ffff 等）：始终拆徽章，即使 soft 路径
         const idCa = extractCardHrefToken(card);
@@ -6054,6 +6154,12 @@
         if (!listReturnSoft && !(isGmgnHost() && isGmgnHeaderMarkedCard(card))) {
           clearCardIcon(card);
         }
+        continue;
+      }
+      // 再强制一次：token 必须等于行 CA
+      const liveId = extractCardHrefToken(card);
+      if (liveId && liveId !== token) {
+        enforceIdentityOnCard(card);
         continue;
       }
 
@@ -6205,9 +6311,8 @@
           bypassForceGap: true
         });
       } else if (isGmgnHost()) {
-        // 0.5.22: truncated scans still enqueue tokens — flush them (was only on non-truncated).
         if (queued > 0 && requestQueue.size > 0 && !batchActive) {
-          scheduleBatchFlush({ delayMs: GMGN_LIST_BATCH_FLUSH_MS });
+          maybeFlushRequestQueue("scan-truncated");
         }
         // Steady GMGN: never immediate force storm — idle slice only.
         scheduleScan(120, { force: false, immediate: false, light: keepLight });
@@ -6217,7 +6322,7 @@
         scheduleScan(120, { force: false, immediate: false, light: keepLight });
       }
     } else if (queued > 0 && requestQueue.size > 0 && !batchActive && !batchTimer) {
-      scheduleBatchFlush({ immediate: true });
+      maybeFlushRequestQueue("scan-done");
     }
 
     // 0.4.51: always per-card double-badge cleanup (GMGN+Debot).
@@ -7593,10 +7698,15 @@
     let delayMs;
     if (isGmgnHost() && attempts <= GMGN_MISSING_RETRY_EARLY_MS.length) {
       delayMs = GMGN_MISSING_RETRY_EARLY_MS[attempts - 1];
+    } else if (isGmgnHost()) {
+      // After early polls: moderate backoff (async edge fill usually done <3s).
+      const expBase = Math.max(0, attempts - 1 - GMGN_MISSING_RETRY_EARLY_MS.length);
+      delayMs = Math.min(
+        15000,
+        Math.max(2000, 2000 * 2 ** Math.min(expBase, 3))
+      );
     } else {
-      const expBase = isGmgnHost()
-        ? Math.max(0, attempts - 1 - GMGN_MISSING_RETRY_EARLY_MS.length)
-        : attempts - 1;
+      const expBase = attempts - 1;
       delayMs = Math.min(MISSING_RETRY_MAX_MS, MISSING_RETRY_BASE_MS * 2 ** expBase);
     }
     missingRetryState.set(normalized, { attempts, retryAt: Date.now() + delayMs });
@@ -7705,25 +7815,28 @@
     return scored.map((x) => x.token);
   }
 
-  function queueToken(token) {
-    if (modeCache.has(token) || isPersistentCacheHit(token) || requestQueue.has(token)) return;
-    const missingState = missingRetryState.get(token);
-    if (missingState && Date.now() < missingState.retryAt) return;
-    requestQueue.add(token);
-    debugInfo("queue", { token });
-    // Overlay UX: flush immediately (was BATCH_FLUSH_MS 350 + idle → multi-second wait).
-    if (isOverlayFast() || quickHasOpenOverlay()) {
+  /**
+   * 批策略：队列空 → 不请求；≥3 个新 CA → 立即 POST；否则 350ms 合并。
+   * 所有路径必须走这里，禁止 delayMs:0 狂刷。
+   */
+  function maybeFlushRequestQueue(_reason) {
+    if (requestQueue.size === 0) return;
+    if (requestQueue.size >= BATCH_MIN_TOKENS) {
       scheduleBatchFlush({ immediate: true, delayMs: 0 });
-    } else if (isGmgnHost() && !isTokenDetailRoute()) {
-      // Hot top-band unpainted → near-immediate; else short list coalesce.
-      if (isGmgnHotUnpaintedToken(token)) {
-        scheduleBatchFlush({ delayMs: GMGN_HOT_BATCH_FLUSH_MS });
-      } else {
-        scheduleBatchFlush({ delayMs: GMGN_LIST_BATCH_FLUSH_MS });
-      }
     } else {
-      scheduleBatchFlush();
+      scheduleBatchFlush({ delayMs: BATCH_FLUSH_MS });
     }
+  }
+
+  function queueToken(token) {
+    const tok = String(token || "").toLowerCase();
+    if (!TARGET_TOKEN_RE.test(tok)) return;
+    if (modeCache.has(tok) || isPersistentCacheHit(tok) || requestQueue.has(tok)) return;
+    const missingState = missingRetryState.get(tok);
+    if (missingState && Date.now() < missingState.retryAt) return;
+    requestQueue.add(tok);
+    debugInfo("queue", { token: tok, queueSize: requestQueue.size });
+    maybeFlushRequestQueue("queue");
   }
 
   /**
@@ -7839,7 +7952,13 @@
         return;
       }
     }
+    // 队列空或无目标 CA：绝不发 /modes
     if (batchActive || requestQueue.size === 0) return;
+    // 防御：只发合法 7777/8888
+    for (const t of Array.from(requestQueue)) {
+      if (!TARGET_TOKEN_RE.test(String(t))) requestQueue.delete(t);
+    }
+    if (requestQueue.size === 0) return;
 
     // Old content script after extension reload: stop all network work silently.
     if (!isExtensionContextValid()) {
@@ -7935,9 +8054,18 @@
           }
         }
       }
-      // Soft-miss: retry on a later scan with token-level backoff. Re-adding immediately
-      // made successful batches loop at zero delay when upstream had no result.
-      (data.missing || []).forEach(deferTokenRetry);
+      // Soft-miss / async pending: CF returns cache hits immediately and fills miss in
+      // background — client must re-poll. pending[] is same as missing for retry purposes.
+      const softMiss = new Set([
+        ...(data.missing || []).map((t) => String(t).toLowerCase()),
+        ...(data.pending || []).map((t) => String(t).toLowerCase())
+      ]);
+      // Tokens we asked for but got neither result nor explicit missing (defensive).
+      tokens.forEach((t) => {
+        const k = String(t).toLowerCase();
+        if (!modeCache.has(k) && !softMiss.has(k)) softMiss.add(k);
+      });
+      softMiss.forEach(deferTokenRetry);
     } catch (error) {
       if (generation !== batchGeneration) return;
       if (isContextInvalidError(error)) {
@@ -7980,11 +8108,11 @@
         batchActive = false;
         batchStartedAt = 0;
         if (isExtensionContextValid() && isTabVisible() && requestQueue.size > 0) {
-          const delayMs = consecutiveFails > 0 ? nextRetryDelayMs() : 0;
-          scheduleBatchFlush({
-            immediate: delayMs === 0,
-            delayMs
-          });
+          if (consecutiveFails > 0) {
+            scheduleBatchFlush({ delayMs: nextRetryDelayMs() });
+          } else {
+            maybeFlushRequestQueue("batch-finally");
+          }
         }
       }
     }
