@@ -15,7 +15,8 @@
   const PREFS_ATTR = "data-flap-tax-recv";
   const LS_KEY = "flapFeeInfo.taxRecvHide.v1";
   /** 与 content.js TARGET_TOKEN_RE 一致 */
-  const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/i;
+  /** 与 content.js 一致：Flap 8888/7777 + Four.meme ffff */
+  const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
   const prev = Number(window.__flapFeeInfoPageHook) || 0;
   if (prev >= HOOK_VER) return;
   window.__flapFeeInfoPageHook = HOOK_VER;

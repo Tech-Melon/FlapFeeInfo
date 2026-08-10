@@ -1,12 +1,14 @@
 (() => {
   const DEFAULT_API_BASE = "https://flap-fee-info.tech-melon.workers.dev";
   const TOKEN_RE = /0x[a-fA-F0-9]{40}/;
-  const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777)$/;
+  // Flap tax 8888/7777 + Four.meme tax ffff
+  const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
   // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
-  const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
+  const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777|ffff)/i;
   const GMGN_TRENCH_ROOT_SELECTOR =
     "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100";
+  // 0.6.14: Four.meme ffff 税币 — 与 Flap 同徽章 schema；后端 Multicall 链上读.
   // 0.6.13: Hot/Steady 双轨 — 视口/新创建未画加速；稳态保持流畅；仅 BSC 链工作.
   // 0.6.12: pending 快重试 / missing 略缓；区分 soft-miss 原因，限制 requeue 定时器数量.
   // 0.6.11: 流畅回退 — 扫卡/mutation 节奏对齐 0.6.2；身份校验快路径+节流，保留防错徽章.
@@ -370,9 +372,11 @@
   };
   // GMGN TokenItem is often div[href="/bsc/token/0x…7777"] (not always <a>) — include bare [href*].
   const SUFFIX_SELECTORS =
-    "[href*='8888'], [href*='7777'], [title*='8888'], [title*='7777'], " +
-    "[aria-label*='8888'], [aria-label*='7777'], [data-token*='8888'], [data-token*='7777'], " +
-    "[data-address*='8888'], [data-address*='7777']";
+    "[href*='8888'], [href*='7777'], [href*='ffff'], [href*='FFFF'], " +
+    "[title*='8888'], [title*='7777'], [title*='ffff'], [title*='FFFF'], " +
+    "[aria-label*='8888'], [aria-label*='7777'], [aria-label*='ffff'], " +
+    "[data-token*='8888'], [data-token*='7777'], [data-token*='ffff'], " +
+    "[data-address*='8888'], [data-address*='7777'], [data-address*='ffff']";
 
   const modeMeta = {
     holder: { fallback: "💎", title: "Fee mode: holder dividend", className: "holder" },
@@ -3271,7 +3275,11 @@
     const interestingHref = (href) =>
       typeof href === "string" &&
       href.length > 8 &&
-      (href.includes("7777") || href.includes("8888") || href.includes("/token/"));
+      (href.includes("7777") ||
+        href.includes("8888") ||
+        href.includes("ffff") ||
+        href.includes("FFFF") ||
+        href.includes("/token/"));
     const probeEl = (el) => {
       if (!(el instanceof HTMLElement)) return false;
       // A direct extension badge insert/remove is our own feedback, not host work.
@@ -7627,7 +7635,7 @@
   }
 
   /**
-   * 全页轻量校验：徽章 feeToken 必须等于宿主行的身份 CA；ffff 等非目标行不得挂徽章。
+   * 全页轻量校验：徽章 feeToken 必须等于宿主行的身份 CA；非目标尾号行不得挂徽章。
    * 0.6.11：节流，避免每扫全页扫图标（主线程尖峰）。
    */
   function scrubIdentityMismatchedBadges() {
@@ -7686,10 +7694,10 @@
     const shortAddress = findCardShortAddress(card);
     const hrefToken = extractCardHrefToken(card);
 
-    // 行身份 CA 已明确：以 href 为准（含 ffff 等非目标 → 绝不挂徽章）.
+    // 行身份 CA 已明确：以 href 为准（非 7777/8888/ffff → 绝不挂徽章）.
     if (hrefToken) {
       if (!TARGET_TOKEN_RE.test(hrefToken)) {
-        // 非 7777/8888：清缓存 + 清残留徽章（js-mcp: ffff 行曾挂 💎/👨‍🍳）
+        // 非目标尾号：清缓存 + 清残留徽章
         cardTokenCache.delete(card);
         wipeNonTargetCardBadges(card, hrefToken);
         return null;
@@ -7792,7 +7800,7 @@
     // Last resort: textContent only (skip full innerHTML serialization).
     const blob = card.textContent || "";
     if (blob.length < 8000) {
-      const re = /0x[a-fA-F0-9]{36}(8888|7777)/gi;
+      const re = /0x[a-fA-F0-9]{36}(8888|7777|ffff)/gi;
       let match = re.exec(blob);
       while (match) {
         const token = accept(match[0].toLowerCase());

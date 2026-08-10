@@ -10,7 +10,10 @@
 
 ## 1. 项目目标
 
-在 **GMGN / Debot / Gungnir** 等 meme 列表页上，给 BSC 上 Flap 税收代币（地址尾号 **`8888` 或 `7777`**）展示 **税收分配徽章**，并尽量附带 **底池/报价** 文字。
+在 **GMGN / Debot / Gungnir** 等 meme 列表页上，给 BSC 上税收代币展示 **税收分配徽章**，并尽量附带 **底池/报价** 文字：
+
+- **Flap**：尾号 **`8888` / `7777`** → Helper `getTaxTokenInfoV2`
+- **Four.meme**：尾号 **`ffff`** → token 链上 Multicall（`feeRateBuy/Sell` + `rate*` + `quote`）
 
 | 展示 | 含义 | 数据来源 |
 |------|------|----------|
@@ -103,10 +106,10 @@ FlapFeeInfo/
 三层统一正则（概念上）：
 
 ```text
-^0x[a-fA-F0-9]{36}(8888|7777)$
+^0x[a-fA-F0-9]{36}(8888|7777|ffff)$
 ```
 
-改尾号规则时：**extension + worker + fee_mode_server** 必须同步。
+改尾号规则时：**extension + worker + fee_mode_server + fee_mode** 必须同步。
 
 ### 4.2 链上 Helper
 
@@ -422,6 +425,7 @@ python tools/ctl.py watchdog-run
   - `0.6.11`：流畅优化 — mutation/扫卡/miss 重试对齐 0.6.2；`gateCardIdentity` 快路径 + href 短缓存 + scrub 节流；保留防错徽章
   - `0.6.12`：`pending`/`missing` 分轨重试（pending 0.6/1.4/2.8s，missing 1/2.2/4s）；requeue 定时器上限 24
   - `0.6.13`：Hot/Steady 双轨（热：批 1/120ms、防抖 220、扫 gap 360、pending 0.4s 起）；仅 BSC（他链含 robinhood 全关）
+  - `0.6.14`：Four.meme `ffff` 税币 — 后端 Multicall 链上读 + 与 Flap 同 payload；插件/CF 尾号放行
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`
