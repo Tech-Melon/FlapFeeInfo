@@ -430,6 +430,8 @@ python tools/ctl.py watchdog-run
   - `0.6.16`：自定义多规则 CA 尾号屏蔽（仅 BSC，战壕「新创建」列；storage `flapFeeInfo.suffixHide.v1`）；底池前缀 Flap=🦋 Four=🖐️
   - `0.6.16b`：Debot 列表 API `meme/v3/ranks`→`meme/v4/ranks`（column 改 POST JSON body）；page-hook 补匹配，否则资金接收屏蔽整段不滤
   - `0.7.0`：里程碑 — Debot v4 资金接收屏蔽修复 + 自定义尾号屏蔽 + 底池 🦋/🖐️；page-hook HOOK_VER 49
+  - `0.7.1`：GMGN/Debot 错徽章与身份加固（并入 0.7.2）
+  - `0.7.2`：ffff 视口未画快补 ⏳/入队（与 7777 同权）；4444 等非目标行残留 7777 必拆；GMGN 扫卡/热批/回列表降负载；底池 DOM 优先
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  
