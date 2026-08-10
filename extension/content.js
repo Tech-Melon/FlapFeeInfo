@@ -7,6 +7,7 @@
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
   const GMGN_TRENCH_ROOT_SELECTOR =
     "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100";
+  // 0.6.5: 身份=卡片自身 CA（div[href] 唯一）；禁「多 href 优先 7777」导致 ffff 卡挂错徽章；新创建加速.
   // 0.6.4: js-mcp 实锤 GMGN TokenItem 用 div[href=/bsc/token/…] 非 a — extractCardHrefToken 必须读任意 [href].
   // 0.6.3: 新币徽章 — href 优先于 short CA，禁虚拟列表复用旧徽章；无 /modes 仅 ⏳，有正确值才出真徽章.
   // 0.5.22: GMGN-only batch priority for top viewport + flush when scan truncated; Debot untouched.
@@ -92,17 +93,18 @@
   const MAX_CARDS_PER_SCAN = 56;
   const MAX_BATCH_TOKENS = 48;
   const BATCH_FLUSH_MS = 350;
-  // GMGN list only: slightly snappier batch coalesce (overlay still uses 0).
-  const GMGN_LIST_BATCH_FLUSH_MS = 180;
-  // GMGN top-of-list (新创建 insert band) unpainted tokens: almost-immediate flush.
-  const GMGN_HOT_BATCH_FLUSH_MS = 50;
+  // GMGN list only: snappier batch coalesce (overlay still uses 0).
+  const GMGN_LIST_BATCH_FLUSH_MS = 80;
+  // GMGN top-of-list (新创建 insert band) unpainted tokens: immediate flush.
+  const GMGN_HOT_BATCH_FLUSH_MS = 0;
   const RETRY_BASE_MS = 900;
   const RETRY_MAX_MS = 12000;
   const MISSING_RETRY_BASE_MS = 15000;
   const MISSING_RETRY_MAX_MS = 5 * 60 * 1000;
-  // GMGN early miss/fail retries (first two) — avoid 15s lock on brand-new cards.
+  // GMGN early miss/fail retries (first two) — brand-new cards often miss once on chain/KV.
+  // 0.6.5: 2s/5s → 400ms/1.2s（用户实测 3s+ 空白主要来自 early miss 锁）.
   // Later attempts fall back to the global 15s exponential curve.
-  const GMGN_MISSING_RETRY_EARLY_MS = [2000, 5000];
+  const GMGN_MISSING_RETRY_EARLY_MS = [400, 1200];
   const PERSISTENT_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
   // Debot mount result cache (avoids getComputedStyle thrash every scan).
   const DEBOT_MOUNT_CACHE_MS = 4000;
@@ -117,17 +119,17 @@
   const DEBOT_SCROLL_RESUME_SCAN_MS = 520;
   const DEBOT_SCROLL_CARDS_BUDGET = 8;
   const DEBOT_STEADY_CARDS_BUDGET = 18;
-  // GMGN list mutation debounce (0.5.21: 700→380; still ≥ Debot thrash floor, snappier new cards).
-  const MUTATION_SCAN_DEBOUNCE_GMGN_MS = 380;
+  // GMGN list mutation debounce (0.6.5: 380→200 — 新创建 insert 更快进扫).
+  const MUTATION_SCAN_DEBOUNCE_GMGN_MS = 200;
   // GMGN list non-force scan min gap (home/meme only). Token pages keep SCAN_INTERVAL_MS.
-  const GMGN_LIST_SCAN_MIN_GAP_MS = 560;
+  const GMGN_LIST_SCAN_MIN_GAP_MS = 360;
   // GMGN cold first scan delay (host hydration first; was 900).
-  const GMGN_FIRST_SCAN_DELAY_MS = 650;
+  const GMGN_FIRST_SCAN_DELAY_MS = 450;
   // GMGN per-scan card budget while scroll-cooling (smaller slices).
   const GMGN_SCROLL_CARDS_BUDGET = 12;
   // After /modes hits on GMGN list: cache-first viewport paint (cards, ms) — no network.
-  const GMGN_POST_API_PAINT_CARDS = 10;
-  const GMGN_POST_API_PAINT_MS = 10;
+  const GMGN_POST_API_PAINT_CARDS = 14;
+  const GMGN_POST_API_PAINT_MS = 16;
   // chrome.storage rewrite throttle + max entries (LRU by fetchedAt).
   const PERSIST_MIN_INTERVAL_MS = 10000;
   const PERSISTENT_CACHE_MAX_ENTRIES = 800;
@@ -5722,13 +5724,18 @@
           return false;
         }
       }
-      // Virtual list recycle: href/data 与 marked 不一致 → 立刻失稳，禁止保留旧徽章。
+      // Virtual list recycle: 行身份 CA 必须与 mark/badge 一致（CA 唯一）.
       // Skip for header (multiple 0x links in ticker/share row).
       if (!(existing.dataset.feeHeader === "1" || isGmgnHeaderMarkedCard(card))) {
         if (!cardStillMatchesToken(card, marked)) return false;
-        // 额外：href 明确指向其它 CA 时即使 short 巧合匹配也失稳
         const hrefTok = extractCardHrefToken(card);
         if (hrefTok && hrefTok !== marked) return false;
+        // badge feeToken 必须等于行身份 CA
+        if (existing.dataset.feeToken && hrefTok && existing.dataset.feeToken !== hrefTok) {
+          return false;
+        }
+        // 非目标行（ffff）绝不能 stable 挂徽章
+        if (hrefTok && !TARGET_TOKEN_RE.test(hrefTok)) return false;
       }
       return true;
     }
@@ -5762,6 +5769,10 @@
     if (!cardStillMatchesToken(card, marked)) return false;
     const hrefTok = extractCardHrefToken(card);
     if (hrefTok && hrefTok !== marked) return false;
+    if (existing.dataset.feeToken && hrefTok && existing.dataset.feeToken !== hrefTok) {
+      return false;
+    }
+    if (hrefTok && !TARGET_TOKEN_RE.test(hrefTok)) return false;
     const er = existing.getBoundingClientRect();
     return er.width >= 2 && er.height >= 2;
   }
@@ -6032,6 +6043,12 @@
         (listReturnSoft ? extractCardHrefToken(card) : null);
       if (!token) token = siteStrategy.extractToken(card);
       if (!token) {
+        // 非目标 CA（ffff 等）：始终拆徽章，即使 soft 路径
+        const idCa = extractCardHrefToken(card);
+        if (idCa && !TARGET_TOKEN_RE.test(idCa)) {
+          wipeNonTargetCardBadges(card, idCa);
+          continue;
+        }
         // 0.5.3: never wipe GMGN K-line header mark on transient extract miss
         // (was flash-then-gone: tryPaint mounts → scan extractToken fails → clear).
         if (!listReturnSoft && !(isGmgnHost() && isGmgnHeaderMarkedCard(card))) {
@@ -6211,6 +6228,9 @@
       // Soft return still risks double mount on one card after forceAppend/Tax.
       dedupeBadgesPerCardOnly(outerCards);
     }
+
+    // 0.6.5: CA 身份校验 — 拆 ffff 行 / feeToken≠行 CA 的错挂（不依赖候选集是否扫到该行）
+    scrubIdentityMismatchedBadges();
 
     // Tax-recv hide: re-apply after list paint (map from page-hook; no extra HTTP).
     if (taxRecvHidePrefs.enabled || taxRecvMap.size > 0) {
@@ -7160,79 +7180,186 @@
   }
 
   /**
-   * Token-route href on the card (SPA/virtual-list identity source of truth).
-   * Prefer this over short-CA text, which often lags one paint after row recycle.
+   * **卡片唯一身份 = 该行自身的 token-route CA**（GMGN: TokenItem `div[href="/bsc/token/0x…"]`）。
    *
-   * js-mcp 0.6.4: GMGN 战壕 TokenItem 是 **div[href="/bsc/token/0x…"]**，不是 <a>。
-   * 只查 a[href] 会恒为 null → 退回 short CA → 复用行长时间挂旧徽章（用户实测先错后对）。
-   * 多 href 时优先 7777/8888 目标 CA（避免先命中站内无关 0x 链接）。
+   * 规则（0.6.5 / js-mcp）：
+   * 1. 自 card 向上找最近带 `/token/0x` 的 `href` —— 这就是行身份，**绝不**用别的 7777 覆盖 ffff
+   * 2. 仅当上下都没有时，才在子树找第一个 token-route href
+   * 3. 禁止「候选里优先 7777/8888」—— 那会把 ffff 行误认成邻近 7777 并挂徽章
+   *
+   * 返回任意完整 CA（含非 7777/8888）；调用方用 TARGET_TOKEN_RE 决定是否挂徽章。
    */
   function extractCardHrefToken(card) {
     if (!(card instanceof HTMLElement)) return null;
     const fromRaw = (raw) => {
       if (!raw) return null;
       const s = String(raw);
-      // External icon links on the same card (flap.sh / explorers) are not identity.
+      // External icon links (flap.sh / explorers) are never row identity.
       if (/flap\.sh|bscscan|etherscan|lens\.google/i.test(s)) return null;
-      if (s.indexOf("0x") === -1) return null;
+      // Row identity must be a token-route path (GMGN /bsc/token/0x… or /token/0x…).
+      if (s.indexOf("/token/") === -1) return null;
       return extractAnyToken(s);
     };
-    /** @type {string[]} */
-    const candidates = [];
-    const push = (tok) => {
-      if (tok && !candidates.includes(tok)) candidates.push(tok);
-    };
     try {
-      // 1) Card root itself (GMGN TokenItem.tsx root often has href attribute).
-      push(fromRaw(card.getAttribute?.("href") || ""));
+      // 1) Self + ancestors: nearest token-route href wins (the row's own CA).
+      let el = card;
+      for (let i = 0; i < 10 && el; i += 1) {
+        const raw = el.getAttribute?.("href") || "";
+        if (raw && (raw.indexOf("/token/") !== -1 || raw.indexOf("/bsc/token/") !== -1)) {
+          const tok = fromRaw(raw);
+          if (tok) return tok;
+        }
+        el = el.parentElement;
+      }
     } catch (_errSelf) {
       // ignore
     }
     try {
-      // 2) Descendants: any [href] with 0x (div or a — NOT a-only). Cap walk.
-      if (card.querySelectorAll) {
-        const nodes = card.querySelectorAll(
-          "[href*='/token/'][href*='0x'], [href*='/bsc/token/'][href*='0x'], [href*='0x']"
+      // 2) Subtree fallback only when host itself is not the TokenItem root.
+      if (card.querySelector) {
+        const preferred = card.querySelector(
+          "[href*='/bsc/token/'][href*='0x'], [href*='/token/'][href*='0x']"
         );
-        const lim = Math.min(nodes.length, 12);
-        for (let i = 0; i < lim; i += 1) {
-          push(fromRaw(nodes[i].getAttribute?.("href") || ""));
-        }
+        const tok = fromRaw(preferred?.getAttribute?.("href") || "");
+        if (tok) return tok;
       }
     } catch (_errQ) {
       // ignore
     }
-    // 3) Climb parents: badge host may be nested under TokenItem div[href].
+    return null;
+  }
+
+  /**
+   * 按完整 CA 找战壕行（身份源：href 含该 CA）。CA 唯一且固定。
+   * @returns {HTMLElement[]}
+   */
+  function findCardsByCa(token) {
+    const tok = String(token || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(tok)) return [];
+    const out = [];
+    const seen = new Set();
     try {
-      let p = card.parentElement;
-      for (let i = 0; i < 6 && p; i += 1) {
-        push(fromRaw(p.getAttribute?.("href") || ""));
-        p = p.parentElement;
-      }
-    } catch (_errP) {
+      // 1) Our mark
+      document.querySelectorAll(`[${CARD_DATA}="${tok}"]`).forEach((el) => {
+        if (el instanceof HTMLElement && !seen.has(el)) {
+          seen.add(el);
+          out.push(el);
+        }
+      });
+      // 2) Host TokenItem / link by href (GMGN div[href] or a[href])
+      document.querySelectorAll(`[href*="${tok}"]`).forEach((el) => {
+        if (!(el instanceof HTMLElement) || seen.has(el)) return;
+        const href = (el.getAttribute("href") || "").toLowerCase();
+        if (href.indexOf(tok) === -1) return;
+        if (/flap\.sh|bscscan|etherscan/i.test(href)) return;
+        // Prefer row-sized hosts
+        const r = el.getBoundingClientRect();
+        if (r.width < 80 || r.height < 36) return;
+        seen.add(el);
+        out.push(el);
+      });
+    } catch (_err) {
       // ignore
     }
-    if (!candidates.length) return null;
-    // Prefer Flap tax targets; else first full CA (caller may reject non-target).
-    for (let i = 0; i < candidates.length; i += 1) {
-      if (TARGET_TOKEN_RE.test(candidates[i])) return candidates[i];
+    return out;
+  }
+
+  /** 非目标 CA 行：拆掉任何残留徽章（含别的 7777 复用挂上来的）. */
+  function wipeNonTargetCardBadges(card, identityCa) {
+    if (!(card instanceof HTMLElement)) return;
+    const id = identityCa || extractCardHrefToken(card);
+    if (id && TARGET_TOKEN_RE.test(id)) return;
+    try {
+      card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
+        try {
+          n.remove();
+        } catch (_e) {
+          // ignore
+        }
+      });
+      for (const sib of [card.previousElementSibling, card.nextElementSibling]) {
+        if (sib instanceof HTMLElement && sib.matches?.(`[${ICON_DATA}="1"]`)) {
+          try {
+            sib.remove();
+          } catch (_e2) {
+            // ignore
+          }
+        }
+      }
+      delete card.dataset[CARD_MARK];
+      card.removeAttribute(CARD_DATA);
+      cardTokenCache.delete(card);
+    } catch (_err) {
+      // ignore
     }
-    return candidates[0];
+  }
+
+  /**
+   * 全页轻量校验：徽章 feeToken 必须等于宿主行的身份 CA；ffff 等非目标行不得挂徽章。
+   * 不依赖本轮候选是否扫到该行（错挂常落在「未进 needWork」的复用节点上）。
+   */
+  function scrubIdentityMismatchedBadges() {
+    try {
+      const icons = document.querySelectorAll(`[${ICON_DATA}="1"]`);
+      const lim = Math.min(icons.length, 48);
+      for (let i = 0; i < lim; i += 1) {
+        const icon = icons[i];
+        if (!(icon instanceof HTMLElement)) continue;
+        if (icon.dataset.feeHeader === "1") continue;
+        const fee = (icon.dataset.feeToken || "").toLowerCase();
+        const host =
+          findCardForBadgeIcon(icon) ||
+          icon.closest?.("[href*='/token/'], [href*='/bsc/token/']");
+        if (!(host instanceof HTMLElement)) {
+          // 无宿主行：孤儿徽章拆掉
+          try {
+            icon.remove();
+          } catch (_e) {
+            // ignore
+          }
+          continue;
+        }
+        const idCa = extractCardHrefToken(host);
+        if (!idCa) continue;
+        if (!TARGET_TOKEN_RE.test(idCa)) {
+          wipeNonTargetCardBadges(host, idCa);
+          continue;
+        }
+        if (fee && fee !== idCa) {
+          try {
+            icon.remove();
+          } catch (_e2) {
+            // ignore
+          }
+          // mark 若还指旧 CA 一并清，下一轮按新 CA 重画
+          if (host.dataset[CARD_MARK] && host.dataset[CARD_MARK] !== idCa) {
+            try {
+              delete host.dataset[CARD_MARK];
+              host.removeAttribute(CARD_DATA);
+            } catch (_e3) {
+              // ignore
+            }
+          }
+        }
+      }
+    } catch (_err) {
+      // ignore
+    }
   }
 
   function extractCardTokenFromAttrs(card) {
     const shortAddress = findCardShortAddress(card);
     const hrefToken = extractCardHrefToken(card);
 
-    // href 已是完整 CA：虚拟列表复用时 short 文本常残留上一行 → href 优先。
+    // 行身份 CA 已明确：以 href 为准（含 ffff 等非目标 → 绝不挂徽章）.
     if (hrefToken) {
       if (!TARGET_TOKEN_RE.test(hrefToken)) {
-        // 非 7777/8888：明确不是目标币，清缓存并拒绝旧 short 误匹配
+        // 非 7777/8888：清缓存 + 清残留徽章（js-mcp: ffff 行曾挂 💎/👨‍🍳）
         cardTokenCache.delete(card);
+        wipeNonTargetCardBadges(card, hrefToken);
         return null;
       }
-      // 目标 href：即使 short 尚未跟上（或仍显示旧 7777），也以 href 为准。
-      // 仅当 short 明确是「另一个」目标尾号且与 href 冲突时仍信 href（React 未刷 short）。
+      // 目标 href：即使 short 尚未跟上，也以完整 CA 为准。
       cardTokenCache.set(card, {
         token: hrefToken,
         short: shortAddress || "",
@@ -7245,6 +7372,7 @@
     // Virtual lists reuse the same HTMLElement — old cache must not paint on a new row.
     if (shortAddress && !TARGET_SHORT_TOKEN_RE.test(shortAddress)) {
       cardTokenCache.delete(card);
+      wipeNonTargetCardBadges(card, null);
       return null;
     }
     // Prefer short 8888/7777 presence; still allow pure full-CA cards without short UI.
@@ -7996,12 +8124,31 @@
   function applyModeToKnownCards(token, entry, knownCards = null) {
     const tok = String(token || "").toLowerCase();
     if (!TARGET_TOKEN_RE.test(tok)) return;
-    const cards = knownCards || document.querySelectorAll(`[${CARD_DATA}="${tok}"]`);
+    // 0.6.5: CA 定位 — mark + href 含完整 CA 的行（不靠 climb 猜）
+    const fromCa = findCardsByCa(tok);
+    const fromMark = knownCards
+      ? Array.from(knownCards)
+      : Array.from(document.querySelectorAll(`[${CARD_DATA}="${tok}"]`));
+    const seen = new Set();
+    const cards = [];
+    for (const c of [...fromCa, ...fromMark]) {
+      if (c instanceof HTMLElement && !seen.has(c)) {
+        seen.add(c);
+        cards.push(c);
+      }
+    }
     cards.forEach((card) => {
       if (!(card instanceof HTMLElement)) return;
+      // 行身份 CA 必须就是 tok；否则拆掉误挂
+      const idCa = extractCardHrefToken(card);
+      if (idCa && idCa !== tok) {
+        if (!TARGET_TOKEN_RE.test(idCa)) wipeNonTargetCardBadges(card, idCa);
+        else clearCardIcon(card);
+        return;
+      }
       // Soft match after SPA: trust mark if short CA still matches (avoid full extract thrash).
       const live = siteStrategy.extractToken(card);
-      if (live == null && cardStillMatchesToken(card, tok)) {
+      if (live == null && (idCa === tok || cardStillMatchesToken(card, tok))) {
         renderMode(card, tok, entry);
         return;
       }
@@ -10359,25 +10506,23 @@
       }
       return false;
     }
-    // 虚拟列表复用：当前卡已变成非目标 CA 时不画
+    // 虚拟列表复用 / 错挂：行身份 CA 必须 === tok，且必须是目标尾号
     try {
+      const idCa = extractCardHrefToken(card);
+      if (idCa) {
+        if (!TARGET_TOKEN_RE.test(idCa)) {
+          wipeNonTargetCardBadges(card, idCa);
+          return false;
+        }
+        if (idCa !== tok) {
+          removeAllBadgesForCard(card, tok);
+          return false;
+        }
+      }
       const live = siteStrategy?.extractToken?.(card);
       if (live != null && live !== tok) {
         removeAllBadgesForCard(card, tok);
         return false;
-      }
-      if (live == null) {
-        // div[href] 或 a[href] 均可（0.6.4）
-        const hrefTok = extractCardHrefToken(card);
-        if (hrefTok && !TARGET_TOKEN_RE.test(hrefTok)) {
-          removeAllBadgesForCard(card, tok);
-          return false;
-        }
-        // href 已是另一个 7777/8888 → 禁止用旧 tok 画徽章
-        if (hrefTok && TARGET_TOKEN_RE.test(hrefTok) && hrefTok !== tok) {
-          removeAllBadgesForCard(card, tok);
-          return false;
-        }
       }
     } catch (_e2) {
       // ignore — continue paint

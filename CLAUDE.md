@@ -409,6 +409,7 @@ python tools/ctl.py watchdog-run
   - `0.6.0`：税收接收方隐藏 + 新币 ⏳待加载（无 /modes 不画真徽章）
   - `0.6.3`：新币徽章时序 — href 优先于 short CA，禁虚拟列表复用旧徽章；feeSig 必须对应当前 entry 才跳过重绘
   - `0.6.4`：js-mcp 实锤 GMGN TokenItem 为 `div[href=/bsc/token/…]`（非 `<a>`）— 身份提取读任意 `[href]`，修新创建错徽章残留
+  - `0.6.5`：行身份=自身 CA（禁多 href 优先 7777）；ffff 等非目标永不挂徽章；`findCardsByCa`；新创建 miss 重试 400ms/1.2s
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`
