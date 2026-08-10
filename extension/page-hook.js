@@ -3,18 +3,20 @@
  *
  * 懒挂载（建议 A）：
  *   · 默认只装 SPA history 桥（对齐 0.5.25）
- *   · 仅 tax-recv enabled 时 installTaxRecvNetworkHooks()
+ *   · 仅 tax-recv / 自定义尾号屏蔽 enabled 时 installTaxRecvNetworkHooks()
  *     （XHR/fetch/WS/MessagePort/SharedWorker/JSON.parse）
  *   · 开屏蔽时 owned 写 gmgn disableShareWorker；关则清理
- * ★ 仅 7777/8888；禁止 DOM reflow / 乱包 dedicated Worker
+ * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 47;
-  /** 仅当「资金接收方屏蔽」开启时，由插件临时写入，关闭时清理 */
+  const HOOK_VER = 49;
+  /** 仅当列表过滤开启时，由插件临时写入，关闭时清理 */
   const OWNED_DISABLE_SW = "flapFeeInfo.ownedDisableShareWorker";
   const PREFS_ATTR = "data-flap-tax-recv";
   const LS_KEY = "flapFeeInfo.taxRecvHide.v1";
-  /** 与 content.js TARGET_TOKEN_RE 一致 */
+  const SUFFIX_ATTR = "data-flap-suffix-hide";
+  const SUFFIX_LS_KEY = "flapFeeInfo.suffixHide.v1";
+  const SUFFIX_MAX_RULES = 24;
   /** 与 content.js 一致：Flap 8888/7777 + Four.meme ffff */
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
   const prev = Number(window.__flapFeeInfoPageHook) || 0;
@@ -27,6 +29,9 @@
   /** @type {{ enabled: boolean, thresholdPct: number }} */
   let taxRecvPrefs = { enabled: false, thresholdPct: 100 };
   let taxRecvEnabled = false;
+  /** @type {{ enabled: boolean, rules: Array<{suffix:string, enabled:boolean}> }} */
+  let suffixHidePrefs = { enabled: false, rules: [] };
+  let suffixHideEnabled = false;
 
   let lastGmgnTrench = null;
   /** @type {string[]} */
@@ -42,6 +47,36 @@
     taxRecvEnabled = taxRecvPrefs.enabled === true;
   }
 
+  function applySuffixHideObject(p) {
+    const out = { enabled: false, rules: [] };
+    if (!p || typeof p !== "object") {
+      suffixHidePrefs = out;
+      suffixHideEnabled = false;
+      return;
+    }
+    out.enabled = p.enabled === true;
+    const list = Array.isArray(p.rules) ? p.rules : [];
+    const seen = new Set();
+    for (let i = 0; i < list.length && out.rules.length < SUFFIX_MAX_RULES; i++) {
+      const raw = list[i];
+      let suffix = String(raw?.suffix || "")
+        .trim()
+        .toLowerCase()
+        .replace(/^0x/, "")
+        .replace(/[^a-f0-9]/g, "")
+        .slice(0, 12);
+      if (!suffix || seen.has(suffix)) continue;
+      seen.add(suffix);
+      out.rules.push({
+        suffix,
+        enabled: raw?.enabled !== false
+      });
+    }
+    suffixHidePrefs = out;
+    suffixHideEnabled =
+      out.enabled === true && out.rules.some((r) => r && r.enabled !== false && r.suffix);
+  }
+
   function readPrefsSync() {
     try {
       let raw =
@@ -54,9 +89,23 @@
           raw = "";
         }
       }
-      if (!raw) return;
-      applyPrefsObject(JSON.parse(raw));
+      if (raw) applyPrefsObject(JSON.parse(raw));
     } catch (_e) {
+      // ignore
+    }
+    try {
+      let sraw =
+        (document.documentElement && document.documentElement.getAttribute(SUFFIX_ATTR)) ||
+        "";
+      if (!sraw) {
+        try {
+          sraw = localStorage.getItem(SUFFIX_LS_KEY) || "";
+        } catch (_ls2) {
+          sraw = "";
+        }
+      }
+      if (sraw) applySuffixHideObject(JSON.parse(sraw));
+    } catch (_e2) {
       // ignore
     }
   }
@@ -91,15 +140,37 @@
     }
   }
 
+  /** 任一侧列表过滤开启（资金接收 or 自定义尾号） */
+  function anyFilterEnabled() {
+    return taxRecvEnabled || suffixHideEnabled;
+  }
+
   function prefsOn() {
     if (!isBscPageContext()) return false;
-    if (taxRecvEnabled) return true;
+    if (anyFilterEnabled()) return true;
     const now = Date.now();
     if (now - lastAttrSyncAt >= 80) {
       lastAttrSyncAt = now;
       readPrefsSync();
     }
-    return taxRecvEnabled;
+    return anyFilterEnabled();
+  }
+
+  /** 地址是否命中自定义尾号屏蔽（调用方保证 BSC + enabled） */
+  function shouldHideByCustomSuffix(addr) {
+    if (!suffixHideEnabled) return false;
+    const a = String(addr || "")
+      .trim()
+      .toLowerCase();
+    if (!a.startsWith("0x") || a.length < 6) return false;
+    const rules = suffixHidePrefs.rules || [];
+    for (let i = 0; i < rules.length; i++) {
+      const r = rules[i];
+      if (!r || r.enabled === false) continue;
+      const s = String(r.suffix || "").toLowerCase();
+      if (s && a.endsWith(s)) return true;
+    }
+    return false;
   }
 
   /** 最近误杀排查用：最多保留 40 条被滤地址 + s_tal 摘要 */
@@ -259,8 +330,13 @@
 
   function gmgnTokenHide(t) {
     if (!t || typeof t !== "object") return false;
+    const addr = gmgnAddr(t);
+    // 自定义尾号：任意 CA（不限 7777/8888/ffff）
+    if (shouldHideByCustomSuffix(addr)) return true;
+    // 资金接收方：仅目标税币 + s_tal
+    if (!taxRecvEnabled) return false;
     // 双保险：无尾号不屏蔽
-    if (!isTargetTaxTokenAddr(gmgnAddr(t))) return false;
+    if (!isTargetTaxTokenAddr(addr)) return false;
     const tal = gmgnTal(t);
     if (!tal || typeof tal !== "object") return false;
     if (isGmgnVaultTal(tal)) return false;
@@ -298,7 +374,11 @@
 
   function debotRowHide(row) {
     if (!row || typeof row !== "object") return false;
-    if (!isTargetTaxTokenAddr(row.contract)) return false;
+    const contract = String(row.contract || "").toLowerCase();
+    // 自定义尾号：任意 CA
+    if (shouldHideByCustomSuffix(contract)) return true;
+    if (!taxRecvEnabled) return false;
+    if (!isTargetTaxTokenAddr(contract)) return false;
     const meta = row.meta && typeof row.meta === "object" ? row.meta : null;
     const extra = (meta && meta.launchpad_extra) || row.launchpad_extra;
     if (!extra || typeof extra !== "object") return false;
@@ -316,8 +396,11 @@
   }
 
   function tokenShouldHide(item) {
-    if (isGmgnTokenItem(item) && gmgnTokenHide(item)) return true;
-    if (isDebotTokenItem(item) && debotRowHide(item)) return true;
+    // gmgnTokenHide / debotRowHide 已内含自定义尾号
+    if (item && typeof item === "object") {
+      if (gmgnAddr(item) && gmgnTokenHide(item)) return true;
+      if (typeof item.contract === "string" && debotRowHide(item)) return true;
+    }
     return false;
   }
 
@@ -439,32 +522,136 @@
     return false;
   }
 
-  function isDebotNewCreationRanksUrl(url) {
-    const u = String(url || "");
-    if (!u) return false;
+  function isDebotNewCreationColumnValue(col) {
+    const c = String(col || "")
+      .trim()
+      .toLowerCase();
+    return c === "new" || c === "new_creation" || c === "newcreation";
+  }
+
+  /**
+   * 从 Debot ranks POST body 取 column。
+   * v3 常把 column 放 query；v4 改为 JSON body：{"column":"new",...}
+   */
+  function parseDebotColumnFromBody(body) {
+    if (body == null || body === "") return "";
     try {
-      const parsed = new URL(u, "https://debot.ai");
-      const col = String(parsed.searchParams.get("column") || "")
-        .trim()
-        .toLowerCase();
-      if (col) return col === "new" || col === "new_creation" || col === "newcreation";
+      if (typeof body === "string") {
+        const s = body.trim();
+        if (!s) return "";
+        if (s.startsWith("{")) {
+          const j = JSON.parse(s);
+          if (j && typeof j === "object") {
+            return String(j.column || "").trim().toLowerCase();
+          }
+          return "";
+        }
+        // form / querystring
+        const m = s.match(/(?:^|&)column=([^&]*)/i);
+        if (m) {
+          try {
+            return decodeURIComponent(m[1] || "")
+              .trim()
+              .toLowerCase();
+          } catch (_d) {
+            return String(m[1] || "")
+              .trim()
+              .toLowerCase();
+          }
+        }
+      }
     } catch (_e) {
       // ignore
     }
-    return /[?&]column=new(?:&|#|$)/i.test(u);
+    return "";
+  }
+
+  /** URL query 上的 column（v3 兼容） */
+  function parseDebotColumnFromUrl(url) {
+    const u = String(url || "");
+    if (!u) return "";
+    try {
+      const parsed = new URL(u, "https://debot.ai");
+      return String(parsed.searchParams.get("column") || "")
+        .trim()
+        .toLowerCase();
+    } catch (_e) {
+      // ignore
+    }
+    const m = u.match(/[?&]column=([^&]*)/i);
+    if (m) {
+      try {
+        return decodeURIComponent(m[1] || "")
+          .trim()
+          .toLowerCase();
+      } catch (_d2) {
+        return String(m[1] || "")
+          .trim()
+          .toLowerCase();
+      }
+    }
+    return "";
+  }
+
+  /**
+   * 是否「新创建」ranks 请求。
+   * v4：column 仅在 POST JSON body，URL 只有 request_id。
+   */
+  function isDebotNewCreationRanksUrl(url, body) {
+    const colUrl = parseDebotColumnFromUrl(url);
+    if (colUrl) return isDebotNewCreationColumnValue(colUrl);
+    const colBody = parseDebotColumnFromBody(body);
+    if (colBody) return isDebotNewCreationColumnValue(colBody);
+    // 无 column 信息时不猜测（避免误滤即将打满/已迁移）
+    return false;
+  }
+
+  /**
+   * 响应侧兜底：v4 包体常带 data.new_creations / completing / completed。
+   * 仅当 new_creations 有数据且另两列为空时，可判定为本请求是新创建列。
+   */
+  function responseLooksLikeDebotNewCreationOnly(json) {
+    try {
+      const d = json && json.data;
+      if (!d || typeof d !== "object") return false;
+      const nc = d.new_creations;
+      const cp = d.completing;
+      const cd = d.completed;
+      const nNc = Array.isArray(nc) ? nc.length : -1;
+      const nCp = Array.isArray(cp) ? cp.length : 0;
+      const nCd = Array.isArray(cd) ? cd.length : 0;
+      return nNc > 0 && nCp === 0 && nCd === 0;
+    } catch (_e) {
+      return false;
+    }
   }
 
   function filterTokenArrayInPlace(arr, kind) {
     if (!Array.isArray(arr)) return 0;
     const hideFn = (item) => {
-      if (kind === "gmgn") return isGmgnTokenItem(item) && gmgnTokenHide(item);
-      if (kind === "debot") return isDebotTokenItem(item) && debotRowHide(item);
+      if (kind === "gmgn") {
+        // 尾号可拦任意 CA；资金接收仍走 s_tal 税币
+        if (gmgnAddr(item) && shouldHideByCustomSuffix(gmgnAddr(item))) return true;
+        return isGmgnTokenItem(item) && gmgnTokenHide(item);
+      }
+      if (kind === "debot") {
+        const c = String(item?.contract || "").toLowerCase();
+        if (c && shouldHideByCustomSuffix(c)) return true;
+        return isDebotTokenItem(item) && debotRowHide(item);
+      }
       return tokenShouldHide(item);
     };
     const isTok = (item) => {
-      if (kind === "gmgn") return isGmgnTokenItem(item);
-      if (kind === "debot") return isDebotTokenItem(item);
-      return isGmgnTokenItem(item) || isDebotTokenItem(item);
+      if (kind === "gmgn") return Boolean(gmgnAddr(item)) || isGmgnTokenItem(item);
+      if (kind === "debot") {
+        return Boolean(item && typeof item.contract === "string") || isDebotTokenItem(item);
+      }
+      return (
+        Boolean(gmgnAddr(item)) ||
+        Boolean(item && typeof item.contract === "string") ||
+        isGmgnTokenItem(item) ||
+        isDebotTokenItem(item)
+      );
     };
     let removed = 0;
     let w = 0;
@@ -564,24 +751,26 @@
       let w = 0;
       for (let i = 0; i < data.t.length; i++) {
         const row = data.t[i];
-        if (isGmgnTokenItem(row) && gmgnTokenHide(row)) {
+        const addr = gmgnAddr(row);
+        const bySuffix = addr && shouldHideByCustomSuffix(addr);
+        const byRecv = isGmgnTokenItem(row) && gmgnTokenHide(row);
+        if (bySuffix || byRecv) {
           removed += 1;
-          const addr = gmgnAddr(row);
           if (addr) hideAddrs.add(addr);
-          noteRemovedSample(addr, gmgnTal(row), "delta-nc");
+          noteRemovedSample(addr, gmgnTal(row), bySuffix ? "delta-suffix" : "delta-nc");
           continue;
         }
         data.t[w++] = row;
       }
       data.t.length = w;
-      // a = 本帧 add 列表：只剔除我们屏蔽的 7777/8888，绝不动其它 CA
-      if (Array.isArray(data.a) && hideAddrs.size > 0) {
+      // a = 本帧 add 列表：剔除屏蔽地址（尾号规则可拦任意 CA）
+      if (Array.isArray(data.a) && (hideAddrs.size > 0 || suffixHideEnabled)) {
         let wa = 0;
         for (let i = 0; i < data.a.length; i++) {
           const addr = String(data.a[i] || "")
             .trim()
             .toLowerCase();
-          if (addr && hideAddrs.has(addr)) continue;
+          if (addr && (hideAddrs.has(addr) || shouldHideByCustomSuffix(addr))) continue;
           data.a[wa++] = data.a[i];
         }
         data.a.length = wa;
@@ -593,7 +782,7 @@
   /**
    * 原地从数组/对象属性中删除应藏 token。
    * GMGN：只动 new_creation（HTTP）+ 已判定为 nc 的 delta；不扫即将打满/已开盘。
-   * Debot：仅用于 column=new 的 ranks 响应整包（调用方保证 URL）。
+   * Debot：优先只滤 data.new_creations（v3/v4）；否则深 walk（旧形态）。
    * @returns {number} removed
    */
   function filterJsonInPlace(json, kind) {
@@ -604,11 +793,33 @@
     if (kind === "gmgn" || kind === "auto") {
       removed += filterGmgnTrenchesDeltaInPlace(json);
       removed += filterGmgnHttpNewCreationInPlace(json);
+      // Debot WS upsert 等 auto 路径：顺带处理 meme:new
+      try {
+        removed += neutralizeDebotUpsertMessages(json);
+      } catch (_n) {
+        // ignore
+      }
       return removed;
     }
-    // Debot ranks（整响应即一列）：深 walk 删 hide token
-    const hideFn = (item) => isDebotTokenItem(item) && debotRowHide(item);
-    const isTok = (item) => isDebotTokenItem(item);
+    // Debot ranks：只动 new_creations，绝不碰 completing / completed
+    try {
+      const d = json.data;
+      if (d && typeof d === "object" && Array.isArray(d.new_creations)) {
+        removed += filterTokenArrayInPlace(d.new_creations, "debot");
+        return removed;
+      }
+    } catch (_nc) {
+      // fallthrough deep walk
+    }
+    // 旧形态兜底：深 walk 删 hide token（含自定义尾号）
+    const hideFn = (item) => {
+      if (!item || typeof item !== "object") return false;
+      const c = String(item.contract || "").toLowerCase();
+      if (c && shouldHideByCustomSuffix(c)) return true;
+      return isDebotTokenItem(item) && debotRowHide(item);
+    };
+    const isTok = (item) =>
+      Boolean(item && typeof item.contract === "string") || isDebotTokenItem(item);
     const walk = (o, depth) => {
       if (!o || depth > 12) return;
       if (Array.isArray(o)) {
@@ -631,7 +842,11 @@
         return;
       }
       if (typeof o === "object") {
+        // 显式跳过非新创建桶，防误伤
         for (const k of Object.keys(o)) {
+          if (k === "completing" || k === "completed" || k === "near_completion") {
+            continue;
+          }
           const v = o[k];
           if (!v || typeof v !== "object") continue;
           if (isTok(v) && hideFn(v)) {
@@ -856,20 +1071,36 @@
     const u = String(url || "");
     if (!u) return false;
     if (u.includes("trenches_rank")) return "gmgn";
+    // Debot / Gungnir ranks：v3 → v4（2026-08 起页面只打 v4），兼容更高版本号
+    if (/\/dashboard\/meme\/v\d+\/ranks/i.test(u) || /meme\/v\d+\/ranks/i.test(u)) {
+      return "debot";
+    }
+    // 历史精确串
     if (u.includes("/dashboard/meme/v3/ranks") || u.includes("meme/v3/ranks")) {
+      return "debot";
+    }
+    if (u.includes("/dashboard/meme/v4/ranks") || u.includes("meme/v4/ranks")) {
       return "debot";
     }
     return false;
   }
 
-  function rememberDebotUrl(url) {
+  /**
+   * 只记新创建 ranks（含 body），softRefresh 不误拉即将打满/已迁移。
+   * @type {{ url: string, body: string }[]}
+   */
+  let lastDebotRanksReqs = [];
+
+  function rememberDebotUrl(url, body) {
     const u = String(url || "");
     if (!u) return;
-    // 只记新创建 ranks，softRefresh 不误拉即将打满/已迁移
-    if (!isDebotNewCreationRanksUrl(u)) return;
-    lastDebotRanksUrls = lastDebotRanksUrls.filter((x) => x !== u);
-    lastDebotRanksUrls.unshift(u);
-    if (lastDebotRanksUrls.length > 8) lastDebotRanksUrls.length = 8;
+    const b = typeof body === "string" ? body : "";
+    if (!isDebotNewCreationRanksUrl(u, b)) return;
+    lastDebotRanksReqs = lastDebotRanksReqs.filter((x) => x && x.url !== u);
+    lastDebotRanksReqs.unshift({ url: u, body: b });
+    if (lastDebotRanksReqs.length > 8) lastDebotRanksReqs.length = 8;
+    // 兼容旧字段（调试）
+    lastDebotRanksUrls = lastDebotRanksReqs.map((x) => x.url);
   }
 
   /**
@@ -878,20 +1109,29 @@
    * 历史坑：
    * - keepPool 回填会把 1h 前的 CA 塞进「新创建」，时序错乱
    * - expand limit / softRefresh 重放旧 body 会冲掉 GMGN 原生筛选条件
+   * - Debot v4：URL 无 column，必须读 POST body；漏匹配则整段不滤
+   *
+   * @param {string} url
+   * @param {string} text
+   * @param {string} [reqBody]
    */
-  function processBody(url, text) {
+  function processBody(url, text, reqBody) {
     const kind = urlLooksUseful(url);
     if (!kind || !text || text.length < 2) return null;
     if (!prefsOn()) return null;
-    // Debot：三列分请求；仅 column=new（新创建）过滤
-    if (kind === "debot" && !isDebotNewCreationRanksUrl(url)) {
-      return null;
-    }
     let json;
     try {
       json = JSON.parse(text);
     } catch (_e) {
       return null;
+    }
+    // Debot：三列分请求；仅 column=new（新创建）过滤
+    // v4 body 带 column；若 body 未捕获，响应侧 new_creations-only 兜底
+    if (kind === "debot") {
+      const isNew =
+        isDebotNewCreationRanksUrl(url, reqBody) ||
+        responseLooksLikeDebotNewCreationOnly(json);
+      if (!isNew) return null;
     }
     try {
       let colStats = null;
@@ -907,13 +1147,28 @@
           colStats = null;
         }
       }
+      if (kind === "debot") {
+        try {
+          const nc = json && json.data && json.data.new_creations;
+          if (Array.isArray(nc)) {
+            colStats = { new_creations: { before: nc.length } };
+          }
+        } catch (_ds) {
+          colStats = null;
+        }
+      }
       const removed = filterJsonInPlace(json, kind);
       if (colStats) {
         try {
-          const root = json && json.data && (json.data["0"] || json.data[0] || json.data);
-          for (const col of Object.keys(colStats)) {
-            const tokens = root && root[col] && root[col].tokens;
-            colStats[col].after = Array.isArray(tokens) ? tokens.length : -1;
+          if (kind === "debot" && colStats.new_creations) {
+            const nc = json && json.data && json.data.new_creations;
+            colStats.new_creations.after = Array.isArray(nc) ? nc.length : -1;
+          } else {
+            const root = json && json.data && (json.data["0"] || json.data[0] || json.data);
+            for (const col of Object.keys(colStats)) {
+              const tokens = root && root[col] && root[col].tokens;
+              colStats[col].after = Array.isArray(tokens) ? tokens.length : -1;
+            }
           }
           window.__flapFeeTrenchColStats = {
             ...colStats,
@@ -932,7 +1187,8 @@
         removed,
         rawLen: text.length,
         thr: taxRecvPrefs.thresholdPct,
-        cols: colStats || undefined
+        cols: colStats || undefined,
+        debotV: (/meme\/v(\d+)\/ranks/i.exec(String(url || "")) || [])[1] || ""
       });
       if (removed <= 0) return null;
       return JSON.stringify(json);
@@ -945,15 +1201,23 @@
    * 开启屏蔽时：不要用缓存的旧 body 重拉 trenches。
    * 旧 body 往往不含用户刚改的 GMGN 原生筛选，会表现为「站内筛选失效」。
    * 列表刷新改由 content 整页 reload / 用户自己的请求管道完成。
+   * Debot v4：softRefresh 必须带原 POST JSON（column 在 body）。
    */
   function softRefreshLists() {
     // intentionally no-op for GMGN request replay
-    // Debot: 仅 revalidate 已记录的 column=new URL（不改 query）
     if (!prefsOn()) return;
     try {
-      for (const u of lastDebotRanksUrls.slice(0, 4)) {
-        if (!isDebotNewCreationRanksUrl(u)) continue;
-        window.fetch(u, { credentials: "include", cache: "no-store" }).catch(() => {});
+      for (const req of lastDebotRanksReqs.slice(0, 4)) {
+        if (!req || !req.url) continue;
+        if (!isDebotNewCreationRanksUrl(req.url, req.body)) continue;
+        const init = {
+          credentials: "include",
+          cache: "no-store",
+          method: "POST",
+          headers: { "content-type": "application/json" }
+        };
+        if (req.body) init.body = req.body;
+        window.fetch(req.url, init).catch(() => {});
       }
     } catch (_e2) {
       // ignore
@@ -1008,7 +1272,7 @@
         const data = event.data;
         if (!data || data.source !== "flap-fee-info") return;
         if (data.type === "tax-recv-prefs") {
-          const was = taxRecvEnabled;
+          const was = anyFilterEnabled();
           applyPrefsObject(data.prefs || {});
           try {
             const payload = JSON.stringify({
@@ -1022,14 +1286,37 @@
           }
           // 懒挂载：开启时装网络钩子；关闭清 owned（钩子随 reload 卸掉）
           if (typeof ensureTaxRecvRuntime === "function") {
-            ensureTaxRecvRuntime(taxRecvEnabled ? "prefs-on" : "prefs-off");
+            ensureTaxRecvRuntime(anyFilterEnabled() ? "prefs-on" : "prefs-off");
           }
-          if (taxRecvEnabled && (!was || data.refresh === true)) {
+          if (anyFilterEnabled() && (!was || data.refresh === true)) {
+            queueMicrotask(softRefreshLists);
+          }
+        }
+        if (data.type === "suffix-hide-prefs") {
+          const was = anyFilterEnabled();
+          applySuffixHideObject(data.prefs || {});
+          try {
+            const payload = JSON.stringify({
+              enabled: suffixHidePrefs.enabled === true,
+              rules: (suffixHidePrefs.rules || []).map((r) => ({
+                suffix: r.suffix,
+                enabled: r.enabled !== false
+              }))
+            });
+            document.documentElement?.setAttribute(SUFFIX_ATTR, payload);
+            localStorage.setItem(SUFFIX_LS_KEY, payload);
+          } catch (_a2) {
+            // ignore
+          }
+          if (typeof ensureTaxRecvRuntime === "function") {
+            ensureTaxRecvRuntime(anyFilterEnabled() ? "suffix-on" : "suffix-off");
+          }
+          if (anyFilterEnabled() && !was) {
             queueMicrotask(softRefreshLists);
           }
         }
         if (data.type === "tax-recv-refresh") {
-          if (taxRecvEnabled) queueMicrotask(softRefreshLists);
+          if (anyFilterEnabled()) queueMicrotask(softRefreshLists);
         }
       } catch (_e) {
         // ignore
@@ -1541,24 +1828,31 @@
           const input = args[0];
           const init = args[1];
           let url = "";
+          let reqBody = "";
           try {
             if (typeof input === "string") url = input;
             else if (input && typeof input.url === "string") url = input.url;
           } catch (_e) {
             url = "";
           }
+          try {
+            if (init && init.body != null && typeof init.body === "string") {
+              reqBody = init.body;
+            } else if (input && typeof input === "object" && typeof input.clone === "function") {
+              // Request 对象 body 不便同步读；依赖 URL / 响应兜底
+              reqBody = "";
+            }
+          } catch (_b) {
+            reqBody = "";
+          }
           const kind = urlLooksUseful(url);
-          if (kind === "debot") rememberDebotUrl(url);
+          if (kind === "debot") rememberDebotUrl(url, reqBody);
           // 不改写请求体（保留 GMGN 原生筛选/limit）
           if (kind === "gmgn") {
             try {
-              let body = null;
-              if (init && init.body != null) {
-                body = typeof init.body === "string" ? init.body : null;
-              }
               lastGmgnTrench = {
                 url,
-                body: body || lastGmgnTrench?.body || "{}",
+                body: reqBody || lastGmgnTrench?.body || "{}",
                 method: "POST"
               };
             } catch (_e) {
@@ -1571,7 +1865,7 @@
             try {
               if (!res || !res.ok || typeof res.clone !== "function") return res;
               const text = await res.clone().text();
-              const next = processBody(url, text);
+              const next = processBody(url, text, reqBody);
               if (next == null) return res;
               return new Response(next, {
                 status: res.status,
@@ -1610,8 +1904,15 @@
           }
           return "";
         };
-        const cacheKey = () =>
-          `${taxRecvEnabled ? 1 : 0}:${taxRecvPrefs.thresholdPct}`;
+        const cacheKey = () => {
+          const suf = (suffixHidePrefs.rules || [])
+            .filter((r) => r && r.enabled !== false && r.suffix)
+            .map((r) => r.suffix)
+            .join(",");
+          return `${taxRecvEnabled ? 1 : 0}:${taxRecvPrefs.thresholdPct}|s${
+            suffixHideEnabled ? 1 : 0
+          }:${suf}`;
+        };
 
         const filteredText = (xhr) => {
           try {
@@ -1623,7 +1924,7 @@
             }
             const raw = rawText(xhr);
             if (typeof raw !== "string" || raw.length < 2) return null;
-            const next = processBody(u, raw);
+            const next = processBody(u, raw, xhr.__flapFeeBody || "");
             xhr.__flapFeeFilterKey = key;
             xhr.__flapFeeFilteredText = next != null ? next : raw;
             xhr.__flapFeeDidFilter = next != null;
@@ -1692,6 +1993,7 @@
           try {
             this.__flapFeeUrl = url != null ? String(url) : "";
             this.__flapFeeMethod = method != null ? String(method) : "GET";
+            this.__flapFeeBody = "";
             this.__flapFeeFilteredText = null;
             this.__flapFeeFilterKey = "";
             this.__flapFeeDidFilter = false;
@@ -1703,16 +2005,22 @@
         XMLHttpRequest.prototype.send = function (body) {
           try {
             const u = this.__flapFeeUrl || "";
+            const bodyStr = typeof body === "string" ? body : "";
+            try {
+              this.__flapFeeBody = bodyStr;
+            } catch (_bb) {
+              // ignore
+            }
             const kind = urlLooksUseful(u);
             if (kind === "gmgn") {
               // 原样记录，不改 body
               lastGmgnTrench = {
                 url: u,
-                body: typeof body === "string" ? body : lastGmgnTrench?.body || "{}",
+                body: bodyStr || lastGmgnTrench?.body || "{}",
                 method: this.__flapFeeMethod || "POST"
               };
             }
-            if (kind === "debot") rememberDebotUrl(u);
+            if (kind === "debot") rememberDebotUrl(u, bodyStr);
             const xhr = this;
             xhr.addEventListener("loadend", function () {
               try {
@@ -1734,7 +2042,7 @@
   }
 
   function ensureTaxRecvRuntime(reason) {
-    if (!taxRecvEnabled) {
+    if (!anyFilterEnabled()) {
       syncGmgnShareWorkerMode(false);
       return;
     }
@@ -1760,9 +2068,9 @@
     if (typeof MutationObserver === "function" && document.documentElement) {
       new MutationObserver(() => {
         try {
-          const before = taxRecvEnabled;
+          const before = anyFilterEnabled();
           readPrefsSync();
-          if (taxRecvEnabled !== before) {
+          if (anyFilterEnabled() !== before) {
             ensureTaxRecvRuntime("attr");
           }
         } catch (_e) {
@@ -1770,7 +2078,7 @@
         }
       }).observe(document.documentElement, {
         attributes: true,
-        attributeFilter: [PREFS_ATTR]
+        attributeFilter: [PREFS_ATTR, SUFFIX_ATTR]
       });
     }
   } catch (_mo) {

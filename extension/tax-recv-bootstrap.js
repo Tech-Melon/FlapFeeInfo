@@ -1,14 +1,19 @@
 /**
- * document_start (isolated): push tax-recv prefs into PAGE before first list XHR when possible.
- * MAIN page-hook reads data-flap-tax-recv + postMessage.
+ * document_start (isolated): push list-filter prefs into PAGE before first list XHR.
+ * MAIN page-hook reads data-flap-tax-recv / data-flap-suffix-hide + postMessage.
  */
 (() => {
-  const KEY = "flapFeeInfo.taxRecvHide.v1";
-  const PREFS_ATTR = "data-flap-tax-recv";
-  const DEFAULT = { enabled: false, thresholdPct: 100 };
+  const TAX_KEY = "flapFeeInfo.taxRecvHide.v1";
+  const TAX_ATTR = "data-flap-tax-recv";
+  const SUFFIX_KEY = "flapFeeInfo.suffixHide.v1";
+  const SUFFIX_ATTR = "data-flap-suffix-hide";
+  const OWN_KEY = "flapFeeInfo.ownedDisableShareWorker";
+  const DEFAULT_TAX = { enabled: false, thresholdPct: 100 };
+  const DEFAULT_SUFFIX = { enabled: false, rules: [] };
+  const SUFFIX_MAX = 24;
 
-  function normalize(raw) {
-    const out = { ...DEFAULT };
+  function normalizeTax(raw) {
+    const out = { ...DEFAULT_TAX };
     if (!raw || typeof raw !== "object") return out;
     out.enabled = raw.enabled === true;
     const thr = Number(raw.thresholdPct);
@@ -18,54 +23,79 @@
     return out;
   }
 
-  function publish(prefs) {
-    const p = normalize(prefs);
-    const payload = JSON.stringify({
-      enabled: p.enabled === true,
-      thresholdPct: p.thresholdPct
-    });
-    // 1) DOM attr — page-hook MutationObserver / 低频同步可读
-    try {
-      if (document.documentElement) {
-        document.documentElement.setAttribute(PREFS_ATTR, payload);
-      }
-    } catch (_e1) {
-      // ignore
+  function normalizeSuffix(raw) {
+    const out = { enabled: false, rules: [] };
+    if (!raw || typeof raw !== "object") return out;
+    out.enabled = raw.enabled === true;
+    const list = Array.isArray(raw.rules) ? raw.rules : [];
+    const seen = new Set();
+    for (let i = 0; i < list.length && out.rules.length < SUFFIX_MAX; i++) {
+      let suffix = String(list[i]?.suffix || "")
+        .trim()
+        .toLowerCase()
+        .replace(/^0x/, "")
+        .replace(/[^a-f0-9]/g, "")
+        .slice(0, 12);
+      if (!suffix || seen.has(suffix)) continue;
+      seen.add(suffix);
+      out.rules.push({
+        suffix,
+        enabled: list[i]?.enabled !== false
+      });
     }
-    // 2) 页面 localStorage（同源同步，供 MAIN page-hook document_start 下一跳秒读）
+    return out;
+  }
+
+  function isBscPage() {
     try {
-      localStorage.setItem(KEY, payload);
-    } catch (_ls) {
-      // ignore
+      const u = new URL(location.href);
+      const q = String(u.searchParams.get("chain") || "").toLowerCase();
+      const path = String(u.pathname || "");
+      if (q && q !== "bsc") return false;
+      return (
+        q === "bsc" ||
+        /^\/bsc(\/|$)/i.test(path) ||
+        /\/bsc\/token\//i.test(path) ||
+        /\/token\/bsc(?:\/|$)/i.test(path)
+      );
+    } catch (_u) {
+      return false;
     }
-    // 2b) 仅 BSC 页开启屏蔽时写 disableShareWorker（robinhood 等不写）
+  }
+
+  function syncShareWorker(taxOn, suffixOn) {
     try {
-      const ownKey = "flapFeeInfo.ownedDisableShareWorker";
-      let isBsc = false;
-      try {
-        const u = new URL(location.href);
-        const q = String(u.searchParams.get("chain") || "").toLowerCase();
-        const path = String(u.pathname || "");
-        isBsc =
-          q === "bsc" ||
-          /^\/bsc(\/|$)/i.test(path) ||
-          /\/bsc\/token\//i.test(path) ||
-          /\/token\/bsc(?:\/|$)/i.test(path);
-        if (q && q !== "bsc") isBsc = false;
-      } catch (_u) {
-        isBsc = false;
-      }
-      if (p.enabled === true && isBsc) {
+      const filterOn = (taxOn || suffixOn) && isBscPage();
+      if (filterOn) {
         localStorage.setItem("disableShareWorker", "true");
-        localStorage.setItem(ownKey, "1");
-      } else if (localStorage.getItem(ownKey) === "1") {
+        localStorage.setItem(OWN_KEY, "1");
+      } else if (localStorage.getItem(OWN_KEY) === "1") {
         localStorage.removeItem("disableShareWorker");
-        localStorage.removeItem(ownKey);
+        localStorage.removeItem(OWN_KEY);
       }
     } catch (_sw) {
       // ignore
     }
-    // 3) postMessage（MAIN 已放宽 source 校验）
+  }
+
+  function publishTax(prefs) {
+    const p = normalizeTax(prefs);
+    const payload = JSON.stringify({
+      enabled: p.enabled === true,
+      thresholdPct: p.thresholdPct
+    });
+    try {
+      if (document.documentElement) {
+        document.documentElement.setAttribute(TAX_ATTR, payload);
+      }
+    } catch (_e1) {
+      // ignore
+    }
+    try {
+      localStorage.setItem(TAX_KEY, payload);
+    } catch (_ls) {
+      // ignore
+    }
     try {
       window.postMessage(
         {
@@ -81,17 +111,72 @@
     } catch (_e2) {
       // ignore
     }
+    return p;
+  }
+
+  function publishSuffix(prefs) {
+    const p = normalizeSuffix(prefs);
+    const payload = JSON.stringify({
+      enabled: p.enabled === true,
+      rules: p.rules
+    });
+    try {
+      if (document.documentElement) {
+        document.documentElement.setAttribute(SUFFIX_ATTR, payload);
+      }
+    } catch (_e1) {
+      // ignore
+    }
+    try {
+      localStorage.setItem(SUFFIX_KEY, payload);
+    } catch (_ls) {
+      // ignore
+    }
+    try {
+      window.postMessage(
+        {
+          source: "flap-fee-info",
+          type: "suffix-hide-prefs",
+          prefs: {
+            enabled: p.enabled === true,
+            rules: p.rules
+          }
+        },
+        "*"
+      );
+    } catch (_e2) {
+      // ignore
+    }
+    return p;
+  }
+
+  function publishAll(taxRaw, suffixRaw) {
+    const tax = publishTax(taxRaw);
+    const suffix = publishSuffix(suffixRaw);
+    const suffixActive =
+      suffix.enabled === true &&
+      (suffix.rules || []).some((r) => r && r.enabled !== false && r.suffix);
+    syncShareWorker(tax.enabled === true, suffixActive);
   }
 
   // 启动时若 localStorage 已有，先同步 attr（storage 回调前的窗口）
   try {
-    const cached = localStorage.getItem(KEY);
-    if (cached) {
-      try {
-        publish(JSON.parse(cached));
-      } catch (_c) {
-        // ignore
-      }
+    let taxCached = null;
+    let suffixCached = null;
+    try {
+      const t = localStorage.getItem(TAX_KEY);
+      if (t) taxCached = JSON.parse(t);
+    } catch (_c1) {
+      // ignore
+    }
+    try {
+      const s = localStorage.getItem(SUFFIX_KEY);
+      if (s) suffixCached = JSON.parse(s);
+    } catch (_c2) {
+      // ignore
+    }
+    if (taxCached || suffixCached) {
+      publishAll(taxCached, suffixCached);
     }
   } catch (_ls0) {
     // ignore
@@ -100,27 +185,26 @@
   function load() {
     try {
       if (!chrome?.storage?.local) {
-        publish(DEFAULT);
+        publishAll(DEFAULT_TAX, DEFAULT_SUFFIX);
         return;
       }
-      chrome.storage.local.get([KEY], (items) => {
+      chrome.storage.local.get([TAX_KEY, SUFFIX_KEY], (items) => {
         try {
           if (chrome.runtime?.lastError) {
-            publish(DEFAULT);
+            publishAll(DEFAULT_TAX, DEFAULT_SUFFIX);
             return;
           }
-          publish(items?.[KEY]);
+          publishAll(items?.[TAX_KEY], items?.[SUFFIX_KEY]);
         } catch (_err) {
-          publish(DEFAULT);
+          publishAll(DEFAULT_TAX, DEFAULT_SUFFIX);
         }
       });
     } catch (_err2) {
-      publish(DEFAULT);
+      publishAll(DEFAULT_TAX, DEFAULT_SUFFIX);
     }
   }
 
   load();
-  // storage may resolve after first paint — re-push
   try {
     setTimeout(load, 0);
     setTimeout(load, 50);
@@ -132,8 +216,17 @@
   try {
     if (chrome?.storage?.onChanged) {
       chrome.storage.onChanged.addListener((changes, area) => {
-        if (area !== "local" || !changes[KEY]) return;
-        publish(changes[KEY].newValue);
+        if (area !== "local") return;
+        if (!changes[TAX_KEY] && !changes[SUFFIX_KEY]) return;
+        // 重读两边，避免一侧变更时清掉另一侧 ShareWorker 状态
+        try {
+          chrome.storage.local.get([TAX_KEY, SUFFIX_KEY], (items) => {
+            if (chrome.runtime?.lastError) return;
+            publishAll(items?.[TAX_KEY], items?.[SUFFIX_KEY]);
+          });
+        } catch (_e) {
+          // ignore
+        }
       });
     }
   } catch (_l) {

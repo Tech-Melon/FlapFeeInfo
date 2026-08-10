@@ -7,8 +7,11 @@
   const DRAG_KEY = "flapFeeInfo.badgeDragEdit.v1";
   const UI_LANG_KEY = "flapFeeInfo.uiLang.v1";
   const TAX_RECV_HIDE_KEY = "flapFeeInfo.taxRecvHide.v1";
+  const SUFFIX_HIDE_KEY = "flapFeeInfo.suffixHide.v1";
   const DEFAULT_THEME = "dark";
   const DEFAULT_TAX_RECV_HIDE = { enabled: false, thresholdPct: 100 };
+  const DEFAULT_SUFFIX_HIDE = { enabled: false, rules: [] };
+  const SUFFIX_HIDE_MAX_RULES = 24;
   const DEFAULT_OFFSETS = {
     gmgn: { enabled: false, x: 12, y: 8 },
     debot: { enabled: false, x: 12, y: 8 }
@@ -53,7 +56,7 @@
       statusDragging: "拖拽中",
       statusReset: "已恢复默认（贴税率旁）",
       pref_pool_title: "底池报价",
-      pref_pool_desc: "如 🪙BNB | …",
+      pref_pool_desc: "🦋Flap / 🖐️Four / 🪙其它",
       pref_holder_title: "持有人分红",
       pref_holder_desc: "dividend 分配",
       pref_creator_title: "创作者/营销",
@@ -79,7 +82,19 @@
       taxRecvEnableDesc: "开启后只过滤「新创建」列",
       taxRecvThresholdLabel: "阈值 ≥",
       taxRecvHint2:
-        "仅新创建：7777/8888 且 👨‍🍳 marketing%≥阈值则屏蔽（含 hybrid）；纯 💎/🎁金库不挡。即将打满与已开盘原样显示。不垫旧币、不改 GMGN 原生筛选。"
+        "仅新创建：7777/8888 且 👨‍🍳 marketing%≥阈值则屏蔽（含 hybrid）；纯 💎/🎁金库不挡。即将打满与已开盘原样显示。不垫旧币、不改 GMGN 原生筛选。",
+      suffixHideSection: "自定义尾号屏蔽",
+      suffixHideHint:
+        "仅 BSC 生效。隐藏 CA 以指定十六进制尾号结尾的代币（可多条）。战壕「新创建」列数据层过滤。默认关闭。",
+      suffixHideEnableTitle: "启用尾号屏蔽",
+      suffixHideEnableDesc: "开启后按下方规则过滤列表",
+      suffixAddPlaceholder: "如 0000 / dead",
+      suffixAddBtn: "添加",
+      suffixHideHint2: "例：添加 dead → 屏蔽所有以 dead 结尾的 0x 地址。最多 24 条；仅 hex 字符。",
+      suffixRuleDel: "删除",
+      suffixEmpty: "暂无规则，在下方输入尾号后添加",
+      suffixDup: "该尾号已存在",
+      suffixInvalid: "请输入 1–12 位十六进制字符"
     },
     en: {
       appTitle: "TechMelon FlapFeeInfo",
@@ -119,7 +134,7 @@
       statusDragging: "dragging",
       statusReset: "Reset to default (beside Tax)",
       pref_pool_title: "Pool quote",
-      pref_pool_desc: "e.g. 🪙BNB | …",
+      pref_pool_desc: "🦋Flap / 🖐️Four / 🪙other",
       pref_holder_title: "Holder dividend",
       pref_holder_desc: "dividend share",
       pref_creator_title: "Creator / marketing",
@@ -145,7 +160,20 @@
       taxRecvEnableDesc: "Only filter the New creation column",
       taxRecvThresholdLabel: "Threshold ≥",
       taxRecvHint2:
-        "New column only: hide 7777/8888 when marketing% ≥ threshold (incl. hybrid). Pure 💎 / vault kept. No old-token padding; host filters untouched."
+        "New column only: hide 7777/8888 when marketing% ≥ threshold (incl. hybrid). Pure 💎 / vault kept. No old-token padding; host filters untouched.",
+      suffixHideSection: "Custom CA suffix hide",
+      suffixHideHint:
+        "BSC only. Hide tokens whose CA ends with a hex suffix (multi-rule). Filters New creation column at data layer. Off by default.",
+      suffixHideEnableTitle: "Enable suffix hide",
+      suffixHideEnableDesc: "Filter list by rules below",
+      suffixAddPlaceholder: "e.g. 0000 / dead",
+      suffixAddBtn: "Add",
+      suffixHideHint2:
+        "E.g. add dead → hide all 0x addresses ending in dead. Max 24 rules; hex only.",
+      suffixRuleDel: "Del",
+      suffixEmpty: "No rules yet — type a suffix below and add",
+      suffixDup: "Suffix already exists",
+      suffixInvalid: "Enter 1–12 hex characters"
     }
   };
 
@@ -162,7 +190,7 @@
     "unknown"
   ];
   const PREF_EMOJI = {
-    pool: "🪙",
+    pool: "🦋",
     holder: "💎",
     creator: "👨‍🍳",
     gift: "🎁",
@@ -200,6 +228,11 @@
   const taxRecvThreshold = document.getElementById("taxRecvThreshold");
   const taxRecvThresholdRange = document.getElementById("taxRecvThresholdRange");
   const taxRecvThresholdRow = document.getElementById("taxRecvThresholdRow");
+  const suffixHideEnabled = document.getElementById("suffixHideEnabled");
+  const suffixRulesWrap = document.getElementById("suffixRulesWrap");
+  const suffixRulesList = document.getElementById("suffixRulesList");
+  const suffixAddInput = document.getElementById("suffixAddInput");
+  const suffixAddBtn = document.getElementById("suffixAddBtn");
 
   /** @type {{ gmgn: {enabled:boolean,x:number,y:number}, debot: {enabled:boolean,x:number,y:number} }} */
   let offsets = {
@@ -215,6 +248,9 @@
   let saveTimer = null;
   let taxRecvState = { ...DEFAULT_TAX_RECV_HIDE };
   let taxRecvSaveTimer = null;
+  /** @type {{ enabled: boolean, rules: Array<{id:string, suffix:string, enabled:boolean}> }} */
+  let suffixHideState = { enabled: false, rules: [] };
+  let suffixHideSaveTimer = null;
 
   function t(key) {
     const pack = I18N[uiLang] || I18N.zh;
@@ -256,6 +292,40 @@
     return out;
   }
 
+  function normalizeSuffixRule(raw, idx) {
+    const id =
+      raw && typeof raw.id === "string" && raw.id
+        ? raw.id
+        : `r${Date.now().toString(36)}_${idx || 0}`;
+    let suffix = String(raw?.suffix || "")
+      .trim()
+      .toLowerCase()
+      .replace(/^0x/, "")
+      .replace(/[^a-f0-9]/g, "")
+      .slice(0, 12);
+    return {
+      id,
+      suffix,
+      enabled: raw?.enabled !== false
+    };
+  }
+
+  function normalizeSuffixHide(raw) {
+    const out = { enabled: false, rules: [] };
+    if (!raw || typeof raw !== "object") return out;
+    out.enabled = raw.enabled === true;
+    const list = Array.isArray(raw.rules) ? raw.rules : [];
+    const seen = new Set();
+    for (let i = 0; i < list.length && out.rules.length < SUFFIX_HIDE_MAX_RULES; i++) {
+      const r = normalizeSuffixRule(list[i], i);
+      if (!r.suffix || r.suffix.length < 1) continue;
+      if (seen.has(r.suffix)) continue;
+      seen.add(r.suffix);
+      out.rules.push(r);
+    }
+    return out;
+  }
+
   function normalizeOffsets(raw) {
     const out = {
       gmgn: { ...DEFAULT_OFFSETS.gmgn },
@@ -287,7 +357,8 @@
             OFFSET_KEY,
             DRAG_KEY,
             UI_LANG_KEY,
-            TAX_RECV_HIDE_KEY
+            TAX_RECV_HIDE_KEY,
+            SUFFIX_HIDE_KEY
           ],
           (items) => {
             if (chrome.runtime.lastError) {
@@ -298,7 +369,8 @@
                 offsets: normalizeOffsets(null),
                 dragEdit: false,
                 lang: "zh",
-                taxRecv: { ...DEFAULT_TAX_RECV_HIDE }
+                taxRecv: { ...DEFAULT_TAX_RECV_HIDE },
+                suffixHide: { ...DEFAULT_SUFFIX_HIDE }
               });
               return;
             }
@@ -317,7 +389,8 @@
               offsets: normalizeOffsets(items?.[OFFSET_KEY]),
               dragEdit: items?.[DRAG_KEY] === true,
               lang: normalizeLang(items?.[UI_LANG_KEY]),
-              taxRecv: normalizeTaxRecvHide(items?.[TAX_RECV_HIDE_KEY])
+              taxRecv: normalizeTaxRecvHide(items?.[TAX_RECV_HIDE_KEY]),
+              suffixHide: normalizeSuffixHide(items?.[SUFFIX_HIDE_KEY])
             });
           }
         );
@@ -329,7 +402,8 @@
           offsets: normalizeOffsets(null),
           dragEdit: false,
           lang: "zh",
-          taxRecv: { ...DEFAULT_TAX_RECV_HIDE }
+          taxRecv: { ...DEFAULT_TAX_RECV_HIDE },
+          suffixHide: { ...DEFAULT_SUFFIX_HIDE }
         });
       }
     });
@@ -375,6 +449,114 @@
       enabled: taxRecvEnabled?.checked === true,
       thresholdPct: thrRaw
     });
+  }
+
+  function saveSuffixHide(state) {
+    const normalized = normalizeSuffixHide(state);
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.set({ [SUFFIX_HIDE_KEY]: normalized }, () => {
+          void chrome.runtime?.lastError;
+          resolve(normalized);
+        });
+      } catch {
+        resolve(normalized);
+      }
+    });
+  }
+
+  function scheduleSaveSuffixHide() {
+    if (suffixHideSaveTimer) window.clearTimeout(suffixHideSaveTimer);
+    suffixHideSaveTimer = window.setTimeout(async () => {
+      suffixHideSaveTimer = null;
+      suffixHideState = await saveSuffixHide(suffixHideState);
+      renderSuffixHideUI(suffixHideState);
+    }, 120);
+  }
+
+  function renderSuffixHideUI(state) {
+    suffixHideState = normalizeSuffixHide(state);
+    if (suffixHideEnabled) {
+      suffixHideEnabled.checked = suffixHideState.enabled === true;
+    }
+    if (suffixRulesWrap) {
+      suffixRulesWrap.classList.toggle("is-disabled", suffixHideState.enabled !== true);
+    }
+    if (!suffixRulesList) return;
+    suffixRulesList.innerHTML = "";
+    const rules = suffixHideState.rules || [];
+    if (!rules.length) {
+      const empty = document.createElement("div");
+      empty.className = "suffix-empty";
+      empty.textContent = t("suffixEmpty");
+      suffixRulesList.appendChild(empty);
+      return;
+    }
+    for (const rule of rules) {
+      const row = document.createElement("div");
+      row.className = "suffix-rule-row";
+      row.dataset.id = rule.id;
+
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = rule.enabled !== false;
+      cb.title = rule.suffix;
+      cb.addEventListener("change", () => {
+        const r = suffixHideState.rules.find((x) => x.id === rule.id);
+        if (!r) return;
+        r.enabled = cb.checked === true;
+        scheduleSaveSuffixHide();
+      });
+
+      const text = document.createElement("span");
+      text.className = "suffix-rule-text" + (rule.enabled === false ? " is-off" : "");
+      text.textContent = `…${rule.suffix}`;
+
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "suffix-rule-del";
+      del.textContent = t("suffixRuleDel");
+      del.addEventListener("click", () => {
+        suffixHideState.rules = suffixHideState.rules.filter((x) => x.id !== rule.id);
+        scheduleSaveSuffixHide();
+      });
+
+      row.append(cb, text, del);
+      suffixRulesList.appendChild(row);
+    }
+  }
+
+  function tryAddSuffixRule() {
+    if (!suffixAddInput) return;
+    let raw = String(suffixAddInput.value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/^0x/, "")
+      .replace(/[^a-f0-9]/g, "")
+      .slice(0, 12);
+    if (!raw) {
+      suffixAddInput.placeholder = t("suffixInvalid");
+      return;
+    }
+    const exists = (suffixHideState.rules || []).some((r) => r.suffix === raw);
+    if (exists) {
+      suffixAddInput.placeholder = t("suffixDup");
+      suffixAddInput.value = "";
+      return;
+    }
+    if ((suffixHideState.rules || []).length >= SUFFIX_HIDE_MAX_RULES) return;
+    suffixHideState.rules = [
+      ...(suffixHideState.rules || []),
+      { id: `r${Date.now().toString(36)}`, suffix: raw, enabled: true }
+    ];
+    // 添加规则时自动开启总开关，避免用户漏勾
+    if (!suffixHideState.enabled) {
+      suffixHideState.enabled = true;
+      if (suffixHideEnabled) suffixHideEnabled.checked = true;
+    }
+    suffixAddInput.value = "";
+    suffixAddInput.placeholder = t("suffixAddPlaceholder");
+    scheduleSaveSuffixHide();
   }
 
   function savePrefs(prefs) {
@@ -476,6 +658,11 @@
       } else {
         el.textContent = val;
       }
+    });
+    document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+      const key = el.getAttribute("data-i18n-placeholder");
+      if (!key) return;
+      el.placeholder = t(key);
     });
     if (langToggle) langToggle.textContent = uiLang === "zh" ? "EN" : "中文";
     if (offsetHint) offsetHint.innerHTML = t("offsetHintHtml");
@@ -650,6 +837,7 @@
     renderTheme(currentTheme);
     renderPrefs(prefsState);
     renderTaxRecvUI(taxRecvState);
+    renderSuffixHideUI(suffixHideState);
   });
 
   taxRecvEnabled?.addEventListener("change", () => {
@@ -672,6 +860,31 @@
   taxRecvThreshold?.addEventListener("input", () => syncTaxRecvThreshold(false));
   taxRecvThresholdRange?.addEventListener("input", () => syncTaxRecvThreshold(true));
   taxRecvThresholdRange?.addEventListener("change", () => syncTaxRecvThreshold(true));
+
+  suffixHideEnabled?.addEventListener("change", () => {
+    suffixHideState = normalizeSuffixHide({
+      ...suffixHideState,
+      enabled: suffixHideEnabled.checked === true
+    });
+    renderSuffixHideUI(suffixHideState);
+    scheduleSaveSuffixHide();
+  });
+  suffixAddBtn?.addEventListener("click", () => tryAddSuffixRule());
+  suffixAddInput?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      tryAddSuffixRule();
+    }
+  });
+  suffixAddInput?.addEventListener("input", () => {
+    // 仅允许 hex
+    const cleaned = String(suffixAddInput.value || "")
+      .toLowerCase()
+      .replace(/^0x/, "")
+      .replace(/[^a-f0-9]/g, "")
+      .slice(0, 12);
+    if (suffixAddInput.value !== cleaned) suffixAddInput.value = cleaned;
+  });
 
   prefCollapseBtn?.addEventListener("click", () => {
     setPrefsExpanded(!prefsExpanded);
@@ -750,10 +963,15 @@
         renderTheme(currentTheme);
         renderPrefs(prefsState);
         renderTaxRecvUI(taxRecvState);
+        renderSuffixHideUI(suffixHideState);
       }
       if (changes[TAX_RECV_HIDE_KEY]) {
         taxRecvState = normalizeTaxRecvHide(changes[TAX_RECV_HIDE_KEY].newValue);
         renderTaxRecvUI(taxRecvState);
+      }
+      if (changes[SUFFIX_HIDE_KEY]) {
+        suffixHideState = normalizeSuffixHide(changes[SUFFIX_HIDE_KEY].newValue);
+        renderSuffixHideUI(suffixHideState);
       }
       if (changes[PREFS_KEY]) {
         prefsState = normalizePrefs(changes[PREFS_KEY].newValue);
@@ -772,7 +990,8 @@
       offsets: loadedOffsets,
       dragEdit: loadedDrag,
       lang,
-      taxRecv: loadedTaxRecv
+      taxRecv: loadedTaxRecv,
+      suffixHide: loadedSuffixHide
     }) => {
       uiLang = lang;
       solidDark = loadedSolid === true;
@@ -782,10 +1001,12 @@
       if (dragEditToggle) dragEditToggle.checked = dragEdit;
       prefsState = prefs;
       taxRecvState = normalizeTaxRecvHide(loadedTaxRecv);
+      suffixHideState = normalizeSuffixHide(loadedSuffixHide);
       applyStaticI18n();
       renderTheme(theme);
       renderPrefs(prefs);
       renderTaxRecvUI(taxRecvState);
+      renderSuffixHideUI(suffixHideState);
       // Display items collapsed by default
       setPrefsExpanded(false);
       fillOffsetUI(offsets);

@@ -85,6 +85,43 @@
       </p>
     </section>
 
+    <section class="section tax-recv-section" id="suffixHideSection">
+      <div class="section-title" data-i18n="suffixHideSection">自定义尾号屏蔽</div>
+      <p class="theme-hint" data-i18n="suffixHideHint">
+        仅 BSC 生效。隐藏 CA 以指定十六进制尾号结尾的代币（可多条）。战壕「新创建」列数据层过滤。默认关闭。
+      </p>
+      <label class="row drag-row" for="suffixHideEnabled">
+        <input type="checkbox" id="suffixHideEnabled" />
+        <span class="emoji">🔚</span>
+        <div class="label">
+          <strong data-i18n="suffixHideEnableTitle">启用尾号屏蔽</strong>
+          <span data-i18n="suffixHideEnableDesc">开启后按下方规则过滤列表</span>
+        </div>
+      </label>
+      <div class="suffix-rules-wrap" id="suffixRulesWrap">
+        <div class="suffix-rules" id="suffixRulesList"></div>
+        <div class="suffix-add-row">
+          <span class="suffix-0x">…</span>
+          <input
+            type="text"
+            id="suffixAddInput"
+            class="suffix-add-input"
+            maxlength="12"
+            spellcheck="false"
+            autocomplete="off"
+            data-i18n-placeholder="suffixAddPlaceholder"
+            placeholder="如 0000 / dead"
+          />
+          <button type="button" class="btn btn-sm" id="suffixAddBtn" data-i18n="suffixAddBtn">
+            添加
+          </button>
+        </div>
+        <p class="theme-hint" data-i18n="suffixHideHint2" id="suffixHideHint2">
+          例：添加 dead → 屏蔽所有以 dead 结尾的 0x 地址。最多 24 条；仅 hex 字符。
+        </p>
+      </div>
+    </section>
+
     <section class="section" id="prefSection">
       <button type="button" class="collapse-head" id="prefCollapseBtn" aria-expanded="false">
         <span class="section-title collapse-title" data-i18n="prefSection">显示项（默认全部开启）</span>

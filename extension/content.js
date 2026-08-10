@@ -8,6 +8,9 @@
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777|ffff)/i;
   const GMGN_TRENCH_ROOT_SELECTOR =
     "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100";
+  // 0.7.0: Debot ranks v4 资金接收屏蔽修复；自定义多尾号屏蔽（BSC）；底池 Flap=🦋 Four=🖐️
+  // 0.6.16: 自定义多规则尾号屏蔽（仅 BSC，新创建列）；底池前缀 Flap=🦋 Four=🖐️
+  // 0.6.16b: Debot ranks v3→v4 导致 dev 钱包接收屏蔽失效 — page-hook 认 v4 + POST body.column
   // 0.6.15: ffff 徽章点击 → four.meme/zh-TW/token/{ca}；Flap 仍 flap.sh taxinfo.
   // 0.6.14: Four.meme ffff 税币 — 与 Flap 同徽章 schema；后端 Multicall 链上读.
   // 0.6.13: Hot/Steady 双轨 — 视口/新创建未画加速；稳态保持流畅；仅 BSC 链工作.
@@ -321,6 +324,10 @@
     enabled: false,
     thresholdPct: 100
   };
+  /** 自定义尾号屏蔽（仅 BSC）：rules[].suffix 为 1–12 位 hex */
+  const SUFFIX_HIDE_KEY = "flapFeeInfo.suffixHide.v1";
+  const DEFAULT_SUFFIX_HIDE = { enabled: false, rules: [] };
+  const SUFFIX_HIDE_MAX_RULES = 24;
   const TAX_RECV_HIDE_CLASS = "flap-fee-tax-recv-hidden";
   const TAX_RECV_HIDE_ATTR = "data-flap-tax-recv-hidden";
   // Badge color theme: dark (default, for dark sites) | light (solid soft chips for contrast).
@@ -352,8 +359,10 @@
     'input[placeholder*="搜名称"], input[placeholder*="KOL"], input[placeholder*="推特号"]';
   const CARD_DATA = `data-${toKebab(CARD_MARK)}`;
   const ICON_DATA = `data-${toKebab(ICON_MARK)}`;
-  // Pool/quote prefix (coin) — do not hide site pool icons; show all quotes including BNB.
-  const POOL_PREFIX = "🪙";
+  // Pool/quote prefix by platform (not site pool icons).
+  const POOL_PREFIX_DEFAULT = "🪙";
+  const POOL_PREFIX_FLAP = "🦋"; // 7777 / 8888
+  const POOL_PREFIX_FOUR = "🖐️"; // ffff Four.meme
   const MAX_QUOTE_SYMBOL_LEN = 8;
   // GMGN special quote icons (not in /static/quotes/*.png RWA list).
   const GMGN_ICON_QUOTE_RULES = [
@@ -613,6 +622,8 @@
   /** address(lower) -> { recvPct, isVault, source } from host list APIs (page-hook). */
   const taxRecvMap = new Map();
   let taxRecvHideApplyTimer = 0;
+  /** @type {{ enabled: boolean, rules: { id: string, suffix: string, enabled: boolean }[] }} */
+  let suffixHidePrefs = { enabled: false, rules: [] };
   const requestQueue = new Set();
   let batchTimer = null;
   /** Delay of the pending batchTimer (ms); prefer shorter reschedules (hot tokens). */
@@ -2249,7 +2260,7 @@
           const q =
             normalizeQuoteSymbol(entryHit.quote_symbol || "", { allowCjk: true }) ||
             "BNB";
-          const presentation = computeBadgePresentation(entryHit, q);
+          const presentation = computeBadgePresentation(entryHit, q, urlTok);
           if (presentation.label) {
             const textEl = existingGood.querySelector(".gmgn-fee-mode-icon__text");
             const shown = textEl ? textEl.textContent : existingGood.textContent;
@@ -2416,7 +2427,7 @@
           (host instanceof HTMLElement ? resolveQuoteSymbol(host, entry) : "") ||
           "BNB";
       }
-      const presentation = computeBadgePresentation(entry, q);
+      const presentation = computeBadgePresentation(entry, q, token);
       const { label } = presentation;
       if (!label) return false;
 
@@ -3908,7 +3919,7 @@
     try {
       // 与 renderMode 一致：API → DOM → 链默认，禁止硬编码 BNB 造成先错后对
       const q = resolveQuoteSymbol(card, entry);
-      const presentation = computeBadgePresentation(entry, q);
+      const presentation = computeBadgePresentation(entry, q, token);
       const { label } = presentation;
       if (!label) return false;
 
@@ -5775,7 +5786,7 @@
         normalizeQuoteSymbol(entry.quote_symbol || "", { allowCjk: true }) ||
         resolveQuoteSymbol(header, entry) ||
         "BNB";
-      const presentation = computeBadgePresentation(entry, q);
+      const presentation = computeBadgePresentation(entry, q, token);
       const { label } = presentation;
       if (!label) return false;
 
@@ -6417,7 +6428,7 @@
           }
           // 必须用当前 entry 重算 label；禁止仅凭 feeSig 自洽就跳过（会卡在旧/错徽章）
           const quoteSymbol = resolveQuoteSymbol(card, entry);
-          const presentation = computeBadgePresentation(entry, quoteSymbol);
+          const presentation = computeBadgePresentation(entry, quoteSymbol, token);
           const { label, className, basketCount } = presentation;
           if (
             label &&
@@ -8166,6 +8177,8 @@
     if (!TARGET_TOKEN_RE.test(tok)) return;
     // 非 BSC 页禁止入队（双保险）
     if (!isAllowedScanChain()) return;
+    // 自定义尾号屏蔽：不入队、不打 /modes（省 RPC）
+    if (shouldHideByCustomSuffix(tok)) return;
     if (modeCache.has(tok) || isPersistentCacheHit(tok) || requestQueue.has(tok)) return;
     const missingState = missingRetryState.get(tok);
     if (missingState && Date.now() < missingState.retryAt) return;
@@ -8862,7 +8875,11 @@
     const text = icon.textContent || "";
     const pipe = text.indexOf(" | ");
     const poolPart =
-      pipe >= 0 ? text.slice(0, pipe) : text.startsWith(POOL_PREFIX) ? text : "";
+      pipe >= 0
+        ? text.slice(0, pipe)
+        : /^(🪙|🦋|🖐️)/.test(text)
+          ? text
+          : "";
     if (!poolPart) return true;
     return !poolPart.includes(apiQ);
   }
@@ -9030,6 +9047,31 @@
     return out;
   }
 
+  /** 列表过滤是否开启（资金接收 or 自定义尾号），仅 BSC 写 disableShareWorker */
+  function isListFilterActive() {
+    const recvOn = taxRecvHidePrefs && taxRecvHidePrefs.enabled === true;
+    const suffixOn =
+      suffixHidePrefs &&
+      suffixHidePrefs.enabled === true &&
+      (suffixHidePrefs.rules || []).some((r) => r && r.enabled !== false && r.suffix);
+    return Boolean(recvOn || suffixOn);
+  }
+
+  function syncGmgnShareWorkerForFilters() {
+    try {
+      const ownKey = "flapFeeInfo.ownedDisableShareWorker";
+      if (isListFilterActive() && isAllowedScanChain()) {
+        localStorage.setItem("disableShareWorker", "true");
+        localStorage.setItem(ownKey, "1");
+      } else if (localStorage.getItem(ownKey) === "1") {
+        localStorage.removeItem("disableShareWorker");
+        localStorage.removeItem(ownKey);
+      }
+    } catch (_sw) {
+      // ignore
+    }
+  }
+
   function pushTaxRecvPrefsToPage(extra) {
     const prefs = {
       enabled: taxRecvHidePrefs.enabled === true,
@@ -9047,19 +9089,7 @@
     } catch (_ls) {
       // ignore
     }
-    // GMGN：仅 BSC 开启屏蔽时写 disableShareWorker；他链不污染
-    try {
-      const ownKey = "flapFeeInfo.ownedDisableShareWorker";
-      if (prefs.enabled && isAllowedScanChain()) {
-        localStorage.setItem("disableShareWorker", "true");
-        localStorage.setItem(ownKey, "1");
-      } else if (localStorage.getItem(ownKey) === "1") {
-        localStorage.removeItem("disableShareWorker");
-        localStorage.removeItem(ownKey);
-      }
-    } catch (_sw) {
-      // ignore
-    }
+    syncGmgnShareWorkerForFilters();
     try {
       window.postMessage(
         {
@@ -9149,13 +9179,21 @@
   function hydrateTaxRecvHidePrefs() {
     if (!isExtensionContextValid() || !chrome.storage?.local) return;
     try {
-      chrome.storage.local.get([TAX_RECV_HIDE_KEY], (items) => {
+      chrome.storage.local.get([TAX_RECV_HIDE_KEY, SUFFIX_HIDE_KEY], (items) => {
         if (!isExtensionContextValid() || chrome.runtime.lastError) return;
         taxRecvHidePrefs = normalizeTaxRecvHidePrefs(items?.[TAX_RECV_HIDE_KEY]);
+        suffixHidePrefs = normalizeSuffixHidePrefs(items?.[SUFFIX_HIDE_KEY]);
         pushTaxRecvPrefsToPage();
+        pushSuffixHidePrefsToPage();
         // Re-push after page-hook may finish loading
-        window.setTimeout(pushTaxRecvPrefsToPage, 200);
-        window.setTimeout(pushTaxRecvPrefsToPage, 1000);
+        window.setTimeout(() => {
+          pushTaxRecvPrefsToPage();
+          pushSuffixHidePrefsToPage();
+        }, 200);
+        window.setTimeout(() => {
+          pushTaxRecvPrefsToPage();
+          pushSuffixHidePrefsToPage();
+        }, 1000);
         scheduleTaxRecvHideApply(0);
       });
     } catch {
@@ -9579,13 +9617,20 @@
    *        只靠 page-hook 在 HTTP + SharedWorker 数据层过滤（对齐 GMGN 原生「筛完再渲染」）。
    */
   function applyTaxRecvHideNow() {
-    // Always clear when disabled
-    if (!taxRecvHidePrefs || taxRecvHidePrefs.enabled !== true) {
+    const recvOn = taxRecvHidePrefs && taxRecvHidePrefs.enabled === true;
+    const suffixOn =
+      suffixHidePrefs &&
+      suffixHidePrefs.enabled === true &&
+      isAllowedScanChain() &&
+      (suffixHidePrefs.rules || []).some((r) => r && r.enabled !== false && r.suffix);
+    // Always clear when both disabled
+    if (!recvOn && !suffixOn) {
       clearAllTaxRecvDomHide();
       return;
     }
 
     // GMGN：禁止 UI 层动刀（会与 React 虚拟列表抢 transform → 跳动/徽章错位）
+    // 资金接收 + 自定义尾号均由 page-hook 数据层过滤
     if (isGmgnHost()) {
       clearAllTaxRecvDomHide();
       return;
@@ -9607,7 +9652,9 @@
         return;
       }
       const info = resolveTaxRecvInfo(token);
-      setCardTaxRecvHidden(card, info ? shouldHideTaxRecv(info) : false);
+      const hideRecv = info ? shouldHideTaxRecv(info) : false;
+      const hideSuffix = shouldHideByCustomSuffix(token);
+      setCardTaxRecvHidden(card, hideRecv || hideSuffix);
     };
 
     let scopeRoots = [];
@@ -10394,6 +10441,28 @@
           }
           scheduleTaxRecvHideApply(0);
         }
+        if (changes[SUFFIX_HIDE_KEY]) {
+          const wasOn = suffixHidePrefs.enabled === true;
+          suffixHidePrefs = normalizeSuffixHidePrefs(changes[SUFFIX_HIDE_KEY].newValue);
+          pushSuffixHidePrefsToPage();
+          const nowOn = suffixHidePrefs.enabled === true;
+          // 规则变化：GMGN 需 reload 让 page-hook 用新规则滤首包/WS
+          if (wasOn !== nowOn || nowOn) {
+            try {
+              sessionStorage.removeItem("flapFeeInfo.taxRecvReflow.v1");
+            } catch (_ss3) {
+              // ignore
+            }
+            if (isTaxRecvListReflowPage()) {
+              scheduleTaxRecvListReflow("suffix-hide-change");
+            } else {
+              scheduleTaxRecvHideApply(0);
+            }
+          } else {
+            clearAllTaxRecvDomHide();
+            scheduleTaxRecvHideApply(0);
+          }
+        }
         if (dirty) rerenderAllBadges();
       });
     } catch {
@@ -10515,15 +10584,16 @@
   }
 
   /**
-   * Badge text: 🪙QUOTE | fee (spaces around |), honor displayPrefs.
+   * Badge text: {🦋|🖐️|🪙}QUOTE | fee (spaces around |), honor displayPrefs.
    * Returns empty string when everything is toggled off.
    */
-  function buildDisplayLabel(entry, quoteSymbol) {
+  function buildDisplayLabel(entry, quoteSymbol, token) {
     const prefs = displayPrefs || DEFAULT_DISPLAY_PREFS;
     const fee = buildFeeLabel(entry);
     const showPool = prefs.pool !== false && Boolean(quoteSymbol);
-    if (showPool && fee) return `${POOL_PREFIX}${quoteSymbol} | ${fee}`;
-    if (showPool) return `${POOL_PREFIX}${quoteSymbol}`;
+    const prefix = poolPrefixForToken(token || "");
+    if (showPool && fee) return `${prefix}${quoteSymbol} | ${fee}`;
+    if (showPool) return `${prefix}${quoteSymbol}`;
     return fee;
   }
 
@@ -10539,11 +10609,12 @@
     return `${String(v.toFixed(1)).replace(/\.0$/, "")}%`;
   }
 
-  function buildTipModel(entry, quoteSymbol, label) {
+  function buildTipModel(entry, quoteSymbol, label, token) {
     const basket = getBasketAssetsForDisplay(entry);
     return {
       label: label || "",
       quoteSymbol: quoteSymbol || "",
+      poolPrefix: poolPrefixForToken(token || ""),
       buyTax: bpsToPercentLabel(entry.buy_tax_bps),
       sellTax: bpsToPercentLabel(entry.sell_tax_bps),
       titleLines: String(entry.title || "")
@@ -10555,11 +10626,12 @@
     };
   }
 
-  function computeBadgePresentation(entry, quoteSymbol) {
+  function computeBadgePresentation(entry, quoteSymbol, token) {
     const theme = badgeTheme === "light" ? "light" : "dark";
     const solidDarkClass =
       theme === "dark" && badgeSolidDark ? "gmgn-fee-mode-icon--solid-dark" : "";
-    // 未就绪：固定 emoji + 待加载（不拼 🪙/半截 fee，避免突变）
+    const tok = String(token || "").toLowerCase();
+    // 未就绪：固定 emoji + 待加载（不拼 半截 fee，避免突变）
     if (isFeeLoadingEntry(entry)) {
       const label = loadingBadgeLabel();
       const title = loadingBadgeTitle();
@@ -10581,6 +10653,7 @@
         tipModel: {
           label,
           quoteSymbol: "",
+          poolPrefix: poolPrefixForToken(tok),
           buyTax: "",
           sellTax: "",
           titleLines: [title],
@@ -10591,7 +10664,7 @@
       };
     }
     const meta = modeMeta[entry.mode] || modeMeta.unknown;
-    const label = buildDisplayLabel(entry, quoteSymbol);
+    const label = buildDisplayLabel(entry, quoteSymbol, tok);
     const basketAssets = getBasketAssetsForDisplay(entry);
     const basketCount = basketAssets.length;
     // For muted "&" between first two symbols (e.g. SPCX&TSLA).
@@ -10623,7 +10696,7 @@
     ]
       .filter(Boolean)
       .join(" ");
-    const tipModel = buildTipModel(entry, quoteSymbol, label);
+    const tipModel = buildTipModel(entry, quoteSymbol, label, tok);
     // Legacy plain title kept for rare code paths; UI uses custom tooltip.
     const title = tipModel.titleLines.join("\n");
     return {
@@ -10722,7 +10795,7 @@
     if (model.quoteSymbol) {
       const row = document.createElement("div");
       row.className = "gmgn-fee-mode-tooltip__row";
-      row.innerHTML = `<span class="gmgn-fee-mode-tooltip__k">${tipT("pool")}</span><span class="gmgn-fee-mode-tooltip__v">🪙${model.quoteSymbol}</span>`;
+      row.innerHTML = `<span class="gmgn-fee-mode-tooltip__k">${tipT("pool")}</span><span class="gmgn-fee-mode-tooltip__v">${model.poolPrefix || POOL_PREFIX_DEFAULT}${model.quoteSymbol}</span>`;
       root.appendChild(row);
     }
 
@@ -10803,6 +10876,98 @@
   function isFlapTaxToken(token) {
     const ca = String(token || "").toLowerCase();
     return /^0x[a-f0-9]{36}(8888|7777)$/.test(ca);
+  }
+
+  /** 底池前缀：Four 🖐️ · Flap 🦋 · 其它 🪙 */
+  function poolPrefixForToken(token) {
+    if (isFourTaxToken(token)) return POOL_PREFIX_FOUR;
+    if (isFlapTaxToken(token)) return POOL_PREFIX_FLAP;
+    return POOL_PREFIX_DEFAULT;
+  }
+
+  function normalizeSuffixHideRule(raw, idx) {
+    const id =
+      raw && typeof raw.id === "string" && raw.id
+        ? raw.id
+        : `r${Date.now().toString(36)}_${idx || 0}`;
+    let suffix = String(raw?.suffix || "")
+      .trim()
+      .toLowerCase()
+      .replace(/^0x/, "");
+    suffix = suffix.replace(/[^a-f0-9]/g, "").slice(0, 12);
+    return {
+      id,
+      suffix,
+      enabled: raw?.enabled !== false
+    };
+  }
+
+  function normalizeSuffixHidePrefs(raw) {
+    const out = { enabled: false, rules: [] };
+    if (!raw || typeof raw !== "object") return out;
+    out.enabled = raw.enabled === true;
+    const list = Array.isArray(raw.rules) ? raw.rules : [];
+    const seen = new Set();
+    for (let i = 0; i < list.length && out.rules.length < SUFFIX_HIDE_MAX_RULES; i++) {
+      const r = normalizeSuffixHideRule(list[i], i);
+      if (!r.suffix || r.suffix.length < 1) continue;
+      if (seen.has(r.suffix)) continue;
+      seen.add(r.suffix);
+      out.rules.push(r);
+    }
+    return out;
+  }
+
+  /** 仅 BSC：地址是否命中自定义尾号屏蔽 */
+  function shouldHideByCustomSuffix(token) {
+    if (!suffixHidePrefs || suffixHidePrefs.enabled !== true) return false;
+    if (!isAllowedScanChain()) return false;
+    const addr = String(token || "")
+      .trim()
+      .toLowerCase();
+    if (!addr.startsWith("0x") || addr.length < 6) return false;
+    const rules = suffixHidePrefs.rules || [];
+    for (let i = 0; i < rules.length; i++) {
+      const r = rules[i];
+      if (!r || r.enabled === false) continue;
+      const s = String(r.suffix || "").toLowerCase();
+      if (s && addr.endsWith(s)) return true;
+    }
+    return false;
+  }
+
+  function pushSuffixHidePrefsToPage() {
+    const prefs = {
+      enabled: suffixHidePrefs.enabled === true,
+      rules: (suffixHidePrefs.rules || []).map((r) => ({
+        suffix: r.suffix,
+        enabled: r.enabled !== false
+      }))
+    };
+    const payload = JSON.stringify(prefs);
+    try {
+      document.documentElement?.setAttribute("data-flap-suffix-hide", payload);
+    } catch (_e) {
+      // ignore
+    }
+    try {
+      localStorage.setItem(SUFFIX_HIDE_KEY, payload);
+    } catch (_ls) {
+      // ignore
+    }
+    syncGmgnShareWorkerForFilters();
+    try {
+      window.postMessage(
+        {
+          source: "flap-fee-info",
+          type: "suffix-hide-prefs",
+          prefs
+        },
+        "*"
+      );
+    } catch (_e2) {
+      // ignore
+    }
   }
 
   /**
@@ -10979,7 +11144,7 @@
     const quoteSymbol = isFeeLoadingEntry(entry)
       ? ""
       : resolveQuoteSymbol(card, entry);
-    const presentation = computeBadgePresentation(entry, quoteSymbol);
+    const presentation = computeBadgePresentation(entry, quoteSymbol, token);
     const { label, className, basketCount } = presentation;
     if (!label) return true;
     const textEl = existing.querySelector(".gmgn-fee-mode-icon__text");
@@ -11041,7 +11206,7 @@
     const quoteSymbol = isFeeLoadingEntry(entry)
       ? ""
       : resolveQuoteSymbol(card, entry);
-    const presentation = computeBadgePresentation(entry, quoteSymbol);
+    const presentation = computeBadgePresentation(entry, quoteSymbol, tok);
     const { label } = presentation;
     const pos = getActiveBadgePosition(card);
     const wantMode = pos.enabled ? "absolute" : "default";

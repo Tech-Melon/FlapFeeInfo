@@ -23,10 +23,10 @@
 | 🔥`N%` | 销毁 | `deflationBps` |
 | 💧`N%` | 回流 LP | `lpBps` |
 | ❓️未 | 无有效分配 | 全 0 |
-| 🪙`QUOTE` | 底池报价符号（BNB / USD1 / NVDAB…） | **页面 DOM**（不查链） |
+| 🦋/🖐️/🪙`QUOTE` | 底池报价（Flap=🦋、Four.meme ffff=🖐️、其它=🪙） | **页面 DOM**（不查链） |
 
 - **有值才出**；多项非零 → `mode=hybrid`，fee 段**按 bps 从高到低**（最高在左），如 `💎90%→SPCXB👨‍🍳10%`  
-- **合成徽章**（有报价时）：`🪙QUOTE | fee`，如 `🪙BNB | 💎90%`、`🪙USD1 | 💎100%`（`|` 两侧有空格）  
+- **合成徽章**（有报价时）：`{🦋|🖐️|🪙}QUOTE | fee`，如 `🦋BNB | 💎90%`、`🖐️USD1 | 💎100%`（`|` 两侧有空格）  
 - **买卖税率**只进 tooltip（`title`），不进主文案  
 - **不隐藏**站点原有底池小图标  
 - Flap 官网：`8888` → `/feeinfo`，`7777` → `/taxinfo`；查询合约 **同一 Helper**
@@ -426,9 +426,14 @@ python tools/ctl.py watchdog-run
   - `0.6.12`：`pending`/`missing` 分轨重试（pending 0.6/1.4/2.8s，missing 1/2.2/4s）；requeue 定时器上限 24
   - `0.6.13`：Hot/Steady 双轨（热：批 1/120ms、防抖 220、扫 gap 360、pending 0.4s 起）；仅 BSC（他链含 robinhood 全关）
   - `0.6.14`：Four.meme `ffff` 税币 — 后端 Multicall 链上读 + 与 Flap 同 payload；插件/CF 尾号放行
+  - `0.6.15`：ffff 徽章点击 → four.meme/zh-TW/token/{ca}；Flap 仍 flap.sh taxinfo
+  - `0.6.16`：自定义多规则 CA 尾号屏蔽（仅 BSC，战壕「新创建」列；storage `flapFeeInfo.suffixHide.v1`）；底池前缀 Flap=🦋 Four=🖐️
+  - `0.6.16b`：Debot 列表 API `meme/v3/ranks`→`meme/v4/ranks`（column 改 POST JSON body）；page-hook 补匹配，否则资金接收屏蔽整段不滤
+  - `0.7.0`：里程碑 — Debot v4 资金接收屏蔽修复 + 自定义尾号屏蔽 + 底池 🦋/🖐️；page-hook HOOK_VER 49
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
-- 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`
+- 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  
+- 尾号屏蔽：`flapFeeInfo.suffixHide.v1` = `{ enabled, rules:[{id,suffix,enabled}] }`（最多 24 条 hex 1–12 位）
 
 ---
 
