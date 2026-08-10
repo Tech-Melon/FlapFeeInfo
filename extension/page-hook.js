@@ -61,7 +61,37 @@
   }
 
   let lastAttrSyncAt = 0;
+
+  /**
+   * 仅 BSC 过滤列表/WS.
+   * - GMGN: ?chain=bsc | /bsc/token/…
+   * - Debot 双站 debot.ai / gungnir.bot: /meme?chain=bsc | /token/bsc/…
+   * - robinhood / sol 等：完全不碰
+   */
+  function isBscPageContext() {
+    try {
+      const u = new URL(location.href);
+      const q = String(u.searchParams.get("chain") || "").toLowerCase();
+      // Debot 战壕主入口 /meme?chain=bsc（双站同 query）
+      if (q === "bsc") return true;
+      if (q) return false;
+      const path = String(u.pathname || "");
+      // GMGN K 线
+      if (/^\/bsc(\/|$)/i.test(path) || /\/bsc\/token\//i.test(path)) return true;
+      // Debot/Gungnir K 线 /token/bsc/…
+      if (/\/token\/bsc(?:\/|$)/i.test(path)) return true;
+      if (/\/token\/[a-z0-9_-]+(?:\/|$)/i.test(path) && !/\/token\/bsc(?:\/|$)/i.test(path)) {
+        return false;
+      }
+      // /meme 无 chain 时不主动滤（content 管徽章）；避免他链误伤
+      return false;
+    } catch (_e) {
+      return false;
+    }
+  }
+
   function prefsOn() {
+    if (!isBscPageContext()) return false;
     if (taxRecvEnabled) return true;
     const now = Date.now();
     if (now - lastAttrSyncAt >= 80) {
@@ -1010,7 +1040,8 @@
 
   function syncGmgnShareWorkerMode(enabled) {
     try {
-      if (enabled) {
+      // 仅 BSC 写 disableShareWorker，避免 robinhood 等链被误伤
+      if (enabled && isBscPageContext()) {
         localStorage.setItem("disableShareWorker", "true");
         localStorage.setItem(OWNED_DISABLE_SW, "1");
       } else if (localStorage.getItem(OWNED_DISABLE_SW) === "1") {

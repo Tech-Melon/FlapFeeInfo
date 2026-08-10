@@ -7,6 +7,11 @@
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
   const GMGN_TRENCH_ROOT_SELECTOR =
     "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100";
+  // 0.6.13: Hot/Steady 双轨 — 视口/新创建未画加速；稳态保持流畅；仅 BSC 链工作.
+  // 0.6.12: pending 快重试 / missing 略缓；区分 soft-miss 原因，限制 requeue 定时器数量.
+  // 0.6.11: 流畅回退 — 扫卡/mutation 节奏对齐 0.6.2；身份校验快路径+节流，保留防错徽章.
+  // 0.6.10: Debot 双站 debot.ai + gungnir.bot 列表 /meme?chain=bsc 与 K 线 /token/bsc 门控对齐.
+  // 0.6.9: 仅 BSC 生效 — ?chain=bsc 或路径 /bsc/token、/token/bsc；robinhood 等立即清徽章.
   // 0.6.8: /modes 批：新CA 满3或350ms；0 CA 不请求；CF soft-wait 回填；禁狂刷 503.
   // 0.6.7: 严禁错徽章 — 扫卡前 enforceIdentity；无身份/fee≠CA 立刻拆；仅 loading 或正确 entry.
   // 0.6.6: CF/后端 async-cache-first — 插件对 pending/missing 快轮询；回画 findCardsByCa.
@@ -95,16 +100,28 @@
   const MAX_CANDIDATES_PER_SCAN = 120;
   const MAX_CARDS_PER_SCAN = 56;
   const MAX_BATCH_TOKENS = 48;
-  // 统一批策略：满 BATCH_MIN_TOKENS 个新 CA，或自首个入队起 BATCH_FLUSH_MS 才 POST /modes。
-  // 禁止 0ms 狂刷（曾打爆 CF/后端 503，徽章永远 待加载）。
+  // 稳态批：满 BATCH_MIN_TOKENS 或 BATCH_FLUSH_MS；禁止 0ms 全局狂刷。
   const BATCH_FLUSH_MS = 350;
   const BATCH_MIN_TOKENS = 3;
+  // 热路径（视口/新创建未画）：单 CA 也可尽快发，仍禁止 delay=0 连打。
+  const HOT_BATCH_FLUSH_MS = 120;
+  const HOT_BATCH_MIN_TOKENS = 1;
   const RETRY_BASE_MS = 900;
   const RETRY_MAX_MS = 12000;
   const MISSING_RETRY_BASE_MS = 15000;
   const MISSING_RETRY_MAX_MS = 5 * 60 * 1000;
-  // pending 轮询：与批间隔对齐，勿 300ms 风暴。
-  const GMGN_MISSING_RETRY_EARLY_MS = [400, 900, 2000];
+  /**
+   * GMGN /modes soft-miss 早期重试（前 N 次，之后指数退避）。
+   * 热路径（顶区未画）用 HOT_* 表，更快出徽章；稳态用下列表。
+   */
+  const GMGN_PENDING_RETRY_EARLY_MS = [600, 1400, 2800];
+  const GMGN_MISSING_RETRY_EARLY_MS = [1000, 2200, 4000];
+  const HOT_PENDING_RETRY_EARLY_MS = [400, 900, 1800];
+  const HOT_MISSING_RETRY_EARLY_MS = [700, 1500, 2800];
+  /** 同时挂起的 miss 重入队定时器上限（防几十个 CA 各挂一个 timer） */
+  const GMGN_MISSING_REQUEUE_MAX = 24;
+  /** 热档最长：连续无热工作超过此时间退回稳态扫/防抖 */
+  const HOT_PATH_HOLD_MS = 2500;
   const PERSISTENT_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
   // Debot mount result cache (avoids getComputedStyle thrash every scan).
   const DEBOT_MOUNT_CACHE_MS = 4000;
@@ -119,17 +136,26 @@
   const DEBOT_SCROLL_RESUME_SCAN_MS = 520;
   const DEBOT_SCROLL_CARDS_BUDGET = 8;
   const DEBOT_STEADY_CARDS_BUDGET = 18;
-  // GMGN list mutation debounce (0.6.5: 380→200 — 新创建 insert 更快进扫).
-  const MUTATION_SCAN_DEBOUNCE_GMGN_MS = 200;
+  // GMGN 稳态 mutation / 扫间隔（流畅）；热路径见 HOT_*。
+  const MUTATION_SCAN_DEBOUNCE_GMGN_MS = 380;
+  const HOT_MUTATION_SCAN_DEBOUNCE_GMGN_MS = 220;
   // GMGN list non-force scan min gap (home/meme only). Token pages keep SCAN_INTERVAL_MS.
-  const GMGN_LIST_SCAN_MIN_GAP_MS = 360;
-  // GMGN cold first scan delay (host hydration first; was 900).
-  const GMGN_FIRST_SCAN_DELAY_MS = 450;
+  const GMGN_LIST_SCAN_MIN_GAP_MS = 560;
+  const HOT_GMGN_LIST_SCAN_MIN_GAP_MS = 360;
+  // GMGN cold first scan delay (host hydration first).
+  const GMGN_FIRST_SCAN_DELAY_MS = 500;
   // GMGN per-scan card budget while scroll-cooling (smaller slices).
   const GMGN_SCROLL_CARDS_BUDGET = 12;
   // After /modes hits on GMGN list: cache-first viewport paint (cards, ms) — no network.
-  const GMGN_POST_API_PAINT_CARDS = 14;
-  const GMGN_POST_API_PAINT_MS = 16;
+  const GMGN_POST_API_PAINT_CARDS = 10;
+  const GMGN_POST_API_PAINT_MS = 10;
+  const HOT_GMGN_POST_API_PAINT_CARDS = 14;
+  const HOT_GMGN_POST_API_PAINT_MS = 14;
+  // 行 href 身份短缓存（虚拟列表复用后 TTL 内仍可能错，保持 ≤600ms）.
+  const HREF_TOKEN_CACHE_MS = 500;
+  // 全页 scrub 错徽章最小间隔（每扫都 scrub 过重）.
+  const SCRUB_IDENTITY_MIN_GAP_MS = 1200;
+  const SCRUB_IDENTITY_MAX_ICONS = 24;
   // chrome.storage rewrite throttle + max entries (LRU by fetchedAt).
   const PERSIST_MIN_INTERVAL_MS = 10000;
   const PERSISTENT_CACHE_MAX_ENTRIES = 800;
@@ -377,9 +403,38 @@
   }
 
   /**
-   * 无 /modes 缓存时：入队 + 画固定「⏳待加载」（GMGN/Debot 列表/弹层共用）。
-   * @returns {boolean} 是否已挂上占位徽章
+   * 扫卡门控：稳定正确徽章走快路径；仅 unstable / 错挂嫌疑才全量 enforce.
+   * @returns {{ idCa: string|null, allowed: boolean, wiped: boolean }}
    */
+  function gateCardIdentity(card) {
+    if (!(card instanceof HTMLElement)) {
+      return { idCa: null, allowed: false, wiped: false };
+    }
+    try {
+      const marked = (card.dataset[CARD_MARK] || "").toLowerCase();
+      if (marked && TARGET_TOKEN_RE.test(marked)) {
+        const existing =
+          card.querySelector?.(`[${ICON_DATA}="1"][data-fee-token="${marked}"]`) ||
+          card.querySelector?.(`[${ICON_DATA}="1"]`);
+        if (
+          existing instanceof HTMLElement &&
+          existing.dataset.feeLoading !== "1" &&
+          (existing.dataset.feeToken || "").toLowerCase() === marked &&
+          document.contains(existing)
+        ) {
+          const idCa = extractCardHrefToken(card);
+          if (!idCa || idCa === marked) {
+            return { idCa: marked, allowed: true, wiped: false };
+          }
+          return enforceIdentityOnCard(card);
+        }
+      }
+    } catch (_fast) {
+      // fall through
+    }
+    return enforceIdentityOnCard(card);
+  }
+
   /**
    * 扫卡/回画前强制：徽章 feeToken 必须等于行身份 CA。
    * 仅拆「错徽章」；正确徽章保留（避免每轮全拆闪烁）。
@@ -415,9 +470,17 @@
     };
 
     try {
-      card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => {
-        if (shouldDrop(icon)) removeIcon(icon);
-      });
+      // 常见单徽章：先查一个；仅多徽章时再全量 querySelectorAll
+      const first = card.querySelector?.(`[${ICON_DATA}="1"]`);
+      if (first) {
+        if (shouldDrop(first)) removeIcon(first);
+        const all = card.querySelectorAll(`[${ICON_DATA}="1"]`);
+        if (all.length > 1) {
+          all.forEach((icon) => {
+            if (shouldDrop(icon)) removeIcon(icon);
+          });
+        }
+      }
       for (const sib of [card.previousElementSibling, card.nextElementSibling]) {
         if (sib instanceof HTMLElement && sib.matches?.(`[${ICON_DATA}="1"]`)) {
           if (shouldDrop(sib)) removeIcon(sib);
@@ -438,6 +501,11 @@
         // ignore
       }
       cardTokenCache.delete(card);
+      try {
+        hrefTokenCache.delete(card);
+      } catch (_hc) {
+        // ignore
+      }
       return { idCa: null, allowed: false, wiped };
     }
 
@@ -553,6 +621,8 @@
   const missingRetryState = new Map();
   /** GMGN only: one deferred requeue timer per token after miss/fail. */
   const gmgnMissingRequeueTimers = new Map();
+  /** 最近一次确认存在热工作（视口/新创建未画）的墙钟，用于退热 */
+  let lastGmgnHotWorkAt = 0;
   let scanScheduled = false;
   let lastScanAt = 0;
   /** Wall clock of last completed scanVisibleCards (watchdog uses this). */
@@ -589,6 +659,9 @@
   let gmgnTaxMountCache = new WeakMap();
   /** card -> last extracted full CA (skip deep scan when stable). Replaced on SPA. */
   let cardTokenCache = new WeakMap();
+  /** @type {WeakMap<Element, { token: string|null, at: number }>} */
+  let hrefTokenCache = new WeakMap();
+  let lastScrubIdentityAt = 0;
   /** GMGN only: suppress mutation scans until this wall time (scroll settle). */
   let gmgnScrollQuietUntil = 0;
   /** GMGN only: one-shot scan after scroll stops. */
@@ -1118,10 +1191,9 @@
     return /\/token\//i.test(location.pathname || "") && location.hostname.endsWith("gmgn.ai");
   }
 
-  /** Debot / Gungnir token detail only (host-scoped). */
+  /** Debot / Gungnir token detail only（双站同形: /token/bsc/0x…）. */
   function isDebotTokenPage() {
-    const host = location.hostname || "";
-    if (!host.endsWith("debot.ai") && !host.endsWith("gungnir.bot")) return false;
+    if (!isDebotLikeHost()) return false;
     return /\/token\//i.test(location.pathname || "");
   }
 
@@ -1433,7 +1505,7 @@
     return false;
   }
 
-  /** URL ?chain= (gmgn/debot/gungnir). Empty → treat as unknown. */
+  /** URL ?chain= (gmgn / debot.ai / gungnir.bot). Empty → treat as unknown. */
   function getUrlChain() {
     try {
       return String(new URL(location.href).searchParams.get("chain") || "").toLowerCase();
@@ -1442,21 +1514,117 @@
     }
   }
 
-  /** Only BSC trenches for now; Robinhood / other chains → no scan. */
-  function isAllowedScanChain() {
-    const chain = getUrlChain();
-    if (!chain) {
-      // GMGN token pages sometimes omit chain in path-only URLs — allow token if host ok.
-      if (isGmgnTokenPage() || isDebotTokenPage()) return true;
-      // Home/meme without chain param: default boards are usually bsc — allow.
-      return true;
+  /**
+   * Debot 双站：debot.ai 与 gungnir.bot 同前端（同 Vite/MUI/API），门控与策略共用.
+   */
+  function isDebotLikeHost() {
+    const host = location.hostname || "";
+    return host.endsWith("debot.ai") || host.endsWith("gungnir.bot");
+  }
+
+  /**
+   * Resolve active chain from query + path (SPA 常把 chain 写在 path 或 query 里).
+   * - GMGN 列表: ?chain=bsc | robinhood | sol …
+   * - GMGN K线: /bsc/token/0x… （query 可无 chain）
+   * - Debot/Gungnir 列表: /meme?chain=bsc （双站同形）
+   * - Debot/Gungnir K线: /token/bsc/0x… 或 /token/bsc/123_0x…
+   */
+  function resolvePageChain() {
+    // 1) query 优先：Debot 战壕 /meme?chain=bsc 与 GMGN 首页都靠它
+    const q = getUrlChain();
+    if (q) return q;
+    try {
+      const path = String(location.pathname || "");
+      // GMGN: /bsc/token/0x…
+      let m = path.match(/^\/([a-z0-9_-]+)\/token\//i);
+      if (m) return m[1].toLowerCase();
+      // Debot/Gungnir K线: /token/bsc/… （不是 /bsc/token）
+      m = path.match(/\/token\/([a-z0-9_-]+)(?:\/|$)/i);
+      if (m) return m[1].toLowerCase();
+    } catch (_err) {
+      // ignore
     }
-    if (chain === "robinhood" || chain === "rh") return false;
-    return chain === "bsc";
+    return "";
+  }
+
+  /** 非 BSC 链名（query/path/href 命中即拒绝） */
+  const NON_BSC_CHAIN_RE =
+    /(?:^|[/?&=_])(robinhood|rh|sol|eth|base|tron|monad|blast|op|arb|polygon|matic|avax|sui|ape)(?:$|[/?&=_])/i;
+
+  function looksLikeNonBscHref(href) {
+    const h = String(href || "").toLowerCase();
+    if (!h) return false;
+    if (h.includes("chain=bsc") || h.includes("/bsc/token/") || h.includes("/token/bsc/")) {
+      return false;
+    }
+    if (NON_BSC_CHAIN_RE.test(h)) return true;
+    if (/\/(?:sol|eth|base|tron|monad|blast|robinhood)\/token\//i.test(h)) return true;
+    if (/\/token\/(?:sol|eth|base|tron|monad|blast|robinhood)(?:\/|$)/i.test(h)) return true;
+    return false;
+  }
+
+  /**
+   * 仅 BSC：战壕/弹层/K 线/内嵌战壕。
+   * - 允许: ?chain=bsc | /bsc/token | /token/bsc | DOM 明确 BSC
+   * - 拒绝: 任何显式他链（robinhood/sol/eth/…），无「默认放行他链」
+   */
+  function isAllowedScanChain() {
+    const chain = resolvePageChain();
+    if (chain === "bsc") return true;
+    // 显式非 BSC 一律拒绝（不只 robinhood）
+    if (chain) return false;
+
+    // 无 query chain：K 线必须路径含 bsc
+    if (isGmgnTokenPage()) {
+      return /\/bsc\/token\//i.test(location.pathname || "");
+    }
+    if (isDebotTokenPage()) {
+      return /\/token\/bsc(?:\/|$)/i.test(location.pathname || "");
+    }
+
+    // 列表页无 ?chain=：有他链线索 → 关；有 BSC 线索 → 开；全无 → 关（避免 sol 默认误开）
+    try {
+      const hrefNodes = document.querySelectorAll(
+        "a[href*='token'], a[href*='chain='], [href*='/token/'], [href*='chain=']"
+      );
+      let sawBsc = false;
+      let sawForeign = false;
+      const lim = Math.min(hrefNodes.length, 48);
+      for (let i = 0; i < lim; i += 1) {
+        const href = hrefNodes[i].getAttribute?.("href") || "";
+        if (
+          /\/bsc\/token\//i.test(href) ||
+          /\/token\/bsc(?:\/|$|\?)/i.test(href) ||
+          /[?&]chain=bsc(?:&|$)/i.test(href)
+        ) {
+          sawBsc = true;
+        } else if (looksLikeNonBscHref(href)) {
+          sawForeign = true;
+        }
+      }
+      if (sawForeign && !sawBsc) return false;
+      if (sawBsc) return true;
+    } catch (_err) {
+      // ignore
+    }
+    // 冷启动尚无 token 链接：不允许猜链（用户切到 bsc 后 URL 会带 chain=bsc）
+    return false;
+  }
+
+  /** Leave non-BSC pages immediately clean (not every 20th scan). */
+  function purgeMarksIfChainDisallowed() {
+    if (isAllowedScanChain()) return false;
+    try {
+      resetOurDomMarks();
+    } catch (_err) {
+      // ignore
+    }
+    return true;
   }
 
   /**
    * Pure home / meme 战壕 page (no token K-line in path).
+   * Debot 双站列表主入口: /meme?chain=bsc （debot.ai 与 gungnir.bot 相同）.
    */
   function isTrenchListPage() {
     if (isTokenDetailRoute()) return false;
@@ -1467,7 +1635,8 @@
       // Home / tab boards: / or /trend etc without /token/
       return !/\/token\//i.test(path);
     }
-    if (host.endsWith("debot.ai") || host.endsWith("gungnir.bot")) {
+    if (isDebotLikeHost()) {
+      // 战壕: /meme；偶发 / 或空 path
       return /\/meme/i.test(path) || path === "/" || path === "";
     }
     return false;
@@ -1545,17 +1714,18 @@
 
   /**
    * Hard gate: whether this page should run fee scans at all.
-   * - chain=Robinhood → off
-   * - non-bsc (when chain present) → off
-   * - allowed: gmgn (list + token on bsc), debot/gungnir meme (+ token if needed)
+   * - chain=robinhood / sol / eth … → off
+   * - only BSC list + BSC K-line (+ 弹层/内嵌战壕)
+   * - GMGN: ?chain=bsc | /bsc/token/…
+   * - Debot 双站 (debot.ai / gungnir.bot): /meme?chain=bsc | /token/bsc/…
    */
   function isScanPageAllowed() {
     if (!isAllowedScanChain()) return false;
     const host = location.hostname || "";
     const path = location.pathname || "/";
     if (host.endsWith("gmgn.ai")) return true;
-    if (host.endsWith("debot.ai") || host.endsWith("gungnir.bot")) {
-      // Meme trenches + token detail; skip pure unrelated routes if any.
+    if (isDebotLikeHost()) {
+      // 列表 /meme、K 线 /token/…、偶发首页 /
       if (/\/meme/i.test(path) || /\/token\//i.test(path) || path === "/" || path === "") {
         return true;
       }
@@ -2718,8 +2888,11 @@
     const bypassForceGap = options.bypassForceGap === true;
     // Avoid burning CPU/network while the tab is fully hidden (timers are frozen anyway).
     if (!isTabVisible() && !force) return;
-    // chain=Robinhood / non-allowed pages: never schedule work.
-    if (!isScanPageAllowed()) return;
+    // chain=robinhood / 非 BSC：不扫，并清残留徽章
+    if (!isScanPageAllowed()) {
+      purgeMarksIfChainDisallowed();
+      return;
+    }
     // The outgoing trench can remain visible after the token URL commits. Any scan in
     // this window can repaint/reposition its badges and compete with K-line mounting.
     if (isTokenEnterTransitionActive()) return;
@@ -2763,12 +2936,11 @@
       if (isDebotScrollCooling() && !pendingLightScan && !isOverlayFast()) return;
       const now = performance.now();
       // Light scans use shorter min interval (overlay UX).
-      // GMGN list only: slightly tighter non-force gap so new 新创建 rows fill sooner
-      // without the old force-scan storm (token pages still use full SCAN_INTERVAL).
+      // GMGN list: 热路径用更短 gap，稳态 560ms 保流畅。
       const minGap = pendingLightScan
         ? 450
         : isGmgnHost() && !isTokenDetailRoute()
-          ? GMGN_LIST_SCAN_MIN_GAP_MS
+          ? gmgnListScanMinGapMs()
           : SCAN_INTERVAL_MS;
       if (!force && now - lastScanAt < minGap) {
         scheduleScan(minGap - (now - lastScanAt), { light: pendingLightScan });
@@ -4783,6 +4955,36 @@
     if (nextKey === lastRouteKey) return;
     const prevKey = lastRouteKey;
     lastRouteKey = nextKey;
+    // 切到 robinhood / 非 BSC：立刻卸徽章，后续 settle 也不再扫
+    if (!isScanPageAllowed()) {
+      try {
+        stopDebotTokenHeaderWatch();
+        stopDebotHeaderDomWatch();
+        stopGmgnHeaderDomWatch();
+        clearTokenHeaderArtifacts();
+        resetOurDomMarks();
+      } catch (_err) {
+        // ignore
+      }
+      scanTimerIds.forEach((id) => window.clearTimeout(id));
+      scanTimerIds = [];
+      scanScheduled = false;
+      clearSpaNavScanTimers();
+      if (spaNavCoalesceTimer) {
+        window.clearTimeout(spaNavCoalesceTimer);
+        spaNavCoalesceTimer = null;
+      }
+      if (spaQuietFlushTimer) {
+        window.clearTimeout(spaQuietFlushTimer);
+        spaQuietFlushTimer = null;
+      }
+      debugInfo("spa:chain-off", {
+        reason,
+        from: prevKey.slice(0, 80),
+        to: nextKey.slice(0, 80)
+      });
+      return;
+    }
     // Cover keyboard/programmatic navigation that bypasses the card click listener.
     // Freeze immediately at route detection, before the 40ms settle coalescer runs.
     if (routeKeyWasTokenDetail(nextKey)) armTokenEnterTransition();
@@ -4912,6 +5114,10 @@
    */
   function beginSpaRouteSettle(prevKey, nextKey) {
     if (!isExtensionContextValid() || !isTabVisible()) return;
+    if (!isScanPageAllowed()) {
+      purgeMarksIfChainDisallowed();
+      return;
+    }
 
     const prevTok = extractTokenFromRouteKey(prevKey);
     const nextTok = extractTokenFromRouteKey(nextKey);
@@ -4933,6 +5139,7 @@
     debotMountCache = new WeakMap();
     gmgnTaxMountCache = new WeakMap();
     cardTokenCache = new WeakMap();
+    hrefTokenCache = new WeakMap();
     scanRootsCache = { at: 0, roots: [] };
     gmgnSteadyRoundRobinRow = 0;
     gmgnTrenchProbeCache = { at: 0, roots: [], ready: false };
@@ -5874,17 +6081,8 @@
     }
     if (!isTabVisible()) return;
     if (!isScanPageAllowed()) {
-      // Leave Robinhood / wrong chain clean — drop our marks if any.
-      if (scanGeneration % 20 === 0) {
-        try {
-          document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => n.remove());
-          document.querySelectorAll(`[${CARD_DATA}]`).forEach((c) => {
-            if (c instanceof HTMLElement) delete c.dataset[CARD_MARK];
-          });
-        } catch (_err) {
-          // ignore
-        }
-      }
+      // Leave robinhood / 非 BSC clean — 立即卸徽章（勿隔 N 代才清）
+      purgeMarksIfChainDisallowed();
       return;
     }
 
@@ -6002,8 +6200,8 @@
       // Nested mark cleanup: drop CARD_MARK on discarded inner nodes.
       // (handled by only painting outerCards)
 
-      // ★ 0.6.7：任何路径之前先按行 CA 拆错徽章（虚拟列表复用主修）
-      const idGate = enforceIdentityOnCard(card);
+      // ★ 0.6.11：稳定正确卡走 gate 快路径；仅嫌疑卡全量 enforce（防卡顿）
+      const idGate = gateCardIdentity(card);
       if (!idGate.allowed) {
         // 非目标 / 无身份：已拆徽章，不入队不绘制
         continue;
@@ -7306,11 +7504,42 @@
       return extractAnyToken(s);
     };
     try {
-      // 1) Self + ancestors: nearest token-route href wins (the row's own CA).
-      let el = card;
-      for (let i = 0; i < 10 && el; i += 1) {
+      // 热路径：自身 href（GMGN TokenItem）。缓存必须绑定 href 签名，防虚拟列表复用串 CA。
+      const selfRaw = card.getAttribute?.("href") || "";
+      if (selfRaw && selfRaw.indexOf("/token/") !== -1) {
+        try {
+          const hit = hrefTokenCache.get(card);
+          if (
+            hit &&
+            hit.href === selfRaw &&
+            Date.now() - hit.at < HREF_TOKEN_CACHE_MS
+          ) {
+            return hit.token;
+          }
+        } catch (_c) {
+          // ignore
+        }
+        const selfTok = fromRaw(selfRaw);
+        try {
+          hrefTokenCache.set(card, {
+            token: selfTok,
+            at: Date.now(),
+            href: selfRaw
+          });
+        } catch (_set) {
+          // ignore
+        }
+        return selfTok;
+      }
+    } catch (_self) {
+      // ignore
+    }
+    // 祖先 / 子树：不做缓存（路径少见，且难做可靠签名）
+    try {
+      let el = card.parentElement;
+      for (let i = 0; i < 6 && el; i += 1) {
         const raw = el.getAttribute?.("href") || "";
-        if (raw && (raw.indexOf("/token/") !== -1 || raw.indexOf("/bsc/token/") !== -1)) {
+        if (raw && raw.indexOf("/token/") !== -1) {
           const tok = fromRaw(raw);
           if (tok) return tok;
         }
@@ -7320,13 +7549,11 @@
       // ignore
     }
     try {
-      // 2) Subtree fallback only when host itself is not the TokenItem root.
       if (card.querySelector) {
         const preferred = card.querySelector(
           "[href*='/bsc/token/'][href*='0x'], [href*='/token/'][href*='0x']"
         );
-        const tok = fromRaw(preferred?.getAttribute?.("href") || "");
-        if (tok) return tok;
+        return fromRaw(preferred?.getAttribute?.("href") || "");
       }
     } catch (_errQ) {
       // ignore
@@ -7401,12 +7628,15 @@
 
   /**
    * 全页轻量校验：徽章 feeToken 必须等于宿主行的身份 CA；ffff 等非目标行不得挂徽章。
-   * 不依赖本轮候选是否扫到该行（错挂常落在「未进 needWork」的复用节点上）。
+   * 0.6.11：节流，避免每扫全页扫图标（主线程尖峰）。
    */
   function scrubIdentityMismatchedBadges() {
+    const now = Date.now();
+    if (now - lastScrubIdentityAt < SCRUB_IDENTITY_MIN_GAP_MS) return;
+    lastScrubIdentityAt = now;
     try {
       const icons = document.querySelectorAll(`[${ICON_DATA}="1"]`);
-      const lim = Math.min(icons.length, 48);
+      const lim = Math.min(icons.length, SCRUB_IDENTITY_MAX_ICONS);
       for (let i = 0; i < lim; i += 1) {
         const icon = icons[i];
         if (!(icon instanceof HTMLElement)) continue;
@@ -7688,34 +7918,51 @@
     return true;
   }
 
-  function deferTokenRetry(token) {
+  /**
+   * @param {string} token
+   * @param {"pending"|"missing"|"fail"} [reason]
+   */
+  function deferTokenRetry(token, reason) {
     const normalized = String(token || "").toLowerCase();
     if (!normalized || modeCache.has(normalized)) return;
     const previous = missingRetryState.get(normalized);
     const attempts = Math.min(8, (previous?.attempts || 0) + 1);
-    // GMGN: first two misses use short delays (new cards often land before KV/chain).
-    // Debot/Gungnir keep the conservative 15s curve unchanged.
+    const kind = reason === "pending" ? "pending" : reason === "fail" ? "fail" : "missing";
+    const hot = isGmgnHost() && isGmgnHotUnpaintedToken(normalized);
+    // GMGN：热路径用 HOT_* 表；稳态用普通表。Debot 仍 15s 曲线。
     let delayMs;
-    if (isGmgnHost() && attempts <= GMGN_MISSING_RETRY_EARLY_MS.length) {
-      delayMs = GMGN_MISSING_RETRY_EARLY_MS[attempts - 1];
-    } else if (isGmgnHost()) {
-      // After early polls: moderate backoff (async edge fill usually done <3s).
-      const expBase = Math.max(0, attempts - 1 - GMGN_MISSING_RETRY_EARLY_MS.length);
-      delayMs = Math.min(
-        15000,
-        Math.max(2000, 2000 * 2 ** Math.min(expBase, 3))
-      );
+    if (isGmgnHost()) {
+      const early =
+        kind === "pending"
+          ? hot
+            ? HOT_PENDING_RETRY_EARLY_MS
+            : GMGN_PENDING_RETRY_EARLY_MS
+          : hot
+            ? HOT_MISSING_RETRY_EARLY_MS
+            : GMGN_MISSING_RETRY_EARLY_MS;
+      if (attempts <= early.length) {
+        delayMs = early[attempts - 1];
+      } else {
+        const expBase = Math.max(0, attempts - 1 - early.length);
+        const floor = kind === "pending" ? (hot ? 1200 : 1600) : hot ? 1800 : 2200;
+        delayMs = Math.min(15000, Math.max(floor, floor * 2 ** Math.min(expBase, 3)));
+      }
+      if (hot) noteGmgnHotWork();
     } else {
       const expBase = attempts - 1;
       delayMs = Math.min(MISSING_RETRY_MAX_MS, MISSING_RETRY_BASE_MS * 2 ** expBase);
     }
-    missingRetryState.set(normalized, { attempts, retryAt: Date.now() + delayMs });
+    missingRetryState.set(normalized, {
+      attempts,
+      retryAt: Date.now() + delayMs,
+      kind
+    });
     if (isGmgnHost()) scheduleGmgnMissingRequeue(normalized, delayMs);
   }
 
   /**
    * GMGN only: when miss/fail backoff ends, re-queue if the card is still marked.
-   * Avoids waiting for the next 560–900ms scan tick after the lock expires.
+   * Avoids waiting for the next list-scan tick after the lock expires.
    */
   function scheduleGmgnMissingRequeue(token, delayMs) {
     if (!token || !isGmgnHost()) return;
@@ -7724,6 +7971,19 @@
       try {
         window.clearTimeout(prev);
       } catch (_err) {
+        // ignore
+      }
+      gmgnMissingRequeueTimers.delete(token);
+    }
+    // 定时器过多时丢掉最旧的（仍靠后续扫描入队）
+    if (gmgnMissingRequeueTimers.size >= GMGN_MISSING_REQUEUE_MAX) {
+      try {
+        const oldest = gmgnMissingRequeueTimers.keys().next().value;
+        if (oldest) {
+          window.clearTimeout(gmgnMissingRequeueTimers.get(oldest));
+          gmgnMissingRequeueTimers.delete(oldest);
+        }
+      } catch (_cap) {
         // ignore
       }
     }
@@ -7748,30 +8008,74 @@
   }
 
   /**
-   * GMGN list: token has a marked card in the top band without a badge yet.
-   * These are the 新创建 insert rows users stare at first.
+   * GMGN list: 视口上带 / 新创建列 未画正式徽章（可有 ⏳）→ 热路径。
    */
   function isGmgnHotUnpaintedToken(token) {
     if (!isGmgnHost() || isTokenDetailRoute() || !token) return false;
     try {
-      if (document.querySelector(`[${ICON_DATA}="1"][data-fee-token="${token}"]`)) {
+      // 已有正式徽章（非 loading）→ 非热
+      const icon = document.querySelector(
+        `[${ICON_DATA}="1"][data-fee-token="${token}"]`
+      );
+      if (
+        icon instanceof HTMLElement &&
+        icon.dataset.feeLoading !== "1" &&
+        document.contains(icon)
+      ) {
         return false;
       }
       const cards = document.querySelectorAll(`[${CARD_DATA}="${token}"]`);
       const lim = Math.min(cards.length, 4);
+      const leftBand = window.innerWidth / 3;
       for (let i = 0; i < lim; i += 1) {
         const card = cards[i];
         if (!(card instanceof HTMLElement)) continue;
         const r = card.getBoundingClientRect();
-        // First ~3 rows across columns (header ~150 + 3×124).
-        if (r.width >= 2 && r.height >= 2 && r.top >= 90 && r.top < 560 && r.bottom > 0) {
-          return true;
-        }
+        if (r.width < 2 || r.height < 2 || r.bottom <= 0) continue;
+        // 顶区约 3～4 行
+        if (r.top >= 80 && r.top < 620) return true;
+        // 新创建左列可见带略放宽
+        if (r.left < leftBand && r.top >= 80 && r.top < 720) return true;
       }
     } catch (_err) {
       return false;
     }
     return false;
+  }
+
+  function noteGmgnHotWork() {
+    lastGmgnHotWorkAt = Date.now();
+  }
+
+  /**
+   * 当前是否应使用热档（扫间隔/防抖/组批）。
+   * 有热 token 或 2.5s 内刚确认过热工作 → 热；否则稳态。
+   */
+  function isGmgnHotPathActive() {
+    if (!isGmgnHost() || isTokenDetailRoute()) return false;
+    if (!isAllowedScanChain()) return false;
+    try {
+      for (const t of requestQueue) {
+        if (isGmgnHotUnpaintedToken(t)) {
+          noteGmgnHotWork();
+          return true;
+        }
+      }
+    } catch (_q) {
+      // ignore
+    }
+    if (Date.now() - lastGmgnHotWorkAt < HOT_PATH_HOLD_MS) return true;
+    return false;
+  }
+
+  function gmgnListScanMinGapMs() {
+    return isGmgnHotPathActive() ? HOT_GMGN_LIST_SCAN_MIN_GAP_MS : GMGN_LIST_SCAN_MIN_GAP_MS;
+  }
+
+  function gmgnMutationDebounceMs() {
+    return isGmgnHotPathActive()
+      ? HOT_MUTATION_SCAN_DEBOUNCE_GMGN_MS
+      : MUTATION_SCAN_DEBOUNCE_GMGN_MS;
   }
 
   /**
@@ -7816,25 +8120,46 @@
   }
 
   /**
-   * 批策略：队列空 → 不请求；≥3 个新 CA → 立即 POST；否则 350ms 合并。
-   * 所有路径必须走这里，禁止 delayMs:0 狂刷。
+   * 批策略：
+   * - 稳态：≥3 立即 / 否则 350ms
+   * - 热路径（队列含视口未画）：≥1 立即 / 否则 120ms
+   * 禁止全局 delayMs:0 连打。
    */
   function maybeFlushRequestQueue(_reason) {
     if (requestQueue.size === 0) return;
-    if (requestQueue.size >= BATCH_MIN_TOKENS) {
+    let hot = false;
+    if (isGmgnHost() && !isTokenDetailRoute()) {
+      try {
+        for (const t of requestQueue) {
+          if (isGmgnHotUnpaintedToken(t)) {
+            hot = true;
+            noteGmgnHotWork();
+            break;
+          }
+        }
+      } catch (_e) {
+        // ignore
+      }
+    }
+    const minTok = hot ? HOT_BATCH_MIN_TOKENS : BATCH_MIN_TOKENS;
+    const flushMs = hot ? HOT_BATCH_FLUSH_MS : BATCH_FLUSH_MS;
+    if (requestQueue.size >= minTok) {
       scheduleBatchFlush({ immediate: true, delayMs: 0 });
     } else {
-      scheduleBatchFlush({ delayMs: BATCH_FLUSH_MS });
+      scheduleBatchFlush({ delayMs: flushMs });
     }
   }
 
   function queueToken(token) {
     const tok = String(token || "").toLowerCase();
     if (!TARGET_TOKEN_RE.test(tok)) return;
+    // 非 BSC 页禁止入队（双保险）
+    if (!isAllowedScanChain()) return;
     if (modeCache.has(tok) || isPersistentCacheHit(tok) || requestQueue.has(tok)) return;
     const missingState = missingRetryState.get(tok);
     if (missingState && Date.now() < missingState.retryAt) return;
     requestQueue.add(tok);
+    if (isGmgnHotUnpaintedToken(tok)) noteGmgnHotWork();
     debugInfo("queue", { token: tok, queueSize: requestQueue.size });
     maybeFlushRequestQueue("queue");
   }
@@ -7854,14 +8179,20 @@
     let painted = 0;
     let queued = 0;
     const seen = new Set();
+    const paintCap = isGmgnHotPathActive()
+      ? HOT_GMGN_POST_API_PAINT_CARDS
+      : GMGN_POST_API_PAINT_CARDS;
+    const paintMs = isGmgnHotPathActive()
+      ? HOT_GMGN_POST_API_PAINT_MS
+      : GMGN_POST_API_PAINT_MS;
     try {
       const seeds = collectListReturnAnchorsRoundRobin({
-        cap: GMGN_POST_API_PAINT_CARDS + 4,
+        cap: paintCap + 4,
         forceFreshRoots: false
       });
       for (let i = 0; i < seeds.length; i += 1) {
-        if (painted >= GMGN_POST_API_PAINT_CARDS) break;
-        if (performance.now() - t0 > GMGN_POST_API_PAINT_MS) break;
+        if (painted >= paintCap) break;
+        if (performance.now() - t0 > paintMs) break;
         const resolved = resolveListReturnSeed(seeds[i]);
         if (!resolved) continue;
         const { card, token } = resolved;
@@ -8054,18 +8385,26 @@
           }
         }
       }
-      // Soft-miss / async pending: CF returns cache hits immediately and fills miss in
-      // background — client must re-poll. pending[] is same as missing for retry purposes.
-      const softMiss = new Set([
-        ...(data.missing || []).map((t) => String(t).toLowerCase()),
-        ...(data.pending || []).map((t) => String(t).toLowerCase())
-      ]);
-      // Tokens we asked for but got neither result nor explicit missing (defensive).
+      // Soft-miss：CF 先回缓存，miss 后台填 → pending 需更快重试；true missing 略缓。
+      const pendingSet = new Set(
+        (data.pending || []).map((t) => String(t).toLowerCase())
+      );
+      const missingSet = new Set(
+        (data.missing || []).map((t) => String(t).toLowerCase())
+      );
+      pendingSet.forEach((t) => {
+        if (!modeCache.has(t)) deferTokenRetry(t, "pending");
+      });
+      missingSet.forEach((t) => {
+        if (!modeCache.has(t) && !pendingSet.has(t)) deferTokenRetry(t, "missing");
+      });
+      // 请求了但结果里既无 results 也无 missing/pending
       tokens.forEach((t) => {
         const k = String(t).toLowerCase();
-        if (!modeCache.has(k) && !softMiss.has(k)) softMiss.add(k);
+        if (!modeCache.has(k) && !pendingSet.has(k) && !missingSet.has(k)) {
+          deferTokenRetry(k, "missing");
+        }
       });
-      softMiss.forEach(deferTokenRetry);
     } catch (error) {
       if (generation !== batchGeneration) return;
       if (isContextInvalidError(error)) {
@@ -8078,7 +8417,7 @@
 
       // Fail open: a badge request must never create a retry loop beside the host's
       // navigation/render work. Future scans may retry after per-token backoff.
-      tokens.forEach(deferTokenRetry);
+      tokens.forEach((t) => deferTokenRetry(t, "fail"));
       activeBatchTokens = [];
 
       if (isAbortError(error)) {
@@ -8697,11 +9036,10 @@
     } catch (_ls) {
       // ignore
     }
-    // GMGN：开启屏蔽时临时主线程 WSS（仅本功能占用；关闭时清理）
-    // 不关浏览器全局 SharedWorker，只写 gmgn.ai 页 localStorage
+    // GMGN：仅 BSC 开启屏蔽时写 disableShareWorker；他链不污染
     try {
       const ownKey = "flapFeeInfo.ownedDisableShareWorker";
-      if (prefs.enabled) {
+      if (prefs.enabled && isAllowedScanChain()) {
         localStorage.setItem("disableShareWorker", "true");
         localStorage.setItem(ownKey, "1");
       } else if (localStorage.getItem(ownKey) === "1") {
@@ -11629,7 +11967,7 @@
       : isTokenDetailRoute()
         ? MUTATION_SCAN_DEBOUNCE_TOKEN_LOADING_MS
         : isGmgnHost()
-          ? MUTATION_SCAN_DEBOUNCE_GMGN_MS
+          ? gmgnMutationDebounceMs()
           : MUTATION_SCAN_DEBOUNCE_MS;
     mutationDebounceTimer = window.setTimeout(() => {
       mutationDebounceTimer = null;

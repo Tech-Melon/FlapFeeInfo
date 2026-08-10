@@ -38,10 +38,24 @@
     } catch (_ls) {
       // ignore
     }
-    // 2b) GMGN 列表过滤依赖主线程 WSS：开启屏蔽时临时写入，关闭时仅清理我们占用的
+    // 2b) 仅 BSC 页开启屏蔽时写 disableShareWorker（robinhood 等不写）
     try {
       const ownKey = "flapFeeInfo.ownedDisableShareWorker";
-      if (p.enabled === true) {
+      let isBsc = false;
+      try {
+        const u = new URL(location.href);
+        const q = String(u.searchParams.get("chain") || "").toLowerCase();
+        const path = String(u.pathname || "");
+        isBsc =
+          q === "bsc" ||
+          /^\/bsc(\/|$)/i.test(path) ||
+          /\/bsc\/token\//i.test(path) ||
+          /\/token\/bsc(?:\/|$)/i.test(path);
+        if (q && q !== "bsc") isBsc = false;
+      } catch (_u) {
+        isBsc = false;
+      }
+      if (p.enabled === true && isBsc) {
         localStorage.setItem("disableShareWorker", "true");
         localStorage.setItem(ownKey, "1");
       } else if (localStorage.getItem(ownKey) === "1") {

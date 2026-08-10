@@ -417,6 +417,11 @@ python tools/ctl.py watchdog-run
   - `0.6.5`：行身份=自身 CA（禁多 href 优先 7777）；ffff 等非目标永不挂徽章；`findCardsByCa`；新创建 miss 重试 400ms/1.2s
   - `0.6.6`：CF/后端 async-cache-first（缓存秒回 + 后台填 + pending 去重/5min·500 清理）；插件 poll pending
   - `0.6.7`：后端 QN 走 httpx keep-alive；扫卡 `enforceIdentity` 严禁错徽章（fee≠行 CA 立刻拆）
+  - `0.6.9`：仅 BSC 生效（`?chain=bsc` / `/bsc/token` / Debot `/token/bsc`）；robinhood 等立即清徽章；K 线+内嵌战壕保留
+  - `0.6.10`：Debot 双站 `debot.ai` + `gungnir.bot` 对齐 `/meme?chain=bsc` 与 `/token/bsc` 门控
+  - `0.6.11`：流畅优化 — mutation/扫卡/miss 重试对齐 0.6.2；`gateCardIdentity` 快路径 + href 短缓存 + scrub 节流；保留防错徽章
+  - `0.6.12`：`pending`/`missing` 分轨重试（pending 0.6/1.4/2.8s，missing 1/2.2/4s）；requeue 定时器上限 24
+  - `0.6.13`：Hot/Steady 双轨（热：批 1/120ms、防抖 220、扫 gap 360、pending 0.4s 起）；仅 BSC（他链含 robinhood 全关）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`
