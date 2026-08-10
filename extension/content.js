@@ -7,6 +7,7 @@
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777)/i;
   const GMGN_TRENCH_ROOT_SELECTOR =
     "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100";
+  // 0.6.4: js-mcp 实锤 GMGN TokenItem 用 div[href=/bsc/token/…] 非 a — extractCardHrefToken 必须读任意 [href].
   // 0.6.3: 新币徽章 — href 优先于 short CA，禁虚拟列表复用旧徽章；无 /modes 仅 ⏳，有正确值才出真徽章.
   // 0.5.22: GMGN-only batch priority for top viewport + flush when scan truncated; Debot untouched.
   // 0.5.21: GMGN-only new-card latency (soft debounce / early miss retry / cache paint); Debot untouched.
@@ -339,8 +340,9 @@
     sol: "SOL",
     tron: "TRX"
   };
+  // GMGN TokenItem is often div[href="/bsc/token/0x…7777"] (not always <a>) — include bare [href*].
   const SUFFIX_SELECTORS =
-    "a[href*='8888'], a[href*='7777'], [title*='8888'], [title*='7777'], " +
+    "[href*='8888'], [href*='7777'], [title*='8888'], [title*='7777'], " +
     "[aria-label*='8888'], [aria-label*='7777'], [data-token*='8888'], [data-token*='7777'], " +
     "[data-address*='8888'], [data-address*='7777']";
 
@@ -3379,9 +3381,10 @@
         ? Math.floor(requestedOffset)
         : 0;
     const forceFreshRoots = options.forceFreshRoots !== false;
+    // Include div[href] (GMGN TokenItem) — a-only misses 新创建 seeds (js-mcp 0.6.4).
     const linkSel =
-      "a[href*='/token/'][href*='8888'], a[href*='/token/'][href*='7777'], " +
-      "a[href*='/bsc/token/'][href*='8888'], a[href*='/bsc/token/'][href*='7777']";
+      "[href*='/token/'][href*='8888'], [href*='/token/'][href*='7777'], " +
+      "[href*='/bsc/token/'][href*='8888'], [href*='/bsc/token/'][href*='7777']";
     const buckets = [[], [], []];
     const seenKey = new Set();
     const pushSeed = (el, key) => {
@@ -3468,12 +3471,13 @@
       (node.getAttribute && node.getAttribute("href")) || node.href || ""
     );
     if (!hrefTok && node.querySelector) {
+      // div[href] / a[href] token routes (GMGN + Debot)
       const a = node.querySelector(
-        "a[href*='/token/'][href*='0x'], a[href*='/bsc/token/'][href*='0x'], a[href*='0x']"
+        "[href*='/token/'][href*='0x'], [href*='/bsc/token/'][href*='0x'], [href*='0x']"
       );
       if (a) {
         const h = a.getAttribute("href") || "";
-        if (!/flap\.sh|bscscan|etherscan/i.test(h)) {
+        if (!/flap\.sh|bscscan|etherscan|lens\.google/i.test(h)) {
           hrefTok = normalizeToken(h);
         }
       }
@@ -3483,7 +3487,9 @@
       (siteStrategy.findCard && siteStrategy.findCard(node)) ||
       (hrefTok
         ? quickClimbCardFromTokenLink(
-            node.tagName === "A" ? node : node.querySelector?.("a[href*='0x']") || node
+            node.getAttribute?.("href")
+              ? node
+              : node.querySelector?.("[href*='0x']") || node
           )
         : null);
     if (!(card instanceof HTMLElement)) return null;
@@ -6020,13 +6026,10 @@
       }
 
       // list-return: token from href hint first (skip extractCardToken deep walk).
+      // GMGN: div[href=/bsc/token/…] — must use extractCardHrefToken, not a-only.
       let token =
         listReturnTokenHint.get(card) ||
-        (listReturnSoft
-          ? normalizeToken(
-              card.querySelector?.("a[href*='0x']")?.getAttribute?.("href") || ""
-            )
-          : null);
+        (listReturnSoft ? extractCardHrefToken(card) : null);
       if (!token) token = siteStrategy.extractToken(card);
       if (!token) {
         // 0.5.3: never wipe GMGN K-line header mark on transient extract miss
@@ -6931,17 +6934,18 @@
               ? GMGN_STEADY_CANDIDATES * 2
               : MAX_CANDIDATES_PER_SCAN * 2;
       // Prefer site token routes over external flap.sh icons (js-mcp: flap.sh 18×18 noise).
+      // 0.6.4: GMGN TokenItem is div[href] — do not require <a>.
       root
         .querySelectorAll(
-          "a[href*='/token/'][href*='8888'], a[href*='/token/'][href*='7777'], " +
-            "a[href*='/bsc/token/'][href*='8888'], a[href*='/bsc/token/'][href*='7777']"
+          "[href*='/token/'][href*='8888'], [href*='/token/'][href*='7777'], " +
+            "[href*='/bsc/token/'][href*='8888'], [href*='/bsc/token/'][href*='7777']"
         )
         .forEach((n) => addNode(n, 2));
       // 0.4.42 GMGN: also CA hrefs (flap/site) but NEVER leaf textContent walks.
       if (gmgnLite && !listReturnSoft) {
-        root.querySelectorAll("a[href*='8888'], a[href*='7777']").forEach((n) => {
+        root.querySelectorAll("[href*='8888'], [href*='7777']").forEach((n) => {
           const href = (n.getAttribute && n.getAttribute("href")) || "";
-          if (/flap\.sh|bscscan|etherscan/i.test(href)) addNode(n, 1);
+          if (/flap\.sh|bscscan|etherscan|lens\.google/i.test(href)) addNode(n, 1);
           else addNode(n, 2);
         });
         return;
@@ -7158,32 +7162,62 @@
   /**
    * Token-route href on the card (SPA/virtual-list identity source of truth).
    * Prefer this over short-CA text, which often lags one paint after row recycle.
+   *
+   * js-mcp 0.6.4: GMGN 战壕 TokenItem 是 **div[href="/bsc/token/0x…"]**，不是 <a>。
+   * 只查 a[href] 会恒为 null → 退回 short CA → 复用行长时间挂旧徽章（用户实测先错后对）。
+   * 多 href 时优先 7777/8888 目标 CA（避免先命中站内无关 0x 链接）。
    */
   function extractCardHrefToken(card) {
-    if (!(card instanceof HTMLElement) || !card.querySelector) return null;
-    const fromEl = (el) => {
-      if (!el) return null;
-      try {
-        return extractAnyToken(el.getAttribute?.("href") || el.href || "");
-      } catch (_err) {
-        return null;
-      }
+    if (!(card instanceof HTMLElement)) return null;
+    const fromRaw = (raw) => {
+      if (!raw) return null;
+      const s = String(raw);
+      // External icon links on the same card (flap.sh / explorers) are not identity.
+      if (/flap\.sh|bscscan|etherscan|lens\.google/i.test(s)) return null;
+      if (s.indexOf("0x") === -1) return null;
+      return extractAnyToken(s);
+    };
+    /** @type {string[]} */
+    const candidates = [];
+    const push = (tok) => {
+      if (tok && !candidates.includes(tok)) candidates.push(tok);
     };
     try {
-      if (card.matches?.("a[href*='/token/'], a[href*='/bsc/token/']")) {
-        const selfTok = fromEl(card);
-        if (selfTok) return selfTok;
-      }
+      // 1) Card root itself (GMGN TokenItem.tsx root often has href attribute).
+      push(fromRaw(card.getAttribute?.("href") || ""));
     } catch (_errSelf) {
       // ignore
     }
-    // Prefer explicit token routes (avoid random 0x explorer/share links on the card).
-    const preferred = card.querySelector(
-      "a[href*='/token/'][href*='0x'], a[href*='/bsc/token/'][href*='0x']"
-    );
-    const preferredTok = fromEl(preferred);
-    if (preferredTok) return preferredTok;
-    return null;
+    try {
+      // 2) Descendants: any [href] with 0x (div or a — NOT a-only). Cap walk.
+      if (card.querySelectorAll) {
+        const nodes = card.querySelectorAll(
+          "[href*='/token/'][href*='0x'], [href*='/bsc/token/'][href*='0x'], [href*='0x']"
+        );
+        const lim = Math.min(nodes.length, 12);
+        for (let i = 0; i < lim; i += 1) {
+          push(fromRaw(nodes[i].getAttribute?.("href") || ""));
+        }
+      }
+    } catch (_errQ) {
+      // ignore
+    }
+    // 3) Climb parents: badge host may be nested under TokenItem div[href].
+    try {
+      let p = card.parentElement;
+      for (let i = 0; i < 6 && p; i += 1) {
+        push(fromRaw(p.getAttribute?.("href") || ""));
+        p = p.parentElement;
+      }
+    } catch (_errP) {
+      // ignore
+    }
+    if (!candidates.length) return null;
+    // Prefer Flap tax targets; else first full CA (caller may reject non-target).
+    for (let i = 0; i < candidates.length; i += 1) {
+      if (TARGET_TOKEN_RE.test(candidates[i])) return candidates[i];
+    }
+    return candidates[0];
   }
 
   function extractCardTokenFromAttrs(card) {
@@ -10333,13 +10367,14 @@
         return false;
       }
       if (live == null) {
-        const hrefEl = card?.querySelector?.(
-          "a[href*='/token/'][href*='0x'], a[href*='/bsc/token/'][href*='0x']"
-        );
-        const hrefTok = hrefEl
-          ? extractAnyToken(hrefEl.getAttribute("href") || hrefEl.href || "")
-          : null;
+        // div[href] 或 a[href] 均可（0.6.4）
+        const hrefTok = extractCardHrefToken(card);
         if (hrefTok && !TARGET_TOKEN_RE.test(hrefTok)) {
+          removeAllBadgesForCard(card, tok);
+          return false;
+        }
+        // href 已是另一个 7777/8888 → 禁止用旧 tok 画徽章
+        if (hrefTok && TARGET_TOKEN_RE.test(hrefTok) && hrefTok !== tok) {
           removeAllBadgesForCard(card, tok);
           return false;
         }
