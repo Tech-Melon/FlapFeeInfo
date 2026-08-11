@@ -16,6 +16,7 @@
     '[data-sentry-source-file="SearchModalDetail.tsx"]';
   // 0.7.12: watch scoped TokenItem href swaps so virtual rows repaint after reuse.
   // 0.7.11: fixed GMGN surfaces, scoped observers, and current-column scroll repair.
+  // 0.7.15: GMGN token->trench return waits for replacement PumpSub roots; accept full-width home roots.
   // 0.7.9: K 线战壕短地址先爬真实卡片；停滚分片补绘并复用相邻徽章
   // 0.7.8: GMGN 战壕/钱包追踪滚动热路径降载；禁区停滚不再恢复扫描
   // 0.7.5: K 线侧栏下滑徽章饥饿 — truncated 禁 light 死循环；token 页视口快补；dirty 兜底
@@ -309,6 +310,13 @@
   // URL returns before the K-line React subtree leaves. Wait for a real multi-row trench
   // surface before any list paint so the old embedded sidebar cannot be mistaken for home.
   const LIST_RETURN_TRANSITION_MS = 2500;
+  // GMGN desktop can render both trench columns inside one PumpSub root. Cache the
+  // structural probe briefly so cache-first return does not wait for the timeout path.
+  const GMGN_TRENCH_ROOT_CACHE_MS = 180;
+  // Wallet/favorites classification is layout-sensitive and runs on the scroll hot path.
+  // Cache negative probes for one frame and positive probes longer (blocking is safer).
+  const GMGN_PANEL_PROBE_FALSE_CACHE_MS = 32;
+  const GMGN_PANEL_PROBE_TRUE_CACHE_MS = 500;
   // Healthy guardians only validate route/header state. Mutation observers own repairs.
   const TOKEN_GUARDIAN_HEALTHY_MS = 5000;
   const TOKEN_GUARDIAN_HIDDEN_MS = 10000;
@@ -925,6 +933,8 @@
   let lastScrubHrefAt = 0;
   let lastViewportQuickAt = 0;
   let badgeForbiddenCache = new WeakMap();
+  /** GMGN panel classification cache; replaced on SPA route changes. */
+  let gmgnPanelProbeCache = new WeakMap();
   /** GMGN only: suppress mutation scans until this wall time (scroll settle). */
   let gmgnScrollQuietUntil = 0;
   /** GMGN only: one-shot scan after scroll stops. */
@@ -987,6 +997,9 @@
   let listReturnTransitionTimer = null;
   /** Short-lived GMGN transition probe cache; prevents repeated layout reads during mount bursts. */
   let gmgnTrenchProbeCache = { at: 0, roots: [], ready: false };
+  let gmgnTrenchRootsCache = { at: 0, roots: [] };
+  /** PumpSub roots still owned by the token page when a list return begins. */
+  let gmgnOutgoingTrenchRoots = new WeakSet();
   /** Throttle immediate mutation header paint. */
   let debotHeaderMutPaintAt = 0;
   /** Wall time of last force full-scan (not light). */
@@ -3075,59 +3088,52 @@
    * GMGN 左侧「钱包 / 追踪 / 喊单 / 监控」面板（含弹层宽栏）。
    * 主战壕列在 mid 区；此栏 left≈0 且含追踪语义。
    */
-  function isGmgnWalletTrackPanel(node) {
+  function isGmgnWalletTrackPanelUncached(node) {
     if (!(node instanceof HTMLElement) || !isGmgnHost()) return false;
     try {
       let p = node;
       for (let i = 0; i < 18 && p && p !== document.body; i++) {
-        const pr = p.getBoundingClientRect();
-        if (pr.width < 180 || pr.height < 160) {
-          p = p.parentElement;
-          continue;
+        if (
+          p.matches?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR) ||
+          p.matches?.(GMGN_FIXED_SEARCH_ROOT_SELECTOR)
+        ) {
+          return false;
         }
-        const compact = (p.textContent || "").slice(0, 900).replace(/\s+/g, "");
+        const rawText = p.textContent || "";
+        // Stop before the full-page shell. It contains footer labels such as
+        // 钱包追踪/监控/喊单 and used to force a synchronous full-page layout.
+        if (rawText.length > 5000) break;
+        const compact = rawText.slice(0, 900).replace(/\s+/g, "");
         const walletAt = compact.indexOf("钱包");
         const trackAt = compact.indexOf("追踪", Math.max(0, walletAt + 2));
         const callAt = compact.indexOf("喊单", Math.max(0, trackAt + 2));
         const monitorAt = compact.indexOf("监控", Math.max(0, callAt + 2));
         const noteAt = compact.indexOf("备注", Math.max(0, monitorAt + 2));
         const trenchTitle = /新创建|即将打满|已开盘|已迁移/.test(compact.slice(0, 260));
+        if (trenchTitle) return false;
         const semanticHits = [walletAt, trackAt, callAt, monitorAt, noteAt].filter(
           (at) => at >= 0
         ).length;
-
-        // GMGN's resizable wallet stream can sit in the middle of a K-line layout.
-        // Its own tab strip is stable even when the panel width/position changes.
+        const dollars = (compact.match(/\$\s*\d/g) || []).length;
+        const percents = (compact.match(/[+-]?\d+(?:\.\d+)?%/g) || []).length;
+        const hasNarrowWalletSignal =
+          !trenchTitle &&
+          !/(?:Tax|MC|总税率)/i.test(compact) &&
+          dollars >= 2 &&
+          percents >= 2;
+        const structuralHint = /wallet|track|follow|monitor|watch/i.test(
+          `${p.getAttribute("data-sentry-source-file") || ""} ${String(p.className || "")}`
+        );
+        // A real wallet panel exposes several stable tab semantics. Main trench
+        // roots are rejected first, while narrow feeds can also use their source
+        // metadata or repeated wallet-value shape. No layout read is needed.
+        if (!trenchTitle && semanticHits >= 3) return true;
         if (
-          pr.width >= 220 &&
-          pr.width < window.innerWidth * 0.86 &&
-          pr.height >= 180 &&
-          semanticHits >= 3 &&
-          !trenchTitle
+          !trenchTitle &&
+          walletAt >= 0 &&
+          (semanticHits >= 2 || structuralHint || hasNarrowWalletSignal)
         ) {
           return true;
-        }
-
-        // Narrow wallet feed: the tab strip may be outside this subtree or absent
-        // in the compact layout. Repeated wallet amounts/percentages distinguish it
-        // from the three trench columns, which expose Tax/MC labels.
-        if (
-          pr.left < Math.max(120, window.innerWidth * 0.08) &&
-          pr.width >= 180 &&
-          pr.width <= 420 &&
-          pr.height >= 200
-        ) {
-          if (!trenchTitle && semanticHits >= 1) return true;
-          const dollars = (compact.match(/\$\s*\d/g) || []).length;
-          const percents = (compact.match(/[+-]?\d+(?:\.\d+)?%/g) || []).length;
-          if (
-            !trenchTitle &&
-            !/(?:Tax|MC|总税率)/i.test(compact) &&
-            dollars >= 2 &&
-            percents >= 2
-          ) {
-            return true;
-          }
         }
         p = p.parentElement;
       }
@@ -3135,6 +3141,21 @@
       // ignore
     }
     return false;
+  }
+
+  function isGmgnWalletTrackPanel(node) {
+    if (!(node instanceof HTMLElement) || !isGmgnHost()) return false;
+    const now = performance.now();
+    const cached = gmgnPanelProbeCache.get(node);
+    if (cached && cached.width === window.innerWidth) {
+      const ttl = cached.value
+        ? GMGN_PANEL_PROBE_TRUE_CACHE_MS
+        : GMGN_PANEL_PROBE_FALSE_CACHE_MS;
+      if (now - cached.at < ttl) return cached.value;
+    }
+    const value = isGmgnWalletTrackPanelUncached(node);
+    gmgnPanelProbeCache.set(node, { at: now, width: window.innerWidth, value });
+    return value;
   }
 
   /**
@@ -3146,21 +3167,20 @@
     try {
       let p = node;
       for (let i = 0; i < 18 && p && p !== document.body; i++) {
-        const pr = p.getBoundingClientRect();
         if (
-          pr.width >= 220 &&
-          pr.width < window.innerWidth * 0.72 &&
-          pr.height >= 180
+          p.matches?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR) ||
+          p.matches?.(GMGN_FIXED_SEARCH_ROOT_SELECTOR)
         ) {
-          const compact = (p.textContent || "")
-            .slice(0, 260)
-            .replace(/\s+/g, "");
-          if (
-            compact.slice(0, 80).includes("收藏") &&
-            /币种.*交易数.*价格.*24h%/i.test(compact)
-          ) {
-            return true;
-          }
+          return false;
+        }
+        const rawText = p.textContent || "";
+        if (rawText.length > 5000) break;
+        const compact = rawText.slice(0, 260).replace(/\s+/g, "");
+        if (
+          compact.slice(0, 80).includes("收藏") &&
+          /币种.*交易数.*价格.*24h%/i.test(compact)
+        ) {
+          return true;
         }
         p = p.parentElement;
       }
@@ -3293,6 +3313,7 @@
 
   function armTokenEnterTransition() {
     listReturnTransitionUntil = 0;
+    gmgnOutgoingTrenchRoots = new WeakSet();
     if (listReturnTransitionTimer) {
       window.clearTimeout(listReturnTransitionTimer);
       listReturnTransitionTimer = null;
@@ -3344,7 +3365,30 @@
       }
       const roots = getMountedGmgnTrenchRoots();
       const columns = new Set(roots.map((root) => listColumnBucket(root)));
-      const ready = roots.length >= 2 && columns.size >= 2;
+      const freshFixedRootReady = roots.some(
+        (root) =>
+          root.matches?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR) &&
+          !gmgnOutgoingTrenchRoots.has(root)
+      );
+      // GMGN's current desktop layout nests both trench columns in one PumpSub
+      // root. Treat two real scroll panes inside that root as mounted; requiring
+      // two outer roots makes cache-first return wait for LIST_RETURN_TRANSITION_MS.
+      let nestedColumns = 0;
+      if (roots.length === 1) {
+        try {
+          nestedColumns = [...roots[0].querySelectorAll(".gmgn-scrollbar")].filter((el) => {
+            const r = el.getBoundingClientRect();
+            return r.width >= 240 && r.height >= 200 && r.bottom > 0 && r.top < window.innerHeight;
+          }).length;
+        } catch (_err) {
+          nestedColumns = 0;
+        }
+      }
+      const embeddedHomeReady = roots.length === 1 && nestedColumns >= 2;
+      const ready =
+        freshFixedRootReady ||
+        (roots.length >= 2 && columns.size >= 2) ||
+        embeddedHomeReady;
       gmgnTrenchProbeCache = { at: now, roots, ready };
       return ready;
     }
@@ -3409,6 +3453,7 @@
     if (isTokenDetailRoute()) return false;
     if (!force && !hasMountedTrenchSurface()) return false;
     listReturnTransitionUntil = 0;
+    gmgnOutgoingTrenchRoots = new WeakSet();
     if (listReturnTransitionTimer) {
       window.clearTimeout(listReturnTransitionTimer);
       listReturnTransitionTimer = null;
@@ -3441,8 +3486,33 @@
 
   function armListReturnTransition(reason) {
     finishTokenEnterTransition();
+    if (!listReturnTransitionUntil && isGmgnHost()) {
+      const outgoing = new WeakSet();
+      try {
+        document.querySelectorAll(GMGN_FIXED_TRENCH_ROOT_SELECTOR).forEach((root) => {
+          if (!(root instanceof HTMLElement)) return;
+          const r = root.getBoundingClientRect();
+          // Token-page trench columns are compact. The current home layout replaces
+          // them with viewport-width PumpSub roots after the URL has already changed.
+          if (
+            r.width >= 240 &&
+            r.width <= window.innerWidth * 0.55 &&
+            r.height >= 200 &&
+            r.right > 0 &&
+            r.left < window.innerWidth
+          ) {
+            outgoing.add(root);
+          }
+        });
+      } catch (_err) {
+        // If the outgoing subtree already detached, the next fixed root is safe.
+      }
+      gmgnOutgoingTrenchRoots = outgoing;
+    }
     listReturnTransitionUntil = Date.now() + LIST_RETURN_TRANSITION_MS;
     gmgnTrenchProbeCache = { at: 0, roots: [], ready: false };
+    gmgnTrenchRootsCache = { at: 0, roots: [] };
+    gmgnPanelProbeCache = new WeakMap();
     stopListReturnDomWatch();
     scanTimerIds.forEach((id) => window.clearTimeout(id));
     scanTimerIds = [];
@@ -4592,6 +4662,14 @@
    * embedded trench sidebar that can remain mounted while GMGN leaves the K-line.
    */
   function getMountedGmgnTrenchRoots() {
+    const now = Date.now();
+    if (
+      now - gmgnTrenchRootsCache.at < GMGN_TRENCH_ROOT_CACHE_MS &&
+      gmgnTrenchRootsCache.roots.length > 0 &&
+      gmgnTrenchRootsCache.roots.every((root) => root?.isConnected)
+    ) {
+      return gmgnTrenchRootsCache.roots;
+    }
     const candidates = [];
     try {
       const exact = Array.from(
@@ -4602,14 +4680,19 @@
         : Array.from(document.querySelectorAll(GMGN_TRENCH_ROOT_SELECTOR));
       rootNodes.forEach((root) => {
         if (!(root instanceof HTMLElement)) return;
+        if (isListReturnTransitionActive() && gmgnOutgoingTrenchRoots.has(root)) return;
         if (isGmgnWalletTrackPanel(root) || isGmgnFavoritesPanel(root)) return;
         const r = root.getBoundingClientRect();
+        const fixedRoot = root.matches?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR);
+        const maxWidth = fixedRoot ? window.innerWidth * 1.05 : window.innerWidth * 0.48;
         if (
           r.width < 240 ||
-          r.width > window.innerWidth * 0.48 ||
+          r.width > maxWidth ||
           r.height < 200 ||
           r.bottom <= 0 ||
-          r.top >= window.innerHeight
+          r.top >= window.innerHeight ||
+          r.right <= 0 ||
+          r.left >= window.innerWidth
         ) {
           return;
         }
@@ -4644,6 +4727,7 @@
         roots.push(candidate.root);
       }
     }
+    gmgnTrenchRootsCache = { at: now, roots };
     return roots;
   }
 
@@ -6182,6 +6266,8 @@
     scanRootsCache = { at: 0, roots: [] };
     gmgnSteadyRoundRobinRow = 0;
     gmgnTrenchProbeCache = { at: 0, roots: [], ready: false };
+    gmgnTrenchRootsCache = { at: 0, roots: [] };
+    gmgnPanelProbeCache = new WeakMap();
     taxRateLabelCache = { el: null, at: 0 };
     gmgnHeaderBadgeCache = { token: "", el: null };
     // GMGN scroll quiet should not block SPA progressive settle.
