@@ -9,7 +9,7 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 49;
+  const HOOK_VER = 50;
   /** 仅当列表过滤开启时，由插件临时写入，关闭时清理 */
   const OWNED_DISABLE_SW = "flapFeeInfo.ownedDisableShareWorker";
   const PREFS_ATTR = "data-flap-tax-recv";
@@ -19,9 +19,23 @@
   const SUFFIX_MAX_RULES = 24;
   /** 与 content.js 一致：Flap 8888/7777 + Four.meme ffff */
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
+  /**
+   * 新创建保留池（仅过滤开启时）：
+   * - 宿主 API 常在 ~2 分钟后把币移出 new_creation；开屏蔽后 disableShareWorker，
+   *   列表不再靠 SW 累积，币会「到点消失」。
+   * - 本池记住已见过的非屏蔽行：最多保留 NC_KEEP_MAX_AGE_MS，展示上限 NC_KEEP_MAX_CARDS。
+   * - 满卡时优先保留更新鲜的（按 lastSeen）；超时一律丢弃。不再无限垫 1h 旧币。
+   */
+  const NC_KEEP_MAX_AGE_MS = 10 * 60 * 1000;
+  const NC_KEEP_MAX_CARDS = 40;
   const prev = Number(window.__flapFeeInfoPageHook) || 0;
   if (prev >= HOOK_VER) return;
   window.__flapFeeInfoPageHook = HOOK_VER;
+
+  /**
+   * @type {Map<string, { item: object, firstSeen: number, lastSeen: number, kind: string }>}
+   */
+  const ncKeepPool = new Map();
 
   const NativeWebSocket = window.WebSocket;
   const NativeSharedWorker = window.SharedWorker;
@@ -660,6 +674,10 @@
       if (isTok(item) && hideFn(item)) {
         removed += 1;
         try {
+          const gone = String(gmgnAddr(item) || item.contract || "")
+            .trim()
+            .toLowerCase();
+          if (gone) ncKeepPool.delete(gone);
           noteRemovedSample(gmgnAddr(item) || item.contract, gmgnTal(item), "col");
         } catch (_nr) {
           // ignore
@@ -671,6 +689,173 @@
     }
     arr.length = w;
     return removed;
+  }
+
+  function ncItemAddr(item, kind) {
+    if (!item || typeof item !== "object") return "";
+    if (kind === "debot") {
+      return String(item.contract || "")
+        .trim()
+        .toLowerCase();
+    }
+    return String(gmgnAddr(item) || item.contract || item.address || "")
+      .trim()
+      .toLowerCase();
+  }
+
+  function cloneNcItem(item) {
+    try {
+      return JSON.parse(JSON.stringify(item));
+    } catch (_e) {
+      return item;
+    }
+  }
+
+  function pruneNcKeepPool() {
+    const now = Date.now();
+    for (const [addr, ent] of [...ncKeepPool.entries()]) {
+      if (!ent || now - ent.firstSeen > NC_KEEP_MAX_AGE_MS) {
+        ncKeepPool.delete(addr);
+        continue;
+      }
+      // 偏好变更后：池内项若已应屏蔽则丢掉
+      try {
+        const item = ent.item;
+        if (!item) {
+          ncKeepPool.delete(addr);
+          continue;
+        }
+        if (shouldHideByCustomSuffix(addr)) {
+          ncKeepPool.delete(addr);
+          continue;
+        }
+        if (ent.kind === "debot") {
+          if (debotRowHide(item)) ncKeepPool.delete(addr);
+        } else if (isGmgnTokenItem(item) && gmgnTokenHide(item)) {
+          ncKeepPool.delete(addr);
+        }
+      } catch (_p) {
+        // ignore single entry
+      }
+    }
+    // 硬顶：池过大时丢掉最早 firstSeen
+    if (ncKeepPool.size > NC_KEEP_MAX_CARDS * 2) {
+      const ordered = [...ncKeepPool.entries()].sort(
+        (a, b) => (a[1]?.firstSeen || 0) - (b[1]?.firstSeen || 0)
+      );
+      while (ncKeepPool.size > NC_KEEP_MAX_CARDS * 2 && ordered.length) {
+        const [addr] = ordered.shift();
+        ncKeepPool.delete(addr);
+      }
+    }
+  }
+
+  /**
+   * 只记入保留池（delta 瘦身行 / 存活帧）。不改 arr。
+   * 若对象字段很少（纯 delta），仅刷新 lastSeen，不覆盖已有完整 item。
+   */
+  function rememberNewCreationItems(arr, kind) {
+    if (!Array.isArray(arr) || !prefsOn()) return;
+    const now = Date.now();
+    const k = kind === "debot" ? "debot" : "gmgn";
+    for (let i = 0; i < arr.length; i++) {
+      const item = arr[i];
+      const addr = ncItemAddr(item, kind);
+      if (!addr || !/^0x[a-f0-9]{40}$/.test(addr)) continue;
+      const prevEnt = ncKeepPool.get(addr);
+      const keys = item && typeof item === "object" ? Object.keys(item).length : 0;
+      // HTTP 全量行通常字段多；delta 常只有 c/a/f 等
+      const looksFull = keys >= 6;
+      if (prevEnt && !looksFull) {
+        prevEnt.lastSeen = now;
+        continue;
+      }
+      ncKeepPool.set(addr, {
+        item: cloneNcItem(item),
+        firstSeen: prevEnt && Number.isFinite(prevEnt.firstSeen) ? prevEnt.firstSeen : now,
+        lastSeen: now,
+        kind: k
+      });
+    }
+    pruneNcKeepPool();
+  }
+
+  /**
+   * 按 10 分钟 / 满 NC_KEEP_MAX_CARDS 回填到 HTTP 全量 tokens 数组。
+   * @returns {number} padded count
+   */
+  function padNewCreationArray(arr, kind) {
+    if (!Array.isArray(arr) || !prefsOn()) return 0;
+    rememberNewCreationItems(arr, kind);
+    pruneNcKeepPool();
+    const now = Date.now();
+    const have = new Set();
+    for (let i = 0; i < arr.length; i++) {
+      const a = ncItemAddr(arr[i], kind);
+      if (a) have.add(a);
+    }
+    const k = kind === "debot" ? "debot" : "gmgn";
+    const cands = [];
+    for (const [addr, ent] of ncKeepPool) {
+      if (have.has(addr)) continue;
+      if (ent.kind && ent.kind !== k) continue;
+      if (now - ent.firstSeen > NC_KEEP_MAX_AGE_MS) continue;
+      // 缺完整快照的不垫（delta 瘦行无法当卡片）
+      if (!ent.item || Object.keys(ent.item).length < 4) continue;
+      cands.push([addr, ent]);
+    }
+    // 较新 lastSeen 优先垫回（live 顺序在前，垫在列尾）
+    cands.sort((a, b) => (b[1].lastSeen || 0) - (a[1].lastSeen || 0));
+    let padded = 0;
+    for (let i = 0; i < cands.length; i++) {
+      if (arr.length >= NC_KEEP_MAX_CARDS) break;
+      const [addr, ent] = cands[i];
+      arr.push(cloneNcItem(ent.item));
+      have.add(addr);
+      padded += 1;
+    }
+    try {
+      window.__flapFeeNcKeep = {
+        pool: ncKeepPool.size,
+        padded,
+        maxAgeMs: NC_KEEP_MAX_AGE_MS,
+        maxCards: NC_KEEP_MAX_CARDS,
+        t: now
+      };
+    } catch (_dbg) {
+      // ignore
+    }
+    return padded;
+  }
+
+  /** HTTP 全量：先记再垫 */
+  function rememberAndPadNewCreation(arr, kind) {
+    return padNewCreationArray(arr, kind);
+  }
+
+  /** delta.r 移除列表：仍在保留期内的 CA 不让宿主删掉 */
+  function filterNcDeltaRemovesInPlace(data) {
+    if (!data || !Array.isArray(data.r) || data.r.length === 0) return 0;
+    if (ncKeepPool.size === 0) return 0;
+    pruneNcKeepPool();
+    const now = Date.now();
+    let kept = 0;
+    let w = 0;
+    for (let i = 0; i < data.r.length; i++) {
+      const addr = String(data.r[i] || "")
+        .trim()
+        .toLowerCase();
+      if (addr && ncKeepPool.has(addr)) {
+        const ent = ncKeepPool.get(addr);
+        if (ent && now - ent.firstSeen <= NC_KEEP_MAX_AGE_MS) {
+          kept += 1;
+          continue;
+        }
+      }
+      data.r[w++] = data.r[i];
+    }
+    data.r.length = w;
+    return kept;
   }
 
   /**
@@ -685,6 +870,7 @@
       seen.add(block);
       if (Array.isArray(block.tokens)) {
         removed += filterTokenArrayInPlace(block.tokens, "gmgn");
+        rememberAndPadNewCreation(block.tokens, "gmgn");
       }
     };
     const tryObj = (o, depth) => {
@@ -763,6 +949,10 @@
         data.t[w++] = row;
       }
       data.t.length = w;
+      // 存活增量只记地址/刷新 lastSeen，不 pad 进 delta.t（避免污染增量语义）
+      if (data.t.length > 0) {
+        rememberNewCreationItems(data.t, "gmgn");
+      }
       // a = 本帧 add 列表：剔除屏蔽地址（尾号规则可拦任意 CA）
       if (Array.isArray(data.a) && (hideAddrs.size > 0 || suffixHideEnabled)) {
         let wa = 0;
@@ -775,6 +965,10 @@
         }
         data.a.length = wa;
       }
+      // r = 宿主要移除的地址：保留期内的 CA 吞掉，避免 ~2 分钟被踢出新创建
+      const rBlocked = filterNcDeltaRemovesInPlace(data);
+      // 让上游 changed 判定生效（仅吞 r 也算修改）
+      if (rBlocked > 0) removed += rBlocked;
     }
     return removed;
   }
@@ -806,6 +1000,7 @@
       const d = json.data;
       if (d && typeof d === "object" && Array.isArray(d.new_creations)) {
         removed += filterTokenArrayInPlace(d.new_creations, "debot");
+        rememberAndPadNewCreation(d.new_creations, "debot");
         return removed;
       }
     } catch (_nc) {
@@ -930,11 +1125,14 @@
     }
     try {
       const removed = filterJsonInPlace(data, "auto");
-      if (removed > 0) {
+      const padded =
+        (window.__flapFeeNcKeep && Number(window.__flapFeeNcKeep.padded)) || 0;
+      if (removed > 0 || padded > 0) {
         scrubGmgnDeltaAddList(data);
         noteFilter({
           channel,
           removed,
+          padded,
           thr: taxRecvPrefs.thresholdPct,
           kind: "auto"
         });
@@ -944,11 +1142,14 @@
       try {
         const clone = JSON.parse(JSON.stringify(data));
         const removed = filterJsonInPlace(clone, "auto");
-        if (removed > 0) {
+        const padded =
+          (window.__flapFeeNcKeep && Number(window.__flapFeeNcKeep.padded)) || 0;
+        if (removed > 0 || padded > 0) {
           scrubGmgnDeltaAddList(clone);
           noteFilter({
             channel,
             removed,
+            padded,
             thr: taxRecvPrefs.thresholdPct,
             kind: "auto-clone"
           });
@@ -1158,6 +1359,8 @@
         }
       }
       const removed = filterJsonInPlace(json, kind);
+      const padded =
+        (window.__flapFeeNcKeep && Number(window.__flapFeeNcKeep.padded)) || 0;
       if (colStats) {
         try {
           if (kind === "debot" && colStats.new_creations) {
@@ -1173,7 +1376,8 @@
           window.__flapFeeTrenchColStats = {
             ...colStats,
             removed,
-            padded: 0,
+            padded,
+            keepPool: (window.__flapFeeNcKeep && window.__flapFeeNcKeep.pool) || 0,
             t: Date.now()
           };
         } catch (_s2) {
@@ -1185,12 +1389,14 @@
         kind,
         channel: "http",
         removed,
+        padded,
         rawLen: text.length,
         thr: taxRecvPrefs.thresholdPct,
         cols: colStats || undefined,
         debotV: (/meme\/v(\d+)\/ranks/i.exec(String(url || "")) || [])[1] || ""
       });
-      if (removed <= 0) return null;
+      // 有删除或保留池回填时都要改写响应（仅 pad 也必须 stringify）
+      if (removed <= 0 && padded <= 0) return null;
       return JSON.stringify(json);
     } catch (_e2) {
       return null;
@@ -1353,10 +1559,15 @@
     } catch (_t) {
       // ignore
     }
-    // 清掉历史 keepPool（0.6.1 曾写入 sessionStorage，避免用户仍看到旧垫片）
+    // 清掉历史 keepPool session 残留；内存池由本版 10min/40 卡逻辑管理
     try {
       sessionStorage.removeItem("flapFeeInfo.taxKeepPool.v1");
     } catch (_ss) {
+      // ignore
+    }
+    try {
+      ncKeepPool.clear();
+    } catch (_clr) {
       // ignore
     }
 
@@ -1590,6 +1801,7 @@
         const clone = NativeJSONParse(JSON.stringify(parsed));
         let removed = 0;
         let shape = "feed";
+        let padded = 0;
         if (isDelta) {
           removed = filterGmgnTrenchesDeltaInPlace(clone);
           if (removed > 0) shape = "delta";
@@ -1600,15 +1812,18 @@
         }
         if (removed <= 0) {
           removed = filterJsonInPlace(clone, "auto");
-          if (removed > 0) {
+          padded =
+            (window.__flapFeeNcKeep && Number(window.__flapFeeNcKeep.padded)) || 0;
+          if (removed > 0 || padded > 0) {
             scrubGmgnDeltaAddList(clone);
             shape = isDelta ? "delta" : "feed";
           }
         }
-        if (removed <= 0) return null;
+        if (removed <= 0 && padded <= 0) return null;
         noteFilter({
           channel: channel || "ws",
           removed,
+          padded,
           thr: taxRecvPrefs.thresholdPct,
           shape
         });
@@ -1675,14 +1890,20 @@
               const obj = NativeJSONParse(text);
               if (obj && typeof obj === "object") {
                 let removed = filterGmgnTrenchesDeltaInPlace(obj);
+                let padded = 0;
                 if (removed <= 0) {
                   removed = filterJsonInPlace(obj, "auto");
-                  if (removed > 0) scrubGmgnDeltaAddList(obj);
+                  padded =
+                    (window.__flapFeeNcKeep &&
+                      Number(window.__flapFeeNcKeep.padded)) ||
+                    0;
+                  if (removed > 0 || padded > 0) scrubGmgnDeltaAddList(obj);
                 }
-                if (removed > 0) {
+                if (removed > 0 || padded > 0) {
                   noteFilter({
                     channel: "json-parse",
                     removed,
+                    padded,
                     thr: taxRecvPrefs.thresholdPct,
                     shape:
                       obj.channel === "trenches_delta" || obj.channel === "trenches_update"

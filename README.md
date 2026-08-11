@@ -133,7 +133,14 @@ FlapFeeInfo\extension
 3. 点当前插件的 `重新加载`（或重新「加载已解压」指向 `extension/`）。
 4. **硬刷新** GMGN / Debot 目标页（否则可能仍是旧 content script）。
 
-当前插件版本见 `extension/manifest.json` 的 `version` 字段。
+当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.7.9**）。
+
+### 0.7.x 要点（近期）
+
+- **0.7.9**：K 线左侧战壕下滑后徽章可靠补绘；滚动更顺  
+- **0.7.7+**：钱包追踪 / 收藏面板不挂徽章  
+- **0.7.4+**：错徽章（行 CA 与徽章不一致）加固；新创建在开启屏蔽时最长保留约 10 分钟 / 40 卡  
+- 支持 Flap `7777`/`8888` 与 Four.meme `ffff`
 
 ## 常见问题
 

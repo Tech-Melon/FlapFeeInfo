@@ -355,6 +355,11 @@ python tools/ctl.py watchdog-run
 | GMGN 无 🪙BNB / 🪙USD1 | 未识别特殊 icon / 默认 BNB | 升到 `0.2.9+`；确认 `chain=bsc` |
 | Worker 403 | 无 UA / 边缘防护 | 浏览器正常；脚本请求带浏览器 UA |
 | 7777 无图标 | 未重载 0.2.x 插件 | 确认 manifest version |
+| K 线侧栏下滑徽章几十秒不更新 | settled 后 light 续扫不扫战壕；短地址未爬卡；滚动热路径过重 | 升到 **0.7.9+**；扩展重载 + 硬刷页 |
+| 钱包追踪 / 收藏栏误挂徽章 | 禁区识别不全 | **0.7.7+** 禁钱包追踪+收藏；主战壕/搜索/K 线侧栏应仍有徽章 |
+| 拖 K 线分隔条时卡顿 | 拖动中仍扫 DOM | **0.7.6+** 拖动 pause，松手 settle 再扫 |
+| 开资金接收后新创建只剩很少卡 | 宿主 ~2 分钟轮出 + 屏蔽砍 👨‍🍳 + 无 SW 累积 | **0.7.4+** 保留池 10 分钟/40 卡；网页筛选+阈值配合 |
+| 抽样 feeMatch:false（行 CA≠徽章） | 虚拟列表复用短窗 | **0.7.4+** 无身份不 stable + scrub 后 cache 重画 |
 
 ---
 
@@ -432,6 +437,15 @@ python tools/ctl.py watchdog-run
   - `0.7.0`：里程碑 — Debot v4 资金接收屏蔽修复 + 自定义尾号屏蔽 + 底池 🦋/🖐️；page-hook HOOK_VER 49
   - `0.7.1`：GMGN/Debot 错徽章与身份加固（并入 0.7.2）
   - `0.7.2`：ffff 视口未画快补 ⏳/入队（与 7777 同权）；4444 等非目标行残留 7777 必拆；GMGN 扫卡/热批/回列表降负载；底池 DOM 优先
+  - `0.7.3`：禁挂徽章场景 — 钱包追踪侧栏/弹层（GMGN+Debot）、GMGN 顶 ticker、搜索弹层「钱包」区；主战壕/币种结果不变
+  - `0.7.4`：feeMatch 加固（无身份信号不 stable；scrub 拆错后 cache 重画）；新创建保留池 10 分钟 / 满 40 卡（page-hook HOOK_VER 50，仅过滤开启时）
+  - `0.7.5`：GMGN K 线侧栏下滑徽章饥饿 — truncated 禁止 settled→light 死循环；token 页视口快补侧栏；scroll-settle 必扫战壕；embedded dirty href 兜底 + 松视口
+  - `0.7.6`：K 线分隔条（col-resize）拖动期间暂停扫/画；松手 settle 后单次恢复扫 + 顶栏 tryPaint
+  - `0.7.7`：GMGN 钱包追踪 + **收藏面板** 禁徽章（标题+表头双条件）；搜索/主战壕/K 线侧栏仍显示
+  - `0.7.8`：滚动热路径降载 — 单 deadline 停滚定时器；禁区滚动不 resume 扫；viewport-quick / scrub 节流（900ms / 1.4s / 1.8s）；`isBadgeMountForbidden` 短缓存
+  - `0.7.9`：K 线战壕短地址行先爬真实卡片再几何门禁；停滚分片补绘（quick×2 + light:false scan）；候选限 scan roots 内
+- 插件当前版本：见 `extension/manifest.json`（**0.7.9**）
+- page-hook：`HOOK_VER` **50**（新创建保留池；仅 tax-recv/尾号过滤开启时）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  

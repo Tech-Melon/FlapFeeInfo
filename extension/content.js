@@ -8,8 +8,14 @@
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777|ffff)/i;
   const GMGN_TRENCH_ROOT_SELECTOR =
     "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100";
+  // 0.7.9: K 线战壕短地址先爬真实卡片；停滚分片补绘并复用相邻徽章
+  // 0.7.8: GMGN 战壕/钱包追踪滚动热路径降载；禁区停滚不再恢复扫描
+  // 0.7.5: K 线侧栏下滑徽章饥饿 — truncated 禁 light 死循环；token 页视口快补；dirty 兜底
+  // 0.7.6: GMGN K 线分隔条拖动期间暂停扫描，停止后单次恢复；header 引用快路径
+  // 0.7.7: GMGN 钱包追踪/收藏面板禁徽章；搜索、战壕、K 线保持显示
+  // 0.7.4: feeMatch 最小加固 — 无身份信号不 stable；scrub 拆错后 cache 重画
+  // 0.7.3: 禁挂徽章 — 钱包追踪弹层/侧栏、GMGN 顶 ticker、搜索「钱包」区
   // 0.7.2: ffff 视口快补 ⏳；4444 残留 7777 必拆；降负载 timings；底池 DOM 优先；href 身份
-  // 0.7.1: GMGN/Debot 错徽章与身份加固（未单独发版，并入 0.7.2）
   // 0.7.0: Debot ranks v4 资金接收屏蔽修复；自定义多尾号屏蔽（BSC）；底池 Flap=🦋 Four=🖐️
   // 0.6.16: 自定义多规则尾号屏蔽（仅 BSC，新创建列）；底池前缀 Flap=🦋 Four=🖐️
   // 0.6.16b: Debot ranks v3→v4 导致 dev 钱包接收屏蔽失效 — page-hook 认 v4 + POST body.column
@@ -139,6 +145,9 @@
   // GMGN: while user scrolls columns, suppress mutation-driven full scans (resume after settle).
   const GMGN_SCROLL_COOLDOWN_MS = 400;
   const GMGN_SCROLL_RESUME_SCAN_MS = 480;
+  // Viewport quick-fill is a fallback, not a second scanner. Keep it out of the
+  // scroll hot path and never run it more than once per settled scan window.
+  const GMGN_VIEWPORT_QUICK_MIN_GAP_MS = 900;
   // Debot/Gungnir virtual lists recycle many rows per wheel tick. Let the host finish
   // scrolling, then fill the newly visible rows in one idle slice.
   const DEBOT_SCROLL_COOLDOWN_MS = 420;
@@ -163,10 +172,14 @@
   // 行 href 身份短缓存（虚拟列表复用后 TTL 内仍可能错，保持 ≤600ms）.
   const HREF_TOKEN_CACHE_MS = 500;
   // 全页 scrub（节流版）：兜底；每扫另有 cheap scrubBadgesToHostHref（不节流）。
-  const SCRUB_IDENTITY_MIN_GAP_MS = 550;
+  const SCRUB_IDENTITY_MIN_GAP_MS = 1800;
   const SCRUB_IDENTITY_MAX_ICONS = 40;
   // 每扫轻量校验上限（仅 closest+比 fee，极便宜）
   const SCRUB_HREF_MAX_ICONS = 48;
+  const SCRUB_HREF_MIN_GAP_MS = 1400;
+  // One card is gated from several paint paths in the same scan. The short
+  // cache avoids repeating ancestor walks and forced geometry reads.
+  const BADGE_FORBIDDEN_CACHE_MS = 500;
   // chrome.storage rewrite throttle + max entries (LRU by fetchedAt).
   const PERSIST_MIN_INTERVAL_MS = 10000;
   const PERSISTENT_CACHE_MAX_ENTRIES = 800;
@@ -251,6 +264,12 @@
   // actually changed; chart/ticker mutations must never reopen a full-page scan.
   const GMGN_EMBEDDED_DIRTY_DEBOUNCE_MS = 180;
   const GMGN_EMBEDDED_DIRTY_CARD_LIMIT = 16;
+  // Resizing the token-page trench rebuilds React rows on every pointer move.
+  // Keep extension DOM/layout work out of that hot path and repair once after settle.
+  const GMGN_TRENCH_RESIZE_SETTLE_MS = 280;
+  // K 线侧栏：视口判定略松（padY），避免刚滑入的已开盘行被 40px 门禁饿死。
+  const GMGN_TOKEN_TRENCH_VIEWPORT_PAD_Y = 220;
+  const GMGN_TOKEN_TRENCH_VIEWPORT_PAD_TOP = 80;
   // Dedicated header paint watch after meme→token SPA (ms). Logged-in DOM is slower.
   const DEBOT_TOKEN_HEADER_WATCH_MS = 20000;
   const DEBOT_TOKEN_HEADER_TICK_MS = 400;
@@ -556,6 +575,12 @@
   function paintLoadingBadgeAndQueue(card, token) {
     const tok = String(token || "").toLowerCase();
     if (!(card instanceof HTMLElement) || !TARGET_TOKEN_RE.test(tok)) return false;
+    if (shouldDeferGmgnTrenchResizeWork()) return false;
+    // 钱包追踪 / 顶 ticker / 搜索「钱包」区：禁止任何徽章
+    if (isBadgeMountForbidden(card)) {
+      wipeForbiddenMountBadges(card, true);
+      return false;
+    }
     // 行身份必须就是 tok，否则禁止画任何东西（包括 ⏳）
     const idCa = extractCardHrefToken(card);
     if (idCa && idCa !== tok) {
@@ -603,52 +628,135 @@
   }
 
   /**
+   * K 线多栏：左侧战壕列（新创建/已开盘）几何门禁。
+   * 排除右侧 K 线主区与顶栏，避免把图表区 href 当列表卡快补。
+   */
+  function isGmgnTokenTrenchSidebarEl(el) {
+    if (!(el instanceof HTMLElement) || !isGmgnTokenPage()) return false;
+    try {
+      const r = el.getBoundingClientRect();
+      if (r.width < 60 || r.height < 28) return false;
+      // 侧栏在屏左；图表主区通常 left > ~36% 视口
+      if (r.left > window.innerWidth * 0.42) return false;
+      if (r.top < 52) return false;
+      // 排除顶栏地址/总税率锁
+      if (isGmgnHeaderMarkedCard(el) || isGmgnTokenHeaderCard(el)) return false;
+      if (el.closest?.(`[${ICON_DATA}="1"][data-fee-header="1"]`)) return false;
+      return true;
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  function isNearGmgnTokenTrenchViewport(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 && rect.height <= 0) return false;
+    return (
+      rect.bottom >= -GMGN_TOKEN_TRENCH_VIEWPORT_PAD_TOP &&
+      rect.top <= window.innerHeight + GMGN_TOKEN_TRENCH_VIEWPORT_PAD_Y
+    );
+  }
+
+  /**
    * GMGN 视口未画 TARGET（7777/8888/ffff）快补：不占主扫 budget。
    * 根因：稳态每轮只 touch 12 卡，瞬间 7777 占满预算时 ffff 要等数轮（数秒）才进 needWork。
    * ffff 与 7777 必须同权 — 本函数按 TokenItem href 扫，不偏后缀。
+   * 0.7.5：K 线 token 页也跑侧栏（禁图表主区），修下滑已开盘几十秒无徽章。
    */
-  function paintUnpaintedTargetViewportQuick(reason) {
-    if (!isGmgnHost() || isTokenDetailRoute()) return 0;
+  function paintUnpaintedTargetViewportQuick(reason, rootHint = null, bypassGap = false) {
+    if (!isGmgnHost()) return 0;
     if (!isExtensionContextValid() || !isTabVisible()) return 0;
     if (isTokenEnterTransitionActive()) return 0;
+    if (shouldDeferGmgnTrenchResizeWork()) return 0;
     if (isGmgnScrollCooling()) return 0;
+    const now = Date.now();
+    if (!bypassGap && now - lastViewportQuickAt < GMGN_VIEWPORT_QUICK_MIN_GAP_MS) return 0;
+    lastViewportQuickAt = now;
+    const tokenPage = isGmgnTokenPage() || isTokenDetailRoute();
     let painted = 0;
     let queued = 0;
     const cap = 10;
     const t0 = performance.now();
-    const msCap = 12;
+    const msCap = tokenPage ? 8 : 12;
     try {
-      const items = document.querySelectorAll(
-        '[href*="/bsc/token/"][href*="0x"], [href*="/token/"][href*="0x"]'
-      );
-      const lim = Math.min(items.length, 80);
-      for (let i = 0; i < lim; i += 1) {
+      const selector =
+        '[href*="/bsc/token/"][href*="0x"], [href*="/token/"][href*="0x"]';
+      const items = [];
+      const seen = new Set();
+      const seenCards = new Set();
+      const roots =
+        rootHint instanceof HTMLElement && rootHint.isConnected
+          ? [rootHint]
+          : getScanRoots();
+      const itemCap = tokenPage ? 100 : 80;
+      for (const root of roots) {
+        if (!(root instanceof HTMLElement) || !root.isConnected) continue;
+        if (root.matches?.(selector) && !seen.has(root)) {
+          seen.add(root);
+          items.push(root);
+        }
+        const nested = root.querySelectorAll(selector);
+        for (let i = 0; i < nested.length && items.length < itemCap; i += 1) {
+          const item = nested[i];
+          if (seen.has(item)) continue;
+          seen.add(item);
+          items.push(item);
+        }
+        if (items.length >= itemCap) break;
+      }
+      for (let i = 0; i < items.length; i += 1) {
         if (painted + queued >= cap) break;
         if (performance.now() - t0 > msCap) break;
         const el = items[i];
         if (!(el instanceof HTMLElement)) continue;
-        if (!isNearViewport(el, false)) continue;
-        const raw = el.getAttribute("href") || "";
+        let card = el;
+        if (tokenPage) {
+          // K 线战壕常把 href 放在卡片内的短地址行（高度约 16px）。
+          // 先爬到真实卡片，再做侧栏和视口门禁，否则下滑后的卡会被永久跳过。
+          if (!isGmgnTokenTrenchSidebarEl(card)) {
+            card = quickClimbCardFromTokenLink(el) || climbGmgnListCard(el);
+          }
+          if (!isGmgnTokenTrenchSidebarEl(card)) continue;
+          if (!isNearGmgnTokenTrenchViewport(card)) continue;
+        } else if (!isNearViewport(el, false)) {
+          continue;
+        }
+        if (!(card instanceof HTMLElement) || seenCards.has(card)) continue;
+        seenCards.add(card);
+        if (isBadgeMountForbidden(card)) {
+          wipeForbiddenMountBadges(card, true);
+          continue;
+        }
+        const raw =
+          el.getAttribute("href") ||
+          card.getAttribute("href") ||
+          card.querySelector?.("[href]")?.getAttribute("href") ||
+          "";
         const ca = extractAnyToken(raw);
         if (!ca || !TARGET_TOKEN_RE.test(ca)) continue;
         // 已有正确徽章（含 ⏳）
         try {
-          const good = el.querySelector(
-            `[${ICON_DATA}="1"][data-fee-token="${ca}"]`
-          );
-          if (good instanceof HTMLElement && document.contains(good)) continue;
+          const good = findLocalBadgeForCard(card, ca);
+          if (
+            good instanceof HTMLElement &&
+            document.contains(good) &&
+            good.dataset.feeToken === ca
+          ) {
+            continue;
+          }
         } catch (_q) {
           // ignore
         }
         // 错徽章（邻行 7777 残留）先拆
         try {
-          const bad = el.querySelector(`[${ICON_DATA}="1"]`);
+          const bad = findLocalBadgeForCard(card);
           if (
             bad instanceof HTMLElement &&
             bad.dataset.feeToken &&
             bad.dataset.feeToken !== ca
           ) {
-            removeAllBadgesForCard(el, bad.dataset.feeToken);
+            removeAllBadgesForCard(card, bad.dataset.feeToken);
           }
         } catch (_b) {
           // ignore
@@ -656,18 +764,18 @@
         const entry = resolveEntry(ca);
         if (entry && !isFeeLoadingEntry(entry)) {
           try {
-            el.dataset[CARD_MARK] = ca;
-            el.setAttribute(CARD_DATA, ca);
+            card.dataset[CARD_MARK] = ca;
+            card.setAttribute(CARD_DATA, ca);
           } catch (_m) {
             // ignore
           }
           if (
-            paintListCardFromCacheFast(el, ca, entry) ||
-            renderMode(el, ca, entry)
+            paintListCardFromCacheFast(card, ca, entry) ||
+            renderMode(card, ca, entry)
           ) {
             painted += 1;
           }
-        } else if (paintLoadingBadgeAndQueue(el, ca)) {
+        } else if (paintLoadingBadgeAndQueue(card, ca)) {
           painted += 1;
           queued += 1;
         } else {
@@ -682,6 +790,7 @@
     if (painted > 0 || queued > 0) {
       debugInfo("viewport-target-quick", {
         reason: reason || "",
+        tokenPage,
         painted,
         queued,
         ms: Math.round(performance.now() - t0)
@@ -788,10 +897,18 @@
   /** @type {WeakMap<Element, { token: string|null, at: number }>} */
   let hrefTokenCache = new WeakMap();
   let lastScrubIdentityAt = 0;
+  let lastScrubHrefAt = 0;
+  let lastViewportQuickAt = 0;
+  let badgeForbiddenCache = new WeakMap();
   /** GMGN only: suppress mutation scans until this wall time (scroll settle). */
   let gmgnScrollQuietUntil = 0;
   /** GMGN only: one-shot scan after scroll stops. */
   let gmgnScrollResumeTimer = null;
+  /** Whether the current scroll window touched a badge-bearing surface. */
+  let gmgnScrollResumeNeedsScan = false;
+  /** Last allowed GMGN scroller; lets settle fill only the column the user moved. */
+  let gmgnScrollResumeTarget = null;
+  let gmgnForbiddenScrollTargetCache = new WeakMap();
   /** Debot/Gungnir: suppress mutation scans while virtual rows are recycling. */
   let debotScrollQuietUntil = 0;
   let debotScrollResumeTimer = null;
@@ -887,6 +1004,13 @@
   /** GMGN token-page TokenItem rows changed since the last targeted pass. */
   const gmgnEmbeddedDirtyCards = new Set();
   let gmgnEmbeddedDirtyTimer = null;
+  /** True while the tall GMGN token-page col-resize handle is being dragged. */
+  let gmgnTrenchResizeActive = false;
+  let gmgnTrenchResizeQuietUntil = 0;
+  let gmgnTrenchResizeDirty = false;
+  let gmgnTrenchResizeSettleTimer = null;
+  /** Stable header badge reference; avoids document geometry reads per mutation batch. */
+  let gmgnHeaderBadgeCache = { token: "", el: null };
   /** Coalesced GMGN search-overlay pass and its one allowed late-DOM retry. */
   let gmgnOverlayPaintTimer = null;
   let gmgnOverlayRetryTimer = null;
@@ -936,10 +1060,19 @@
         if (isGmgnTokenPage()) {
           const root = findGmgnTokenPageRoot();
           if (root && (node === root || root.contains(node))) {
+            // 顶栏 ticker 误爬到 header 壳时仍禁（K 线真 header 由 tryPaint 单独管）
+            if (isGmgnTopTickerOrChrome(node)) {
+              return null;
+            }
             return root;
           }
         }
-        return climbGmgnListCard(node);
+        const card = climbGmgnListCard(node);
+        // Resolve the visual card before applying the unified gate. Raw anchors
+        // and short-address leaves are not card geometry and can match the
+        // legacy side-rail fallback by themselves.
+        if (card && isBadgeMountForbidden(card)) return null;
+        return card;
       },
       extractToken(card) {
         if (card?.dataset?.flapOverlayCard === "1") {
@@ -1200,6 +1333,13 @@
             quickClimbCardFromTokenLink(a);
         // 0.4.51: dedupe by card only — same CA may appear on multiple overlay rows.
         if (!(card instanceof HTMLElement) || seen.has(card)) continue;
+        // 搜索「钱包」区 / 追踪弹层：禁止挂徽章
+        // Gate the resolved row only; applying card geometry to the raw anchor
+        // can classify ordinary short-address leaves as side-rail chips.
+        if (isBadgeMountForbidden(card)) {
+          wipeForbiddenMountBadges(card, true);
+          continue;
+        }
         if (
           !isGmgnHost() &&
           !isInsideOverlayDialog(card) &&
@@ -1288,8 +1428,10 @@
           minWidth: 220,
           requireFeeTag: false
         });
-        // Skip left/right watchlist rails (js-mcp: ~168px DOGI/TSLAB false cards).
-        if (card && isDebotSideRailCard(card)) return null;
+        // Skip left/right watchlist rails + 钱包追踪弹层/搜索钱包区
+        if (card && (isDebotSideRailCard(card) || isBadgeMountForbidden(card))) {
+          return null;
+        }
         // Token page: do not paint URL token onto residual meme list rows still in DOM.
         if (isDebotTokenPage() && card && !isDebotTokenHeaderCard(card)) {
           // Allow list-style rows only if their own attrs match (side boards if any).
@@ -2050,9 +2192,38 @@
    * True if badge sits on GMGN token header beside short CA (not war-room, not 总税率).
    * 0.5.3: use findGmgnHeaderBadgeEl (stable).
    */
+  function getCachedGmgnHeaderBadge(token) {
+    const tok = String(token || "").toLowerCase();
+    const cached = gmgnHeaderBadgeCache;
+    if (
+      !tok ||
+      cached.token !== tok ||
+      !(cached.el instanceof HTMLElement) ||
+      !cached.el.isConnected ||
+      cached.el.dataset.feeHeader !== "1" ||
+      cached.el.dataset.feeToken !== tok
+    ) {
+      if (cached.token === tok || !tok) {
+        gmgnHeaderBadgeCache = { token: "", el: null };
+      }
+      return null;
+    }
+    return cached.el;
+  }
+
   function hasGmgnTokenHeaderBadge() {
     try {
-      const found = !!findGmgnHeaderBadgeEl(extractTokenFromUrl());
+      const token = extractTokenFromUrl();
+      if (!token) return false;
+      const cached = getCachedGmgnHeaderBadge(token);
+      if (cached) {
+        finishTokenEnterTransition();
+        return true;
+      }
+      // A resize mutation arrives after layout invalidation. Never turn its observer
+      // callback into a synchronous layout by probing the whole header here.
+      if (isGmgnTrenchResizeCooling()) return false;
+      const found = !!findGmgnHeaderBadgeEl(token);
       if (found) finishTokenEnterTransition();
       return found;
     } catch (_err) {
@@ -2357,6 +2528,9 @@
     if (!isGmgnTokenPage() || !isExtensionContextValid()) return false;
     const urlTok = extractTokenFromUrl();
     if (!urlTok) return false;
+    if (shouldDeferGmgnTrenchResizeWork()) {
+      return !!getCachedGmgnHeaderBadge(urlTok);
+    }
 
     queueToken(urlTok);
 
@@ -2464,6 +2638,8 @@
    */
   function findGmgnHeaderBadgeEl(urlTok) {
     if (!urlTok) return null;
+    const cached = getCachedGmgnHeaderBadge(urlTok);
+    if (cached) return cached;
     try {
       const nodes = document.querySelectorAll(
         `[${ICON_DATA}="1"][data-fee-token="${urlTok}"]`
@@ -2478,6 +2654,7 @@
         if (r.width < 2 || r.height < 2) continue;
         if (r.bottom <= 0 || r.top >= Math.min(window.innerHeight, 360)) continue;
         if (!isGmgnBadgeBesideAddress(el, urlTok)) continue;
+        gmgnHeaderBadgeCache = { token: urlTok, el };
         return el;
       }
     } catch (_err) {
@@ -2629,6 +2806,7 @@
       }
       const r = icon.getBoundingClientRect();
       const visible = r.width >= 2 && r.height >= 2;
+      if (visible) gmgnHeaderBadgeCache = { token, el: icon };
       if (visible && gmgnEmbeddedDirtyCards.size > 0) scheduleGmgnEmbeddedDirtyPass();
       return visible;
     } catch (_err) {
@@ -2781,22 +2959,29 @@
   /**
    * Narrow side panels (钱包追踪 / 持仓) — not meme board cards.
    * js-mcp 0.5.29: left 钱包追踪 column ~287–291px; row cards ~192px @ left≈0.
-   * Main 新创建 cards start ~left≥291 width≥320 — do not treat as rail.
+   * 0.7.3: 放宽宽度到 ~520（弹层/宽栏「钱包 1 追踪…」）并认「追踪/喊单/监控」。
    */
   function isDebotSideRailCard(card) {
     if (!(card instanceof HTMLElement)) return false;
     try {
       // Column root that hosts 钱包追踪 / 自选 / 持仓 headers
       let p = card;
-      for (let i = 0; i < 10 && p && p !== document.body; i++) {
+      for (let i = 0; i < 12 && p && p !== document.body; i++) {
         const pr = p.getBoundingClientRect();
         if (
-          pr.left < 40 &&
+          pr.left < 80 &&
           pr.width >= 160 &&
-          pr.width <= 320 &&
-          pr.height >= 180
+          pr.width <= 560 &&
+          pr.height >= 160
         ) {
-          const head = (p.textContent || "").slice(0, 48).replace(/\s+/g, "");
+          const head = (p.textContent || "").slice(0, 64).replace(/\s+/g, "");
+          if (
+            /钱包追踪|自选热门|持仓|追踪数|实时通知|喊单|监控|备注/.test(head) &&
+            !/新创建|即将打满|已开盘|已迁移/.test(head.slice(0, 24))
+          ) {
+            // 侧栏/追踪面板：有追踪语义且非主战壕三列头
+            if (/钱包|追踪|持仓|喊单|监控/.test(head)) return true;
+          }
           if (/钱包追踪|自选热门|持仓/.test(head)) return true;
         }
         p = p.parentElement;
@@ -2814,6 +2999,207 @@
     const t = (card.textContent || "").replace(/\s+/g, " ");
     if (/AI报告/.test(t) && !/MC|市值|Tax\s*\d/i.test(t)) return true;
     return false;
+  }
+
+  /**
+   * GMGN 左侧「钱包 / 追踪 / 喊单 / 监控」面板（含弹层宽栏）。
+   * 主战壕列在 mid 区；此栏 left≈0 且含追踪语义。
+   */
+  function isGmgnWalletTrackPanel(node) {
+    if (!(node instanceof HTMLElement) || !isGmgnHost()) return false;
+    try {
+      let p = node;
+      for (let i = 0; i < 18 && p && p !== document.body; i++) {
+        const pr = p.getBoundingClientRect();
+        const compact = (p.textContent || "")
+          .slice(0, 180)
+          .replace(/\s+/g, "");
+        const walletAt = compact.indexOf("钱包");
+        const trackAt = compact.indexOf("追踪", Math.max(0, walletAt + 2));
+        const callAt = compact.indexOf("喊单", Math.max(0, trackAt + 2));
+        const monitorAt = compact.indexOf("监控", Math.max(0, callAt + 2));
+        const noteAt = compact.indexOf("备注", Math.max(0, monitorAt + 2));
+
+        // GMGN's resizable wallet stream can sit in the middle of a K-line layout.
+        // Its own tab strip is stable even when the panel width/position changes.
+        if (
+          pr.width >= 320 &&
+          pr.width < window.innerWidth * 0.86 &&
+          pr.height >= 180 &&
+          walletAt >= 0 &&
+          walletAt <= 24 &&
+          trackAt > walletAt &&
+          callAt > trackAt &&
+          monitorAt > callAt &&
+          noteAt > monitorAt &&
+          noteAt - walletAt < 96
+        ) {
+          return true;
+        }
+
+        // Legacy narrow wallet/watch rails.
+        if (
+          pr.left < 80 &&
+          pr.width >= 200 &&
+          pr.width <= 560 &&
+          pr.height >= 200
+        ) {
+          const head = (p.textContent || "").slice(0, 80).replace(/\s+/g, " ");
+          if (
+            /钱包\s*\d|钱包追踪|追踪\s|喊单|监控|备注|实时通知|追踪数/.test(head)
+          ) {
+            // 排除主战壕（含「新创建」且宽度接近整列板）
+            if (/新创建|即将打满|已开盘/.test(head.slice(0, 40)) && pr.width > 380) {
+              // 可能是误匹配到含侧栏文案的祖先 — 继续上爬
+            } else {
+              return true;
+            }
+          }
+        }
+        p = p.parentElement;
+      }
+    } catch (_e) {
+      // ignore
+    }
+    return false;
+  }
+
+  /**
+   * GMGN favorites drawer/table. Require both the panel title and its table
+   * columns so a generic star button or the bottom navigation cannot match.
+   */
+  function isGmgnFavoritesPanel(node) {
+    if (!(node instanceof HTMLElement) || !isGmgnHost()) return false;
+    try {
+      let p = node;
+      for (let i = 0; i < 18 && p && p !== document.body; i++) {
+        const pr = p.getBoundingClientRect();
+        if (
+          pr.width >= 280 &&
+          pr.width < window.innerWidth * 0.72 &&
+          pr.height >= 180
+        ) {
+          const compact = (p.textContent || "")
+            .slice(0, 260)
+            .replace(/\s+/g, "");
+          if (
+            compact.slice(0, 80).includes("收藏") &&
+            /币种.*交易数.*价格.*24h%/i.test(compact)
+          ) {
+            return true;
+          }
+        }
+        p = p.parentElement;
+      }
+    } catch (_e) {
+      // ignore
+    }
+    return false;
+  }
+
+  /**
+   * GMGN 顶栏 ticker / 快捷买入条：top 很小的 chip，非三列战壕卡。
+   * 用户反馈：AI Facto 旁错误挂徽章 → 直接禁止（不挪位）。
+   */
+  function isGmgnTopTickerOrChrome(node) {
+    if (!(node instanceof HTMLElement) || !isGmgnHost()) return false;
+    try {
+      const r = node.getBoundingClientRect();
+      if (r.height <= 0 || r.width <= 0) return false;
+      // 顶栏横向 ticker / 快捷 token
+      if (r.top >= 0 && r.top < 96 && r.height > 0 && r.height <= 56) {
+        // 主列表卡高度通常 >70；顶栏 chip 偏矮
+        if (r.width < 520) return true;
+      }
+      // 祖先是横向滚动顶条
+      let p = node;
+      for (let i = 0; i < 8 && p && p !== document.body; i++) {
+        const pr = p.getBoundingClientRect();
+        const st = window.getComputedStyle(p);
+        if (
+          pr.top >= 0 &&
+          pr.top < 100 &&
+          pr.height > 0 &&
+          pr.height <= 72 &&
+          pr.width > window.innerWidth * 0.35 &&
+          (st.overflowX === "auto" ||
+            st.overflowX === "scroll" ||
+            /overflow-x|scroll-x|ticker|marquee/i.test(String(p.className || "")))
+        ) {
+          return true;
+        }
+        p = p.parentElement;
+      }
+    } catch (_e) {
+      // ignore
+    }
+    return false;
+  }
+
+  /**
+   * 统一门禁：禁止挂徽章的场景（钱包追踪 / 收藏 / 顶 ticker）。
+   * 所有 render/paint/overlay/viewport-quick 入口必须调用。
+   */
+  function computeBadgeMountForbidden(node) {
+    if (!(node instanceof HTMLElement)) return false;
+    try {
+      // The Debot detector contains legacy card-size fallbacks and must never
+      // classify GMGN anchors, Tax chips, or badge elements.
+      if (isDebotHost() && isDebotSideRailCard(node)) return true;
+      if (isGmgnWalletTrackPanel(node)) return true;
+      if (isGmgnFavoritesPanel(node)) return true;
+      if (isGmgnTopTickerOrChrome(node)) return true;
+      // 顶栏全局：极矮且靠顶的 chip（双保险）
+      const r = node.getBoundingClientRect();
+      if (
+        isGmgnHost() &&
+        r.top >= 0 &&
+        r.top < 88 &&
+        r.height > 0 &&
+        r.height < 44 &&
+        r.width > 0 &&
+        r.width < 280
+      ) {
+        return true;
+      }
+    } catch (_e) {
+      // ignore
+    }
+    return false;
+  }
+
+  /** 禁区宿主上的徽章一律拆掉 */
+  function isBadgeMountForbidden(node) {
+    if (!(node instanceof HTMLElement)) return false;
+    const now = performance.now();
+    const href = node.getAttribute?.("href") || "";
+    const parent = node.parentElement;
+    const cached = badgeForbiddenCache.get(node);
+    if (
+      cached &&
+      now - cached.at < BADGE_FORBIDDEN_CACHE_MS &&
+      cached.href === href &&
+      cached.parent === parent
+    ) {
+      return cached.forbidden;
+    }
+    const forbidden = computeBadgeMountForbidden(node);
+    badgeForbiddenCache.set(node, { at: now, href, parent, forbidden });
+    return forbidden;
+  }
+
+  function wipeForbiddenMountBadges(card, knownForbidden = false) {
+    if (!(card instanceof HTMLElement)) return;
+    if (!knownForbidden && !isBadgeMountForbidden(card)) return;
+    try {
+      removeAllBadgesForCard(card, card.dataset[CARD_MARK] || "");
+      delete card.dataset[CARD_MARK];
+      card.removeAttribute(CARD_DATA);
+      cardTokenCache.delete(card);
+      hrefTokenCache.delete(card);
+    } catch (_e) {
+      // ignore
+    }
   }
 
   function isTabVisible() {
@@ -2916,6 +3302,7 @@
   /** Remove only token-header artifacts; never tear down list-card badges. */
   function clearTokenHeaderArtifacts() {
     const owners = new Set();
+    gmgnHeaderBadgeCache = { token: "", el: null };
     try {
       document.querySelectorAll(`[${ICON_DATA}="1"][data-fee-header="1"]`).forEach((icon) => {
         let owner = icon.parentElement;
@@ -3019,6 +3406,7 @@
       purgeMarksIfChainDisallowed();
       return;
     }
+    if (shouldDeferGmgnTrenchResizeWork()) return;
     // The outgoing trench can remain visible after the token URL commits. Any scan in
     // this window can repaint/reposition its badges and compete with K-line mounting.
     if (isTokenEnterTransitionActive()) return;
@@ -3059,7 +3447,9 @@
       scanScheduled = false;
       if (!isTabVisible() && !force) return;
       if (!isExtensionContextValid()) return;
-      if (isDebotScrollCooling() && !pendingLightScan && !isOverlayFast()) return;
+      if (shouldDeferGmgnTrenchResizeWork()) return;
+      if (isGmgnScrollCooling() && !isOverlayFast()) return;
+      if (isDebotScrollCooling() && !isOverlayFast()) return;
       const now = performance.now();
       // Light scans use shorter min interval (overlay UX).
       // GMGN list: 热路径用更短 gap，稳态 560ms 保流畅。
@@ -3157,11 +3547,139 @@
     return isGmgnHost() && gmgnScrollQuietUntil > 0 && Date.now() < gmgnScrollQuietUntil;
   }
 
+  function isGmgnTrenchResizeCooling() {
+    return (
+      isGmgnHost() &&
+      isGmgnTokenPage() &&
+      (gmgnTrenchResizeActive ||
+        (gmgnTrenchResizeQuietUntil > 0 && Date.now() < gmgnTrenchResizeQuietUntil))
+    );
+  }
+
+  function shouldDeferGmgnTrenchResizeWork() {
+    if (!isGmgnTrenchResizeCooling()) return false;
+    gmgnTrenchResizeDirty = true;
+    return true;
+  }
+
+  function isGmgnForbiddenScrollTarget(target) {
+    if (!(target instanceof HTMLElement)) return false;
+    const cached = gmgnForbiddenScrollTargetCache.get(target);
+    if (cached !== undefined) return cached;
+    const forbidden =
+      isGmgnWalletTrackPanel(target) || isGmgnFavoritesPanel(target);
+    gmgnForbiddenScrollTargetCache.set(target, forbidden);
+    return forbidden;
+  }
+
+  function cancelGmgnTrenchResizeHotWork() {
+    scanTimerIds.forEach((id) => window.clearTimeout(id));
+    scanTimerIds = [];
+    scanScheduled = false;
+    pendingLightScan = false;
+    if (mutationDebounceTimer) {
+      window.clearTimeout(mutationDebounceTimer);
+      mutationDebounceTimer = null;
+    }
+    if (gmgnEmbeddedDirtyTimer) {
+      window.clearTimeout(gmgnEmbeddedDirtyTimer);
+      gmgnEmbeddedDirtyTimer = null;
+    }
+    if (gmgnHeaderRepairTimer) {
+      window.clearTimeout(gmgnHeaderRepairTimer);
+      gmgnHeaderRepairTimer = null;
+    }
+    if (forceFullScanCoalesceTimer) {
+      window.clearTimeout(forceFullScanCoalesceTimer);
+      forceFullScanCoalesceTimer = null;
+    }
+  }
+
+  function findGmgnTrenchResizeHandle(target) {
+    if (!isGmgnHost() || !isGmgnTokenPage()) return null;
+    let el = target instanceof Element ? target : null;
+    for (let depth = 0; el && depth < 4; depth += 1) {
+      if (el instanceof HTMLElement) {
+        try {
+          const style = window.getComputedStyle(el);
+          if (style.cursor === "col-resize") {
+            const r = el.getBoundingClientRect();
+            if (
+              r.width > 0 &&
+              r.width <= 24 &&
+              r.height >= Math.max(280, window.innerHeight * 0.4) &&
+              r.left > 80 &&
+              r.left < window.innerWidth - 80
+            ) {
+              return el;
+            }
+          }
+        } catch (_err) {
+          return null;
+        }
+      }
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  function beginGmgnTrenchResize(event) {
+    if (event?.button != null && event.button !== 0) return;
+    if (!findGmgnTrenchResizeHandle(event?.target)) return;
+    if (gmgnTrenchResizeSettleTimer) {
+      window.clearTimeout(gmgnTrenchResizeSettleTimer);
+      gmgnTrenchResizeSettleTimer = null;
+    }
+    gmgnTrenchResizeActive = true;
+    gmgnTrenchResizeQuietUntil = 0;
+    gmgnTrenchResizeDirty = true;
+    cancelGmgnTrenchResizeHotWork();
+  }
+
+  function finishGmgnTrenchResize() {
+    if (!gmgnTrenchResizeActive) return;
+    gmgnTrenchResizeActive = false;
+    gmgnTrenchResizeQuietUntil = Date.now() + GMGN_TRENCH_RESIZE_SETTLE_MS;
+    if (gmgnTrenchResizeSettleTimer) {
+      window.clearTimeout(gmgnTrenchResizeSettleTimer);
+    }
+    const flush = () => {
+      const waitMs = gmgnTrenchResizeQuietUntil - Date.now();
+      if (gmgnTrenchResizeActive) {
+        gmgnTrenchResizeSettleTimer = null;
+        return;
+      }
+      if (waitMs > 0) {
+        gmgnTrenchResizeSettleTimer = window.setTimeout(flush, Math.max(40, waitMs));
+        return;
+      }
+      gmgnTrenchResizeSettleTimer = null;
+      gmgnTrenchResizeQuietUntil = 0;
+      if (!gmgnTrenchResizeDirty) return;
+      gmgnTrenchResizeDirty = false;
+      gmgnEmbeddedDirtyCards.clear();
+      scanRootsCache = { at: 0, roots: [] };
+      if (!isExtensionContextValid() || !isTabVisible() || !isGmgnTokenPage()) return;
+      try {
+        tryPaintGmgnTokenHeader("trench-resize-settle");
+      } catch (_err) {
+        // The single settle scan below can recover a late header.
+      }
+      lastScanAt = 0;
+      pendingLightScan = false;
+      scheduleScan(0, { force: false, immediate: false, light: false });
+    };
+    gmgnTrenchResizeSettleTimer = window.setTimeout(
+      flush,
+      GMGN_TRENCH_RESIZE_SETTLE_MS
+    );
+  }
+
   /**
    * GMGN only: mark scroll activity. Does NOT scan on every scroll (0.4.5 lesson).
    * After settle, schedule one non-force scan to fill new virtual-list rows.
    */
-  function noteGmgnScrollActivity() {
+  function noteGmgnScrollActivity(scrollTarget = null) {
     if (!isGmgnHost()) return;
     if (!isTabVisible() || !isExtensionContextValid()) return;
     // During K→战壕 soft window, do not enter long cooling (would delay first badges).
@@ -3172,14 +3690,44 @@
     // 资金接收方屏蔽开着时主线程还要扛 WSS 过滤；滚动冷却略加长，少和虚拟列表抢帧
     const taxRecvOn = taxRecvHidePrefs && taxRecvHidePrefs.enabled === true;
     const coolMs = taxRecvOn ? GMGN_SCROLL_COOLDOWN_MS + 160 : GMGN_SCROLL_COOLDOWN_MS;
-    const resumeMs = taxRecvOn ? GMGN_SCROLL_RESUME_SCAN_MS + 120 : GMGN_SCROLL_RESUME_SCAN_MS;
-    gmgnScrollQuietUntil = Date.now() + coolMs;
-    if (gmgnScrollResumeTimer) {
-      window.clearTimeout(gmgnScrollResumeTimer);
-      gmgnScrollResumeTimer = null;
+    const settleMs = Math.max(
+      coolMs,
+      taxRecvOn ? GMGN_SCROLL_RESUME_SCAN_MS + 120 : GMGN_SCROLL_RESUME_SCAN_MS
+    );
+    const startingWindow = !gmgnScrollResumeTimer;
+    if (startingWindow) {
+      gmgnScrollResumeNeedsScan = false;
+      gmgnScrollResumeTarget = null;
+      gmgnEmbeddedDirtyCards.clear();
+      if (gmgnEmbeddedDirtyTimer) {
+        window.clearTimeout(gmgnEmbeddedDirtyTimer);
+        gmgnEmbeddedDirtyTimer = null;
+      }
+      if (mutationDebounceTimer) {
+        window.clearTimeout(mutationDebounceTimer);
+        mutationDebounceTimer = null;
+      }
     }
-    gmgnScrollResumeTimer = window.setTimeout(() => {
+    if (!isGmgnForbiddenScrollTarget(scrollTarget)) {
+      gmgnScrollResumeNeedsScan = true;
+      if (scrollTarget instanceof HTMLElement) gmgnScrollResumeTarget = scrollTarget;
+    }
+    gmgnScrollQuietUntil = Date.now() + settleMs;
+    // Follow one moving deadline instead of allocating and cancelling a timer
+    // for every wheel/scroll event.
+    if (gmgnScrollResumeTimer) return;
+    const finishScroll = () => {
+      const waitMs = gmgnScrollQuietUntil - Date.now();
+      if (waitMs > 0) {
+        gmgnScrollResumeTimer = window.setTimeout(finishScroll, Math.max(40, waitMs));
+        return;
+      }
       gmgnScrollResumeTimer = null;
+      const needsScan = gmgnScrollResumeNeedsScan;
+      const scrollTarget = gmgnScrollResumeTarget;
+      gmgnScrollResumeNeedsScan = false;
+      gmgnScrollResumeTarget = null;
+      if (!needsScan) return;
       if (!isGmgnHost()) return;
       if (!isTabVisible() || !isExtensionContextValid()) return;
       if (isSpaQuiet() || isNonTargetTokenPage()) return;
@@ -3188,13 +3736,40 @@
         scheduleScan(0, { force: true, light: true, immediate: false, bypassForceGap: true });
         return;
       }
+      // 0.7.5：顶栏缺失时仍扫侧栏 — 旧逻辑只 tryPaint header 后 return，
+      // 导致 K 线左列（已开盘）停滚后仍长时间无徽章。
       if (isGmgnTokenPage() && !hasGmgnTokenHeaderBadge()) {
-        tryPaintGmgnTokenHeader("scroll-settle");
-        return;
+        try {
+          tryPaintGmgnTokenHeader("scroll-settle");
+        } catch (_h) {
+          // ignore
+        }
       }
       pendingLightScan = false;
-      scheduleScan(0, { force: false, immediate: false, light: false });
-    }, resumeMs);
+      if (isGmgnTokenPage()) {
+        // Token 页的常驻扫描会在 header 稳定后降为 light。停滚时先补一片
+        // K 线左侧战壕视口，再让常规扫描补剩余卡片。
+        try {
+          paintUnpaintedTargetViewportQuick("scroll-settle", scrollTarget, true);
+        } catch (_vp) {
+          // The regular scan below remains the fallback.
+        }
+        window.setTimeout(() => {
+          if (!isGmgnTokenPage()) return;
+          try {
+            paintUnpaintedTargetViewportQuick("scroll-settle-followup", scrollTarget, true);
+          } catch (_vp) {
+            // The regular scan below remains the fallback.
+          }
+        }, 48);
+      }
+      scheduleScan(isGmgnTokenPage() ? 96 : 0, {
+        force: false,
+        immediate: false,
+        light: false
+      });
+    };
+    gmgnScrollResumeTimer = window.setTimeout(finishScroll, settleMs);
   }
 
   function isDebotScrollCooling() {
@@ -3207,16 +3782,19 @@
     const overlayKnownOpen =
       overlayDetectCache.open && Date.now() - overlayDetectCache.at < 500;
     if (isOverlayFast() || overlayKnownOpen) return;
-    debotScrollQuietUntil = Date.now() + DEBOT_SCROLL_COOLDOWN_MS;
+    const settleMs = Math.max(DEBOT_SCROLL_COOLDOWN_MS, DEBOT_SCROLL_RESUME_SCAN_MS);
+    debotScrollQuietUntil = Date.now() + settleMs;
     if (mutationDebounceTimer) {
       window.clearTimeout(mutationDebounceTimer);
       mutationDebounceTimer = null;
     }
-    if (debotScrollResumeTimer) {
-      window.clearTimeout(debotScrollResumeTimer);
-      debotScrollResumeTimer = null;
-    }
-    debotScrollResumeTimer = window.setTimeout(() => {
+    if (debotScrollResumeTimer) return;
+    const finishScroll = () => {
+      const waitMs = debotScrollQuietUntil - Date.now();
+      if (waitMs > 0) {
+        debotScrollResumeTimer = window.setTimeout(finishScroll, Math.max(40, waitMs));
+        return;
+      }
       debotScrollResumeTimer = null;
       if (!isDebotHost() || !isTabVisible() || !isExtensionContextValid()) return;
       if (isSpaQuiet() || isNonTargetTokenPage()) return;
@@ -3226,7 +3804,8 @@
       }
       pendingLightScan = false;
       scheduleScan(0, { force: false, immediate: false, light: false });
-    }, DEBOT_SCROLL_RESUME_SCAN_MS);
+    };
+    debotScrollResumeTimer = window.setTimeout(finishScroll, settleMs);
   }
 
   /**
@@ -3304,6 +3883,7 @@
   }
 
   function scheduleGmgnEmbeddedDirtyPass() {
+    if (shouldDeferGmgnTrenchResizeWork()) return;
     if (gmgnEmbeddedDirtyTimer) return;
     gmgnEmbeddedDirtyTimer = window.setTimeout(() => {
       gmgnEmbeddedDirtyTimer = null;
@@ -3316,9 +3896,22 @@
         gmgnEmbeddedDirtyCards.clear();
         return;
       }
+      if (shouldDeferGmgnTrenchResizeWork()) return;
       // Boot/progressive scans own the unsettled phase. Once the header is stable,
       // this queue updates only changed trench rows and never wakes the chart scanner.
       if (isSpaQuiet() || !isTokenPageSettledWithBadge() || quickHasOpenOverlay()) return;
+      // 滚动冷却中：不丢队列，等停滚后再补（避免 180ms 空转）
+      if (isGmgnScrollCooling()) {
+        const wait = Math.max(
+          100,
+          Math.min(600, (gmgnScrollQuietUntil || 0) - Date.now() + 60)
+        );
+        gmgnEmbeddedDirtyTimer = window.setTimeout(() => {
+          gmgnEmbeddedDirtyTimer = null;
+          scheduleGmgnEmbeddedDirtyPass();
+        }, wait);
+        return;
+      }
 
       const cards = Array.from(gmgnEmbeddedDirtyCards);
       gmgnEmbeddedDirtyCards.clear();
@@ -3328,10 +3921,19 @@
       for (const card of cards) {
         if (processed >= GMGN_EMBEDDED_DIRTY_CARD_LIMIT) break;
         if (!(card instanceof HTMLElement) || !card.isConnected) continue;
-        if (!isNearViewport(card, false) || !isVisible(card)) continue;
+        // 0.7.5：侧栏用更松视口；非侧栏仍紧门禁
+        const near = isGmgnTokenTrenchSidebarEl(card)
+          ? isNearGmgnTokenTrenchViewport(card)
+          : isNearViewport(card, true);
+        if (!near || !isVisible(card)) continue;
         processed += 1;
-        const token = extractCardTokenFromAttrs(card);
-        if (!token) {
+        let token =
+          extractCardTokenFromAttrs(card) ||
+          extractCardHrefToken(card) ||
+          siteStrategy?.extractToken?.(card) ||
+          null;
+        if (token) token = String(token).toLowerCase();
+        if (!token || !TARGET_TOKEN_RE.test(token)) {
           if (card.dataset[CARD_MARK] || card.querySelector?.(`[${ICON_DATA}="1"]`)) {
             clearCardIcon(card);
           }
@@ -3346,24 +3948,55 @@
           queued += 1;
         }
       }
+      // 本批 dirty 漏掉的视口未画：再快补一轮
       debugInfo("gmgn:embedded-dirty", { cards: cards.length, processed, painted, queued });
     }, GMGN_EMBEDDED_DIRTY_DEBOUNCE_MS);
   }
 
-  /** Collect only GMGN TokenItem roots touched by host mutations. */
+  /** Collect GMGN TokenItem / token-href roots touched by host mutations. */
   function collectGmgnEmbeddedDirtyCards(records) {
     if (!isGmgnTokenPage() || !records?.length) return 0;
+    if (shouldDeferGmgnTrenchResizeWork()) return 0;
     const selector = '[data-sentry-source-file="TokenItem.tsx"]';
+    const hrefSel =
+      '[href*="/bsc/token/"][href*="0x"], [href*="/token/"][href*="0x"]';
     let added = 0;
     let matched = false;
+    const skipForbiddenPanelCard = (card) => {
+      if (
+        !(card instanceof HTMLElement) ||
+        (!isGmgnWalletTrackPanel(card) && !isGmgnFavoritesPanel(card))
+      ) {
+        return false;
+      }
+      wipeForbiddenMountBadges(card, true);
+      return true;
+    };
     const addCard = (node) => {
       if (!(node instanceof HTMLElement)) return;
-      const card = node.matches(selector) ? node : node.closest?.(selector);
+      let card = node.matches(selector) ? node : node.closest?.(selector);
+      // 0.7.5：无 TokenItem 标记时，回退到侧栏 token href 宿主
+      if (!(card instanceof HTMLElement)) {
+        const hrefHost = node.matches?.(hrefSel)
+          ? node
+          : node.closest?.(hrefSel);
+        if (
+          hrefHost instanceof HTMLElement &&
+          isGmgnTokenTrenchSidebarEl(hrefHost)
+        ) {
+          card = hrefHost;
+        }
+      }
       if (card instanceof HTMLElement && card.isConnected) {
-        matched = true;
-        if (!gmgnEmbeddedDirtyCards.has(card)) {
-          gmgnEmbeddedDirtyCards.add(card);
-          added += 1;
+        if (skipForbiddenPanelCard(card)) return;
+        if (!isGmgnTokenTrenchSidebarEl(card) && !card.matches?.(selector)) {
+          // 图表区 / 顶栏 href：不入 dirty
+        } else {
+          matched = true;
+          if (!gmgnEmbeddedDirtyCards.has(card)) {
+            gmgnEmbeddedDirtyCards.add(card);
+            added += 1;
+          }
         }
       }
       if (added >= GMGN_EMBEDDED_DIRTY_CARD_LIMIT) return;
@@ -3374,9 +4007,28 @@
           if (item instanceof HTMLElement && item.isConnected) matched = true;
           continue;
         }
+        if (skipForbiddenPanelCard(item)) continue;
         matched = true;
         gmgnEmbeddedDirtyCards.add(item);
         added += 1;
+      }
+      // href 兜底：子树里新挂的侧栏 token 行
+      if (added < GMGN_EMBEDDED_DIRTY_CARD_LIMIT) {
+        const hrefNested = node.querySelectorAll?.(hrefSel) || [];
+        for (
+          let i = 0;
+          i < hrefNested.length && added < GMGN_EMBEDDED_DIRTY_CARD_LIMIT;
+          i += 1
+        ) {
+          const item = hrefNested[i];
+          if (!(item instanceof HTMLElement) || !item.isConnected) continue;
+          if (skipForbiddenPanelCard(item)) continue;
+          if (!isGmgnTokenTrenchSidebarEl(item)) continue;
+          if (gmgnEmbeddedDirtyCards.has(item)) continue;
+          matched = true;
+          gmgnEmbeddedDirtyCards.add(item);
+          added += 1;
+        }
       }
     };
     for (const record of records) {
@@ -3708,6 +4360,7 @@
     try {
       document.querySelectorAll(GMGN_TRENCH_ROOT_SELECTOR).forEach((root) => {
         if (!(root instanceof HTMLElement)) return;
+        if (isGmgnWalletTrackPanel(root) || isGmgnFavoritesPanel(root)) return;
         const r = root.getBoundingClientRect();
         if (
           r.width < 240 ||
@@ -4018,6 +4671,11 @@
    */
   function paintListCardFromCacheFast(card, token, entry) {
     if (!(card instanceof HTMLElement) || !token || !entry) return false;
+    if (shouldDeferGmgnTrenchResizeWork()) return false;
+    if (isBadgeMountForbidden(card)) {
+      wipeForbiddenMountBadges(card, true);
+      return false;
+    }
     // 加载占位禁止走 cache-fast「真徽章」路径
     if (isFeeLoadingEntry(entry)) return false;
     // 行 CA 必须匹配 token，禁止用缓存画错行
@@ -4394,10 +5052,12 @@
   }
 
   function scheduleGmgnHeaderRepair(reason, delay = 0) {
+    if (shouldDeferGmgnTrenchResizeWork()) return;
     if (gmgnHeaderRepairTimer) return;
     gmgnHeaderRepairTimer = window.setTimeout(() => {
       gmgnHeaderRepairTimer = null;
       if (!isExtensionContextValid() || !isTabVisible() || !isGmgnTokenPage()) return;
+      if (shouldDeferGmgnTrenchResizeWork()) return;
       if (hasGmgnTokenHeaderBadge()) return;
       tryPaintGmgnTokenHeader(reason);
     }, delay);
@@ -5144,6 +5804,13 @@
     if (gmgnEmbeddedDirtyTimer) window.clearTimeout(gmgnEmbeddedDirtyTimer);
     gmgnEmbeddedDirtyTimer = null;
     gmgnEmbeddedDirtyCards.clear();
+    gmgnTrenchResizeActive = false;
+    gmgnTrenchResizeQuietUntil = 0;
+    gmgnTrenchResizeDirty = false;
+    if (gmgnTrenchResizeSettleTimer) {
+      window.clearTimeout(gmgnTrenchResizeSettleTimer);
+      gmgnTrenchResizeSettleTimer = null;
+    }
     cancelGmgnOverlayPaint();
     clearSpaNavScanTimers();
     if (spaQuietFlushTimer) {
@@ -5274,9 +5941,13 @@
     gmgnSteadyRoundRobinRow = 0;
     gmgnTrenchProbeCache = { at: 0, roots: [], ready: false };
     taxRateLabelCache = { el: null, at: 0 };
+    gmgnHeaderBadgeCache = { token: "", el: null };
     // GMGN scroll quiet should not block SPA progressive settle.
     if (isGmgnHost()) {
       gmgnScrollQuietUntil = 0;
+      gmgnScrollResumeNeedsScan = false;
+      gmgnScrollResumeTarget = null;
+      gmgnForbiddenScrollTargetCache = new WeakMap();
       if (gmgnScrollResumeTimer) {
         window.clearTimeout(gmgnScrollResumeTimer);
         gmgnScrollResumeTimer = null;
@@ -5657,6 +6328,9 @@
   /** Remove only our previous token header after the new address row is confirmed. */
   function removeStaleTokenHeaderBadges(currentToken) {
     if (!currentToken) return;
+    if (gmgnHeaderBadgeCache.token && gmgnHeaderBadgeCache.token !== currentToken) {
+      gmgnHeaderBadgeCache = { token: "", el: null };
+    }
     try {
       document
         .querySelectorAll(`[${ICON_DATA}="1"][data-fee-header="1"]`)
@@ -6018,8 +6692,10 @@
     debotHeaderBadgeOkUntil = 0;
     debotHeaderBadgeOkEl = null;
     debotHeaderFindCache = { at: 0, key: "", el: null };
+    gmgnHeaderBadgeCache = { token: "", el: null };
     // Drop GMGN Tax mount cache with marks (nodes are gone / recycled).
     gmgnTaxMountCache = new WeakMap();
+    badgeForbiddenCache = new WeakMap();
     try {
       document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => {
         try {
@@ -6152,14 +6828,13 @@
       // Skip for header (multiple 0x links in ticker/share row).
       if (!(existing.dataset.feeHeader === "1" || isGmgnHeaderMarkedCard(card))) {
         if (!cardStillMatchesToken(card, marked)) return false;
-        const hrefTok = extractCardHrefToken(card);
-        if (hrefTok && hrefTok !== marked) return false;
-        // badge feeToken 必须等于行身份 CA
-        if (existing.dataset.feeToken && hrefTok && existing.dataset.feeToken !== hrefTok) {
-          return false;
-        }
-        // 非目标行（ffff）绝不能 stable 挂徽章
-        if (hrefTok && !TARGET_TOKEN_RE.test(hrefTok)) return false;
+        const hrefTok =
+          readHostRowToken(card) || extractCardHrefToken(card);
+        // 有实心徽章时：必须能读到行身份，且 fee === marked === live
+        if (!hrefTok) return false;
+        if (hrefTok !== marked) return false;
+        if (existing.dataset.feeToken !== hrefTok) return false;
+        if (!TARGET_TOKEN_RE.test(hrefTok)) return false;
       }
       return true;
     }
@@ -6191,17 +6866,21 @@
       }
     }
     if (!cardStillMatchesToken(card, marked)) return false;
-    const hrefTok = extractCardHrefToken(card);
-    if (hrefTok && hrefTok !== marked) return false;
-    if (existing.dataset.feeToken && hrefTok && existing.dataset.feeToken !== hrefTok) {
+    const hrefTok = readHostRowToken(card) || extractCardHrefToken(card);
+    // Debot 常无 /token/ href：允许 short 已在 cardStillMatches 校验；有 href 则三元全等
+    if (hrefTok) {
+      if (hrefTok !== marked) return false;
+      if (existing.dataset.feeToken !== hrefTok) return false;
+      if (!TARGET_TOKEN_RE.test(hrefTok)) return false;
+    } else if (existing.dataset.feeToken !== marked) {
       return false;
     }
-    if (hrefTok && !TARGET_TOKEN_RE.test(hrefTok)) return false;
     const er = existing.getBoundingClientRect();
     return er.width >= 2 && er.height >= 2;
   }
 
   function scanVisibleCards() {
+    if (shouldDeferGmgnTrenchResizeWork()) return;
     // Also guard idle callbacks that were queued before the click transition was armed.
     if (isTokenEnterTransitionActive()) return;
     if (!tryFinishListReturnTransition("idle-scan")) return;
@@ -6210,6 +6889,9 @@
       return;
     }
     if (!isTabVisible()) return;
+    // A scan that was queued before a wheel tick may reach its idle callback
+    // after scrolling has started. Abort it before any root/card geometry walk.
+    if ((isGmgnScrollCooling() || isDebotScrollCooling()) && !isOverlayFast()) return;
     if (!isScanPageAllowed()) {
       // Leave robinhood / 非 BSC clean — 立即卸徽章（勿隔 N 代才清）
       purgeMarksIfChainDisallowed();
@@ -6259,12 +6941,15 @@
     let queued = 0;
     let skippedCached = 0;
     const budget = cardsPerScanBudget();
-    // list-return / overlay / GMGN: tight viewport only (first screen; skip offscreen cost).
-    // Debot token side boards may use loose; GMGN never (0.4.45).
+    // list-return / overlay / GMGN 战壕首页: tight viewport.
+    // 0.7.5: GMGN K 线侧栏用 loose，避免下滑已开盘行被 40px pad 饿死。
+    // Debot token side boards may use loose.
     const looseView =
-      listReturnSoft || overlayFast || isGmgnHost()
+      listReturnSoft || overlayFast
         ? false
-        : lightScan || isTokenDetailRoute();
+        : isGmgnHost()
+          ? isGmgnTokenPage() || isTokenDetailRoute()
+          : lightScan || isTokenDetailRoute();
 
     // Expensive re-extract cleanup is rare — skip deep cleanup during list-return soft.
     // GMGN: never deep cleanup on return soft / scroll cool (DOM thrash).
@@ -6305,6 +6990,10 @@
       if (!card || seenCards.has(card) || !isVisible(card)) continue;
       // Reject full-page shells (token SPA leftover / body mark).
       if (card === document.body || card === document.documentElement) continue;
+      if (isBadgeMountForbidden(card)) {
+        wipeForbiddenMountBadges(card, true);
+        continue;
+      }
       {
         const cr = card.getBoundingClientRect();
         if (cr.height > window.innerHeight * 0.85 && cr.width > window.innerWidth * 0.85) {
@@ -6329,6 +7018,10 @@
     for (const card of outerCards) {
       // Nested mark cleanup: drop CARD_MARK on discarded inner nodes.
       // (handled by only painting outerCards)
+      if (isBadgeMountForbidden(card)) {
+        wipeForbiddenMountBadges(card, true);
+        continue;
+      }
 
       // ★ 0.6.11：稳定正确卡走 gate 快路径；仅嫌疑卡全量 enforce（防卡顿）
       const idGate = gateCardIdentity(card);
@@ -6651,9 +7344,17 @@
 
     // Always continue when work remains (not only SPA) — covers Debot 3-col first paint.
     // 0.4.21: keep light mode on token settled pages so chart full-scan stays off.
+    // 0.7.5: GMGN K 线 settled 时禁止因 truncated 强制 light——light root 不扫三列战壕，
+    // 会形成「有洞 → light 续扫 → 仍不扫侧栏 → 几十秒无徽章」。
     if (truncated) {
+      const tokenTrenchNeedsFull =
+        isGmgnHost() && (isGmgnTokenPage() || isTokenDetailRoute());
       const keepLight =
-        lightScan || overlayFast || isTokenPageSettledWithBadge() || quickHasOpenOverlay();
+        !tokenTrenchNeedsFull &&
+        (lightScan ||
+          overlayFast ||
+          isTokenPageSettledWithBadge() ||
+          quickHasOpenOverlay());
       // list-return: yield to site paint (immediate:false) — 0.4.32 kill stacked longtasks.
       // 0.4.45 GMGN: short delay + stop if first screen already enough (avoid 2s@6 badges).
       if (listReturnSoft && !overlayFast) {
@@ -6681,7 +7382,12 @@
           maybeFlushRequestQueue("scan-truncated");
         }
         // Steady GMGN: never immediate force storm — idle slice only.
-        scheduleScan(120, { force: false, immediate: false, light: keepLight });
+        // token 侧栏截断：light:false + 稍后视口快补
+        scheduleScan(120, {
+          force: false,
+          immediate: false,
+          light: keepLight
+        });
       } else {
         // Debot/Gungnir used to force an immediate full scan every 60ms while truncated.
         // The scan's own badge mutations retriggered the document observer and starved UI.
@@ -7119,7 +7825,12 @@
       now - scanRootsCache.at < SCAN_ROOTS_TTL_MS
     ) {
       // Drop detached roots
-      const alive = scanRootsCache.roots.filter((r) => r.isConnected);
+      const alive = scanRootsCache.roots.filter(
+        (r) =>
+          r.isConnected &&
+          (!isGmgnHost() ||
+            (!isGmgnWalletTrackPanel(r) && !isGmgnFavoritesPanel(r)))
+      );
       if (alive.length) {
         scanRootsCache.roots = alive;
         return alive;
@@ -7139,6 +7850,7 @@
           .querySelectorAll(GMGN_TRENCH_ROOT_SELECTOR)
           .forEach((el) => {
             if (!(el instanceof HTMLElement)) return;
+            if (isGmgnWalletTrackPanel(el) || isGmgnFavoritesPanel(el)) return;
             const r = el.getBoundingClientRect();
             // Side trench columns: tall panels (left 战壕 in split view ~w 240–700).
             if (
@@ -7157,6 +7869,7 @@
           .querySelectorAll(GMGN_TRENCH_ROOT_SELECTOR)
           .forEach((el) => {
             if (!(el instanceof HTMLElement)) return;
+            if (isGmgnWalletTrackPanel(el) || isGmgnFavoritesPanel(el)) return;
             const r = el.getBoundingClientRect();
             if (r.width >= 240 && r.height >= 200 && r.top < window.innerHeight) {
               candidates.push({ el, area: r.width * r.height, top: r.top });
@@ -7341,6 +8054,7 @@
         .querySelectorAll(GMGN_TRENCH_ROOT_SELECTOR)
         .forEach((el) => {
           if (!(el instanceof HTMLElement)) return;
+          if (isGmgnWalletTrackPanel(el) || isGmgnFavoritesPanel(el)) return;
           const r = el.getBoundingClientRect();
           if (r.width >= 200 && r.height >= 160 && r.top < window.innerHeight) roots.push(el);
         });
@@ -7860,6 +8574,11 @@
    * 成本：O(徽章数≤48) × closest + 字符串比，远低于全量 enforce。
    */
   function scrubBadgesToHostHref() {
+    if (shouldDeferGmgnTrenchResizeWork()) return;
+    if (isGmgnScrollCooling() || isDebotScrollCooling()) return;
+    const now = Date.now();
+    if (now - lastScrubHrefAt < SCRUB_HREF_MIN_GAP_MS) return;
+    lastScrubHrefAt = now;
     try {
       const icons = document.querySelectorAll(`[${ICON_DATA}="1"]`);
       const lim = Math.min(icons.length, SCRUB_HREF_MAX_ICONS);
@@ -7883,6 +8602,17 @@
           } catch (_e1) {
             // ignore
           }
+          continue;
+        }
+        // 钱包追踪 / 顶 ticker / 搜索钱包区残留。只判断徽章宿主；
+        // icon 自身通常是短 chip，不能拿卡片几何规则判断。
+        if (isBadgeMountForbidden(host)) {
+          try {
+            icon.remove();
+          } catch (_ef) {
+            // ignore
+          }
+          wipeForbiddenMountBadges(host, true);
           continue;
         }
         const idCa = readHostRowToken(host);
@@ -7924,6 +8654,8 @@
           } catch (_e5) {
             // ignore
           }
+          // ★ 0.7.4: 拆错后立刻 cache-first 重画正确 CA，缩短 feeMatch 空窗
+          tryRepaintCardAfterIdentityWipe(host, idCa);
         }
       }
     } catch (_err) {
@@ -7932,14 +8664,61 @@
   }
 
   /**
+   * scrub 拆掉错徽章后：若行身份仍是目标 CA，用内存 entry 立刻重画（无则 ⏳ 入队）。
+   * 不占主扫 budget，避免「错 → 空一轮 → 才对」。
+   */
+  function tryRepaintCardAfterIdentityWipe(host, idCa) {
+    if (!(host instanceof HTMLElement)) return;
+    const tok = String(idCa || "").toLowerCase();
+    if (!TARGET_TOKEN_RE.test(tok)) return;
+    if (isBadgeMountForbidden(host)) {
+      wipeForbiddenMountBadges(host, true);
+      return;
+    }
+    // 再读一次宿主，防止 wipe 后 React 已换行
+    const live = readHostRowToken(host) || extractCardHrefToken(host);
+    if (live && live !== tok) return;
+    if (live && !TARGET_TOKEN_RE.test(live)) return;
+    try {
+      host.dataset[CARD_MARK] = tok;
+      host.setAttribute(CARD_DATA, tok);
+    } catch (_m) {
+      // ignore
+    }
+    const entry = resolveEntry(tok);
+    if (entry && !isFeeLoadingEntry(entry)) {
+      try {
+        if (
+          paintListCardFromCacheFast(host, tok, entry) ||
+          renderMode(host, tok, entry)
+        ) {
+          return;
+        }
+      } catch (_p) {
+        // fall through queue
+      }
+    }
+    try {
+      paintLoadingBadgeAndQueue(host, tok);
+    } catch (_q) {
+      try {
+        queueToken(tok);
+      } catch (_q2) {
+        // ignore
+      }
+    }
+  }
+
+  /**
    * 节流版全量 scrub（Debot mark 路径等）；主纠错靠 scrubBadgesToHostHref。
    */
   function scrubIdentityMismatchedBadges() {
+    if (shouldDeferGmgnTrenchResizeWork()) return;
     const now = Date.now();
+    if (isGmgnScrollCooling() || isDebotScrollCooling()) return;
     if (now - lastScrubIdentityAt < SCRUB_IDENTITY_MIN_GAP_MS) return;
     lastScrubIdentityAt = now;
     // 先跑轻量
-    scrubBadgesToHostHref();
     try {
       const icons = document.querySelectorAll(`[${ICON_DATA}="1"]`);
       const lim = Math.min(icons.length, SCRUB_IDENTITY_MAX_ICONS);
@@ -8274,11 +9053,21 @@
   function cardStillMatchesToken(card, token) {
     if (!card || !token) return false;
     const want = String(token).toLowerCase();
-    // 徽章 token 本身必须是 7777/8888
+    // 徽章 token 本身必须是 7777/8888/ffff
     if (!TARGET_TOKEN_RE.test(want)) return false;
 
     // 1) Token-route / any 0x href — authoritative identity during recycle.
-    const hrefToken = extractCardHrefToken(card);
+    // Prefer raw host href (bypass short TTL cache) when available.
+    let hrefToken = null;
+    try {
+      const raw = card.getAttribute?.("href") || "";
+      if (raw && raw.indexOf("/token/") !== -1 && raw.indexOf("0x") !== -1) {
+        hrefToken = extractAnyToken(raw);
+      }
+    } catch (_rh) {
+      // ignore
+    }
+    if (!hrefToken) hrefToken = extractCardHrefToken(card);
     if (hrefToken) {
       if (!TARGET_TOKEN_RE.test(hrefToken)) return false;
       return hrefToken === want;
@@ -8306,8 +9095,9 @@
     // A visible short CA with a different suffix means the virtual row changed identity.
     if (SHORT_TOKEN_RE.test(shortSlice)) return false;
 
-    // No short/href signal — keep badge (safer than wipe on temporary empty paint).
-    return true;
+    // ★ 0.7.4: 无 href/short 信号时绝不认匹配。
+    // 虚拟列表复用瞬间常「徽章还在、身份 DOM 暂空」——旧逻辑 return true 会 feeMatch:false。
+    return false;
   }
 
   /**
@@ -11565,7 +12355,8 @@
 
   function renderMode(card, token, entry, options = {}) {
     const forceRemount = options.forceRemount === true;
-    // 仅 7777/8888 挂徽章；其它尾号直接清掉误挂
+    if (shouldDeferGmgnTrenchResizeWork()) return false;
+    // 仅 7777/8888/ffff 挂徽章；其它尾号直接清掉误挂
     const tok = String(token || "").toLowerCase();
     if (!TARGET_TOKEN_RE.test(tok)) {
       try {
@@ -11573,6 +12364,11 @@
       } catch (_e) {
         // ignore
       }
+      return false;
+    }
+    // 钱包追踪 / 顶 ticker / 搜索钱包区：禁止挂载
+    if (card instanceof HTMLElement && isBadgeMountForbidden(card)) {
+      wipeForbiddenMountBadges(card, true);
       return false;
     }
     // 虚拟列表复用 / 错挂：行身份 CA 必须 === tok，且必须是目标尾号
@@ -12433,6 +13229,13 @@
   // 0.4.41 GMGN: closer to 0.4.22 — no tryPaint/overlay storm on every mut.
   // 0.4.43 GMGN: records relevance + scroll cooldown (Debot path unchanged).
   const mutationObserver = new MutationObserver((records) => {
+    // These callbacks are generated in bulk while virtual lists recycle rows.
+    // Exit before any route/context checks or layout reads on the scroll hot path.
+    if (isGmgnScrollCooling() || isDebotScrollCooling()) return;
+    if (isGmgnTrenchResizeCooling()) {
+      gmgnTrenchResizeDirty = true;
+      return;
+    }
     if (!isTabVisible()) return;
     if (!isExtensionContextValid()) return;
     if (!isScanPageAllowed()) return;
@@ -12632,19 +13435,25 @@
 
   // 0.4.5: do NOT full-scan on every scroll (was main jank vs 0.3.4).
   // Virtual-list hosts: passive scroll/wheel marks cooldown; one resume scan after settle.
+  if (isGmgnHost()) {
+    document.addEventListener("pointerdown", beginGmgnTrenchResize, true);
+    document.addEventListener("mousedown", beginGmgnTrenchResize, true);
+    window.addEventListener("pointerup", finishGmgnTrenchResize, true);
+    window.addEventListener("pointercancel", finishGmgnTrenchResize, true);
+    window.addEventListener("mouseup", finishGmgnTrenchResize, true);
+    window.addEventListener("blur", finishGmgnTrenchResize, true);
+  }
+
   if (isGmgnHost() || isDebotHost()) {
-    const onListScroll = () => {
+    const onListScroll = (event) => {
       try {
-        if (isGmgnHost()) noteGmgnScrollActivity();
+        if (isGmgnHost()) noteGmgnScrollActivity(event.target);
         else noteDebotScrollActivity();
       } catch (_err) {
         // ignore
       }
     };
     window.addEventListener("scroll", onListScroll, { passive: true, capture: true });
-    window.addEventListener("wheel", onListScroll, { passive: true, capture: true });
-    // Touch drag on columns (mobile / trackpad-less).
-    window.addEventListener("touchmove", onListScroll, { passive: true, capture: true });
   }
 
   window.addEventListener(
