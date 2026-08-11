@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.7.9",
-  "description": "FlapFeeInfo 0.7.9: reliable K-line trench badge fill with smooth scrolling.",
+  "version": "0.7.14",
+  "description": "FlapFeeInfo 0.7.14: instant new-card badge batching with bounded GMGN mutation work.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

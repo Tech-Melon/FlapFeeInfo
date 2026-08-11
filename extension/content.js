@@ -8,6 +8,14 @@
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777|ffff)/i;
   const GMGN_TRENCH_ROOT_SELECTOR =
     "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100";
+  // Stable GMGN surfaces from the live DOM. Prefer these over page-wide wrappers;
+  // class-only fallbacks remain below for builds that omit Sentry metadata.
+  const GMGN_FIXED_TRENCH_ROOT_SELECTOR =
+    '[data-sentry-source-file="PumpSubX.tsx"], [data-sentry-source-file="PumpSubAX.tsx"]';
+  const GMGN_FIXED_SEARCH_ROOT_SELECTOR =
+    '[data-sentry-source-file="SearchModalDetail.tsx"]';
+  // 0.7.12: watch scoped TokenItem href swaps so virtual rows repaint after reuse.
+  // 0.7.11: fixed GMGN surfaces, scoped observers, and current-column scroll repair.
   // 0.7.9: K 线战壕短地址先爬真实卡片；停滚分片补绘并复用相邻徽章
   // 0.7.8: GMGN 战壕/钱包追踪滚动热路径降载；禁区停滚不再恢复扫描
   // 0.7.5: K 线侧栏下滑徽章饥饿 — truncated 禁 light 死循环；token 页视口快补；dirty 兜底
@@ -264,6 +272,11 @@
   // actually changed; chart/ticker mutations must never reopen a full-page scan.
   const GMGN_EMBEDDED_DIRTY_DEBOUNCE_MS = 180;
   const GMGN_EMBEDDED_DIRTY_CARD_LIMIT = 16;
+  // Newly inserted visible cards use a small, independent batch window so they
+  // do not wait behind the regular list scan/idle pipeline.
+  const GMGN_NEW_CARD_BATCH_FLUSH_MS = 500;
+  const GMGN_NEW_CARD_BATCH_MIN_TOKENS = 3;
+  const GMGN_NEW_CARD_LIMIT = 16;
   // Resizing the token-page trench rebuilds React rows on every pointer move.
   // Keep extension DOM/layout work out of that hot path and repair once after settle.
   const GMGN_TRENCH_RESIZE_SETTLE_MS = 280;
@@ -572,7 +585,7 @@
     return { idCa, allowed: true, wiped };
   }
 
-  function paintLoadingBadgeAndQueue(card, token) {
+  function paintLoadingBadgeAndQueue(card, token, options = {}) {
     const tok = String(token || "").toLowerCase();
     if (!(card instanceof HTMLElement) || !TARGET_TOKEN_RE.test(tok)) return false;
     if (shouldDeferGmgnTrenchResizeWork()) return false;
@@ -593,7 +606,7 @@
       if (!short || !tokenMatchesShort(tok, short)) {
         if (isGmgnHost()) {
           // 仍入队，下一帧有 href 再画
-          queueToken(tok);
+          queueToken(tok, options);
         }
         return false;
       }
@@ -608,7 +621,7 @@
     } catch (_err) {
       // ignore
     }
-    queueToken(tok);
+    queueToken(tok, options);
     try {
       const existing = card.querySelector(`[${ICON_DATA}="1"]`);
       if (
@@ -689,6 +702,11 @@
         rootHint instanceof HTMLElement && rootHint.isConnected
           ? [rootHint]
           : getScanRoots();
+      const fixedTrenchRoot = rootHint instanceof HTMLElement
+        ? rootHint.matches?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR)
+          ? rootHint
+          : rootHint.closest?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR)
+        : null;
       const itemCap = tokenPage ? 100 : 80;
       for (const root of roots) {
         if (!(root instanceof HTMLElement) || !root.isConnected) continue;
@@ -711,7 +729,11 @@
         const el = items[i];
         if (!(el instanceof HTMLElement)) continue;
         let card = el;
-        if (tokenPage) {
+        if (fixedTrenchRoot instanceof HTMLElement) {
+          card = quickClimbCardFromTokenLink(el) || climbGmgnListCard(el);
+          if (!(card instanceof HTMLElement) || !fixedTrenchRoot.contains(card)) continue;
+          if (!isNearViewport(card, false)) continue;
+        } else if (tokenPage) {
           // K 线战壕常把 href 放在卡片内的短地址行（高度约 16px）。
           // 先爬到真实卡片，再做侧栏和视口门禁，否则下滑后的卡会被永久跳过。
           if (!isGmgnTokenTrenchSidebarEl(card)) {
@@ -724,7 +746,7 @@
         }
         if (!(card instanceof HTMLElement) || seenCards.has(card)) continue;
         seenCards.add(card);
-        if (isBadgeMountForbidden(card)) {
+        if (!(fixedTrenchRoot instanceof HTMLElement) && isBadgeMountForbidden(card)) {
           wipeForbiddenMountBadges(card, true);
           continue;
         }
@@ -856,6 +878,9 @@
   const missingRetryState = new Map();
   /** GMGN only: one deferred requeue timer per token after miss/fail. */
   const gmgnMissingRequeueTimers = new Map();
+  /** GMGN visible cards discovered directly from fixed-root mutations. */
+  const gmgnNewCardPendingTokens = new Set();
+  let gmgnNewCardBatchTimer = null;
   /** 最近一次确认存在热工作（视口/新创建未画）的墙钟，用于退热 */
   let lastGmgnHotWorkAt = 0;
   let scanScheduled = false;
@@ -908,6 +933,8 @@
   let gmgnScrollResumeNeedsScan = false;
   /** Last allowed GMGN scroller; lets settle fill only the column the user moved. */
   let gmgnScrollResumeTarget = null;
+  /** Forbidden scroller gets a targeted residue cleanup after settle, never a scan. */
+  let gmgnForbiddenScrollTarget = null;
   let gmgnForbiddenScrollTargetCache = new WeakMap();
   /** Debot/Gungnir: suppress mutation scans while virtual rows are recycling. */
   let debotScrollQuietUntil = 0;
@@ -932,6 +959,7 @@
   let gmgnSteadyRoundRobinRow = 0;
   /** Last bound observer roots (skip rebind when identity unchanged). */
   let lastObserverRoots = [];
+  let gmgnObserverRefreshTimer = null;
   /** Next scan only walks dialog + side-board roots (skip K-line header thrash). */
   let pendingLightScan = false;
   /** Debot/Gungnir: force-paint token header until success or timeout after SPA. */
@@ -1089,25 +1117,43 @@
       },
       findIconTarget(card) {
         if (card?.dataset?.flapOverlayCard === "1") {
-          return findGmgnOverlayVolumeMount(card);
+          return findGmgnOverlayLiquidityHeadMount(card);
         }
         if (isGmgnTokenPage() && isGmgnTokenHeaderCard(card)) {
           // 0.4.50: address ONLY — never 总税率 (user: 徽章必须在地址旁).
           return findGmgnHeaderAddressMount();
         }
         if (isInsideOverlayDialog(card)) {
-          return findGmgnOverlayVolumeMount(card);
+          return findGmgnOverlayLiquidityHeadMount(card);
         }
-        // List / search dialog: Tax chip first; compact row fallback (no Tax in history modal).
-        return findTaxTag(card) || findCompactRowMount(card);
+        // K-line trench default placement is strict: only the card's real Tax chip.
+        // Falling back to the short-CA row can escape into avatar/trade-control columns.
+        const taxMount = findTaxTag(card);
+        if (taxMount) {
+          // Header and overlays returned above. Every remaining token-page card
+          // must stay inside its own Tax row, including the first row whose top
+          // can sit above the generic trench geometry threshold.
+          if (
+            isGmgnTokenPage() ||
+            card.closest?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR)
+          ) {
+            taxMount.dataset.flapMount = "gmgn-trench-tax";
+          }
+          return taxMount;
+        }
+        // Token-page side cards must never fall back to the short-address row:
+        // overflow wrappers can make that path climb into avatar/trade columns.
+        if (isGmgnTokenPage()) return null;
+        // Search/history rows may legitimately have no Tax chip.
+        return findCompactRowMount(card);
       },
       placeIcon(target, icon) {
-        if (target?.dataset?.flapMount === "gmgn-overlay-volume") {
-          icon.dataset.feeOverlayPos = "volume";
-          target.insertAdjacentElement("afterend", icon);
+        if (target?.dataset?.flapMount === "gmgn-overlay-liquidity-head") {
+          icon.dataset.feeOverlayPos = "liquidity-head";
+          target.insertAdjacentElement("afterbegin", icon);
           return;
         }
-        if (isGmgnTokenPage() && target?.dataset?.flapMount) {
+        if (target?.dataset?.flapMount) {
           placeGmgnTokenIcon(target, icon);
           return;
         }
@@ -1315,7 +1361,7 @@
       const root = roots[ri];
       if (!root?.querySelectorAll) continue;
       const anchors = root.querySelectorAll(
-        "a[href*='8888'], a[href*='7777'], a[href*='/token/'][href*='0x']"
+        "[href*='8888'], [href*='7777'], [href*='/token/'][href*='0x']"
       );
       const lim = Math.min(anchors.length, OVERLAY_MAX_CANDIDATES);
       for (let i = 0; i < lim; i += 1) {
@@ -2051,6 +2097,17 @@
 
   /** Header bar ~h-[70px] containing token metrics (价格/池子/总税率). Never body. */
   function findGmgnTokenPageRoot() {
+    // Official K-line address mount (user-confirmed DOM). This avoids the legacy
+    // document-wide span/a/div fallback on every header/card classification.
+    const directAddress = document.querySelector("#token-base-address");
+    if (directAddress instanceof HTMLElement && !isLargeTokenLinkCardNode(directAddress)) {
+      const r = directAddress.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0 && r.top >= 0 && r.top < 240) {
+        return directAddress.parentElement instanceof HTMLElement
+          ? directAddress.parentElement
+          : directAddress;
+      }
+    }
     const taxLab = findGmgnTaxRateLabel();
     if (taxLab) {
       let p = taxLab;
@@ -2853,6 +2910,13 @@
         }
       }
       if (!open && isGmgnHost()) {
+        const exact = document.querySelector(GMGN_FIXED_SEARCH_ROOT_SELECTOR);
+        if (exact instanceof HTMLElement && !isExplicitlyHiddenOverlay(exact)) {
+          const r = exact.getBoundingClientRect();
+          open = r.width >= 260 && r.height >= 100 && r.top < window.innerHeight && r.bottom > 0;
+        }
+      }
+      if (!open && isGmgnHost()) {
         // The permanent header input also contains 搜索/合约. Only the modal's
         // richer placeholder is authoritative, otherwise the trench queue pauses forever.
         const inputs = document.querySelectorAll(GMGN_OVERLAY_INPUT_SELECTOR);
@@ -2922,6 +2986,12 @@
 
   function placeGmgnTokenIcon(target, icon) {
     const kind = target?.dataset?.flapMount || "";
+    if (kind === "gmgn-trench-tax") {
+      // Stay in the Tax metadata row. Never climb through overflow wrappers into
+      // the avatar column or the buy/sell grid.
+      target.insertAdjacentElement("beforebegin", icon);
+      return;
+    }
     // 0.4.50: address leaf/row only. Metrics/tax mounts should not be used for header.
     if (kind === "gmgn-header-address-leaf") {
       target.insertAdjacentElement("afterend", icon);
@@ -3011,49 +3081,52 @@
       let p = node;
       for (let i = 0; i < 18 && p && p !== document.body; i++) {
         const pr = p.getBoundingClientRect();
-        const compact = (p.textContent || "")
-          .slice(0, 180)
-          .replace(/\s+/g, "");
+        if (pr.width < 180 || pr.height < 160) {
+          p = p.parentElement;
+          continue;
+        }
+        const compact = (p.textContent || "").slice(0, 900).replace(/\s+/g, "");
         const walletAt = compact.indexOf("钱包");
         const trackAt = compact.indexOf("追踪", Math.max(0, walletAt + 2));
         const callAt = compact.indexOf("喊单", Math.max(0, trackAt + 2));
         const monitorAt = compact.indexOf("监控", Math.max(0, callAt + 2));
         const noteAt = compact.indexOf("备注", Math.max(0, monitorAt + 2));
+        const trenchTitle = /新创建|即将打满|已开盘|已迁移/.test(compact.slice(0, 260));
+        const semanticHits = [walletAt, trackAt, callAt, monitorAt, noteAt].filter(
+          (at) => at >= 0
+        ).length;
 
         // GMGN's resizable wallet stream can sit in the middle of a K-line layout.
         // Its own tab strip is stable even when the panel width/position changes.
         if (
-          pr.width >= 320 &&
+          pr.width >= 220 &&
           pr.width < window.innerWidth * 0.86 &&
           pr.height >= 180 &&
-          walletAt >= 0 &&
-          walletAt <= 24 &&
-          trackAt > walletAt &&
-          callAt > trackAt &&
-          monitorAt > callAt &&
-          noteAt > monitorAt &&
-          noteAt - walletAt < 96
+          semanticHits >= 3 &&
+          !trenchTitle
         ) {
           return true;
         }
 
-        // Legacy narrow wallet/watch rails.
+        // Narrow wallet feed: the tab strip may be outside this subtree or absent
+        // in the compact layout. Repeated wallet amounts/percentages distinguish it
+        // from the three trench columns, which expose Tax/MC labels.
         if (
-          pr.left < 80 &&
-          pr.width >= 200 &&
-          pr.width <= 560 &&
+          pr.left < Math.max(120, window.innerWidth * 0.08) &&
+          pr.width >= 180 &&
+          pr.width <= 420 &&
           pr.height >= 200
         ) {
-          const head = (p.textContent || "").slice(0, 80).replace(/\s+/g, " ");
+          if (!trenchTitle && semanticHits >= 1) return true;
+          const dollars = (compact.match(/\$\s*\d/g) || []).length;
+          const percents = (compact.match(/[+-]?\d+(?:\.\d+)?%/g) || []).length;
           if (
-            /钱包\s*\d|钱包追踪|追踪\s|喊单|监控|备注|实时通知|追踪数/.test(head)
+            !trenchTitle &&
+            !/(?:Tax|MC|总税率)/i.test(compact) &&
+            dollars >= 2 &&
+            percents >= 2
           ) {
-            // 排除主战壕（含「新创建」且宽度接近整列板）
-            if (/新创建|即将打满|已开盘/.test(head.slice(0, 40)) && pr.width > 380) {
-              // 可能是误匹配到含侧栏文案的祖先 — 继续上爬
-            } else {
-              return true;
-            }
+            return true;
           }
         }
         p = p.parentElement;
@@ -3075,7 +3148,7 @@
       for (let i = 0; i < 18 && p && p !== document.body; i++) {
         const pr = p.getBoundingClientRect();
         if (
-          pr.width >= 280 &&
+          pr.width >= 220 &&
           pr.width < window.innerWidth * 0.72 &&
           pr.height >= 180
         ) {
@@ -3175,9 +3248,10 @@
     const href = node.getAttribute?.("href") || "";
     const parent = node.parentElement;
     const cached = badgeForbiddenCache.get(node);
+    const cacheTtl = cached?.forbidden === true ? BADGE_FORBIDDEN_CACHE_MS : 180;
     if (
       cached &&
-      now - cached.at < BADGE_FORBIDDEN_CACHE_MS &&
+      now - cached.at < cacheTtl &&
       cached.href === href &&
       cached.parent === parent
     ) {
@@ -3564,12 +3638,46 @@
 
   function isGmgnForbiddenScrollTarget(target) {
     if (!(target instanceof HTMLElement)) return false;
+    const now = performance.now();
     const cached = gmgnForbiddenScrollTargetCache.get(target);
-    if (cached !== undefined) return cached;
+    const cacheTtl = cached?.forbidden === true ? 1500 : 200;
+    if (cached && now - cached.at < cacheTtl) return cached.forbidden;
     const forbidden =
       isGmgnWalletTrackPanel(target) || isGmgnFavoritesPanel(target);
-    gmgnForbiddenScrollTargetCache.set(target, forbidden);
+    gmgnForbiddenScrollTargetCache.set(target, { forbidden, at: now });
     return forbidden;
+  }
+
+  function wipeGmgnForbiddenPanelSubtree(node) {
+    if (!(node instanceof HTMLElement)) return 0;
+    let root = null;
+    let p = node;
+    for (let depth = 0; depth < 10 && p && p !== document.body; depth += 1) {
+      if (isGmgnWalletTrackPanel(p) || isGmgnFavoritesPanel(p)) {
+        root = p;
+      } else if (root) {
+        break;
+      }
+      p = p.parentElement;
+    }
+    if (!(root instanceof HTMLElement)) return 0;
+    let removed = 0;
+    root.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => {
+      try {
+        icon.remove();
+        removed += 1;
+      } catch (_err) {
+        // ignore
+      }
+    });
+    root.querySelectorAll(`[${CARD_DATA}]`).forEach((card) => {
+      if (!(card instanceof HTMLElement)) return;
+      delete card.dataset[CARD_MARK];
+      card.removeAttribute(CARD_DATA);
+      cardTokenCache.delete(card);
+      hrefTokenCache.delete(card);
+    });
+    return removed;
   }
 
   function cancelGmgnTrenchResizeHotWork() {
@@ -3698,6 +3806,7 @@
     if (startingWindow) {
       gmgnScrollResumeNeedsScan = false;
       gmgnScrollResumeTarget = null;
+      gmgnForbiddenScrollTarget = null;
       gmgnEmbeddedDirtyCards.clear();
       if (gmgnEmbeddedDirtyTimer) {
         window.clearTimeout(gmgnEmbeddedDirtyTimer);
@@ -3711,6 +3820,8 @@
     if (!isGmgnForbiddenScrollTarget(scrollTarget)) {
       gmgnScrollResumeNeedsScan = true;
       if (scrollTarget instanceof HTMLElement) gmgnScrollResumeTarget = scrollTarget;
+    } else if (scrollTarget instanceof HTMLElement) {
+      gmgnForbiddenScrollTarget = scrollTarget;
     }
     gmgnScrollQuietUntil = Date.now() + settleMs;
     // Follow one moving deadline instead of allocating and cancelling a timer
@@ -3725,9 +3836,14 @@
       gmgnScrollResumeTimer = null;
       const needsScan = gmgnScrollResumeNeedsScan;
       const scrollTarget = gmgnScrollResumeTarget;
+      const forbiddenTarget = gmgnForbiddenScrollTarget;
       gmgnScrollResumeNeedsScan = false;
       gmgnScrollResumeTarget = null;
-      if (!needsScan) return;
+      gmgnForbiddenScrollTarget = null;
+      if (!needsScan) {
+        wipeGmgnForbiddenPanelSubtree(forbiddenTarget);
+        return;
+      }
       if (!isGmgnHost()) return;
       if (!isTabVisible() || !isExtensionContextValid()) return;
       if (isSpaQuiet() || isNonTargetTokenPage()) return;
@@ -3746,22 +3862,37 @@
         }
       }
       pendingLightScan = false;
+      const fixedScrollRoot = scrollTarget instanceof HTMLElement
+        ? scrollTarget.matches?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR)
+          ? scrollTarget
+          : scrollTarget.closest?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR)
+        : null;
+      if (fixedScrollRoot instanceof HTMLElement) {
+        // Exact PumpSubX: repair only the column that moved. A three-column scan
+        // here creates a visible main-thread spike immediately after every scroll.
+        try {
+          paintUnpaintedTargetViewportQuick("scroll-settle-fixed", fixedScrollRoot, true);
+          scrubBadgesToHostHref(fixedScrollRoot, true);
+        } catch (_vp) {
+          // The follow-up remains the fallback.
+        }
+        window.setTimeout(() => {
+          if (!fixedScrollRoot.isConnected) return;
+          try {
+            paintUnpaintedTargetViewportQuick("scroll-settle-fixed-followup", fixedScrollRoot, true);
+            scrubBadgesToHostHref(fixedScrollRoot, true);
+          } catch (_vp) {
+            // ignore
+          }
+        }, 48);
+        return;
+      }
       if (isGmgnTokenPage()) {
-        // Token 页的常驻扫描会在 header 稳定后降为 light。停滚时先补一片
-        // K 线左侧战壕视口，再让常规扫描补剩余卡片。
         try {
           paintUnpaintedTargetViewportQuick("scroll-settle", scrollTarget, true);
         } catch (_vp) {
           // The regular scan below remains the fallback.
         }
-        window.setTimeout(() => {
-          if (!isGmgnTokenPage()) return;
-          try {
-            paintUnpaintedTargetViewportQuick("scroll-settle-followup", scrollTarget, true);
-          } catch (_vp) {
-            // The regular scan below remains the fallback.
-          }
-        }, 48);
       }
       scheduleScan(isGmgnTokenPage() ? 96 : 0, {
         force: false,
@@ -3874,10 +4005,12 @@
   /** GMGN search rows already expose an outer /bsc/token/<CA> link. */
   function findGmgnOverlayCard(node) {
     if (!(node instanceof HTMLElement)) return null;
-    const link = node.closest?.("a[href*='/bsc/token/0x']");
+    const link = node.closest?.(
+      "[href*='/bsc/token/0x'], [href*='/token/0x']"
+    );
     if (!(link instanceof HTMLElement)) return null;
     const href = link.getAttribute("href") || "";
-    return /\/bsc\/token\/0x[a-fA-F0-9]{40}/.test(href) && normalizeToken(href)
+    return /\/(?:bsc\/)?token\/0x[a-fA-F0-9]{40}/.test(href) && normalizeToken(href)
       ? link
       : null;
   }
@@ -3951,6 +4084,92 @@
       // 本批 dirty 漏掉的视口未画：再快补一轮
       debugInfo("gmgn:embedded-dirty", { cards: cards.length, processed, painted, queued });
     }, GMGN_EMBEDDED_DIRTY_DEBOUNCE_MS);
+  }
+
+  /**
+   * Discover newly inserted visible GMGN cards directly from fixed trench roots.
+   * This is intentionally bounded and only handles additions/href swaps; the
+   * regular scanner remains responsible for initial hydration and reconciliation.
+   */
+  function collectGmgnNewCardMutations(records) {
+    if (
+      !isGmgnHost() ||
+      !records?.length ||
+      shouldDeferGmgnTrenchResizeWork() ||
+      isGmgnScrollCooling()
+    ) return 0;
+    const hrefSelector = '[href*="/bsc/token/"][href*="0x"], [href*="/token/"][href*="0x"]';
+    const itemSelector = '[data-sentry-source-file="TokenItem.tsx"]';
+    const seen = new Set();
+    let discovered = 0;
+    const handleNode = (node) => {
+      if (!(node instanceof HTMLElement) || discovered >= GMGN_NEW_CARD_LIMIT) return;
+      const candidates = [];
+      if (node.matches(hrefSelector) || node.matches(itemSelector)) candidates.push(node);
+      if (node.childElementCount <= GMGN_NEW_CARD_LIMIT * 2) {
+        node.querySelectorAll?.(`${hrefSelector}, ${itemSelector}`).forEach((el) => {
+          if (candidates.length < GMGN_NEW_CARD_LIMIT) candidates.push(el);
+        });
+      } else {
+        const firstHref = node.querySelector?.(hrefSelector);
+        const firstItem = node.querySelector?.(itemSelector);
+        if (firstHref) candidates.push(firstHref);
+        if (firstItem && firstItem !== firstHref) candidates.push(firstItem);
+      }
+      for (const candidate of candidates) {
+        if (discovered >= GMGN_NEW_CARD_LIMIT) break;
+        let card = candidate.matches(itemSelector)
+          ? candidate
+          : candidate.closest?.(itemSelector);
+        if (!(card instanceof HTMLElement)) card = quickClimbCardFromTokenLink(candidate);
+        if (!(card instanceof HTMLElement) || seen.has(card) || !card.isConnected) continue;
+        const trench = card.matches(GMGN_FIXED_TRENCH_ROOT_SELECTOR)
+          ? card
+          : card.closest?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR);
+        if (!(trench instanceof HTMLElement)) continue;
+        if (isGmgnWalletTrackPanel(card) || isGmgnFavoritesPanel(card)) {
+          wipeForbiddenMountBadges(card, true);
+          continue;
+        }
+        if (!isNearViewport(card, true)) continue;
+        const token =
+          extractCardTokenFromAttrs(card) ||
+          extractCardHrefToken(card) ||
+          normalizeToken(candidate.getAttribute("href") || "");
+        if (!TARGET_TOKEN_RE.test(token || "")) continue;
+        seen.add(card);
+        discovered += 1;
+        card.dataset[CARD_MARK] = token;
+        const entry = resolveEntry(token);
+        if (entry) {
+          paintListCardFromCacheFast(card, token, entry);
+        } else {
+          paintLoadingBadgeAndQueue(card, token, { deferFlush: true });
+          if (requestQueue.has(token)) gmgnNewCardPendingTokens.add(token);
+        }
+      }
+    };
+    for (const record of records) {
+      if (!record || (record.type !== "childList" && record.type !== "attributes")) continue;
+      if (record.type === "attributes" && record.attributeName !== "href") continue;
+      if (record.type === "childList") {
+        for (const node of record.addedNodes || []) {
+          handleNode(node);
+          if (discovered >= GMGN_NEW_CARD_LIMIT) break;
+        }
+      } else {
+        handleNode(record.target);
+      }
+      if (discovered >= GMGN_NEW_CARD_LIMIT) break;
+    }
+    if (discovered > 0) {
+      scheduleGmgnNewCardBatchFlush();
+      debugInfo("gmgn:new-card", {
+        discovered,
+        pending: gmgnNewCardPendingTokens.size
+      });
+    }
+    return discovered;
   }
 
   /** Collect GMGN TokenItem / token-href roots touched by host mutations. */
@@ -4032,7 +4251,15 @@
       }
     };
     for (const record of records) {
-      if (!record || record.type !== "childList" || isExtensionOnlyMutation(record)) continue;
+      if (!record) continue;
+      if (record.type === "attributes") {
+        if (record.attributeName === "href" && record.target instanceof HTMLElement) {
+          addCard(record.target);
+        }
+        if (added >= GMGN_EMBEDDED_DIRTY_CARD_LIMIT) break;
+        continue;
+      }
+      if (record.type !== "childList" || isExtensionOnlyMutation(record)) continue;
       addCard(record.target instanceof HTMLElement ? record.target : record.target?.parentElement);
       for (const node of record.addedNodes || []) {
         if (node instanceof HTMLElement) addCard(node);
@@ -4079,7 +4306,16 @@
     };
     for (let i = 0; i < records.length; i += 1) {
       const r = records[i];
-      if (!r || r.type !== "childList") continue;
+      if (!r) continue;
+      if (r.type === "attributes") {
+        if (
+          r.attributeName === "href" &&
+          r.target instanceof HTMLElement &&
+          interestingHref(r.target.getAttribute("href") || "")
+        ) return true;
+        continue;
+      }
+      if (r.type !== "childList") continue;
       const added = r.addedNodes;
       for (let j = 0; j < added.length; j += 1) {
         const n = added[j];
@@ -4358,7 +4594,13 @@
   function getMountedGmgnTrenchRoots() {
     const candidates = [];
     try {
-      document.querySelectorAll(GMGN_TRENCH_ROOT_SELECTOR).forEach((root) => {
+      const exact = Array.from(
+        document.querySelectorAll(GMGN_FIXED_TRENCH_ROOT_SELECTOR)
+      );
+      const rootNodes = exact.length
+        ? exact
+        : Array.from(document.querySelectorAll(GMGN_TRENCH_ROOT_SELECTOR));
+      rootNodes.forEach((root) => {
         if (!(root instanceof HTMLElement)) return;
         if (isGmgnWalletTrackPanel(root) || isGmgnFavoritesPanel(root)) return;
         const r = root.getBoundingClientRect();
@@ -5947,7 +6189,13 @@
       gmgnScrollQuietUntil = 0;
       gmgnScrollResumeNeedsScan = false;
       gmgnScrollResumeTarget = null;
+      gmgnForbiddenScrollTarget = null;
       gmgnForbiddenScrollTargetCache = new WeakMap();
+      gmgnNewCardPendingTokens.clear();
+      if (gmgnNewCardBatchTimer) {
+        window.clearTimeout(gmgnNewCardBatchTimer);
+        gmgnNewCardBatchTimer = null;
+      }
       if (gmgnScrollResumeTimer) {
         window.clearTimeout(gmgnScrollResumeTimer);
         gmgnScrollResumeTimer = null;
@@ -6671,17 +6919,79 @@
     }
   }
 
-  /** Keep a live MutationObserver on documentElement (roots may detach after SPA). */
+  function sameObserverRoots(a, b) {
+    return (
+      a.length === b.length &&
+      a.every((root, index) => root === b[index])
+    );
+  }
+
+  function scheduleGmgnObserverRefresh(delay = 80) {
+    if (!isGmgnHost() || gmgnObserverRefreshTimer) return;
+    gmgnObserverRefreshTimer = window.setTimeout(() => {
+      gmgnObserverRefreshTimer = null;
+      if (!isExtensionContextValid() || !isTabVisible() || !isGmgnHost()) return;
+      const wasDiscoveryOnly =
+        lastObserverRoots.length === 1 &&
+        lastObserverRoots[0] === document.documentElement;
+      scanRootsCache = { at: 0, roots: [] };
+      try {
+        const roots = getScanRoots(true);
+        const hasSearch = roots.some(
+          (root) =>
+            root.matches?.(GMGN_FIXED_SEARCH_ROOT_SELECTOR) ||
+            root.querySelector?.(GMGN_FIXED_SEARCH_ROOT_SELECTOR)
+        );
+        if (hasSearch) {
+          overlayDetectCache = { at: 0, open: false };
+          scheduleGmgnOverlayPaint("fixed-surface-refresh", 0, true);
+        } else if (wasDiscoveryOnly && roots.length) {
+          scheduleScan(0, { force: false, immediate: false, light: false });
+        }
+      } catch (_err) {
+        ensureDocumentObserver();
+      }
+    }, Math.max(0, delay));
+  }
+
+  function gmgnDiscoveryMutationLooksRelevant(records) {
+    const selector =
+      `${GMGN_FIXED_TRENCH_ROOT_SELECTOR}, ${GMGN_FIXED_SEARCH_ROOT_SELECTOR}, #token-base-address`;
+    for (const record of records || []) {
+      for (const node of [...(record.addedNodes || []), ...(record.removedNodes || [])]) {
+        if (!(node instanceof Element)) continue;
+        if (node.matches?.(selector) || node.querySelector?.(selector)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * GMGN observes only fixed badge surfaces. During the short boot gap where no
+   * surface exists yet, documentElement is discovery-only and the callback exits
+   * before card/text/layout work. Debot keeps its existing document observer.
+   */
   function ensureDocumentObserver() {
     try {
       const docEl = document.documentElement;
       if (!docEl) return;
-      const already =
-        lastObserverRoots.length === 1 && lastObserverRoots[0] === docEl;
-      if (already) return;
+      const scoped = isGmgnHost() ? getGmgnFixedSurfaceRoots() : [];
+      const nextRoots = isGmgnHost() && scoped.length ? scoped : [docEl];
+      if (sameObserverRoots(lastObserverRoots, nextRoots)) return;
       mutationObserver.disconnect();
-      mutationObserver.observe(docEl, { childList: true, subtree: true });
-      lastObserverRoots = [docEl];
+      const observeOptions =
+        isGmgnHost() && scoped.length
+          ? {
+              childList: true,
+              subtree: true,
+              attributes: true,
+              attributeFilter: ["href"]
+            }
+          : { childList: true, subtree: true };
+      nextRoots.forEach((root) => {
+        mutationObserver.observe(root, observeOptions);
+      });
+      lastObserverRoots = nextRoots;
     } catch (_err) {
       // ignore
     }
@@ -7808,6 +8118,86 @@
    *   full CA mostly in `a[href*='0x…7777|8888']` (~40–50 hrefs). Prefer href, skip body XPath.
    * - Debot: 3× `MuiCard-root` (新创建/即将打满/已迁移) ~9 shorts each; observe cards not whole app.
    */
+  function getGmgnFixedSurfaceRoots() {
+    if (!isGmgnHost() || !document.querySelectorAll) return [];
+    const roots = [];
+    const push = (el) => {
+      if (!(el instanceof HTMLElement) || !el.isConnected || roots.includes(el)) return;
+      if (roots.some((root) => root.contains(el))) return;
+      for (let i = roots.length - 1; i >= 0; i -= 1) {
+        if (el.contains(roots[i])) roots.splice(i, 1);
+      }
+      roots.push(el);
+    };
+    const addTrenchRoot = (el) => {
+      if (!(el instanceof HTMLElement)) return;
+      if (isGmgnWalletTrackPanel(el) || isGmgnFavoritesPanel(el)) return;
+      const r = el.getBoundingClientRect();
+      if (
+        r.width < 180 ||
+        r.height < 120 ||
+        r.bottom <= -GMGN_TOKEN_TRENCH_VIEWPORT_PAD_TOP ||
+        r.top >= window.innerHeight + GMGN_TOKEN_TRENCH_VIEWPORT_PAD_Y
+      ) {
+        return;
+      }
+      push(el);
+    };
+
+    const exactTrenches = Array.from(
+      document.querySelectorAll(GMGN_FIXED_TRENCH_ROOT_SELECTOR)
+    );
+    exactTrenches.forEach(addTrenchRoot);
+
+    // Compatibility fallback only when neither stable PumpSubX variant is present.
+    if (!exactTrenches.length) {
+      const fallback = [];
+      document.querySelectorAll(GMGN_TRENCH_ROOT_SELECTOR).forEach((el) => {
+        if (!(el instanceof HTMLElement)) return;
+        const r = el.getBoundingClientRect();
+        if (r.width >= 180 && r.height >= 160) {
+          fallback.push({ el, area: r.width * r.height });
+        }
+      });
+      fallback.sort((a, b) => b.area - a.area);
+      fallback.slice(0, isGmgnTokenPage() ? 4 : 3).forEach(({ el }) => addTrenchRoot(el));
+    }
+
+    const exactSearch = Array.from(
+      document.querySelectorAll(GMGN_FIXED_SEARCH_ROOT_SELECTOR)
+    ).find((el) => {
+      if (
+        !(el instanceof HTMLElement) ||
+        isExplicitlyHiddenOverlay(el) ||
+        isGmgnWalletTrackPanel(el) ||
+        isGmgnFavoritesPanel(el)
+      ) return false;
+      const r = el.getBoundingClientRect();
+      return r.width >= 260 && r.height >= 100 && r.bottom > 0 && r.top < window.innerHeight;
+    });
+    if (exactSearch instanceof HTMLElement) {
+      push(exactSearch);
+    } else {
+      const searchPanel = findGmgnSearchPanelRoot();
+      if (
+        searchPanel instanceof HTMLElement &&
+        !isExplicitlyHiddenOverlay(searchPanel) &&
+        !isGmgnWalletTrackPanel(searchPanel) &&
+        !isGmgnFavoritesPanel(searchPanel)
+      ) {
+        push(searchPanel);
+      }
+    }
+
+    if (isGmgnTokenPage()) {
+      const address = document.querySelector("#token-base-address");
+      if (address instanceof HTMLElement) {
+        push(address.parentElement instanceof HTMLElement ? address.parentElement : address);
+      }
+    }
+    return roots.slice(0, 8);
+  }
+
   function getScanRoots(forceRefresh = false) {
     const now = Date.now();
     // Dialog just opened: don't wait for roots TTL (search modal must appear in same second).
@@ -7841,51 +8231,7 @@
     const host = location.hostname || "";
 
     if (host.endsWith("gmgn.ai")) {
-      if (isGmgnTokenPage()) {
-        const root = findGmgnTokenPageRoot();
-        if (root && root !== document.body) roots.push(root);
-        // 0.5.2 / 0.4.24: always include left 战壕 / side columns on token multi-panel.
-        // Waiting for header settled (0.4.37) left both header+left empty when mount failed.
-        document
-          .querySelectorAll(GMGN_TRENCH_ROOT_SELECTOR)
-          .forEach((el) => {
-            if (!(el instanceof HTMLElement)) return;
-            if (isGmgnWalletTrackPanel(el) || isGmgnFavoritesPanel(el)) return;
-            const r = el.getBoundingClientRect();
-            // Side trench columns: tall panels (left 战壕 in split view ~w 240–700).
-            if (
-              r.width >= 200 &&
-              r.height >= 160 &&
-              r.top < window.innerHeight &&
-              !roots.includes(el)
-            ) {
-              roots.push(el);
-            }
-          });
-      } else {
-        // Home / war room — keep only top 3 tall columns (selector matches ~40 nested shells).
-        const candidates = [];
-        document
-          .querySelectorAll(GMGN_TRENCH_ROOT_SELECTOR)
-          .forEach((el) => {
-            if (!(el instanceof HTMLElement)) return;
-            if (isGmgnWalletTrackPanel(el) || isGmgnFavoritesPanel(el)) return;
-            const r = el.getBoundingClientRect();
-            if (r.width >= 240 && r.height >= 200 && r.top < window.innerHeight) {
-              candidates.push({ el, area: r.width * r.height, top: r.top });
-            }
-          });
-        candidates.sort((a, b) => b.area - a.area);
-        // Prefer three distinct horizontal columns (left/mid/right).
-        for (let i = 0; i < candidates.length && roots.length < 3; i += 1) {
-          const c = candidates[i];
-          const overlap = roots.some((r) => r.contains(c.el) || c.el.contains(r));
-          if (!overlap) roots.push(c.el);
-        }
-        if (!roots.length && candidates.length) {
-          roots.push(candidates[0].el);
-        }
-      }
+      roots.push(...getGmgnFixedSurfaceRoots());
     } else if (host.endsWith("debot.ai") || host.endsWith("gungnir.bot")) {
       if (isDebotTokenPage()) {
         // Header strip first (SPA meme→token — MuiCards may be 0).
@@ -7960,7 +8306,9 @@
       if (uniq.length >= 8) break;
     }
 
-    scanRootsCache = { at: now, roots: uniq.length ? uniq : [document.body].filter(Boolean) };
+    // GMGN never falls back to body: no fixed surface means there is nothing to scan.
+    const fallbackRoots = isGmgnHost() ? [] : [document.body].filter(Boolean);
+    scanRootsCache = { at: now, roots: uniq.length ? uniq : fallbackRoots };
     // Observer stays on documentElement (rebindMutationObserver is a no-op keep-alive).
     ensureDocumentObserver();
     return scanRootsCache.roots;
@@ -7994,6 +8342,9 @@
       if (added >= 3) return;
       if (!(el instanceof HTMLElement) || !el.isConnected) return;
       if (isExplicitlyHiddenOverlay(el)) return;
+      // Wallet tracking and favorites are hard scan boundaries, even when the
+      // host renders them as dialog-like panels.
+      if (isGmgnWalletTrackPanel(el) || isGmgnFavoritesPanel(el)) return;
       if (roots.includes(el)) return;
       const r = el.getBoundingClientRect();
       if (r.width < 260 || r.height < 100) return;
@@ -8004,6 +8355,9 @@
       added += 1;
     };
 
+    if (isGmgnHost()) {
+      document.querySelectorAll(GMGN_FIXED_SEARCH_ROOT_SELECTOR).forEach((el) => pushIfOk(el));
+    }
     document.querySelectorAll('[role="dialog"], [role="alertdialog"]').forEach((el) => pushIfOk(el));
 
     // MUI modals (Debot/Gungnir search)
@@ -8050,14 +8404,11 @@
       return uniqTok;
     }
     if (host.endsWith("gmgn.ai")) {
-      document
-        .querySelectorAll(GMGN_TRENCH_ROOT_SELECTOR)
-        .forEach((el) => {
-          if (!(el instanceof HTMLElement)) return;
-          if (isGmgnWalletTrackPanel(el) || isGmgnFavoritesPanel(el)) return;
-          const r = el.getBoundingClientRect();
-          if (r.width >= 200 && r.height >= 160 && r.top < window.innerHeight) roots.push(el);
-        });
+      getGmgnFixedSurfaceRoots().forEach((el) => {
+        if (el.matches?.(GMGN_FIXED_SEARCH_ROOT_SELECTOR)) return;
+        const r = el.getBoundingClientRect();
+        if (r.width >= 180 && r.height >= 120 && r.top < window.innerHeight) roots.push(el);
+      });
     } else if (host.endsWith("debot.ai") || host.endsWith("gungnir.bot")) {
       document.querySelectorAll(".MuiCard-root, div.MuiPaper-root.MuiCard-root").forEach((el) => {
         if (!(el instanceof HTMLElement)) return;
@@ -8315,8 +8666,8 @@
     return null;
   }
 
-  /** GMGN search overlay: mount between the V/Fees column and the L column. */
-  function findGmgnOverlayVolumeMount(card) {
+  /** GMGN search overlay: mount above the L/H columns without changing row width. */
+  function findGmgnOverlayLiquidityHeadMount(card) {
     if (
       !(card instanceof HTMLElement) ||
       (card.dataset.flapOverlayCard !== "1" && !isInsideOverlayDialog(card))
@@ -8335,24 +8686,26 @@
     for (const column of directChildren) {
       if (!hasLeafLabel(column, "V") || !hasLeafLabel(column, "Fees")) continue;
 
-      // Confirm the expected V/Fees -> L relationship without depending on class hashes.
+      // Confirm the expected V/Fees -> L/H relationship without depending on class hashes.
       let sibling = column.nextElementSibling;
       let checked = 0;
-      let hasLiquidityColumn = false;
+      let liquidityColumn = null;
       while (sibling && checked < 2) {
         if (sibling instanceof HTMLElement && sibling.dataset?.[ICON_MARK] !== "1") {
           checked += 1;
           if (hasLeafLabel(sibling, "L")) {
-            hasLiquidityColumn = true;
+            liquidityColumn = sibling;
             break;
           }
         }
         sibling = sibling.nextElementSibling;
       }
-      if (!hasLiquidityColumn) continue;
+      if (!(liquidityColumn instanceof HTMLElement)) continue;
 
-      column.dataset.flapMount = "gmgn-overlay-volume";
-      return column;
+      // Search rows have a stable 72px card. Mount above L/H inside the L cell
+      // so the badge does not become a new flex column between V/Fees and L.
+      liquidityColumn.dataset.flapMount = "gmgn-overlay-liquidity-head";
+      return liquidityColumn;
     }
     return null;
   }
@@ -8461,15 +8814,22 @@
     const out = [];
     const seen = new Set();
     try {
+      const roots = isGmgnHost() ? getScanRoots(false) : [document];
+      const forEachScoped = (selector, fn) => {
+        for (const root of roots) {
+          if (!root?.querySelectorAll) continue;
+          root.querySelectorAll(selector).forEach(fn);
+        }
+      };
       // 1) Our mark
-      document.querySelectorAll(`[${CARD_DATA}="${tok}"]`).forEach((el) => {
+      forEachScoped(`[${CARD_DATA}="${tok}"]`, (el) => {
         if (el instanceof HTMLElement && !seen.has(el)) {
           seen.add(el);
           out.push(el);
         }
       });
       // 2) Host TokenItem / link by href (GMGN div[href] or a[href])
-      document.querySelectorAll(`[href*="${tok}"]`).forEach((el) => {
+      forEachScoped(`[href*="${tok}"]`, (el) => {
         if (!(el instanceof HTMLElement) || seen.has(el)) return;
         const href = (el.getAttribute("href") || "").toLowerCase();
         if (href.indexOf(tok) === -1) return;
@@ -8573,14 +8933,15 @@
    * - ffff 同理：若 fee 仍是邻行 7777，此处拆掉。
    * 成本：O(徽章数≤48) × closest + 字符串比，远低于全量 enforce。
    */
-  function scrubBadgesToHostHref() {
+  function scrubBadgesToHostHref(scope = document, bypassGap = false) {
     if (shouldDeferGmgnTrenchResizeWork()) return;
     if (isGmgnScrollCooling() || isDebotScrollCooling()) return;
     const now = Date.now();
-    if (now - lastScrubHrefAt < SCRUB_HREF_MIN_GAP_MS) return;
+    if (!bypassGap && now - lastScrubHrefAt < SCRUB_HREF_MIN_GAP_MS) return;
     lastScrubHrefAt = now;
     try {
-      const icons = document.querySelectorAll(`[${ICON_DATA}="1"]`);
+      const queryRoot = scope?.querySelectorAll ? scope : document;
+      const icons = queryRoot.querySelectorAll(`[${ICON_DATA}="1"]`);
       const lim = Math.min(icons.length, SCRUB_HREF_MAX_ICONS);
       for (let i = 0; i < lim; i += 1) {
         const icon = icons[i];
@@ -9325,6 +9686,17 @@
     }
     const minTok = hot ? HOT_BATCH_MIN_TOKENS : BATCH_MIN_TOKENS;
     const flushMs = hot ? HOT_BATCH_FLUSH_MS : BATCH_FLUSH_MS;
+    if (isGmgnHost() && gmgnNewCardPendingTokens.size > 0) {
+      let newCardPending = 0;
+      for (const token of gmgnNewCardPendingTokens) {
+        if (requestQueue.has(token)) newCardPending += 1;
+        else gmgnNewCardPendingTokens.delete(token);
+      }
+      if (newCardPending > 0 && newCardPending < GMGN_NEW_CARD_BATCH_MIN_TOKENS) {
+        scheduleGmgnNewCardBatchFlush();
+        return;
+      }
+    }
     if (requestQueue.size >= minTok) {
       scheduleBatchFlush({ immediate: true, delayMs: 0 });
     } else {
@@ -9332,7 +9704,7 @@
     }
   }
 
-  function queueToken(token) {
+  function queueToken(token, options = {}) {
     const tok = String(token || "").toLowerCase();
     if (!TARGET_TOKEN_RE.test(tok)) return;
     // 非 BSC 页禁止入队（双保险）
@@ -9345,7 +9717,56 @@
     requestQueue.add(tok);
     if (isGmgnHotUnpaintedToken(tok)) noteGmgnHotWork();
     debugInfo("queue", { token: tok, queueSize: requestQueue.size });
+    if (options.deferFlush === true) return;
     maybeFlushRequestQueue("queue");
+  }
+
+  function scheduleGmgnNewCardBatchFlush() {
+    if (!isGmgnHost() || gmgnNewCardPendingTokens.size === 0) return;
+    let pendingCount = 0;
+    for (const token of gmgnNewCardPendingTokens) {
+      let stillMarked = false;
+      try {
+        stillMarked = !!document.querySelector(`[${CARD_DATA}="${token}"]`);
+      } catch (_err) {
+        stillMarked = false;
+      }
+      if (requestQueue.has(token) && stillMarked) pendingCount += 1;
+      else {
+        requestQueue.delete(token);
+        gmgnNewCardPendingTokens.delete(token);
+      }
+    }
+    if (pendingCount === 0) return;
+    if (pendingCount >= GMGN_NEW_CARD_BATCH_MIN_TOKENS) {
+      if (gmgnNewCardBatchTimer) {
+        window.clearTimeout(gmgnNewCardBatchTimer);
+        gmgnNewCardBatchTimer = null;
+      }
+      scheduleBatchFlush({ immediate: true, delayMs: 0 });
+      return;
+    }
+    if (gmgnNewCardBatchTimer) return;
+    gmgnNewCardBatchTimer = window.setTimeout(() => {
+      gmgnNewCardBatchTimer = null;
+      if (!isExtensionContextValid() || !isTabVisible()) return;
+      let hasPending = false;
+      for (const token of gmgnNewCardPendingTokens) {
+        let stillMarked = false;
+        try {
+          stillMarked = !!document.querySelector(`[${CARD_DATA}="${token}"]`);
+        } catch (_err) {
+          stillMarked = false;
+        }
+        if (requestQueue.has(token) && stillMarked) {
+          hasPending = true;
+          break;
+        }
+        requestQueue.delete(token);
+        gmgnNewCardPendingTokens.delete(token);
+      }
+      if (hasPending) scheduleBatchFlush({ immediate: true, delayMs: 0 });
+    }, GMGN_NEW_CARD_BATCH_FLUSH_MS);
   }
 
   /**
@@ -9487,7 +9908,10 @@
     // GMGN: viewport/top-band unpainted first; Debot: stable insertion order.
     const ordered = orderTokensForBatch(Array.from(requestQueue));
     const tokens = ordered.slice(0, MAX_BATCH_TOKENS);
-    tokens.forEach((token) => requestQueue.delete(token));
+    tokens.forEach((token) => {
+      requestQueue.delete(token);
+      gmgnNewCardPendingTokens.delete(token);
+    });
 
     // Supersede any zombie controller (should be rare after recoverStuckBatch).
     abortActiveRequest("superseded");
@@ -9779,7 +10203,13 @@
     const fromCa = findCardsByCa(tok);
     const fromMark = knownCards
       ? Array.from(knownCards)
-      : Array.from(document.querySelectorAll(`[${CARD_DATA}="${tok}"]`));
+      : isGmgnHost()
+        ? getScanRoots(false).flatMap((root) =>
+            root?.querySelectorAll
+              ? Array.from(root.querySelectorAll(`[${CARD_DATA}="${tok}"]`))
+              : []
+          )
+        : Array.from(document.querySelectorAll(`[${CARD_DATA}="${tok}"]`));
     const seen = new Set();
     const cards = [];
     for (const c of [...fromCa, ...fromMark]) {
@@ -12434,7 +12864,8 @@
       existing &&
       document.contains(existing) &&
       existing.dataset.feeToken === token &&
-      (existing.dataset.feePosMode || "default") === wantMode
+      (existing.dataset.feePosMode || "default") === wantMode &&
+      !(isInsideOverlayDialog(card) && existing.dataset.feeOverlayPos === "volume")
     ) {
       const er = existing.getBoundingClientRect();
       if (er.width >= 2 && er.height >= 2 && existing.parentElement) {
@@ -12569,9 +13000,12 @@
     }
 
     // Match Tax/fee chips; "Tax 0.25%/1.25%" is often wider than 110px so do not hard-cap tightly.
+    const tokenTrench = isGmgnTokenPage() && isGmgnTokenTrenchSidebarEl(card);
     const leaves = card.querySelectorAll("span, div");
     // Cap walk — huge GMGN cards under thrash; Debot cards are smaller so full walk is fine.
-    const maxCheck = isGmgnHost() ? Math.min(leaves.length, 80) : leaves.length;
+    const maxCheck = isGmgnHost()
+      ? Math.min(leaves.length, tokenTrench ? 160 : 80)
+      : leaves.length;
     const candidates = [];
     for (let i = 0; i < maxCheck; i += 1) {
       const el = leaves[i];
@@ -12580,6 +13014,7 @@
       const text = (el.textContent || "").replace(/\s+/g, " ").trim();
       if (!text || text.length > 48) continue;
       if (!hasFeeTag(text)) continue;
+      if (tokenTrench && el.childElementCount > 3) continue;
       const rect = el.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) continue;
       if (rect.width > 280 || rect.height > 40) continue;
@@ -13229,6 +13664,18 @@
   // 0.4.41 GMGN: closer to 0.4.22 — no tryPaint/overlay storm on every mut.
   // 0.4.43 GMGN: records relevance + scroll cooldown (Debot path unchanged).
   const mutationObserver = new MutationObserver((records) => {
+    // Before fixed GMGN surfaces mount, documentElement is discovery-only.
+    // Do not run card, text, overlay, or layout probes for unrelated page churn.
+    if (
+      isGmgnHost() &&
+      lastObserverRoots.length === 1 &&
+      lastObserverRoots[0] === document.documentElement
+    ) {
+      if (gmgnDiscoveryMutationLooksRelevant(records)) {
+        scheduleGmgnObserverRefresh(40);
+      }
+      return;
+    }
     // These callbacks are generated in bulk while virtual lists recycle rows.
     // Exit before any route/context checks or layout reads on the scroll hot path.
     if (isGmgnScrollCooling() || isDebotScrollCooling()) return;
@@ -13251,6 +13698,7 @@
         gmgnHeaderMutationLooksRelevant(records, token)
       ) {
         scheduleGmgnHeaderRepair("document-mutation");
+        scheduleGmgnObserverRefresh(40);
       }
     } else if (isDebotTokenPage()) {
       const token = extractTokenFromUrl();
@@ -13293,9 +13741,11 @@
       return;
     }
 
-    // 0.4.43 GMGN: ignore pure ticker / attr / unrelated node churn.
-    if (isGmgnHost() && !gmgnMutationLooksRelevant(records)) {
-      return;
+    // 0.4.43 GMGN: ignore pure ticker / unrelated node churn. New visible cards
+    // take a direct bounded path and do not wait for the regular scan interval.
+    if (isGmgnHost()) {
+      if (!gmgnMutationLooksRelevant(records)) return;
+      if (!isTokenDetailRoute() && collectGmgnNewCardMutations(records) > 0) return;
     }
     if (isDebotHost() && !debotMutationLooksRelevant(records)) {
       return;
@@ -13454,6 +13904,31 @@
       }
     };
     window.addEventListener("scroll", onListScroll, { passive: true, capture: true });
+  }
+
+  // GMGN search/tabs can mount outside the observed trench roots. Refresh the
+  // fixed-surface registry on user interaction instead of keeping a document-wide
+  // mutation observer alive for chart/ticker churn.
+  if (isGmgnHost()) {
+    document.addEventListener("click", () => scheduleGmgnObserverRefresh(60), true);
+    document.addEventListener(
+      "focusin",
+      (event) => {
+        if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+          scheduleGmgnObserverRefresh(20);
+        }
+      },
+      true
+    );
+    document.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key === "/" || (event.ctrlKey && event.key.toLowerCase() === "k")) {
+          scheduleGmgnObserverRefresh(60);
+        }
+      },
+      true
+    );
   }
 
   window.addEventListener(

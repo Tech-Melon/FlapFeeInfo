@@ -91,11 +91,19 @@
   margin-right: 6px;
 }
 
-/* Search overlays: use only the space intended by the verified host row. */
-.gmgn-fee-mode-icon--gmgn[data-fee-token][data-fee-overlay-pos="volume"] {
-  align-self: center;
-  margin-left: 0;
-  margin-right: 0;
+/* Search result rows: float the badge above the L/H metrics without adding a flex column. */
+[data-flap-mount="gmgn-overlay-liquidity-head"] {
+  position: relative !important;
+  overflow: visible !important;
+}
+
+.gmgn-fee-mode-icon--gmgn[data-fee-token][data-fee-overlay-pos="liquidity-head"] {
+  position: absolute !important;
+  left: 0 !important;
+  top: -22px !important;
+  z-index: 3 !important;
+  margin: 0 !important;
+  pointer-events: auto;
 }
 
 .gmgn-fee-mode-icon--debot[data-fee-overlay-pos="title"] {
