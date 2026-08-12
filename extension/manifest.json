@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.7.15",
-  "description": "FlapFeeInfo 0.7.15: instant new-card badge batching with bounded GMGN mutation work.",
+  "version": "0.7.16",
+  "description": "FlapFeeInfo 0.7.16: ffff candidate parity in scan/mutation selectors; new-card batch no longer blocks queue; Debot scroll-settle sidebar scan.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

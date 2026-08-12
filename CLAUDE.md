@@ -444,7 +444,9 @@ python tools/ctl.py watchdog-run
   - `0.7.7`：GMGN 钱包追踪 + **收藏面板** 禁徽章（标题+表头双条件）；搜索/主战壕/K 线侧栏仍显示
   - `0.7.8`：滚动热路径降载 — 单 deadline 停滚定时器；禁区滚动不 resume 扫；viewport-quick / scrub 节流（900ms / 1.4s / 1.8s）；`isBadgeMountForbidden` 短缓存
   - `0.7.9`：K 线战壕短地址行先爬真实卡片再几何门禁；停滚分片补绘（quick×2 + light:false scan）；候选限 scan roots 内
-- 插件当前版本：见 `extension/manifest.json`（**0.7.9**）
+  - `0.7.10`–`0.7.15`：GMGN 固定 trench/search 根 + scoped observer、TokenItem href swap 监听、新卡独立组批窗（详见 `content.js` 头部注释）
+  - `0.7.16`：ffff 候选选择器补齐（主扫/lite/list-return/mutation 相关性/click-arm/搜索 anchor 共 7 处）；新卡组批只挡新卡不阻塞整队 flush；Debot K 线停滚 settle 修顶栏后恢复侧栏扫；清理漂移注释（watchdog/热轨参数/仅7777 字样）
+- 插件当前版本：见 `extension/manifest.json`（**0.7.16**）
 - page-hook：`HOOK_VER` **50**（新创建保留池；仅 tax-recv/尾号过滤开启时）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  

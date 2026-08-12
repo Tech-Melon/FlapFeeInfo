@@ -14,6 +14,7 @@
     '[data-sentry-source-file="PumpSubX.tsx"], [data-sentry-source-file="PumpSubAX.tsx"]';
   const GMGN_FIXED_SEARCH_ROOT_SELECTOR =
     '[data-sentry-source-file="SearchModalDetail.tsx"]';
+  // 0.7.16: ffff 选择器补齐（候选/mutation/click-arm）；新卡组批不阻塞整队；Debot 停滚 settle 恢复侧栏扫.
   // 0.7.12: watch scoped TokenItem href swaps so virtual rows repaint after reuse.
   // 0.7.11: fixed GMGN surfaces, scoped observers, and current-column scroll repair.
   // 0.7.15: GMGN token->trench return waits for replacement PumpSub roots; accept full-width home roots.
@@ -119,7 +120,6 @@
   const RESUME_LONG_HIDDEN_MS = 10000;
   // While tab is visible, periodic self-heal ONLY when unhealthy (never full remount).
   const PIPELINE_WATCHDOG_MS = 45000;
-  // If no successful scan for this long while visible, force one (watchdog).
   // Cap *real work* per scan (stable badges do not count). Debot 3 cols ≈ 40+ cards.
   const MAX_CANDIDATES_PER_SCAN = 120;
   const MAX_CARDS_PER_SCAN = 56;
@@ -1374,7 +1374,7 @@
       const root = roots[ri];
       if (!root?.querySelectorAll) continue;
       const anchors = root.querySelectorAll(
-        "[href*='8888'], [href*='7777'], [href*='/token/'][href*='0x']"
+        "[href*='8888'], [href*='7777'], [href*='ffff'], [href*='/token/'][href*='0x']"
       );
       const lim = Math.min(anchors.length, OVERLAY_MAX_CANDIDATES);
       for (let i = 0; i < lim; i += 1) {
@@ -2061,7 +2061,7 @@
     return false;
   }
 
-  /** CA from URL path (GMGN/Debot token detail). Only 8888/7777 tax tokens. */
+  /** CA from URL path (GMGN/Debot token detail). Only 8888/7777/ffff tax tokens. */
   function extractTokenFromUrl() {
     const m = String(location.pathname || "").match(/0x[a-fA-F0-9]{40}/i);
     if (!m) return null;
@@ -2231,7 +2231,7 @@
     return found;
   }
 
-  /** Token detail URL with a CA that is NOT 8888/7777 — no fee badge work needed. */
+  /** Token detail URL with a CA that is NOT 8888/7777/ffff — no fee badge work needed. */
   function isNonTargetTokenPage() {
     if (!isTokenDetailRoute()) return false;
     const m = String(location.pathname || "").match(/0x[a-fA-F0-9]{40}/i);
@@ -4000,8 +4000,9 @@
       if (!isDebotHost() || !isTabVisible() || !isExtensionContextValid()) return;
       if (isSpaQuiet() || isNonTargetTokenPage()) return;
       if (isDebotTokenPage() && !hasDebotTokenHeaderBadge()) {
+        // 0.7.16: 修顶栏后继续下面的列表/侧栏扫（原先 return 会饿死侧栏，
+        // 与 GMGN 0.7.5 scroll-settle 必扫战壕对齐）。
         tryPaintDebotTokenHeader("scroll-settle");
-        return;
       }
       pendingLightScan = false;
       scheduleScan(0, { force: false, immediate: false, light: false });
@@ -4364,7 +4365,7 @@
         if (interestingHref(href)) return true;
       }
       // Shallow: direct child links / our marks (avoid full subtree walk on huge chunks).
-      if (el.querySelector?.(`[${ICON_DATA}="1"], a[href*="7777"], a[href*="8888"], a[href*="/token/"]`)) {
+      if (el.querySelector?.(`[${ICON_DATA}="1"], a[href*="7777"], a[href*="8888"], a[href*="ffff"], a[href*="/token/"]`)) {
         return true;
       }
       // Short Tax chip text on leaf-ish nodes.
@@ -4417,14 +4418,16 @@
       const tag = el.tagName;
       if (tag === "A") {
         const href = el.getAttribute("href") || "";
-        if (/\/token\/|\/bsc\/token\//i.test(href) && /(?:7777|8888)/i.test(href)) {
+        if (/\/token\/|\/bsc\/token\//i.test(href) && /(?:7777|8888|ffff)/i.test(href)) {
           return true;
         }
       }
       if (
         el.querySelector?.(
           'a[href*="/token/"][href*="7777"], a[href*="/token/"][href*="8888"], ' +
-            'a[href*="/bsc/token/"][href*="7777"], a[href*="/bsc/token/"][href*="8888"]'
+            'a[href*="/token/"][href*="ffff"], ' +
+            'a[href*="/bsc/token/"][href*="7777"], a[href*="/bsc/token/"][href*="8888"], ' +
+            'a[href*="/bsc/token/"][href*="ffff"]'
         )
       ) {
         return true;
@@ -4750,7 +4753,9 @@
     // Include div[href] (GMGN TokenItem) — a-only misses 新创建 seeds (js-mcp 0.6.4).
     const linkSel =
       "[href*='/token/'][href*='8888'], [href*='/token/'][href*='7777'], " +
-      "[href*='/bsc/token/'][href*='8888'], [href*='/bsc/token/'][href*='7777']";
+      "[href*='/token/'][href*='ffff'], " +
+      "[href*='/bsc/token/'][href*='8888'], [href*='/bsc/token/'][href*='7777'], " +
+      "[href*='/bsc/token/'][href*='ffff']";
     const buckets = [[], [], []];
     const seenKey = new Set();
     const pushSeed = (el, key) => {
@@ -5217,7 +5222,7 @@
     }
   }
 
-  /** CA from a route key or path string (8888/7777 only). */
+  /** CA from a route key or path string (8888/7777/ffff only). */
   function extractTokenFromRouteKey(keyOrPath) {
     const m = String(keyOrPath || "").match(/0x[a-fA-F0-9]{40}/i);
     if (!m) return null;
@@ -5616,7 +5621,8 @@
             );
             if (card) {
               const inner = card.querySelector?.(
-                'a[href*="/token/"][href*="7777"], a[href*="/token/"][href*="8888"], a[href*="0x"][href*="7777"], a[href*="0x"][href*="8888"]'
+                'a[href*="/token/"][href*="7777"], a[href*="/token/"][href*="8888"], a[href*="/token/"][href*="ffff"], ' +
+                  'a[href*="0x"][href*="7777"], a[href*="0x"][href*="8888"], a[href*="0x"][href*="ffff"]'
               );
               if (inner) href = inner.getAttribute("href") || inner.href || "";
             }
@@ -7586,7 +7592,7 @@
         token = hint;
       }
       if (!token) {
-        // 非目标 CA（ffff 等）：始终拆徽章，即使 soft 路径
+        // 非目标 CA（4444 等，ffff 是目标）：始终拆徽章，即使 soft 路径
         const idCa = extractCardHrefToken(card);
         if (idCa && !TARGET_TOKEN_RE.test(idCa)) {
           wipeNonTargetCardBadges(card, idCa);
@@ -8588,12 +8594,14 @@
       root
         .querySelectorAll(
           "[href*='/token/'][href*='8888'], [href*='/token/'][href*='7777'], " +
-            "[href*='/bsc/token/'][href*='8888'], [href*='/bsc/token/'][href*='7777']"
+            "[href*='/token/'][href*='ffff'], " +
+            "[href*='/bsc/token/'][href*='8888'], [href*='/bsc/token/'][href*='7777'], " +
+            "[href*='/bsc/token/'][href*='ffff']"
         )
         .forEach((n) => addNode(n, 2));
       // 0.4.42 GMGN: also CA hrefs (flap/site) but NEVER leaf textContent walks.
       if (gmgnLite && !listReturnSoft) {
-        root.querySelectorAll("[href*='8888'], [href*='7777']").forEach((n) => {
+        root.querySelectorAll("[href*='8888'], [href*='7777'], [href*='ffff']").forEach((n) => {
           const href = (n.getAttribute && n.getAttribute("href")) || "";
           if (/flap\.sh|bscscan|etherscan|lens\.google/i.test(href)) addNode(n, 1);
           else addNode(n, 2);
@@ -9750,8 +9758,8 @@
 
   /**
    * 批策略：
-   * - 稳态：≥3 立即 / 否则 350ms
-   * - 热路径（队列含视口未画）：≥1 立即 / 否则 120ms
+   * - 稳态：≥BATCH_MIN_TOKENS(3) 立即 / 否则 BATCH_FLUSH_MS(350ms)
+   * - 热路径（队列含视口未画）：≥HOT_BATCH_MIN_TOKENS(2) 立即 / 否则 HOT_BATCH_FLUSH_MS(200ms)
    * 禁止全局 delayMs:0 连打。
    */
   function maybeFlushRequestQueue(_reason) {
@@ -9780,7 +9788,9 @@
       }
       if (newCardPending > 0 && newCardPending < GMGN_NEW_CARD_BATCH_MIN_TOKENS) {
         scheduleGmgnNewCardBatchFlush();
-        return;
+        // 0.7.16: 组批窗只延迟新卡自身；队列里还有其它 token 时继续正常 flush
+        // （新卡随批搭车），否则 1–2 张新卡会把视口未画 token 拖住最多 500ms。
+        if (newCardPending >= requestQueue.size) return;
       }
     }
     if (requestQueue.size >= minTok) {
@@ -9976,7 +9986,7 @@
     }
     // 队列空或无目标 CA：绝不发 /modes
     if (batchActive || requestQueue.size === 0) return;
-    // 防御：只发合法 7777/8888
+    // 防御：只发合法 7777/8888/ffff
     for (const t of Array.from(requestQueue)) {
       if (!TARGET_TOKEN_RE.test(String(t))) requestQueue.delete(t);
     }
