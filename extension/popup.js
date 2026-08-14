@@ -81,8 +81,9 @@
       taxRecvEnableTitle: "启用屏蔽",
       taxRecvEnableDesc: "开启后只过滤「新创建」列",
       taxRecvThresholdLabel: "阈值 ≥",
+      taxRecvThresholdLabelGt: "阈值 >",
       taxRecvHint2:
-        "仅新创建：7777/8888 且 👨‍🍳 marketing%≥阈值则屏蔽（含 hybrid）；纯 💎/🎁金库不挡。即将打满与已开盘原样显示。不垫旧币、不改 GMGN 原生筛选。",
+        "仅新创建：7777/8888 且 👨‍🍳 达阈值则屏蔽（含 hybrid）。0% = 严格大于 0%（只要有 dev 分配就挡，不会挡 0%）。纯 💎/🎁金库不挡。即将打满与已开盘原样显示。",
       suffixHideSection: "自定义尾号屏蔽",
       suffixHideHint:
         "仅 BSC 生效。隐藏 CA 以指定十六进制尾号结尾的代币（可多条）。战壕「新创建」列数据层过滤。默认关闭。",
@@ -159,8 +160,9 @@
       taxRecvEnableTitle: "Enable hide",
       taxRecvEnableDesc: "Only filter the New creation column",
       taxRecvThresholdLabel: "Threshold ≥",
+      taxRecvThresholdLabelGt: "Threshold >",
       taxRecvHint2:
-        "New column only: hide 7777/8888 when marketing% ≥ threshold (incl. hybrid). Pure 💎 / vault kept. No old-token padding; host filters untouched.",
+        "New column only: hide 7777/8888 when marketing hits the threshold (incl. hybrid). 0% = strictly > 0% (any dev share hides it; a 0% split is kept). Pure 💎 / vault kept.",
       suffixHideSection: "Custom CA suffix hide",
       suffixHideHint:
         "BSC only. Hide tokens whose CA ends with a hex suffix (multi-rule). Filters New creation column at data layer. Off by default.",
@@ -287,7 +289,7 @@
     out.enabled = raw.enabled === true;
     const thr = Number(raw.thresholdPct);
     if (Number.isFinite(thr)) {
-      out.thresholdPct = Math.max(1, Math.min(100, Math.round(thr)));
+      out.thresholdPct = Math.max(0, Math.min(100, Math.round(thr)));
     }
     return out;
   }
@@ -432,6 +434,13 @@
     }, 120);
   }
 
+  function syncTaxRecvThresholdLabel() {
+    const el = document.querySelector('[data-i18n="taxRecvThresholdLabel"]');
+    if (!el) return;
+    el.textContent =
+      Number(taxRecvState.thresholdPct) <= 0 ? t("taxRecvThresholdLabelGt") : t("taxRecvThresholdLabel");
+  }
+
   function renderTaxRecvUI(state) {
     taxRecvState = normalizeTaxRecvHide(state);
     if (taxRecvEnabled) taxRecvEnabled.checked = taxRecvState.enabled === true;
@@ -441,6 +450,7 @@
     if (taxRecvThresholdRow) {
       taxRecvThresholdRow.classList.toggle("is-disabled", taxRecvState.enabled !== true);
     }
+    syncTaxRecvThresholdLabel();
   }
 
   function readTaxRecvFromUI() {
@@ -666,6 +676,7 @@
     });
     if (langToggle) langToggle.textContent = uiLang === "zh" ? "EN" : "中文";
     if (offsetHint) offsetHint.innerHTML = t("offsetHintHtml");
+    syncTaxRecvThresholdLabel();
     updatePrefCollapseLabel();
     updateStatus();
   }

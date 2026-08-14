@@ -63,7 +63,7 @@
             type="number"
             id="taxRecvThreshold"
             class="tax-recv-threshold-input"
-            min="1"
+            min="0"
             max="100"
             step="1"
             value="100"
@@ -74,14 +74,14 @@
           type="range"
           id="taxRecvThresholdRange"
           class="tax-recv-range"
-          min="1"
+          min="0"
           max="100"
           step="1"
           value="100"
         />
       </div>
       <p class="theme-hint" data-i18n="taxRecvHint2" id="taxRecvHint2">
-        例：100% = 仅藏「税收钱包 100%」且非金库；50% = 接收方占比 ≥50% 也藏。
+        例：0% = 严格大于 0%（有 dev 分配就藏，0% 不藏）；50% = 接收方占比 ≥50% 也藏；100% = 仅藏税收钱包 100%。
       </p>
     </section>
 

@@ -9,7 +9,7 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 50;
+  const HOOK_VER = 52;
   /** 仅当列表过滤开启时，由插件临时写入，关闭时清理 */
   const OWNED_DISABLE_SW = "flapFeeInfo.ownedDisableShareWorker";
   const PREFS_ATTR = "data-flap-tax-recv";
@@ -52,11 +52,26 @@
   let lastDebotRanksUrls = [];
 
   // ---------- prefs ----------
+  function clampTaxRecvThreshold(raw) {
+    const thr = Number(raw);
+    if (!Number.isFinite(thr)) return 100;
+    return Math.max(0, Math.min(100, Math.round(thr)));
+  }
+
+  /** 阈值 0 = 严格 >0%（有 dev 份额就挡）；>0 的阈值仍按 ≥ 比较。 */
+  function exceedsTaxRecvThreshold(pct, thr) {
+    if (!Number.isFinite(pct) || pct <= 0) return false;
+    const t = Number(thr);
+    const threshold = Number.isFinite(t) ? t : 100;
+    if (threshold <= 0) return true;
+    return pct + 1e-9 >= threshold;
+  }
+
   function applyPrefsObject(p) {
     if (!p || typeof p !== "object") return;
     taxRecvPrefs = {
       enabled: p.enabled === true,
-      thresholdPct: Math.max(1, Math.min(100, Math.round(Number(p.thresholdPct) || 100)))
+      thresholdPct: clampTaxRecvThreshold(p.thresholdPct)
     };
     taxRecvEnabled = taxRecvPrefs.enabled === true;
   }
@@ -366,11 +381,10 @@
       return false;
     }
 
-    const thr = taxRecvPrefs.thresholdPct;
     const pct = gmgnCreatorRecvPct(tal);
     if (pct == null) return false;
-    // marketing% ≥ 阈值 → 屏蔽（含部分 👨‍🍳 的 hybrid）
-    return pct + 1e-9 >= thr;
+    // marketing% 达阈值 → 屏蔽（含 hybrid；0 = 严格 >0%，不是 ≥0%）
+    return exceedsTaxRecvThreshold(pct, taxRecvPrefs.thresholdPct);
   }
 
   /**
@@ -406,7 +420,7 @@
     const fp = Number(extra.founder_pct);
     if (!Number.isFinite(fp)) return false;
     const pct = fp >= 99.9 && fp <= 100.0001 ? 100 : fp;
-    return pct + 1e-9 >= taxRecvPrefs.thresholdPct;
+    return exceedsTaxRecvThreshold(pct, taxRecvPrefs.thresholdPct);
   }
 
   function tokenShouldHide(item) {

@@ -14,6 +14,8 @@
     '[data-sentry-source-file="PumpSubX.tsx"], [data-sentry-source-file="PumpSubAX.tsx"]';
   const GMGN_FIXED_SEARCH_ROOT_SELECTOR =
     '[data-sentry-source-file="SearchModalDetail.tsx"]';
+  // 0.7.18: 资金接收 0 = 严格 >0%（有 dev 分配才挡，不是 ≥0%）。
+  // 0.7.17: 资金接收阈值下限 0（只要分给了 dev 钱包就屏蔽）；0% 本身不挡。
   // 0.7.16: ffff 选择器补齐（候选/mutation/click-arm）；新卡组批不阻塞整队；Debot 停滚 settle 恢复侧栏扫.
   // 0.7.12: watch scoped TokenItem href swaps so virtual rows repaint after reuse.
   // 0.7.11: fixed GMGN surfaces, scoped observers, and current-column scroll repair.
@@ -10731,7 +10733,7 @@
     out.enabled = raw.enabled === true;
     const thr = Number(raw.thresholdPct);
     if (Number.isFinite(thr)) {
-      out.thresholdPct = Math.max(1, Math.min(100, Math.round(thr)));
+      out.thresholdPct = Math.max(0, Math.min(100, Math.round(thr)));
     }
     return out;
   }
@@ -11049,9 +11051,10 @@
     // 金库始终显示
     if (entry.isVault === true) return false;
     const pct = Number(entry.recvPct);
-    if (!Number.isFinite(pct)) return false;
+    if (!Number.isFinite(pct) || pct <= 0) return false;
     const thr = Number(taxRecvHidePrefs.thresholdPct);
     const threshold = Number.isFinite(thr) ? thr : DEFAULT_TAX_RECV_HIDE.thresholdPct;
+    if (threshold <= 0) return true;
     return pct + 1e-9 >= threshold;
   }
 

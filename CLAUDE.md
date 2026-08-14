@@ -446,8 +446,10 @@ python tools/ctl.py watchdog-run
   - `0.7.9`：K 线战壕短地址行先爬真实卡片再几何门禁；停滚分片补绘（quick×2 + light:false scan）；候选限 scan roots 内
   - `0.7.10`–`0.7.15`：GMGN 固定 trench/search 根 + scoped observer、TokenItem href swap 监听、新卡独立组批窗（详见 `content.js` 头部注释）
   - `0.7.16`：ffff 候选选择器补齐（主扫/lite/list-return/mutation 相关性/click-arm/搜索 anchor 共 7 处）；新卡组批只挡新卡不阻塞整队 flush；Debot K 线停滚 settle 修顶栏后恢复侧栏扫；清理漂移注释（watchdog/热轨参数/仅7777 字样）
-- 插件当前版本：见 `extension/manifest.json`（**0.7.16**）
-- page-hook：`HOOK_VER` **50**（新创建保留池；仅 tax-recv/尾号过滤开启时）
+  - `0.7.17`：资金接收阈值下限 1→0（只要分给了 dev/marketing 就屏蔽；0% 本身不挡）；page-hook HOOK_VER 51
+  - `0.7.18`：阈值 0 = 严格 >0%（有 dev 分配才挡，不是 ≥0%）；page-hook HOOK_VER 52
+- 插件当前版本：见 `extension/manifest.json`（**0.7.18**）
+- page-hook：`HOOK_VER` **52**（资金接收 0 为严格 >0%；仅 tax-recv/尾号过滤开启时）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  

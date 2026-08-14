@@ -18,7 +18,7 @@
     out.enabled = raw.enabled === true;
     const thr = Number(raw.thresholdPct);
     if (Number.isFinite(thr)) {
-      out.thresholdPct = Math.max(1, Math.min(100, Math.round(thr)));
+      out.thresholdPct = Math.max(0, Math.min(100, Math.round(thr)));
     }
     return out;
   }
