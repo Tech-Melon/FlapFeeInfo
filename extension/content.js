@@ -14,6 +14,7 @@
     '[data-sentry-source-file="PumpSubX.tsx"], [data-sentry-source-file="PumpSubAX.tsx"]';
   const GMGN_FIXED_SEARCH_ROOT_SELECTOR =
     '[data-sentry-source-file="SearchModalDetail.tsx"]';
+  // 0.7.34: 币股 vault 底池用 BNB，不再把 GMGN NVDAB/FXION 芯片当 LP quote。
   // 0.7.33: 完整包剪切板可选用站点（仅 GMGN / 仅 Debot / 二者都用）。
   // 0.7.32: Four.meme Giggle/Binance 慈善分段（🎓/💛）；modeCache.v4。
   // 0.7.31: 版本对齐；徽章逻辑不变。剪切板仅完整包且默认只跳当前标签。
@@ -425,6 +426,17 @@
     [/wbnb|bnbball|\bbnb\b/i, "BNB"]
   ];
   // Native default quote when GMGN shows no quote chip (standard BNB pair has no icon).
+  const REAL_POOL_QUOTE_SYMS = new Set([
+    "BNB",
+    "WBNB",
+    "USD1",
+    "USDT",
+    "USDC",
+    "BUSD",
+    "BTCB",
+    "WETH",
+    "ETH"
+  ]);
   const GMGN_CHAIN_NATIVE_QUOTE = {
     bsc: "BNB",
     eth: "WETH",
@@ -10562,14 +10574,56 @@
     return "";
   }
 
+  function isRealPoolQuoteSymbol(sym) {
+    const s = String(sym || "").toUpperCase();
+    return REAL_POOL_QUOTE_SYMS.has(s);
+  }
+
+  function displayPoolQuoteSymbol(sym) {
+    const s = String(sym || "").toUpperCase();
+    if (s === "WBNB") return "BNB";
+    return sym || "";
+  }
+
+  function stockChipMatchesBasket(sym, entry) {
+    const s = String(sym || "").toUpperCase();
+    if (!s) return false;
+    const assets = entry && Array.isArray(entry.basket_assets) ? entry.basket_assets : [];
+    for (let i = 0; i < assets.length; i += 1) {
+      const raw = String((assets[i] && (assets[i].symbol || assets[i].name)) || "")
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "");
+      if (!raw) continue;
+      if (s === raw || s === `${raw}B` || s.startsWith(raw) || raw.startsWith(s)) return true;
+    }
+    return false;
+  }
+
+  function looksLikeStockQuoteChip(sym, entry) {
+    const s = String(sym || "").toUpperCase();
+    if (!s || isRealPoolQuoteSymbol(s)) return false;
+    if (stockChipMatchesBasket(s, entry)) return true;
+    if (s === "FXION" || s === "FXIO") return true;
+    // GMGN 币股芯片常见 NVDAB / SPCXB / TSLAB，不是 LP quote。
+    if (s.length >= 4 && s.endsWith("B") && s !== "WBTC") return true;
+    return false;
+  }
+
+  function vaultDefaultPoolQuote() {
+    if (siteStrategy.name === "gmgn") {
+      return GMGN_CHAIN_NATIVE_QUOTE[getGmgnChainKey()] || "BNB";
+    }
+    return "BNB";
+  }
+
   /**
-   * True when painted pool segment disagrees with API quote_symbol (stale 🪙BNB feeSig).
+   * True when painted pool segment disagrees with the quote we should show.
    */
   function poolBadgeNeedsQuoteRefresh(icon, entry) {
     if (!(icon instanceof HTMLElement) || !entry) return false;
     if (displayPrefs && displayPrefs.pool === false) return false;
-    const apiQ = normalizeQuoteSymbol(entry.quote_symbol || "", { allowCjk: true });
-    if (!apiQ) return false;
+    const want = expectedPoolQuote(entry);
+    if (!want) return false;
     const text = icon.textContent || "";
     const pipe = text.indexOf(" | ");
     const poolPart =
@@ -10579,26 +10633,47 @@
           ? text
           : "";
     if (!poolPart) return true;
-    return !poolPart.includes(apiQ);
+    return !poolPart.includes(want);
+  }
+
+  function expectedPoolQuote(entry) {
+    if (!entry) return "";
+    if (entry.is_vault) {
+      const apiQ = normalizeQuoteSymbol(entry.quote_symbol || "", { allowCjk: true });
+      if (apiQ && isRealPoolQuoteSymbol(apiQ) && !looksLikeStockQuoteChip(apiQ, entry)) {
+        return displayPoolQuoteSymbol(apiQ);
+      }
+      return vaultDefaultPoolQuote();
+    }
+    return normalizeQuoteSymbol(entry.quote_symbol || "", { allowCjk: true });
   }
 
   /**
    * Pool/quote for badge display.
-   * 1) DOM 池子芯片优先（GMGN /static/quotes/nvdab.png、Debot「NVDAB 流动池」——用户所见即所得）
+   * 1) 普通税币：DOM 池子芯片优先（GMGN /static/quotes、Debot「BNB 流动池」）
    * 2) API quote_symbol（链上 quote，无 DOM 芯片时）
    * 3) GMGN 无芯片默认 BNB
+   * 币股 vault：Helper quote 常为空；GMGN/Debot 的 NVDAB/FXION 芯片是篮子股票，不是底池。
    * 历史曾 API 优先：虚拟列表错挂邻行 entry 时会把 NVDAB 行画成 SPCXB。
    */
   function resolveQuoteSymbol(card, entry) {
     const fromDom = extractQuoteSymbolFromDom(card);
-    if (fromDom) return fromDom;
-
     const apiRaw =
       entry && typeof entry.quote_symbol === "string" ? entry.quote_symbol.trim() : "";
-    if (apiRaw) {
-      const fromApi = normalizeQuoteSymbol(apiRaw, { allowCjk: true });
-      if (fromApi) return fromApi;
+    const fromApi = apiRaw ? normalizeQuoteSymbol(apiRaw, { allowCjk: true }) : "";
+
+    if (entry && entry.is_vault) {
+      if (fromApi && isRealPoolQuoteSymbol(fromApi) && !looksLikeStockQuoteChip(fromApi, entry)) {
+        return displayPoolQuoteSymbol(fromApi);
+      }
+      if (fromDom && isRealPoolQuoteSymbol(fromDom) && !looksLikeStockQuoteChip(fromDom, entry)) {
+        return displayPoolQuoteSymbol(fromDom);
+      }
+      return vaultDefaultPoolQuote();
     }
+
+    if (fromDom) return fromDom;
+    if (fromApi) return fromApi;
 
     // Only when API empty AND no DOM chip — typical WBNB pair on GMGN has no quote icon.
     if (siteStrategy.name === "gmgn") {

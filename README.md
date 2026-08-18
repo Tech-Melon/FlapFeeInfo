@@ -27,6 +27,7 @@
 
 - `{🦋|🖐️|🪙}QUOTE | fee`：Flap（7777/8888）用 🦋，Four.meme（ffff）用 🖐️，其它用 🪙  
   例如 `🦋BNB | 💎90%→BNB`、`🖐️USD1 | 💎100%→USD1`
+- **币股 vault** 底池是 BNB，不会把 NVDAB / FXION 等分红股票当成底池；股票只出现在 📈 段
 - 不隐藏原网站的底池小图标；读不到报价时仍只显示 fee
 
 支持尾号 `8888` / `7777`（Flap）与 `ffff`（Four.meme）税币。

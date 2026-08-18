@@ -25,7 +25,7 @@
 | 🔥`N%` | 销毁 | `deflationBps` |
 | 💧`N%` | 回流 LP | `lpBps` |
 | ❓️未 | 无有效分配 | 全 0 |
-| 🦋/🖐️/🪙`QUOTE` | 底池报价（Flap=🦋、Four.meme ffff=🖐️、其它=🪙） | **页面 DOM**（不查链） |
+| 🦋/🖐️/🪙`QUOTE` | 底池报价（Flap=🦋、Four.meme ffff=🖐️、其它=🪙） | 普通税币：**页面 DOM**；**币股 vault：BNB**（GMGN 股票芯片不是 LP） |
 
 - **有值才出**；多项非零 → `mode=hybrid`，fee 段**按 bps 从高到低**（最高在左），如 `💎90%→SPCXB👨‍🍳10%`  
 - **合成徽章**（有报价时）：`{🦋|🖐️|🪙}QUOTE | fee`，如 `🦋BNB | 💎90%`、`🖐️USD1 | 💎100%`（`|` 两侧有空格）  
@@ -220,6 +220,7 @@ if lpBps > 0:              💧
 | GMGN RWA/美股 | `img[alt$=" quote icon"]` 或 `/static/quotes/{sym}.png` |
 | GMGN 特殊报价 | `data-icon` / `/static/icons/icon_usd1_*` 等 → `USD1` / `USDT` / `USDC` / `WETH` |
 | GMGN 默认 BNB 池 | **常无图标**；BSC 上无特殊报价时默认 `BNB` |
+| **币股 vault** | 忽略 `/static/quotes/nvdab.png`、Debot bstocks 等股票芯片；Helper `quote` 为空时底池固定 `BNB` |
 
 - 扫卡间隔：`SCAN_INTERVAL_MS = 500`  
 - Tab 恢复：仅 in-flight ≥12s 才 force recover，避免 Abort 风暴（`0.2.7+`）  
@@ -231,6 +232,8 @@ if lpBps > 0:              💧
 |-----------|------|
 | `0x556f0944357fb9a789c4a374095d3ce9ffba7777` | fee `💎90%👨‍🍳10%` hybrid；有报价时 `🪙… \| 💎90%👨‍🍳10%` |
 | `0x789476401ce0df8805f6e8a9a1e7439aac117777` | `🎁100%` gift（币股 vault） |
+| `0x7f048908f1fcc57d836c258143004c4597937777` | 币股 `🦋BNB \| 📈NVDA&FXIO`（底池是 BNB，不是 NVDAB） |
+| `0x28e9053bd9c4057da73e99282818cc5c4bc07777` | 币股 `🦋BNB \| 📈FXIO`（底池是 BNB，不是 FXION） |
 | `0x28b8aa38bbcb083a481383151c03074463ceffff` | Four v2 慈善 `🎓50%💛50%` hybrid；有报价时 `🖐️GMEB \| 🎓50%→GMEB💛50%` |
 | GMGN BSC 默认 BNB 池 7777/8888 | `🪙BNB \| …` |
 | GMGN USD1 池（`IconUsd116pxS`） | `🪙USD1 \| …` |
@@ -506,7 +509,8 @@ python tools/ctl.py watchdog-run
   - `0.7.31`：完整包剪切板仅当前活动标签跳转（多开网页不再一起跳）
   - `0.7.32`：Four.meme `rateGiggleCharity` / `rateBinanceCharity` → 🎓/💛；旧 ffff 模板无此 view（multicall allowFailure）；modeCache.v4
   - `0.7.33`：完整包剪切板「使用站点」仅 GMGN / 仅 Debot / 二者都用（Gungnir 算 Debot）
-- 插件当前版本：见 `extension/manifest.json`（**0.7.33**，公开无剪切板）
+  - `0.7.34`：币股 vault 底池固定 BNB（忽略 GMGN NVDAB/FXION 股票芯片；Helper 空 quote 回填 WBNB）
+- 插件当前版本：见 `extension/manifest.json`（**0.7.34**，公开无剪切板）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v1` = `{ [ca]: { chain, at } }`（仅完整包）
 - page-hook：`HOOK_VER` **56**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v4`）  
