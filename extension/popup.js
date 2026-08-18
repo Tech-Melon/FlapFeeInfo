@@ -63,6 +63,10 @@
       pref_creator_desc: "非 vault 的 market",
       pref_gift_title: "金库 vault",
       pref_gift_desc: "gift / 币股等",
+      pref_giggle_title: "Giggle 慈善",
+      pref_giggle_desc: "Four.meme Giggle Academy",
+      pref_binance_title: "Binance 慈善",
+      pref_binance_desc: "Four.meme Binance charity",
       pref_basket_title: "币股分红资产",
       pref_basket_desc: "📈 展示篮子成分（SPCX&TSLA…）",
       pref_openTaxinfo_title: "点击徽章打开详情",
@@ -95,7 +99,7 @@
       suffixRuleDel: "删除",
       suffixEmpty: "暂无规则，在下方输入尾号后添加",
       suffixDup: "该尾号已存在",
-      suffixInvalid: "请输入 1–12 位十六进制字符"
+      suffixInvalid: "请输入 1–12 位十六进制字符",
     },
     en: {
       appTitle: "TechMelon FlapFeeInfo",
@@ -142,6 +146,10 @@
       pref_creator_desc: "non-vault market",
       pref_gift_title: "Vault gift",
       pref_gift_desc: "gift / equity, etc.",
+      pref_giggle_title: "Giggle charity",
+      pref_giggle_desc: "Four.meme Giggle Academy",
+      pref_binance_title: "Binance charity",
+      pref_binance_desc: "Four.meme Binance charity",
       pref_basket_title: "Equity basket",
       pref_basket_desc: "📈 show underlyings (SPCX&TSLA…)",
       pref_openTaxinfo_title: "Click badge to open",
@@ -175,7 +183,7 @@
       suffixRuleDel: "Del",
       suffixEmpty: "No rules yet — type a suffix below and add",
       suffixDup: "Suffix already exists",
-      suffixInvalid: "Enter 1–12 hex characters"
+      suffixInvalid: "Enter 1–12 hex characters",
     }
   };
 
@@ -184,6 +192,8 @@
     "holder",
     "creator",
     "gift",
+    "giggle",
+    "binance",
     "basket",
     "openTaxinfo",
     "burn",
@@ -196,6 +206,8 @@
     holder: "💎",
     creator: "👨‍🍳",
     gift: "🎁",
+    giggle: "🎓",
+    binance: "💛",
     basket: "📈",
     openTaxinfo: "🔗",
     burn: "🔥",
@@ -328,6 +340,7 @@
     return out;
   }
 
+
   function normalizeOffsets(raw) {
     const out = {
       gmgn: { ...DEFAULT_OFFSETS.gmgn },
@@ -360,7 +373,7 @@
             DRAG_KEY,
             UI_LANG_KEY,
             TAX_RECV_HIDE_KEY,
-            SUFFIX_HIDE_KEY
+            SUFFIX_HIDE_KEY,
           ],
           (items) => {
             if (chrome.runtime.lastError) {
@@ -372,7 +385,7 @@
                 dragEdit: false,
                 lang: "zh",
                 taxRecv: { ...DEFAULT_TAX_RECV_HIDE },
-                suffixHide: { ...DEFAULT_SUFFIX_HIDE }
+                suffixHide: { ...DEFAULT_SUFFIX_HIDE },
               });
               return;
             }
@@ -392,7 +405,7 @@
               dragEdit: items?.[DRAG_KEY] === true,
               lang: normalizeLang(items?.[UI_LANG_KEY]),
               taxRecv: normalizeTaxRecvHide(items?.[TAX_RECV_HIDE_KEY]),
-              suffixHide: normalizeSuffixHide(items?.[SUFFIX_HIDE_KEY])
+              suffixHide: normalizeSuffixHide(items?.[SUFFIX_HIDE_KEY]),
             });
           }
         );
@@ -405,7 +418,7 @@
           dragEdit: false,
           lang: "zh",
           taxRecv: { ...DEFAULT_TAX_RECV_HIDE },
-          suffixHide: { ...DEFAULT_SUFFIX_HIDE }
+          suffixHide: { ...DEFAULT_SUFFIX_HIDE },
         });
       }
     });
@@ -692,10 +705,33 @@
     }
   }
 
+  function setSectionExpanded(name, on) {
+    const btn = document.querySelector(`[data-collapse="${name}"]`);
+    const body = document.getElementById(`${name}CollapseBody`);
+    const expanded = on === true;
+    if (btn) btn.setAttribute("aria-expanded", expanded ? "true" : "false");
+    if (body) body.hidden = !expanded;
+    const chevron = btn?.querySelector(".collapse-chevron");
+    if (chevron) chevron.textContent = expanded ? "▾" : "▸";
+    if (name === "pref") {
+      prefsExpanded = expanded;
+      updatePrefCollapseLabel();
+    }
+  }
+
   function setPrefsExpanded(on) {
-    prefsExpanded = on === true;
-    if (prefCollapseBody) prefCollapseBody.hidden = !prefsExpanded;
-    updatePrefCollapseLabel();
+    setSectionExpanded("pref", on);
+  }
+
+  function bindCollapseHeads() {
+    document.querySelectorAll("[data-collapse]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const name = btn.getAttribute("data-collapse");
+        if (!name) return;
+        const expanded = btn.getAttribute("aria-expanded") === "true";
+        setSectionExpanded(name, !expanded);
+      });
+    });
   }
 
   function updateStatus() {
@@ -897,9 +933,6 @@
     if (suffixAddInput.value !== cleaned) suffixAddInput.value = cleaned;
   });
 
-  prefCollapseBtn?.addEventListener("click", () => {
-    setPrefsExpanded(!prefsExpanded);
-  });
 
   for (const cb of offsetEnables) {
     cb.addEventListener("change", () => {
@@ -1002,7 +1035,7 @@
       dragEdit: loadedDrag,
       lang,
       taxRecv: loadedTaxRecv,
-      suffixHide: loadedSuffixHide
+      suffixHide: loadedSuffixHide,
     }) => {
       uiLang = lang;
       solidDark = loadedSolid === true;
@@ -1018,8 +1051,12 @@
       renderPrefs(prefs);
       renderTaxRecvUI(taxRecvState);
       renderSuffixHideUI(suffixHideState);
-      // Display items collapsed by default
-      setPrefsExpanded(false);
+      bindCollapseHeads();
+      setSectionExpanded("theme", false);
+      setSectionExpanded("taxRecv", false);
+      setSectionExpanded("suffixHide", false);
+      setSectionExpanded("pref", false);
+      setSectionExpanded("pos", false);
       fillOffsetUI(offsets);
       updateStatus();
     }

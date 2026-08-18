@@ -20,6 +20,8 @@
 | 💎`N%` | 持有人分红 | 链上 `dividendBps` |
 | 👨‍🍳`N%` | 创作者/营销（非 vault） | `marketBps` 且 `!isVault` |
 | 🎁`N%` | vault gift（含币股等金库） | `marketBps` 且 `isVault` |
+| 🎓`N%` | Giggle 慈善 | Four `rateGiggleCharity` |
+| 💛`N%` | Binance 慈善 | Four `rateBinanceCharity` |
 | 🔥`N%` | 销毁 | `deflationBps` |
 | 💧`N%` | 回流 LP | `lpBps` |
 | ❓️未 | 无有效分配 | 全 0 |
@@ -76,8 +78,15 @@ FlapFeeInfo/
 ├── extension/                # ★ 浏览器插件（公开）
 │   ├── manifest.json         # MV3，当前版本见 name 旁 version
 │   ├── content.js            # 站点策略 + 扫卡 + 渲染
+│   ├── page-hook.js
+│   ├── tax-recv-bootstrap.js
+│   ├── popup.html / popup.js / popup.css
 │   ├── style.css
 │   └── icons/
+├── private/clip-jump/        # 本机 overlay（默认不进公开 git）
+│   ├── clip-content.js / clip-popup.js / background.js
+│   ├── clipboard-util.js / clip-spa.js / offscreen.*
+│   └── overlay.json          # 打包时叠到完整包
 ├── cloudflare/               # CF Worker（本地全栈，默认不进公开 git）
 │   ├── worker.js
 │   ├── wrangler.jsonc
@@ -121,21 +130,23 @@ FlapFeeInfo/
 
 ```text
 segments = []
-if dividendBps > 0:  💎
-if marketBps > 0:    🎁 if is_vault else 👨‍🍳
-if deflationBps > 0: 🔥
-if lpBps > 0:        💧
+if dividendBps > 0:        💎
+if marketBps > 0:          🎁 if is_vault else 👨‍🍳
+if giggle_charity_bps > 0: 🎓
+if binance_charity_bps > 0:💛
+if deflationBps > 0:       🔥
+if lpBps > 0:              💧
 
 0 段 → unknown
-1 段 → 单标签 mode（holder/creator/gift/burn/lp）
+1 段 → 单标签 mode（holder/creator/gift/giggle/binance/burn/lp）
 多段 → mode=hybrid
 
 最大份额段始终标注 →SYMBOL（与池子 quote 相同也不省略）
   holder → dividendToken（空则 quote/WBNB）
   gift（vault）→ dividendToken（税info「分红 Token」；空则 quote/WBNB）
-  creator/lp → quoteToken（空则 WBNB）
+  creator/lp/giggle/binance → quoteToken（空则 WBNB）
   burn → taxToken 自身
-  并列 bps 时优先级: holder > gift > creator > burn > lp
+  并列 bps 时优先级: holder > gift > giggle > binance > creator > burn > lp
   注：币股篮子成分（NVDA/SPCX）属 vault 内部，不进 →SYMBOL
 ```
 
@@ -155,6 +166,8 @@ if lpBps > 0:        💧
       "market_bps": 1000,
       "deflation_bps": 0,
       "lp_bps": 0,
+      "giggle_charity_bps": 0,
+      "binance_charity_bps": 0,
       "is_vault": false,
       "buy_tax_bps": 100,
       "sell_tax_bps": 100,
@@ -218,8 +231,37 @@ if lpBps > 0:        💧
 |-----------|------|
 | `0x556f0944357fb9a789c4a374095d3ce9ffba7777` | fee `💎90%👨‍🍳10%` hybrid；有报价时 `🪙… \| 💎90%👨‍🍳10%` |
 | `0x789476401ce0df8805f6e8a9a1e7439aac117777` | `🎁100%` gift（币股 vault） |
+| `0x28b8aa38bbcb083a481383151c03074463ceffff` | Four v2 慈善 `🎓50%💛50%` hybrid；有报价时 `🖐️GMEB \| 🎓50%→GMEB💛50%` |
 | GMGN BSC 默认 BNB 池 7777/8888 | `🪙BNB \| …` |
 | GMGN USD1 池（`IconUsd116pxS`） | `🪙USD1 \| …` |
+
+### 4.6 剪切板跳转 K 线（本机 overlay，不进公开仓）
+
+**公开 `extension/` 不含此功能**（无 `clipboardRead` / background / offscreen）。完整能力在 `private/clip-jump/`，打包叠到 `dist/unpacked-full`。
+
+弹窗独立区块，**默认折叠且默认关闭**。开启流程：安全提醒 → 二次确认 → `optional_permissions: clipboardRead`（iOS 跳过后台权限，只做手势读取）。
+
+| 平台 | 行为 |
+|------|------|
+| Windows / 桌面 Chrome | 授权后 offscreen 读文本，**只抽出地址**后立刻丢原文 |
+| iOS / iPadOS | 系统禁止后台静默读剪切板；只提供「立即检测」和输入框粘贴 |
+| 关闭功能 | 停止 offscreen，并 `permissions.remove(clipboardRead)` |
+
+识别（本地、不上传、不改写剪切板；扫描上限 8KB）：
+
+- EVM：文中任意位置的 `0x` + 40 hex
+- Solana：文中任意位置的 32 字节 base58 合约地址（含 `…pump`）
+- 已知 URL 带链名时尊重链（`gmgn.ai/base/token/...` → base）
+- 裸 EVM：后台 `GET https://gmgn.ai/vas/api/v1/search_v3?q={ca}`（与搜索栏同一接口），用返回的 `chain` / `token_link.gmgn` 定链；失败才回退 BSC
+- 只把 `{kind,address,chain}` 传给后台，**原文不进 SW / storage / 日志**
+
+跳转：
+
+- **主路径（推荐）**：GMGN/Debot 标签里的 content script 常驻。页可见且聚焦时轮询剪切板；切回该标签立刻读一次。定链可走同源 `search_v3`，再 `clip-spa.js` 站内跳。
+- **不要**把监听押在 MV3 Service Worker / offscreen 上：SW 会睡，隐藏页会被收，读剪切板还经常没焦点。
+- **offscreen 仅兜底**：人不在 GMGN/Debot 时，才尝试后台读并新开标签。
+- **禁止** `chrome.tabs.update` 换地址栏（整页重载很慢）
+- 同一地址 2.5s 内不连跳
 
 ---
 
@@ -360,6 +402,7 @@ python tools/ctl.py watchdog-run
 | 拖 K 线分隔条时卡顿 | 拖动中仍扫 DOM | **0.7.6+** 拖动 pause，松手 settle 再扫 |
 | 开资金接收后新创建只剩很少卡 | 宿主 ~2 分钟轮出 + 屏蔽砍 👨‍🍳 + 无 SW 累积 | **0.7.4+** 保留池 10 分钟/40 卡；网页筛选+阈值配合 |
 | 抽样 feeMatch:false（行 CA≠徽章） | 虚拟列表复用短窗 | **0.7.4+** 无身份不 stable + scrub 后 cache 重画 |
+| 剪切板跳转不生效 | 未授权 / iOS 禁后台读 / 文本过长或不像地址 | 弹窗里确认开启；Windows 允许读取剪切板；iOS 用「立即检测」或粘贴框 |
 
 ---
 
@@ -448,12 +491,29 @@ python tools/ctl.py watchdog-run
   - `0.7.16`：ffff 候选选择器补齐（主扫/lite/list-return/mutation 相关性/click-arm/搜索 anchor 共 7 处）；新卡组批只挡新卡不阻塞整队 flush；Debot K 线停滚 settle 修顶栏后恢复侧栏扫；清理漂移注释（watchdog/热轨参数/仅7777 字样）
   - `0.7.17`：资金接收阈值下限 1→0（只要分给了 dev/marketing 就屏蔽；0% 本身不挡）；page-hook HOOK_VER 51
   - `0.7.18`：阈值 0 = 严格 >0%（有 dev 分配才挡，不是 ≥0%）；page-hook HOOK_VER 52
-- 插件当前版本：见 `extension/manifest.json`（**0.7.18**）
-- page-hook：`HOOK_VER` **52**（资金接收 0 为严格 >0%；仅 tax-recv/尾号过滤开启时）
-- 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v3`）  
+  - `0.7.19`：可选剪切板跳转 K 线（默认关，需确认+授权；Windows 后台读 / iOS 仅手势粘贴）；弹窗已有功能默认折叠
+  - `0.7.20`：剪切板区块默认折叠；只抽 EVM/Solana CA（可在一行文字中间）；GMGN/Debot 走站内 SPA，其它页才按设置新开标签
+  - `0.7.21`：站内跳转不再读 `tab.url`（无 host 权限时为空会误开新标签）；向当前标签 content 探活并注入 `clip-spa.js`
+  - `0.7.22`：裸 EVM CA 先走 GMGN `/vas/api/v1/search_v3` 定链（bsc/base/eth…），再站内跳对应链 K 线
+  - `0.7.23`：剪切板漏检 — 读失败不覆盖、同 CA 2.5s 冷却而非永久去重、offscreen 30s 保活、页内 copy 快路径
+  - `0.7.24`：剪切板主路径改 GMGN/Debot 页内常驻（聚焦轮询 + 切回前台立刻读），不再把监听押在会睡的 SW/offscreen
+  - `0.7.25`：剪切板与徽章隔离 — 默认关不挂监听；页内禁止 execCommand paste（避免抢交易/搜索焦点）
+  - `0.7.26`：剪切板内容未变则切页/回前台不再二次跳转（按文本签名去重，session 持久）
+  - `0.7.27`：浏览器无剪切板修改时间；再次复制同一 CA（copy / writeText）视为新操作可跳，纯切页仍不跳
+  - `0.7.28`：用 `clipboardchange` 识别任意应用里再次复制同一段文字；page-hook 早钩 writeText；切页仍不跳
+  - `0.7.29`：同一 CA 定链本地缓存（内存 + storage，7 天 / 最多 300 条），命中不再打 search_v3
+  - `0.7.30`：剪切板跳转拆到 `private/clip-jump` overlay；公开 `extension/` 只含徽章
+  - `0.7.31`：完整包剪切板仅当前活动标签跳转（多开网页不再一起跳）
+  - `0.7.32`：Four.meme `rateGiggleCharity` / `rateBinanceCharity` → 🎓/💛；旧 ffff 模板无此 view（multicall allowFailure）；modeCache.v4
+  - `0.7.33`：完整包剪切板「使用站点」仅 GMGN / 仅 Debot / 二者都用（Gungnir 算 Debot）
+- 插件当前版本：见 `extension/manifest.json`（**0.7.33**，公开无剪切板）
+- 定链缓存：`flapFeeInfo.clipJump.chainCache.v1` = `{ [ca]: { chain, at } }`（仅完整包）
+- page-hook：`HOOK_VER` **56**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+- 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v4`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  
 - 尾号屏蔽：`flapFeeInfo.suffixHide.v1` = `{ enabled, rules:[{id,suffix,enabled}] }`（最多 24 条 hex 1–12 位）
+- 剪切板跳转：`flapFeeInfo.clipJump.v1` = `{ enabled:false, target:"gmgn"|"debot", sites:"both"|"gmgn"|"debot", activeTabOnly:true }`（默认关；开启需确认 + `clipboardRead` 可选权限）
 
 ---
 

@@ -17,113 +17,139 @@
       </div>
     </header>
 
+
     <section class="section">
-      <div class="section-title" data-i18n="themeSection">颜色主题</div>
-      <div class="theme-seg" role="group" aria-label="badge theme" id="themeGroup">
-        <button type="button" class="theme-btn" data-theme="dark" id="themeDark">
-          <span class="theme-dot theme-dot-dark"></span>
-          <span data-i18n="themeDark">深色</span>
-          <span class="theme-tag" data-i18n="themeDefault">默认</span>
-        </button>
-        <button type="button" class="theme-btn" data-theme="light" id="themeLight">
-          <span class="theme-dot theme-dot-light"></span>
-          <span data-i18n="themeHighContrast">高对比</span>
-        </button>
-      </div>
-      <label class="row drag-row theme-opt-row" for="solidDarkToggle" id="solidDarkRow">
-        <input type="checkbox" id="solidDarkToggle" />
-        <span class="emoji">◼</span>
-        <div class="label">
-          <strong data-i18n="solidDarkTitle">深色背景</strong>
-          <span data-i18n="solidDarkDesc">仅「深色」主题可调：勾选=实心深底；默认=半透明配色</span>
-        </div>
-      </label>
-      <p class="theme-hint" id="themeHint" data-i18n="themeHintDefault">
-        深色可调背景；「高对比」固定实心深底+彩色字（不可调透明）。
-      </p>
-    </section>
-
-    <section class="section tax-recv-section" id="taxRecvSection">
-      <div class="section-title" data-i18n="taxRecvSection">资金接收方屏蔽</div>
-      <p class="theme-hint" data-i18n="taxRecvHint">
-        仅战壕/Meme 列表生效。监听列表接口过滤（GMGN 自动补位），不额外请求；金库始终显示。默认关闭。
-      </p>
-      <label class="row drag-row" for="taxRecvEnabled">
-        <input type="checkbox" id="taxRecvEnabled" />
-        <span class="emoji">🚫</span>
-        <div class="label">
-          <strong data-i18n="taxRecvEnableTitle">启用屏蔽</strong>
-          <span data-i18n="taxRecvEnableDesc">开启后按下方阈值隐藏列表卡</span>
-        </div>
-      </label>
-      <div class="tax-recv-threshold-row" id="taxRecvThresholdRow">
-        <label class="tax-recv-threshold-label" for="taxRecvThreshold">
-          <span data-i18n="taxRecvThresholdLabel">阈值 ≥</span>
-          <input
-            type="number"
-            id="taxRecvThreshold"
-            class="tax-recv-threshold-input"
-            min="0"
-            max="100"
-            step="1"
-            value="100"
-          />
-          <span class="tax-recv-unit">%</span>
-        </label>
-        <input
-          type="range"
-          id="taxRecvThresholdRange"
-          class="tax-recv-range"
-          min="0"
-          max="100"
-          step="1"
-          value="100"
-        />
-      </div>
-      <p class="theme-hint" data-i18n="taxRecvHint2" id="taxRecvHint2">
-        例：0% = 严格大于 0%（有 dev 分配就藏，0% 不藏）；50% = 接收方占比 ≥50% 也藏；100% = 仅藏税收钱包 100%。
-      </p>
-    </section>
-
-    <section class="section tax-recv-section" id="suffixHideSection">
-      <div class="section-title" data-i18n="suffixHideSection">自定义尾号屏蔽</div>
-      <p class="theme-hint" data-i18n="suffixHideHint">
-        仅 BSC 生效。隐藏 CA 以指定十六进制尾号结尾的代币（可多条）。战壕「新创建」列数据层过滤。默认关闭。
-      </p>
-      <label class="row drag-row" for="suffixHideEnabled">
-        <input type="checkbox" id="suffixHideEnabled" />
-        <span class="emoji">🔚</span>
-        <div class="label">
-          <strong data-i18n="suffixHideEnableTitle">启用尾号屏蔽</strong>
-          <span data-i18n="suffixHideEnableDesc">开启后按下方规则过滤列表</span>
-        </div>
-      </label>
-      <div class="suffix-rules-wrap" id="suffixRulesWrap">
-        <div class="suffix-rules" id="suffixRulesList"></div>
-        <div class="suffix-add-row">
-          <span class="suffix-0x">…</span>
-          <input
-            type="text"
-            id="suffixAddInput"
-            class="suffix-add-input"
-            maxlength="12"
-            spellcheck="false"
-            autocomplete="off"
-            data-i18n-placeholder="suffixAddPlaceholder"
-            placeholder="如 0000 / dead"
-          />
-          <button type="button" class="btn btn-sm" id="suffixAddBtn" data-i18n="suffixAddBtn">
-            添加
+      <button type="button" class="collapse-head" data-collapse="theme" aria-expanded="false">
+        <span class="section-title collapse-title" data-i18n="themeSection">颜色主题</span>
+        <span class="collapse-chevron">▸</span>
+      </button>
+      <div class="collapse-body" id="themeCollapseBody" hidden>
+        <div class="theme-seg" role="group" aria-label="badge theme" id="themeGroup">
+          <button type="button" class="theme-btn" data-theme="dark" id="themeDark">
+            <span class="theme-dot theme-dot-dark"></span>
+            <span data-i18n="themeDark">深色</span>
+            <span class="theme-tag" data-i18n="themeDefault">默认</span>
+          </button>
+          <button type="button" class="theme-btn" data-theme="light" id="themeLight">
+            <span class="theme-dot theme-dot-light"></span>
+            <span data-i18n="themeHighContrast">高对比</span>
           </button>
         </div>
-        <p class="theme-hint" data-i18n="suffixHideHint2" id="suffixHideHint2">
-          例：添加 dead → 屏蔽所有以 dead 结尾的 0x 地址。最多 24 条；仅 hex 字符。
+        <label class="row drag-row theme-opt-row" for="solidDarkToggle" id="solidDarkRow">
+          <input type="checkbox" id="solidDarkToggle" />
+          <span class="emoji">◼</span>
+          <div class="label">
+            <strong data-i18n="solidDarkTitle">深色背景</strong>
+            <span data-i18n="solidDarkDesc">仅「深色」主题可调：勾选=实心深底；默认=半透明配色</span>
+          </div>
+        </label>
+        <p class="theme-hint" id="themeHint" data-i18n="themeHintDefault">
+          深色可调背景；「高对比」固定实心深底+彩色字（不可调透明）。
         </p>
       </div>
     </section>
 
+    <section class="section">
+      <button type="button" class="collapse-head" data-collapse="taxRecv" aria-expanded="false">
+        <span class="section-title collapse-title" data-i18n="taxRecvSection">资金接收方屏蔽</span>
+        <span class="collapse-chevron">▸</span>
+      </button>
+      <div class="collapse-body" id="taxRecvCollapseBody" hidden>
+        <div class="tax-recv-section" id="taxRecvSection">
+          <p class="theme-hint" data-i18n="taxRecvHint">
+            仅战壕/Meme 列表生效。监听列表接口过滤（GMGN 自动补位），不额外请求；金库始终显示。默认关闭。
+          </p>
+          <label class="row drag-row" for="taxRecvEnabled">
+            <input type="checkbox" id="taxRecvEnabled" />
+            <span class="emoji">🚫</span>
+            <div class="label">
+              <strong data-i18n="taxRecvEnableTitle">启用屏蔽</strong>
+              <span data-i18n="taxRecvEnableDesc">开启后按下方阈值隐藏列表卡</span>
+            </div>
+          </label>
+          <div class="tax-recv-threshold-row" id="taxRecvThresholdRow">
+            <label class="tax-recv-threshold-label" for="taxRecvThreshold">
+              <span data-i18n="taxRecvThresholdLabel">阈值 ≥</span>
+              <input
+                type="number"
+                id="taxRecvThreshold"
+                class="tax-recv-threshold-input"
+                min="0"
+                max="100"
+                step="1"
+                value="100"
+              />
+              <span class="tax-recv-unit">%</span>
+            </label>
+            <input
+              type="range"
+              id="taxRecvThresholdRange"
+              class="tax-recv-range"
+              min="0"
+              max="100"
+              step="1"
+              value="100"
+            />
+          </div>
+          <p class="theme-hint" data-i18n="taxRecvHint2" id="taxRecvHint2">
+            例：0% = 严格大于 0%（有 dev 分配就藏，0% 不藏）；50% = 接收方占比 ≥50% 也藏；100% = 仅藏税收钱包 100%。
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <button type="button" class="collapse-head" data-collapse="suffixHide" aria-expanded="false">
+        <span class="section-title collapse-title" data-i18n="suffixHideSection">自定义尾号屏蔽</span>
+        <span class="collapse-chevron">▸</span>
+      </button>
+      <div class="collapse-body" id="suffixHideCollapseBody" hidden>
+        <div class="tax-recv-section" id="suffixHideSection">
+          <p class="theme-hint" data-i18n="suffixHideHint">
+            仅 BSC 生效。隐藏 CA 以指定十六进制尾号结尾的代币（可多条）。战壕「新创建」列数据层过滤。默认关闭。
+          </p>
+          <label class="row drag-row" for="suffixHideEnabled">
+            <input type="checkbox" id="suffixHideEnabled" />
+            <span class="emoji">🔚</span>
+            <div class="label">
+              <strong data-i18n="suffixHideEnableTitle">启用尾号屏蔽</strong>
+              <span data-i18n="suffixHideEnableDesc">开启后按下方规则过滤列表</span>
+            </div>
+          </label>
+          <div class="suffix-rules-wrap" id="suffixRulesWrap">
+            <div class="suffix-rules" id="suffixRulesList"></div>
+            <div class="suffix-add-row">
+              <span class="suffix-0x">…</span>
+              <input
+                type="text"
+                id="suffixAddInput"
+                class="suffix-add-input"
+                maxlength="12"
+                spellcheck="false"
+                autocomplete="off"
+                data-i18n-placeholder="suffixAddPlaceholder"
+                placeholder="如 0000 / dead"
+              />
+              <button type="button" class="btn btn-sm" id="suffixAddBtn" data-i18n="suffixAddBtn">
+                添加
+              </button>
+            </div>
+            <p class="theme-hint" data-i18n="suffixHideHint2" id="suffixHideHint2">
+              例：添加 dead → 屏蔽所有以 dead 结尾的 0x 地址。最多 24 条；仅 hex 字符。
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section class="section" id="prefSection">
-      <button type="button" class="collapse-head" id="prefCollapseBtn" aria-expanded="false">
+      <button
+        type="button"
+        class="collapse-head"
+        id="prefCollapseBtn"
+        data-collapse="pref"
+        aria-expanded="false"
+      >
         <span class="section-title collapse-title" data-i18n="prefSection">显示项（默认全部开启）</span>
         <span class="collapse-chevron" id="prefChevron">▸</span>
       </button>
@@ -137,84 +163,89 @@
     </section>
 
     <section class="section">
-      <div class="section-title" data-i18n="posSection">徽章位置</div>
-      <p class="theme-hint offset-hint" id="offsetHint"></p>
+      <button type="button" class="collapse-head" data-collapse="pos" aria-expanded="false">
+        <span class="section-title collapse-title" data-i18n="posSection">徽章位置</span>
+        <span class="collapse-chevron">▸</span>
+      </button>
+      <div class="collapse-body" id="posCollapseBody" hidden>
+        <p class="theme-hint offset-hint" id="offsetHint"></p>
 
-      <label class="row drag-row" for="dragEditToggle">
-        <input type="checkbox" id="dragEditToggle" />
-        <span class="emoji">✥</span>
-        <div class="label">
-          <strong data-i18n="dragTitle">页面内拖拽定位</strong>
-          <span data-i18n="dragDesc">开启后拖一次徽章；松手写入坐标、同步全站并自动关闭拖拽</span>
-        </div>
-      </label>
+        <label class="row drag-row" for="dragEditToggle">
+          <input type="checkbox" id="dragEditToggle" />
+          <span class="emoji">✥</span>
+          <div class="label">
+            <strong data-i18n="dragTitle">页面内拖拽定位</strong>
+            <span data-i18n="dragDesc">开启后拖一次徽章；松手写入坐标、同步全站并自动关闭拖拽</span>
+          </div>
+        </label>
 
-      <div class="offset-site" data-site="gmgn">
-        <div class="offset-site-head">
-          <div class="offset-site-title">GMGN</div>
-          <label class="offset-enable">
-            <input type="checkbox" class="offset-enable-input" data-site="gmgn" />
-            <span data-i18n="useCardCoords">使用卡片坐标</span>
-          </label>
-        </div>
-        <div class="offset-row">
-          <label class="offset-axis">X
-            <input type="number" class="offset-input" data-site="gmgn" data-axis="x" min="-40" max="640" step="1" value="12" />
-            <span class="offset-unit">px</span>
-          </label>
-          <div class="offset-step">
-            <button type="button" class="btn-step" data-site="gmgn" data-axis="x" data-delta="-4">−</button>
-            <button type="button" class="btn-step" data-site="gmgn" data-axis="x" data-delta="4">+</button>
+        <div class="offset-site" data-site="gmgn">
+          <div class="offset-site-head">
+            <div class="offset-site-title">GMGN</div>
+            <label class="offset-enable">
+              <input type="checkbox" class="offset-enable-input" data-site="gmgn" />
+              <span data-i18n="useCardCoords">使用卡片坐标</span>
+            </label>
+          </div>
+          <div class="offset-row">
+            <label class="offset-axis">X
+              <input type="number" class="offset-input" data-site="gmgn" data-axis="x" min="-40" max="640" step="1" value="12" />
+              <span class="offset-unit">px</span>
+            </label>
+            <div class="offset-step">
+              <button type="button" class="btn-step" data-site="gmgn" data-axis="x" data-delta="-4">−</button>
+              <button type="button" class="btn-step" data-site="gmgn" data-axis="x" data-delta="4">+</button>
+            </div>
+          </div>
+          <div class="offset-row">
+            <label class="offset-axis">Y
+              <input type="number" class="offset-input" data-site="gmgn" data-axis="y" min="-40" max="640" step="1" value="8" />
+              <span class="offset-unit">px</span>
+            </label>
+            <div class="offset-step">
+              <button type="button" class="btn-step" data-site="gmgn" data-axis="y" data-delta="-4">−</button>
+              <button type="button" class="btn-step" data-site="gmgn" data-axis="y" data-delta="4">+</button>
+            </div>
           </div>
         </div>
-        <div class="offset-row">
-          <label class="offset-axis">Y
-            <input type="number" class="offset-input" data-site="gmgn" data-axis="y" min="-40" max="640" step="1" value="8" />
-            <span class="offset-unit">px</span>
-          </label>
-          <div class="offset-step">
-            <button type="button" class="btn-step" data-site="gmgn" data-axis="y" data-delta="-4">−</button>
-            <button type="button" class="btn-step" data-site="gmgn" data-axis="y" data-delta="4">+</button>
+
+        <div class="offset-site" data-site="debot">
+          <div class="offset-site-head">
+            <div class="offset-site-title">Debot / Gungnir</div>
+            <label class="offset-enable">
+              <input type="checkbox" class="offset-enable-input" data-site="debot" />
+              <span data-i18n="useCardCoords">使用卡片坐标</span>
+            </label>
+          </div>
+          <div class="offset-row">
+            <label class="offset-axis">X
+              <input type="number" class="offset-input" data-site="debot" data-axis="x" min="-40" max="640" step="1" value="12" />
+              <span class="offset-unit">px</span>
+            </label>
+            <div class="offset-step">
+              <button type="button" class="btn-step" data-site="debot" data-axis="x" data-delta="-4">−</button>
+              <button type="button" class="btn-step" data-site="debot" data-axis="x" data-delta="4">+</button>
+            </div>
+          </div>
+          <div class="offset-row">
+            <label class="offset-axis">Y
+              <input type="number" class="offset-input" data-site="debot" data-axis="y" min="-40" max="640" step="1" value="8" />
+              <span class="offset-unit">px</span>
+            </label>
+            <div class="offset-step">
+              <button type="button" class="btn-step" data-site="debot" data-axis="y" data-delta="-4">−</button>
+              <button type="button" class="btn-step" data-site="debot" data-axis="y" data-delta="4">+</button>
+            </div>
           </div>
         </div>
+
+        <div class="offset-actions">
+          <button type="button" id="btnOffsetReset" class="btn btn-muted" data-i18n="btnResetOffset">
+            恢复默认（贴税率旁）
+          </button>
+        </div>
+        <p class="status" id="offsetStatus" aria-live="polite"></p>
       </div>
-
-      <div class="offset-site" data-site="debot">
-        <div class="offset-site-head">
-          <div class="offset-site-title">Debot / Gungnir</div>
-          <label class="offset-enable">
-            <input type="checkbox" class="offset-enable-input" data-site="debot" />
-            <span data-i18n="useCardCoords">使用卡片坐标</span>
-          </label>
-        </div>
-        <div class="offset-row">
-          <label class="offset-axis">X
-            <input type="number" class="offset-input" data-site="debot" data-axis="x" min="-40" max="640" step="1" value="12" />
-            <span class="offset-unit">px</span>
-          </label>
-          <div class="offset-step">
-            <button type="button" class="btn-step" data-site="debot" data-axis="x" data-delta="-4">−</button>
-            <button type="button" class="btn-step" data-site="debot" data-axis="x" data-delta="4">+</button>
-          </div>
-        </div>
-        <div class="offset-row">
-          <label class="offset-axis">Y
-            <input type="number" class="offset-input" data-site="debot" data-axis="y" min="-40" max="640" step="1" value="8" />
-            <span class="offset-unit">px</span>
-          </label>
-          <div class="offset-step">
-            <button type="button" class="btn-step" data-site="debot" data-axis="y" data-delta="-4">−</button>
-            <button type="button" class="btn-step" data-site="debot" data-axis="y" data-delta="4">+</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="offset-actions">
-        <button type="button" id="btnOffsetReset" class="btn btn-muted" data-i18n="btnResetOffset">
-          恢复默认（贴税率旁）
-        </button>
-      </div>
-      <p class="status" id="offsetStatus" aria-live="polite"></p>
     </section>
 
     <p class="hint" data-i18n="footerHint">

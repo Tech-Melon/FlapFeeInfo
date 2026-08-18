@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.7.18",
-  "description": "FlapFeeInfo 0.7.18: tax-recv 0 means strictly >0% (any dev share), not >=0%.",
+  "version": "0.7.33",
+  "description": "FlapFeeInfo 0.7.33: Four.meme Giggle/Binance charity badges on GMGN / Debot / Gungnir.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

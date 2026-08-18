@@ -14,6 +14,10 @@
     '[data-sentry-source-file="PumpSubX.tsx"], [data-sentry-source-file="PumpSubAX.tsx"]';
   const GMGN_FIXED_SEARCH_ROOT_SELECTOR =
     '[data-sentry-source-file="SearchModalDetail.tsx"]';
+  // 0.7.33: 完整包剪切板可选用站点（仅 GMGN / 仅 Debot / 二者都用）。
+  // 0.7.32: Four.meme Giggle/Binance 慈善分段（🎓/💛）；modeCache.v4。
+  // 0.7.31: 版本对齐；徽章逻辑不变。剪切板仅完整包且默认只跳当前标签。
+  // 0.7.30: 剪切板跳转已拆到 private/clip-jump overlay，本文件只负责徽章。
   // 0.7.18: 资金接收 0 = 严格 >0%（有 dev 分配才挡，不是 ≥0%）。
   // 0.7.17: 资金接收阈值下限 0（只要分给了 dev 钱包就屏蔽）；0% 本身不挡。
   // 0.7.16: ffff 选择器补齐（候选/mutation/click-arm）；新卡组批不阻塞整队；Debot 停滚 settle 恢复侧栏扫.
@@ -338,7 +342,7 @@
   const DEBUG_LOG = false;
   // Steady-state: painted badges free; unpainted prioritized.
   // v3: top_payout_symbol always annotated on largest tax segment (→SYM never omitted).
-  const PERSISTENT_CACHE_KEY = "flapFeeInfo.modeCache.v3";
+  const PERSISTENT_CACHE_KEY = "flapFeeInfo.modeCache.v4";
   // Popup toggles: which badge parts to show (default all true).
   const DISPLAY_PREFS_KEY = "flapFeeInfo.displayPrefs.v1";
   const DEFAULT_DISPLAY_PREFS = {
@@ -346,6 +350,8 @@
     holder: true,
     creator: true,
     gift: true,
+    giggle: true,
+    binance: true,
     burn: true,
     lp: true,
     payoutArrow: true,
@@ -439,6 +445,8 @@
   const modeMeta = {
     holder: { fallback: "💎", title: "Fee mode: holder dividend", className: "holder" },
     gift: { fallback: "🎁", title: "Fee mode: vault gift", className: "gift" },
+    giggle: { fallback: "🎓", title: "Fee mode: Giggle charity", className: "giggle" },
+    binance: { fallback: "💛", title: "Fee mode: Binance charity", className: "binance" },
     creator: { fallback: "👨‍🍳", title: "Fee mode: creator marketing", className: "creator" },
     burn: { fallback: "🔥", title: "Fee mode: burn / deflation", className: "burn" },
     lp: { fallback: "💧", title: "Fee mode: liquidity", className: "lp" },
@@ -10279,6 +10287,8 @@
       market_bps: Number(result.market_bps) || 0,
       deflation_bps: Number(result.deflation_bps) || 0,
       lp_bps: Number(result.lp_bps) || 0,
+      giggle_charity_bps: Number(result.giggle_charity_bps) || 0,
+      binance_charity_bps: Number(result.binance_charity_bps) || 0,
       is_vault: Boolean(result.is_vault),
       buy_tax_bps: Number(result.buy_tax_bps) || 0,
       sell_tax_bps: Number(result.sell_tax_bps) || 0,
@@ -12237,14 +12247,20 @@
           pri: 1
         });
       } else if (!entry.is_vault && prefs.creator !== false) {
-        candidates.push({ kind: "creator", emoji: "👨‍🍳", bps: entry.market_bps, pri: 2 });
+        candidates.push({ kind: "creator", emoji: "👨‍🍳", bps: entry.market_bps, pri: 4 });
       }
     }
+    if ((entry.giggle_charity_bps || 0) > 0 && prefs.giggle !== false) {
+      candidates.push({ kind: "giggle", emoji: "🎓", bps: entry.giggle_charity_bps, pri: 2 });
+    }
+    if ((entry.binance_charity_bps || 0) > 0 && prefs.binance !== false) {
+      candidates.push({ kind: "binance", emoji: "💛", bps: entry.binance_charity_bps, pri: 3 });
+    }
     if ((entry.deflation_bps || 0) > 0 && prefs.burn !== false) {
-      candidates.push({ kind: "burn", emoji: "🔥", bps: entry.deflation_bps, pri: 3 });
+      candidates.push({ kind: "burn", emoji: "🔥", bps: entry.deflation_bps, pri: 5 });
     }
     if ((entry.lp_bps || 0) > 0 && prefs.lp !== false) {
-      candidates.push({ kind: "lp", emoji: "💧", bps: entry.lp_bps, pri: 4 });
+      candidates.push({ kind: "lp", emoji: "💧", bps: entry.lp_bps, pri: 6 });
     }
 
     if (!candidates.length) {
@@ -12274,7 +12290,7 @@
         topSym = compactDisplaySymbol(
           entry.dividend_symbol || entry.top_payout_symbol || ""
         );
-      } else if (top === "creator" || top === "gift" || top === "lp") {
+      } else if (top === "creator" || top === "gift" || top === "lp" || top === "giggle" || top === "binance") {
         topSym = compactDisplaySymbol(entry.quote_symbol || "");
       }
       // burn: tax symbol not always cached client-side — omit arrow if unknown
@@ -12390,6 +12406,8 @@
     const segmentCount =
       Number((entry.dividend_bps || 0) > 0) +
       Number((entry.market_bps || 0) > 0) +
+      Number((entry.giggle_charity_bps || 0) > 0) +
+      Number((entry.binance_charity_bps || 0) > 0) +
       Number((entry.deflation_bps || 0) > 0) +
       Number((entry.lp_bps || 0) > 0);
     // Light: never translucent / never honor solidDark toggle — CSS forces solid dark chip.
@@ -13611,6 +13629,8 @@
                 market_bps: Number(value.market_bps) || 0,
                 deflation_bps: Number(value.deflation_bps) || 0,
                 lp_bps: Number(value.lp_bps) || 0,
+                giggle_charity_bps: Number(value.giggle_charity_bps) || 0,
+                binance_charity_bps: Number(value.binance_charity_bps) || 0,
                 is_vault: Boolean(value.is_vault),
                 buy_tax_bps: Number(value.buy_tax_bps) || 0,
                 sell_tax_bps: Number(value.sell_tax_bps) || 0,
@@ -13680,6 +13700,8 @@
         market_bps: entry.market_bps,
         deflation_bps: entry.deflation_bps,
         lp_bps: entry.lp_bps,
+        giggle_charity_bps: entry.giggle_charity_bps || 0,
+        binance_charity_bps: entry.binance_charity_bps || 0,
         is_vault: entry.is_vault,
         buy_tax_bps: entry.buy_tax_bps,
         sell_tax_bps: entry.sell_tax_bps,
@@ -13736,6 +13758,8 @@
           market_bps: entry.market_bps,
           deflation_bps: entry.deflation_bps,
           lp_bps: entry.lp_bps,
+          giggle_charity_bps: entry.giggle_charity_bps || 0,
+          binance_charity_bps: entry.binance_charity_bps || 0,
           is_vault: entry.is_vault,
           buy_tax_bps: entry.buy_tax_bps,
           sell_tax_bps: entry.sell_tax_bps,

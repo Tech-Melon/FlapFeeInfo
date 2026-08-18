@@ -9,7 +9,7 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 52;
+  const HOOK_VER = 56;
   /** 仅当列表过滤开启时，由插件临时写入，关闭时清理 */
   const OWNED_DISABLE_SW = "flapFeeInfo.ownedDisableShareWorker";
   const PREFS_ATTR = "data-flap-tax-recv";
