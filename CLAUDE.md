@@ -533,7 +533,7 @@ python tools/ctl.py watchdog-run
   - `0.7.52`：英文 CSS Highlight 按全部推文正文刷新，不再被中文重扫清空
   - `0.7.53`：英文专名改为深青绿底 + 浅字，深色主题可读
   - `0.7.54`：js-mcp 实测重构文章样式识别层 — 中文实体三通道（词典整词≥3字 + 单字碎片合并重建未登录词「美联储/鲍威尔/比特币」+ 音译字连串「卡尔达舍夫」），词表降为加分兜底；英文句首大写不再误标（Advancement 类噪音），全名跨空格合并（Bill Gates）；修整数百分比不高亮、英文高亮全页 64 上限改按卡片、@handle 不标、去 extendNoun 盲吞
-  - `0.7.57`：热通道并行请求 — 主批 /modes 在途时，GMGN 列表页热 token（视口/新创建未画，上限 12）走第二条并行 /modes，不再被单飞 `batchActive` 锁排队；共享 `processModesResponse`；watchdog/resume/hardReset 同步回收热通道
+  - `0.7.57`：热通道并行请求 — 主批 /modes 在途时，GMGN 列表页热 token（视口/新创建未画，上限 12）走第二条并行 /modes，不再被单飞 `batchActive` 锁排队；共享 `processModesResponse`；watchdog/resume/hardReset 同步回收热通道。Worker 同步：mem miss 后 **KV 读与回源并行**（js-mcp 实测 KV 冷读 ~250ms 且新币必 miss；新卡 ⏳→徽章 p50 1107→943ms）
  - `0.7.56`：新币徽章提速 — 插件新卡组批窗 500→200ms（满 2 张即发）、热路径单 token 组批 200→120ms；Worker `DIRECT_FILL_CAP` 12→24（首屏冷批一轮 wait_chain 回齐）；后端 `FLAP_FEE_RPC_RPS_LIMIT` 30→40（QN 24h 零 429，有余量）
  - `0.7.55`：文章样式降载与可调 — GMGN 上 observer 不订阅 characterData（战壕价格跳动不再进回调）；禁区全页清扫仅路由变化时执行；长文（>400 字）词典整词只出现一次的不标（词频降噪，复用已收集命中不加遍历）；屏蔽词（弹窗管理 + 双击胶囊即屏蔽，`skips` 存入 articleStyle.v1，覆盖词表/大写/英文高亮全通道）；胶囊配色跟随 badgeTheme 深浅主题；清 CSS.highlights 死代码；句首全名 lookahead 容忍 1–2 个空格
 - 插件当前版本：见 `extension/manifest.json`（**0.7.57**，公开无剪切板）
