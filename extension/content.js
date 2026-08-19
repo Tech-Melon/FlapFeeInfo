@@ -14,6 +14,29 @@
     '[data-sentry-source-file="PumpSubX.tsx"], [data-sentry-source-file="PumpSubAX.tsx"]';
   const GMGN_FIXED_SEARCH_ROOT_SELECTOR =
     '[data-sentry-source-file="SearchModalDetail.tsx"]';
+  // 0.7.57: 热通道 — 主批 /modes 在途时，视口/新创建热 token 走第二条并行请求
+  //          （GMGN 列表页 only，上限 12），消除新币撞上冷大批要排队的竞态；
+  //          watchdog/resume/hardReset 同步回收热通道。
+  // 0.7.56: 新币徽章提速 — 新卡组批窗 500→200ms / 满 2 张即发；热路径单token
+  //          组批 200→120ms。后端很闲（cache hit 1ms、QN 无 429），延迟都在前端窗口。
+  // 0.7.53: 英文专名改在 data-word 上加深绿底浅字，不再用看不清的 CSS Highlight。
+  // 0.7.52: 英文 Highlight 改为每次扫全部推文正文，避免中文重扫清掉英文。
+  // 0.7.51: 推特卡整卡插入时补扫 CollapsibleTextContent，避免正文永远扫不到。
+  // 0.7.50: 跟单列表不改 DOM；推文英文用 CSS Highlight，避开 span[data-word] 包胶囊。
+  // 0.7.49: 文章样式不碰 GMGN 跟单/战壕列表（TrackerListItem），只标推特卡，避免增量错位。
+  // 0.7.48: 文章样式只标重点专名；英文按句子上下文，不再因拆 span 被当成孤词。
+  // 0.7.47: 文章样式英文专名走同一套分词（Chinamaxxing / Federal Reserve）。
+  // 0.7.46: 文章样式用 Intl.Segmenter + 虚词过滤识别句中名词。
+  // 0.7.45: 文章样式跳过孤词/金额（36.6K）；专名仍走词表而非泛 NER。
+  // 0.7.44: 文章样式识别中文专名（词表最长匹配 + 中国神灵类复合 + 自定义词）。
+  // 0.7.43: 文章样式只扫变化节点，不再每次整页重扫。
+  // 0.7.42: 完整包文章样式改圆角胶囊，引号后固定跟「复制」。
+  // 0.7.41: 完整包可选文章重点样式（默认关；按填写域名注入）。
+  // 0.7.40: 完整包剪切板轮询 350ms（前台+offscreen）。
+  // 0.7.38: 完整包可选覆盖 GMGN 推特监控等站点自带 CA 样式。
+  // 0.7.37: 完整包高亮 CA 可申请全站权限，X/其它 https 页也能点跳。
+  // 0.7.36: 完整包可选高亮页面 CA（默认关，CSS Highlight，点击复制并跳转）。
+  // 0.7.35: 完整包剪切板 — 切页不复跳；可选复用已开 GMGN/Debot 标签。
   // 0.7.34: 币股 vault 底池用 BNB，不再把 GMGN NVDAB/FXION 芯片当 LP quote。
   // 0.7.33: 完整包剪切板可选用站点（仅 GMGN / 仅 Debot / 二者都用）。
   // 0.7.32: Four.meme Giggle/Binance 慈善分段（🎓/💛）；modeCache.v4。
@@ -134,9 +157,11 @@
   // 稳态批：满 BATCH_MIN_TOKENS 或 BATCH_FLUSH_MS；禁止 0ms 全局狂刷。
   const BATCH_FLUSH_MS = 350;
   const BATCH_MIN_TOKENS = 3;
-  // 热路径（视口/新创建未画）：降频 — 少打 /modes，减主线程与 Worker 压力。
-  const HOT_BATCH_FLUSH_MS = 200;
+  // 热路径（视口/新创建未画）：0.7.56 单 token 也只等 120ms（后端空闲，缩窗提时效）。
+  const HOT_BATCH_FLUSH_MS = 120;
   const HOT_BATCH_MIN_TOKENS = 2;
+  // 0.7.57 热通道：主批在途时热 token 并行发送的单次上限（对齐 Worker 直填能力）。
+  const HOT_LANE_MAX_TOKENS = 12;
   const RETRY_BASE_MS = 900;
   const RETRY_MAX_MS = 12000;
   const MISSING_RETRY_BASE_MS = 15000;
@@ -282,8 +307,9 @@
   const GMGN_EMBEDDED_DIRTY_CARD_LIMIT = 16;
   // Newly inserted visible cards use a small, independent batch window so they
   // do not wait behind the regular list scan/idle pipeline.
-  const GMGN_NEW_CARD_BATCH_FLUSH_MS = 500;
-  const GMGN_NEW_CARD_BATCH_MIN_TOKENS = 3;
+  // 0.7.56: 新卡多为单张出现，500ms 窗口=纯延迟；缩到 200ms / 满 2 张即发。
+  const GMGN_NEW_CARD_BATCH_FLUSH_MS = 200;
+  const GMGN_NEW_CARD_BATCH_MIN_TOKENS = 2;
   const GMGN_NEW_CARD_LIMIT = 16;
   // Resizing the token-page trench rebuilds React rows on every pointer move.
   // Keep extension DOM/layout work out of that hot path and repair once after settle.
@@ -903,6 +929,14 @@
   let activeAbortController = null;
   /** Tokens currently inside an in-flight /modes request (re-queue on force recover). */
   let activeBatchTokens = [];
+  // 0.7.57 热通道：主批在途时，视口/新创建热 token 走独立并行 /modes，
+  // 不再被单飞 batchActive 锁压在大批后面（竞态：新币撞上冷大批要等好几秒）。
+  let hotLaneActive = false;
+  let hotLaneStartedAt = 0;
+  let hotLaneGeneration = 0;
+  let hotLaneAbortController = null;
+  /** Tokens inside the in-flight hot-lane request (re-queue on reset). */
+  let hotLaneTokens = [];
   let consecutiveFails = 0;
   /** Per-token backoff for API soft misses; prevents a zero-delay /modes loop. */
   const missingRetryState = new Map();
@@ -8038,6 +8072,7 @@
 
     batchGeneration += 1;
     abortActiveRequest(reason);
+    resetHotLane(reason, true);
     activeBatchTokens.forEach((token) => requestQueue.add(token));
     activeBatchTokens = [];
     batchActive = false;
@@ -8080,6 +8115,16 @@
         const ageMs = batchStartedAt ? Date.now() - batchStartedAt : BATCH_STUCK_MS + 1;
         if (ageMs >= BATCH_STUCK_MS || !batchStartedAt) {
           recoverStuckBatch(true, "watchdog-batch");
+          unhealthy = true;
+        }
+      }
+      // 0.7.57: heal stuck hot lane the same way (requeue its tokens).
+      if (hotLaneActive) {
+        const hotAgeMs = hotLaneStartedAt
+          ? Date.now() - hotLaneStartedAt
+          : BATCH_STUCK_MS + 1;
+        if (hotAgeMs >= BATCH_STUCK_MS) {
+          resetHotLane("watchdog-hot-lane", true);
           unhealthy = true;
         }
       }
@@ -8149,6 +8194,14 @@
         (ageMs >= RESUME_FORCE_MIN_AGE_MS || ageMs >= BATCH_STUCK_MS || !batchStartedAt)
       ) {
         recoverStuckBatch(true, "resume-old-batch");
+      }
+      // 0.7.57: 冻结期间挂起的热通道请求同样按龄回收。
+      if (
+        hotLaneActive &&
+        hotLaneStartedAt &&
+        now - hotLaneStartedAt >= RESUME_FORCE_MIN_AGE_MS
+      ) {
+        resetHotLane("resume-old-hot-lane", true);
       }
       if (scanScheduled && scanTimerIds.length === 0) scanScheduled = false;
       if (requestQueue.size > 0) scheduleBatchFlush({ immediate: true });
@@ -9802,6 +9855,12 @@
     }
     const minTok = hot ? HOT_BATCH_MIN_TOKENS : BATCH_MIN_TOKENS;
     const flushMs = hot ? HOT_BATCH_FLUSH_MS : BATCH_FLUSH_MS;
+    // 0.7.57: 主批健康在途时，热 token 立刻走热通道并行发送（不等主批 finally）。
+    // 僵尸主批（超时）仍交给下方 scheduleBatchFlush 的 recover 路径处理。
+    if (hot && batchActive && !hotLaneActive) {
+      const mainAgeMs = batchStartedAt ? Date.now() - batchStartedAt : BATCH_STUCK_MS + 1;
+      if (mainAgeMs < BATCH_STUCK_MS) void flushHotLane();
+    }
     if (isGmgnHost() && gmgnNewCardPendingTokens.size > 0) {
       let newCardPending = 0;
       for (const token of gmgnNewCardPendingTokens) {
@@ -9861,6 +9920,8 @@
         window.clearTimeout(gmgnNewCardBatchTimer);
         gmgnNewCardBatchTimer = null;
       }
+      // 0.7.57: 主批在途时新卡走热通道，否则 scheduleBatchFlush 会静默 no-op。
+      if (batchActive && !hotLaneActive) void flushHotLane();
       scheduleBatchFlush({ immediate: true, delayMs: 0 });
       return;
     }
@@ -9883,7 +9944,11 @@
         requestQueue.delete(token);
         gmgnNewCardPendingTokens.delete(token);
       }
-      if (hasPending) scheduleBatchFlush({ immediate: true, delayMs: 0 });
+      if (hasPending) {
+        // 0.7.57: 组批窗到期时主批可能仍在途 — 新卡改走热通道并行发送。
+        if (batchActive && !hotLaneActive) void flushHotLane();
+        scheduleBatchFlush({ immediate: true, delayMs: 0 });
+      }
     }, GMGN_NEW_CARD_BATCH_FLUSH_MS);
   }
 
@@ -9993,6 +10058,181 @@
     );
   }
 
+  /**
+   * Shared /modes response handling for both the main batch and the hot lane:
+   * cache + paint confirmed results, then schedule pending/missing retries.
+   */
+  function processModesResponse(tokens, data, lane) {
+    debugInfo("request:ok", {
+      lane,
+      requested: tokens.length,
+      returned: Object.keys(data.results || {}).length,
+      missing: (data.missing || []).length,
+      upstreamError: data.upstream_error || null
+    });
+    const confirmed = [];
+    Object.entries(data.results || {}).forEach(([rawToken, result]) => {
+      const token = String(rawToken).toLowerCase();
+      const entry = normalizeResult(result);
+      if (!entry) return;
+      modeCache.set(token, entry);
+      missingRetryState.delete(String(token).toLowerCase());
+      const missTimer = gmgnMissingRequeueTimers.get(String(token).toLowerCase());
+      if (missTimer) {
+        try {
+          window.clearTimeout(missTimer);
+        } catch (_errT) {
+          // ignore
+        }
+        gmgnMissingRequeueTimers.delete(String(token).toLowerCase());
+      }
+      confirmed.push([token, entry]);
+    });
+    if (confirmed.length > 0) {
+      const cardsByToken = new Map();
+      document.querySelectorAll(`[${CARD_DATA}]`).forEach((card) => {
+        if (!(card instanceof HTMLElement)) return;
+        const marked = card.dataset[CARD_MARK] || card.getAttribute(CARD_DATA) || "";
+        if (!marked) return;
+        if (!cardsByToken.has(marked)) cardsByToken.set(marked, []);
+        cardsByToken.get(marked).push(card);
+      });
+      confirmed.forEach(([token, entry]) => {
+        applyModeToKnownCards(token, entry, cardsByToken.get(token) || []);
+        // Tax-recv hide: use fee market_bps when list-hook missed first paint.
+        try {
+          ingestFeeEntryForTaxRecv(token, entry);
+        } catch (_errIngest) {
+          // ignore
+        }
+      });
+      persistConfirmedModes(confirmed);
+      if (taxRecvHidePrefs.enabled) {
+        scheduleTaxRecvHideApply(40);
+      }
+      const currentToken = extractTokenFromUrl();
+      if (currentToken && confirmed.some(([token]) => token === currentToken)) {
+        if (isDebotTokenPage()) {
+          scheduleDebotHeaderRepair("request-ok", 0);
+        } else if (isGmgnTokenPage()) {
+          scheduleGmgnHeaderRepair("request-ok", 0);
+        }
+      }
+      // GMGN list: paint newly-cached viewport rows immediately (bounded).
+      // Debot already applies via known marks; skip to avoid extra main-thread work.
+      if (isGmgnHost() && !isTokenDetailRoute()) {
+        try {
+          paintGmgnCachedViewportCards("request-ok");
+        } catch (_errPaint) {
+          // ignore
+        }
+      }
+    }
+    // Soft-miss：CF 先回缓存，miss 后台填 → pending 需更快重试；true missing 略缓。
+    const pendingSet = new Set(
+      (data.pending || []).map((t) => String(t).toLowerCase())
+    );
+    const missingSet = new Set(
+      (data.missing || []).map((t) => String(t).toLowerCase())
+    );
+    pendingSet.forEach((t) => {
+      if (!modeCache.has(t)) deferTokenRetry(t, "pending");
+    });
+    missingSet.forEach((t) => {
+      if (!modeCache.has(t) && !pendingSet.has(t)) deferTokenRetry(t, "missing");
+    });
+    // 请求了但结果里既无 results 也无 missing/pending
+    tokens.forEach((t) => {
+      const k = String(t).toLowerCase();
+      if (!modeCache.has(k) && !pendingSet.has(k) && !missingSet.has(k)) {
+        deferTokenRetry(k, "missing");
+      }
+    });
+  }
+
+  /**
+   * 0.7.57: reset the hot lane (abort in-flight, optionally requeue its tokens).
+   */
+  function resetHotLane(reason, requeue = true) {
+    hotLaneGeneration += 1;
+    if (hotLaneAbortController) {
+      try {
+        hotLaneAbortController.abort(reason || "hot-lane-reset");
+      } catch (_err) {
+        // ignore
+      }
+      hotLaneAbortController = null;
+    }
+    if (requeue) hotLaneTokens.forEach((token) => requestQueue.add(token));
+    hotLaneTokens = [];
+    hotLaneActive = false;
+    hotLaneStartedAt = 0;
+  }
+
+  /**
+   * 0.7.57 热通道：主批（batchActive）在途时，把队列里的热 token（视口/新创建
+   * 未画）用第二条并行 /modes 发出去，消除「新币撞上冷大批要排队」的竞态。
+   * 仅 GMGN 列表页；主批空闲时不启用（走正常单飞路径）。
+   */
+  async function flushHotLane() {
+    if (!isGmgnHost() || isTokenDetailRoute()) return;
+    if (!isExtensionContextValid() || !isTabVisible()) return;
+    if (hotLaneActive) {
+      const ageMs = hotLaneStartedAt ? Date.now() - hotLaneStartedAt : BATCH_STUCK_MS + 1;
+      if (ageMs < BATCH_STUCK_MS) return;
+      resetHotLane("hot-lane-stuck", true);
+    }
+    // 主批空闲 → 正常 flush 路径即可，热通道只做在途兜底。
+    if (!batchActive) return;
+    const hotTokens = [];
+    for (const token of requestQueue) {
+      // 主批已带上的 token 不重复请求（CF/后端虽会合并，但省一份带宽）。
+      if (activeBatchTokens.includes(token)) continue;
+      if (isGmgnHotUnpaintedToken(token)) {
+        hotTokens.push(token);
+        if (hotTokens.length >= HOT_LANE_MAX_TOKENS) break;
+      }
+    }
+    if (hotTokens.length === 0) return;
+    hotTokens.forEach((token) => {
+      requestQueue.delete(token);
+      gmgnNewCardPendingTokens.delete(token);
+    });
+    const controller = new AbortController();
+    hotLaneAbortController = controller;
+    const generation = (hotLaneGeneration += 1);
+    hotLaneTokens = hotTokens.slice();
+    hotLaneActive = true;
+    hotLaneStartedAt = Date.now();
+    try {
+      debugInfo("request:start", { tokens: hotTokens, lane: "hot" });
+      const data = await queryModes(hotTokens, controller.signal);
+      if (generation !== hotLaneGeneration) return;
+      consecutiveFails = 0;
+      processModesResponse(hotTokens, data, "hot");
+    } catch (error) {
+      if (generation !== hotLaneGeneration) return;
+      if (isContextInvalidError(error)) return;
+      hotTokens.forEach((token) => deferTokenRetry(token, "fail"));
+      if (isAbortError(error)) {
+        debugInfo("request:aborted", { tokens: hotTokens, lane: "hot" });
+      } else {
+        debugInfo("request:failed", {
+          tokens: hotTokens,
+          lane: "hot",
+          error: normalizeError(error)
+        });
+      }
+    } finally {
+      if (generation === hotLaneGeneration) {
+        if (hotLaneAbortController === controller) hotLaneAbortController = null;
+        hotLaneTokens = [];
+        hotLaneActive = false;
+        hotLaneStartedAt = 0;
+      }
+    }
+  }
+
   async function flushTokenBatch() {
     batchTimer = null;
     pendingBatchDelayMs = -1;
@@ -10047,90 +10287,7 @@
 
       consecutiveFails = 0;
       activeBatchTokens = [];
-      debugInfo("request:ok", {
-        requested: tokens.length,
-        returned: Object.keys(data.results || {}).length,
-        missing: (data.missing || []).length,
-        upstreamError: data.upstream_error || null
-      });
-      const confirmed = [];
-      Object.entries(data.results || {}).forEach(([rawToken, result]) => {
-        const token = String(rawToken).toLowerCase();
-        const entry = normalizeResult(result);
-        if (!entry) return;
-        modeCache.set(token, entry);
-        missingRetryState.delete(String(token).toLowerCase());
-        const missTimer = gmgnMissingRequeueTimers.get(String(token).toLowerCase());
-        if (missTimer) {
-          try {
-            window.clearTimeout(missTimer);
-          } catch (_errT) {
-            // ignore
-          }
-          gmgnMissingRequeueTimers.delete(String(token).toLowerCase());
-        }
-        confirmed.push([token, entry]);
-      });
-      if (confirmed.length > 0) {
-        const cardsByToken = new Map();
-        document.querySelectorAll(`[${CARD_DATA}]`).forEach((card) => {
-          if (!(card instanceof HTMLElement)) return;
-          const marked = card.dataset[CARD_MARK] || card.getAttribute(CARD_DATA) || "";
-          if (!marked) return;
-          if (!cardsByToken.has(marked)) cardsByToken.set(marked, []);
-          cardsByToken.get(marked).push(card);
-        });
-        confirmed.forEach(([token, entry]) => {
-          applyModeToKnownCards(token, entry, cardsByToken.get(token) || []);
-          // Tax-recv hide: use fee market_bps when list-hook missed first paint.
-          try {
-            ingestFeeEntryForTaxRecv(token, entry);
-          } catch (_errIngest) {
-            // ignore
-          }
-        });
-        persistConfirmedModes(confirmed);
-        if (taxRecvHidePrefs.enabled) {
-          scheduleTaxRecvHideApply(40);
-        }
-        const currentToken = extractTokenFromUrl();
-        if (currentToken && confirmed.some(([token]) => token === currentToken)) {
-          if (isDebotTokenPage()) {
-            scheduleDebotHeaderRepair("request-ok", 0);
-          } else if (isGmgnTokenPage()) {
-            scheduleGmgnHeaderRepair("request-ok", 0);
-          }
-        }
-        // GMGN list: paint newly-cached viewport rows immediately (bounded).
-        // Debot already applies via known marks; skip to avoid extra main-thread work.
-        if (isGmgnHost() && !isTokenDetailRoute()) {
-          try {
-            paintGmgnCachedViewportCards("request-ok");
-          } catch (_errPaint) {
-            // ignore
-          }
-        }
-      }
-      // Soft-miss：CF 先回缓存，miss 后台填 → pending 需更快重试；true missing 略缓。
-      const pendingSet = new Set(
-        (data.pending || []).map((t) => String(t).toLowerCase())
-      );
-      const missingSet = new Set(
-        (data.missing || []).map((t) => String(t).toLowerCase())
-      );
-      pendingSet.forEach((t) => {
-        if (!modeCache.has(t)) deferTokenRetry(t, "pending");
-      });
-      missingSet.forEach((t) => {
-        if (!modeCache.has(t) && !pendingSet.has(t)) deferTokenRetry(t, "missing");
-      });
-      // 请求了但结果里既无 results 也无 missing/pending
-      tokens.forEach((t) => {
-        const k = String(t).toLowerCase();
-        if (!modeCache.has(k) && !pendingSet.has(k) && !missingSet.has(k)) {
-          deferTokenRetry(k, "missing");
-        }
-      });
+      processModesResponse(tokens, data, "main");
     } catch (error) {
       if (generation !== batchGeneration) return;
       if (isContextInvalidError(error)) {

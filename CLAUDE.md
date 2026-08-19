@@ -45,7 +45,7 @@ Cloudflare Worker  (https://flap-fee-info.tech-melon.workers.dev)
     ① 立即返回 mem + KV 命中
     ② miss → pending 标记 + waitUntil 后台回源
         ↓  Bearer + POST /modes { wait_chain: true }  （仅后台）
-VPS Nginx  (https://flap.jishugua.top)
+VPS Nginx  (https://api.tech-melon.top/flap-fee)
         ↓
 Python API  (127.0.0.1:8765)
     默认 wait_chain=false：mem+SQLite 秒回，miss 后台 inflight 上链
@@ -266,6 +266,8 @@ if lpBps > 0:              💧
 - **禁止** `chrome.tabs.update` 换地址栏（整页重载很慢）
 - 同一地址 2.5s 内不连跳
 
+可选「文章重点样式」（默认关，完整包独立区块）：源自微博监控 `formatAiText` 的阅读强调（引号 / `$ticker` / 大写缩写 / 百分比 / 中英实体）。圆角胶囊；引号后固定跟「复制」。中文实体三通道（`0.7.54`）：词典整词（≥3 字）、Segmenter 单字碎片合并（重建未登录词：美联储/鲍威尔/比特币/降息）、音译字连串（卡尔达舍夫/泽连斯基）；内置词表 + 自定义词为最高优先兜底。英文：驼峰/全大写/句中首字母大写专名；**句首大写不算信号**（短推文或紧跟第二个大写词的全名除外），全名跨空格合并（Bill Gates）。`@handle` 与金额不标；孤词抑制只作用于大写/百分比/$ 等形态类命中。只对已填域名注入。
+
 ---
 
 ## 5. 环境与运行
@@ -308,7 +310,7 @@ wrangler secret put UPSTREAM_API_TOKEN
 wrangler deploy
 ```
 
-`wrangler.jsonc`：`UPSTREAM_BASE_URL=https://flap.jishugua.top`，KV binding `FLAP_FEE_CACHE`。
+`wrangler.jsonc`：`UPSTREAM_BASE_URL=https://api.tech-melon.top/flap-fee`，KV binding `FLAP_FEE_CACHE`。
 
 ### 5.3 插件
 
@@ -406,6 +408,7 @@ python tools/ctl.py watchdog-run
 | 开资金接收后新创建只剩很少卡 | 宿主 ~2 分钟轮出 + 屏蔽砍 👨‍🍳 + 无 SW 累积 | **0.7.4+** 保留池 10 分钟/40 卡；网页筛选+阈值配合 |
 | 抽样 feeMatch:false（行 CA≠徽章） | 虚拟列表复用短窗 | **0.7.4+** 无身份不 stable + scrub 后 cache 重画 |
 | 剪切板跳转不生效 | 未授权 / iOS 禁后台读 / 文本过长或不像地址 | 弹窗里确认开启；Windows 允许读取剪切板；iOS 用「立即检测」或粘贴框 |
+| 文章重点样式没出现 | 未开开关 / 域名未加入 / 未授权该站 | 完整包弹窗「文章重点样式」添加域名并允许访问；刷新目标页 |
 
 ---
 
@@ -510,14 +513,38 @@ python tools/ctl.py watchdog-run
   - `0.7.32`：Four.meme `rateGiggleCharity` / `rateBinanceCharity` → 🎓/💛；旧 ffff 模板无此 view（multicall allowFailure）；modeCache.v4
   - `0.7.33`：完整包剪切板「使用站点」仅 GMGN / 仅 Debot / 二者都用（Gungnir 算 Debot）
   - `0.7.34`：币股 vault 底池固定 BNB（忽略 GMGN NVDAB/FXION 股票芯片；Helper 空 quote 回填 WBNB）
-- 插件当前版本：见 `extension/manifest.json`（**0.7.34**，公开无剪切板）
+  - `0.7.35`：完整包剪切板切页不复跳；可选「复用已开站点标签」（默认关，GMGN/Debot 都支持）
+  - `0.7.36`：完整包可选高亮页面 EVM/Sol CA（默认关；CSS Highlight 不改宿主 DOM；点击复制并跳转）
+  - `0.7.37`：高亮 CA 开启时申请全站 host 权限并动态注入，X/其它站点可点跳（公开包不加）
+  - `0.7.38`：完整包可选覆盖站点自带 CA 样式（默认关；去掉 GMGN 粉色 CA/搜索条，改用插件底纹+跳转）
+  - `0.7.39`：高亮 CA 点击只复制，不再直跳；由剪切板监听负责打开 K 线
+  - `0.7.40`：完整包剪切板轮询 350ms（前台 + offscreen）
+  - `0.7.41`：完整包可选文章重点样式（默认关；域名白名单注入；引号/$ticker/ALLCAPS/百分比可复制）
+  - `0.7.42`：文章样式改圆角胶囊，引号后固定跟「复制」
+  - `0.7.43`：文章样式只处理变化节点，滚动不再整页重扫
+  - `0.7.44`：文章样式中文专名（词表最长匹配 + 复合 + 自定义词）
+  - `0.7.45`：文章样式跳过孤词与金额（GMGN 列表 36.6K 不再胶囊化）
+  - `0.7.46`：句中名词用 Intl.Segmenter + 虚词过滤，不再只靠地名表
+  - `0.7.47`：英文专名同样分词（首字母大写 / 驼峰；until further notice 不标）
+  - `0.7.48`：文章样式收成重点专名；英文按句子上下文避免拆 span 漏标
+  - `0.7.49`：GMGN 跟单/战壕列表不改文章样式，只标推特监控卡片
+  - `0.7.50`：跟单列表禁止包胶囊；推文英文走 CSS Highlight（不拆 data-word）
+  - `0.7.51`：推特卡整卡插入后补扫正文；文章样式需弹窗开开关并添加 gmgn.ai
+  - `0.7.52`：英文 CSS Highlight 按全部推文正文刷新，不再被中文重扫清空
+  - `0.7.53`：英文专名改为深青绿底 + 浅字，深色主题可读
+  - `0.7.54`：js-mcp 实测重构文章样式识别层 — 中文实体三通道（词典整词≥3字 + 单字碎片合并重建未登录词「美联储/鲍威尔/比特币」+ 音译字连串「卡尔达舍夫」），词表降为加分兜底；英文句首大写不再误标（Advancement 类噪音），全名跨空格合并（Bill Gates）；修整数百分比不高亮、英文高亮全页 64 上限改按卡片、@handle 不标、去 extendNoun 盲吞
+  - `0.7.57`：热通道并行请求 — 主批 /modes 在途时，GMGN 列表页热 token（视口/新创建未画，上限 12）走第二条并行 /modes，不再被单飞 `batchActive` 锁排队；共享 `processModesResponse`；watchdog/resume/hardReset 同步回收热通道
+ - `0.7.56`：新币徽章提速 — 插件新卡组批窗 500→200ms（满 2 张即发）、热路径单 token 组批 200→120ms；Worker `DIRECT_FILL_CAP` 12→24（首屏冷批一轮 wait_chain 回齐）；后端 `FLAP_FEE_RPC_RPS_LIMIT` 30→40（QN 24h 零 429，有余量）
+ - `0.7.55`：文章样式降载与可调 — GMGN 上 observer 不订阅 characterData（战壕价格跳动不再进回调）；禁区全页清扫仅路由变化时执行；长文（>400 字）词典整词只出现一次的不标（词频降噪，复用已收集命中不加遍历）；屏蔽词（弹窗管理 + 双击胶囊即屏蔽，`skips` 存入 articleStyle.v1，覆盖词表/大写/英文高亮全通道）；胶囊配色跟随 badgeTheme 深浅主题；清 CSS.highlights 死代码；句首全名 lookahead 容忍 1–2 个空格
+- 插件当前版本：见 `extension/manifest.json`（**0.7.57**，公开无剪切板）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v1` = `{ [ca]: { chain, at } }`（仅完整包）
 - page-hook：`HOOK_VER` **56**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v4`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  
 - 尾号屏蔽：`flapFeeInfo.suffixHide.v1` = `{ enabled, rules:[{id,suffix,enabled}] }`（最多 24 条 hex 1–12 位）
-- 剪切板跳转：`flapFeeInfo.clipJump.v1` = `{ enabled:false, target:"gmgn"|"debot", sites:"both"|"gmgn"|"debot", activeTabOnly:true }`（默认关；开启需确认 + `clipboardRead` 可选权限）
+- 剪切板跳转：`flapFeeInfo.clipJump.v1` = `{ enabled:false, target:"gmgn"|"debot", sites:"both"|"gmgn"|"debot", activeTabOnly:true, reuseSiteTab:false, pageMarkCa:false, overrideHostCa:false }`（默认关；开启需确认 + `clipboardRead` 可选权限）
+- 文章重点样式（仅完整包）：`flapFeeInfo.articleStyle.v1` = `{ enabled:false, domains:[{id,host,enabled}], nouns:[{id,word,enabled}], skips:[{id,word,enabled}] }`（默认关；只改已填域名；`skips` 为屏蔽词，双击胶囊或弹窗添加，最多 48 条）
 
 ---
 
