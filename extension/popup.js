@@ -24,7 +24,15 @@
   const I18N = {
     zh: {
       appTitle: "技术瓜FlapFeeInfo",
-      appSub: "徽章显示 · 主题 · 位置",
+      appSub: "税收徽章 · 许可证 · 设置",
+      catTools: "增强工具",
+      catToolsDesc: "剪切板 · 搜索 · 阅读",
+      catBadge: "徽章外观",
+      catBadgeDesc: "主题与显示项",
+      catFilter: "列表过滤",
+      catFilterDesc: "战壕新创建列",
+      catPosition: "徽章位置",
+      catPositionDesc: "坐标与拖拽",
       themeSection: "颜色主题",
       themeDark: "深色",
       themeDefault: "默认",
@@ -101,6 +109,10 @@
       suffixRuleDel: "删除",
       suffixEmpty: "暂无规则，在下方输入尾号后添加",
       licenseSection: "许可证（可选）",
+      licenseHeroTitle: "访问许可证",
+      licenseHeroSub: "当前免费可用 · 付费后粘贴 TG Bot 密钥",
+      licensePillFree: "免费",
+      licensePillActive: "已配置",
       licenseHint:
         "当前免费可用，密钥可留空。购买 Flap 套餐后粘贴 TG Bot 发来的密钥；一钥绑定本 Chrome 配置。",
       licenseKeyLabel: "访问密钥",
@@ -116,7 +128,15 @@
     },
     en: {
       appTitle: "TechMelon FlapFeeInfo",
-      appSub: "Badge · Theme · Position",
+      appSub: "Tax badges · License · Settings",
+      catTools: "Productivity",
+      catToolsDesc: "Clipboard · Search · Reading",
+      catBadge: "Badge look",
+      catBadgeDesc: "Theme & display",
+      catFilter: "List filters",
+      catFilterDesc: "New column only",
+      catPosition: "Badge position",
+      catPositionDesc: "Coords & drag",
       themeSection: "Color theme",
       themeDark: "Dark",
       themeDefault: "Default",
@@ -196,6 +216,10 @@
       suffixRuleDel: "Del",
       suffixEmpty: "No rules yet — type a suffix below and add",
       licenseSection: "License (optional)",
+      licenseHeroTitle: "Access license",
+      licenseHeroSub: "Free for now · paste TG bot key when paid",
+      licensePillFree: "Free",
+      licensePillActive: "Configured",
       licenseHint:
         "Free for now — leave blank. Paste key from TG bot after purchase; one key per Chrome profile.",
       licenseKeyLabel: "Access key",
@@ -413,9 +437,17 @@
   const licenseSaveBtn = document.getElementById("licenseSaveBtn");
   const licenseClearBtn = document.getElementById("licenseClearBtn");
   const licenseStatus = document.getElementById("licenseStatus");
+  const licensePill = document.getElementById("licensePill");
 
   function setLicenseStatus(msg) {
     if (licenseStatus) licenseStatus.textContent = msg || "";
+  }
+
+  function updateLicensePill() {
+    if (!licensePill) return;
+    const active = Boolean(licenseState.key);
+    licensePill.dataset.state = active ? "active" : "free";
+    licensePill.textContent = active ? t("licensePillActive") : t("licensePillFree");
   }
 
   function renderLicenseUI(state) {
@@ -423,6 +455,7 @@
     if (licenseKeyInput) {
       licenseKeyInput.value = licenseState.key || "";
     }
+    updateLicensePill();
     if (!licenseState.key) {
       setLicenseStatus(t("licenseEmpty"));
     }
@@ -441,6 +474,7 @@
       return;
     }
     licenseState = saved;
+    updateLicensePill();
     setLicenseStatus(saved.key ? t("licenseSaved") : t("licenseEmpty"));
   }
 
@@ -448,6 +482,7 @@
     if (licenseKeyInput) licenseKeyInput.value = "";
     await saveLicense({ key: "" });
     licenseState = { ...DEFAULT_LICENSE };
+    updateLicensePill();
     setLicenseStatus(t("licenseCleared"));
   }
 
@@ -797,6 +832,7 @@
     if (offsetHint) offsetHint.innerHTML = t("offsetHintHtml");
     syncTaxRecvThresholdLabel();
     updatePrefCollapseLabel();
+    updateLicensePill();
     updateStatus();
   }
 
@@ -817,6 +853,7 @@
     const expanded = on === true;
     if (btn) btn.setAttribute("aria-expanded", expanded ? "true" : "false");
     if (body) body.hidden = !expanded;
+    if (btn) btn.classList.toggle("is-expanded", expanded);
     const chevron = btn?.querySelector(".collapse-chevron");
     if (chevron) chevron.textContent = expanded ? "▾" : "▸";
     if (name === "pref") {
@@ -1163,7 +1200,6 @@
       setSectionExpanded("theme", false);
       setSectionExpanded("taxRecv", false);
       setSectionExpanded("suffixHide", false);
-      setSectionExpanded("license", false);
       setSectionExpanded("pref", false);
       setSectionExpanded("pos", false);
       fillOffsetUI(offsets);

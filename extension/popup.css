@@ -1,23 +1,33 @@
 :root {
   color-scheme: light dark;
-  --bg: #0f1419;
-  --card: #1a2332;
-  --text: #e7ecf3;
+  --bg: #0b1017;
+  --bg-elevated: #121a24;
+  --card: #161f2c;
+  --text: #e8edf5;
   --muted: #8b9bb4;
-  --accent: #3d9cf0;
-  --border: #2a3548;
+  --accent: #4da3ff;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --border: #243044;
   --ok: #3ecf8e;
+  --license-glow: #f0b429;
+  --license-bg: color-mix(in srgb, #f0b429 12%, var(--card));
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
 }
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #f4f6f9;
+    --bg: #eef2f7;
+    --bg-elevated: #f7f9fc;
     --card: #ffffff;
-    --text: #1a2332;
+    --text: #152033;
     --muted: #5c6b82;
     --accent: #1a7fd4;
-    --border: #d8dee8;
+    --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
+    --border: #d5dde8;
     --ok: #1a9f63;
+    --license-glow: #d4920a;
+    --license-bg: linear-gradient(135deg, #fff9e8 0%, #ffffff 55%, #f3f8ff 100%);
+    --shadow: 0 8px 22px rgba(21, 32, 51, 0.08);
   }
 }
 
@@ -27,8 +37,8 @@
 
 body {
   margin: 0;
-  min-width: 280px;
-  max-width: 320px;
+  min-width: 300px;
+  max-width: 340px;
   font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
   background: var(--bg);
   color: var(--text);
@@ -36,7 +46,9 @@ body {
 }
 
 .head {
-  margin-bottom: 10px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
 }
 
 .head-row {
@@ -76,7 +88,151 @@ body {
 }
 
 .section {
-  margin-bottom: 12px;
+  margin-bottom: 8px;
+}
+
+.cat-group {
+  margin-bottom: 14px;
+}
+
+.cat-group.is-hidden {
+  display: none;
+}
+
+.cat-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 2px 8px;
+  padding: 0 2px;
+}
+
+.cat-icon {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.cat-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.cat-desc {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.cat-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.license-hero {
+  position: relative;
+  margin-bottom: 14px;
+  padding: 12px 12px 10px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--license-glow) 45%, var(--border));
+  background: var(--license-bg);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.license-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  background: linear-gradient(90deg, #f0b429, #ffdf7a, #4da3ff);
+}
+
+.license-hero-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.license-hero-brand {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.license-hero-icon {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--license-glow) 22%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--license-glow) 35%, var(--border));
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.license-hero-title {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.license-hero-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.license-pill {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+}
+
+.license-pill[data-state="free"] {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
+}
+
+.license-pill[data-state="active"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.license-hero-hint {
+  margin: 0 0 10px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.license-status {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--ok);
+  min-height: 1em;
 }
 
 .tax-recv-section {
@@ -245,20 +401,47 @@ body {
   border: 1px solid var(--border);
   background: var(--card);
   color: inherit;
-  border-radius: 10px;
-  padding: 8px 10px;
+  border-radius: 11px;
+  padding: 9px 10px;
   cursor: pointer;
   text-align: left;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
 
 .collapse-head:hover {
-  border-color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 4%, var(--card));
+}
+
+.collapse-head[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.collapse-head-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.collapse-icon {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: var(--accent-soft);
+  font-size: 12px;
+  flex-shrink: 0;
 }
 
 .collapse-title {
   margin: 0 !important;
   color: var(--text) !important;
   font-size: 12px !important;
+  font-weight: 600 !important;
 }
 
 .collapse-chevron {
@@ -606,7 +789,20 @@ body {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+.btn-primary {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--card));
+  color: var(--text);
+  font-weight: 700;
+}
+
+.btn-primary:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 28%, var(--card));
+}
+
 .license-input:focus {
   outline: none;
-  border-color: var(--accent);
+  border-color: var(--license-glow);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--license-glow) 22%, transparent);
 }
