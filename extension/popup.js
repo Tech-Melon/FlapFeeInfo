@@ -8,9 +8,11 @@
   const UI_LANG_KEY = "flapFeeInfo.uiLang.v1";
   const TAX_RECV_HIDE_KEY = "flapFeeInfo.taxRecvHide.v1";
   const SUFFIX_HIDE_KEY = "flapFeeInfo.suffixHide.v1";
+  const LICENSE_KEY = "flapFeeInfo.license.v1";
   const DEFAULT_THEME = "dark";
   const DEFAULT_TAX_RECV_HIDE = { enabled: false, thresholdPct: 100 };
   const DEFAULT_SUFFIX_HIDE = { enabled: false, rules: [] };
+  const DEFAULT_LICENSE = { key: "" };
   const SUFFIX_HIDE_MAX_RULES = 24;
   const DEFAULT_OFFSETS = {
     gmgn: { enabled: false, x: 12, y: 8 },
@@ -98,6 +100,17 @@
       suffixHideHint2: "例：添加 dead → 屏蔽所有以 dead 结尾的 0x 地址。最多 24 条；仅 hex 字符。",
       suffixRuleDel: "删除",
       suffixEmpty: "暂无规则，在下方输入尾号后添加",
+      licenseSection: "许可证（可选）",
+      licenseHint:
+        "当前免费可用，密钥可留空。购买 Flap 套餐后粘贴 TG Bot 发来的密钥；一钥绑定本 Chrome 配置。",
+      licenseKeyLabel: "访问密钥",
+      licenseKeyPlaceholder: "粘贴密钥（可留空）",
+      licenseSaveBtn: "保存",
+      licenseClearBtn: "清除",
+      licenseSaved: "已保存（本机，不会上传原文到其它存储）",
+      licenseCleared: "已清除",
+      licenseEmpty: "未填写密钥（免费模式）",
+      licenseInvalid: "密钥格式无效",
       suffixDup: "该尾号已存在",
       suffixInvalid: "请输入 1–12 位十六进制字符",
     },
@@ -182,6 +195,17 @@
         "E.g. add dead → hide all 0x addresses ending in dead. Max 24 rules; hex only.",
       suffixRuleDel: "Del",
       suffixEmpty: "No rules yet — type a suffix below and add",
+      licenseSection: "License (optional)",
+      licenseHint:
+        "Free for now — leave blank. Paste key from TG bot after purchase; one key per Chrome profile.",
+      licenseKeyLabel: "Access key",
+      licenseKeyPlaceholder: "Paste key (optional)",
+      licenseSaveBtn: "Save",
+      licenseClearBtn: "Clear",
+      licenseSaved: "Saved locally (not uploaded elsewhere)",
+      licenseCleared: "Cleared",
+      licenseEmpty: "No key (free mode)",
+      licenseInvalid: "Invalid key format",
       suffixDup: "Suffix already exists",
       suffixInvalid: "Enter 1–12 hex characters",
     }
@@ -360,6 +384,84 @@
     return out;
   }
 
+  function normalizeLicense(raw) {
+    const key = String(raw?.key || raw || "")
+      .trim()
+      .replace(/\s+/g, "");
+    if (!key) return { ...DEFAULT_LICENSE };
+    // Allow printable keys from TG bot (alphanumeric + common separators).
+    if (!/^[A-Za-z0-9._~\-]{8,128}$/.test(key)) return null;
+    return { key };
+  }
+
+  function saveLicense(state) {
+    const normalized = normalizeLicense(state);
+    if (!normalized) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.set({ [LICENSE_KEY]: normalized }, () => {
+          resolve(chrome.runtime.lastError ? null : normalized);
+        });
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  let licenseState = { ...DEFAULT_LICENSE };
+  const licenseKeyInput = document.getElementById("licenseKeyInput");
+  const licenseSaveBtn = document.getElementById("licenseSaveBtn");
+  const licenseClearBtn = document.getElementById("licenseClearBtn");
+  const licenseStatus = document.getElementById("licenseStatus");
+
+  function setLicenseStatus(msg) {
+    if (licenseStatus) licenseStatus.textContent = msg || "";
+  }
+
+  function renderLicenseUI(state) {
+    licenseState = normalizeLicense(state) || { ...DEFAULT_LICENSE };
+    if (licenseKeyInput) {
+      licenseKeyInput.value = licenseState.key || "";
+    }
+    if (!licenseState.key) {
+      setLicenseStatus(t("licenseEmpty"));
+    }
+  }
+
+  async function onLicenseSave() {
+    const raw = licenseKeyInput?.value || "";
+    const next = normalizeLicense({ key: raw });
+    if (!next) {
+      setLicenseStatus(t("licenseInvalid"));
+      return;
+    }
+    const saved = await saveLicense(next);
+    if (!saved) {
+      setLicenseStatus(t("licenseInvalid"));
+      return;
+    }
+    licenseState = saved;
+    setLicenseStatus(saved.key ? t("licenseSaved") : t("licenseEmpty"));
+  }
+
+  async function onLicenseClear() {
+    if (licenseKeyInput) licenseKeyInput.value = "";
+    await saveLicense({ key: "" });
+    licenseState = { ...DEFAULT_LICENSE };
+    setLicenseStatus(t("licenseCleared"));
+  }
+
+  if (licenseSaveBtn) licenseSaveBtn.addEventListener("click", () => void onLicenseSave());
+  if (licenseClearBtn) licenseClearBtn.addEventListener("click", () => void onLicenseClear());
+  if (licenseKeyInput) {
+    licenseKeyInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        void onLicenseSave();
+      }
+    });
+  }
+
   function loadAll() {
     return new Promise((resolve) => {
       try {
@@ -374,6 +476,7 @@
             UI_LANG_KEY,
             TAX_RECV_HIDE_KEY,
             SUFFIX_HIDE_KEY,
+            LICENSE_KEY,
           ],
           (items) => {
             if (chrome.runtime.lastError) {
@@ -386,6 +489,7 @@
                 lang: "zh",
                 taxRecv: { ...DEFAULT_TAX_RECV_HIDE },
                 suffixHide: { ...DEFAULT_SUFFIX_HIDE },
+                license: { ...DEFAULT_LICENSE },
               });
               return;
             }
@@ -406,6 +510,7 @@
               lang: normalizeLang(items?.[UI_LANG_KEY]),
               taxRecv: normalizeTaxRecvHide(items?.[TAX_RECV_HIDE_KEY]),
               suffixHide: normalizeSuffixHide(items?.[SUFFIX_HIDE_KEY]),
+              license: normalizeLicense(items?.[LICENSE_KEY]) || { ...DEFAULT_LICENSE },
             });
           }
         );
@@ -419,6 +524,7 @@
           lang: "zh",
           taxRecv: { ...DEFAULT_TAX_RECV_HIDE },
           suffixHide: { ...DEFAULT_SUFFIX_HIDE },
+          license: { ...DEFAULT_LICENSE },
         });
       }
     });
@@ -1036,6 +1142,7 @@
       lang,
       taxRecv: loadedTaxRecv,
       suffixHide: loadedSuffixHide,
+      license: loadedLicense,
     }) => {
       uiLang = lang;
       solidDark = loadedSolid === true;
@@ -1051,10 +1158,12 @@
       renderPrefs(prefs);
       renderTaxRecvUI(taxRecvState);
       renderSuffixHideUI(suffixHideState);
+      renderLicenseUI(loadedLicense);
       bindCollapseHeads();
       setSectionExpanded("theme", false);
       setSectionExpanded("taxRecv", false);
       setSectionExpanded("suffixHide", false);
+      setSectionExpanded("license", false);
       setSectionExpanded("pref", false);
       setSectionExpanded("pos", false);
       fillOffsetUI(offsets);

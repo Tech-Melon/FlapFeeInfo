@@ -8,3 +8,4 @@
 - Token 尾号与税收分配字段
 - 公开 Git 只放行 `extension/` + 文档
 - 部署顺序与验收样本
+- **计划收费**：见根目录 [`ENABLE_FLAP_MONETIZATION.md`](./ENABLE_FLAP_MONETIZATION.md)

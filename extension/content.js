@@ -405,6 +405,12 @@
   };
   /** 自定义尾号屏蔽（仅 BSC）：rules[].suffix 为 1–12 位 hex */
   const SUFFIX_HIDE_KEY = "flapFeeInfo.suffixHide.v1";
+  const LICENSE_KEY = "flapFeeInfo.license.v1";
+  const DEVICE_ID_KEY = "flapFeeInfo.deviceId.v1";
+  /** Optional paid key; empty = free mode. Sent as Authorization when set. */
+  let licenseAccessKey = "";
+  /** Per-install UUID; one license key binds to first device_id (Worker KV). */
+  let licenseDeviceId = "";
   const DEFAULT_SUFFIX_HIDE = { enabled: false, rules: [] };
   const SUFFIX_HIDE_MAX_RULES = 24;
   const TAX_RECV_HIDE_CLASS = "flap-fee-tax-recv-hidden";
@@ -10371,9 +10377,16 @@
     }, REQUEST_TIMEOUT_MS);
 
     try {
+      const headers = { "Content-Type": "application/json" };
+      if (licenseAccessKey) {
+        headers.Authorization = `Bearer ${licenseAccessKey}`;
+        if (licenseDeviceId) {
+          headers["X-Flap-Device-Id"] = licenseDeviceId;
+        }
+      }
       const res = await fetch(`${DEFAULT_API_BASE}/modes`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ tokens }),
         signal: controller.signal,
         cache: "no-store"
@@ -10384,7 +10397,13 @@
           status: res.status,
           body: data
         });
-        throw new Error(`batch query failed status=${res.status}`);
+        const err = new Error(`batch query failed status=${res.status}`);
+        if (res.status === 429) {
+          err.name = "RateLimitError";
+          // Push fail backoff up so a single 429 doesn't hammer the edge.
+          consecutiveFails = Math.max(consecutiveFails, 3);
+        }
+        throw err;
       }
       return data;
     } catch (error) {
@@ -11109,13 +11128,33 @@
     }
   }
 
+  function normalizeLicenseDeviceId(stored) {
+    const id = String(stored?.id || stored || "").trim();
+    if (
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        id
+      )
+    ) {
+      return id.toLowerCase();
+    }
+    return "";
+  }
+
   function hydrateTaxRecvHidePrefs() {
     if (!isExtensionContextValid() || !chrome.storage?.local) return;
     try {
-      chrome.storage.local.get([TAX_RECV_HIDE_KEY, SUFFIX_HIDE_KEY], (items) => {
+      chrome.storage.local.get([TAX_RECV_HIDE_KEY, SUFFIX_HIDE_KEY, LICENSE_KEY, DEVICE_ID_KEY], (items) => {
         if (!isExtensionContextValid() || chrome.runtime.lastError) return;
         taxRecvHidePrefs = normalizeTaxRecvHidePrefs(items?.[TAX_RECV_HIDE_KEY]);
         suffixHidePrefs = normalizeSuffixHidePrefs(items?.[SUFFIX_HIDE_KEY]);
+        const lic = items?.[LICENSE_KEY];
+        licenseAccessKey = String(lic?.key || "").trim();
+        let devId = normalizeLicenseDeviceId(items?.[DEVICE_ID_KEY]);
+        if (!devId && typeof crypto !== "undefined" && crypto.randomUUID) {
+          devId = crypto.randomUUID().toLowerCase();
+          chrome.storage.local.set({ [DEVICE_ID_KEY]: { id: devId } });
+        }
+        licenseDeviceId = devId;
         pushTaxRecvPrefsToPage();
         pushSuffixHidePrefsToPage();
         // Re-push after page-hook may finish loading
@@ -12416,6 +12455,12 @@
             clearAllTaxRecvDomHide();
             scheduleTaxRecvHideApply(0);
           }
+        }
+        if (changes[LICENSE_KEY]) {
+          licenseAccessKey = String(changes[LICENSE_KEY].newValue?.key || "").trim();
+        }
+        if (changes[DEVICE_ID_KEY]) {
+          licenseDeviceId = normalizeLicenseDeviceId(changes[DEVICE_ID_KEY].newValue);
         }
         if (dirty) rerenderAllBadges();
       });

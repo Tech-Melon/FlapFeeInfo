@@ -580,3 +580,33 @@ body {
 .offset-actions .btn {
   width: 100%;
 }
+
+.license-label {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.license-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.license-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.license-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}

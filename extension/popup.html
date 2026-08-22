@@ -142,6 +142,42 @@
       </div>
     </section>
 
+    <section class="section">
+      <button type="button" class="collapse-head" data-collapse="license" aria-expanded="false">
+        <span class="section-title collapse-title" data-i18n="licenseSection">许可证（可选）</span>
+        <span class="collapse-chevron">▸</span>
+      </button>
+      <div class="collapse-body" id="licenseCollapseBody" hidden>
+        <div class="tax-recv-section" id="licenseSection">
+          <p class="theme-hint" data-i18n="licenseHint">
+            当前版本免费可用，密钥可先留空。付费开启后，在此粘贴 TG 发卡机器人发来的密钥。
+          </p>
+          <label class="license-label" for="licenseKeyInput">
+            <span data-i18n="licenseKeyLabel">访问密钥</span>
+          </label>
+          <div class="license-row">
+            <input
+              type="password"
+              id="licenseKeyInput"
+              class="license-input"
+              maxlength="128"
+              spellcheck="false"
+              autocomplete="off"
+              data-i18n-placeholder="licenseKeyPlaceholder"
+              placeholder="粘贴密钥（可留空）"
+            />
+            <button type="button" class="btn btn-sm" id="licenseSaveBtn" data-i18n="licenseSaveBtn">
+              保存
+            </button>
+            <button type="button" class="btn btn-sm btn-muted" id="licenseClearBtn" data-i18n="licenseClearBtn">
+              清除
+            </button>
+          </div>
+          <p class="theme-hint" id="licenseStatus" aria-live="polite"></p>
+        </div>
+      </div>
+    </section>
+
     <section class="section" id="prefSection">
       <button
         type="button"

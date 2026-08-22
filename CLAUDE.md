@@ -85,7 +85,7 @@ FlapFeeInfo/
 │   └── icons/
 ├── private/clip-jump/        # 本机 overlay（默认不进公开 git）
 │   ├── clip-content.js / clip-popup.js / background.js
-│   ├── clipboard-util.js / clip-spa.js / offscreen.*
+│   ├── clipboard-util.js / clip-spa.js / clip-search.js / offscreen.*
 │   └── overlay.json          # 打包时叠到完整包
 ├── cloudflare/               # CF Worker（本地全栈，默认不进公开 git）
 │   ├── worker.js
@@ -191,7 +191,7 @@ if lpBps > 0:              💧
 缓存：
 
 - 后端：内存 + SQLite `payload` JSON；**无完整 payload 的旧行当 miss**；连接按事务显式关闭，过期行默认每 6 小时清理，短批次响应缓存上限 128；HTTP 槽位满时默认短等 250ms 再决定是否返回 503
-- Worker：isolate 内存 + KV；**缺 label/bps/top_payout_* 的旧条目当 miss**；vault gift 仍 `top_payout≠dividend_token` 的旧 →BNB 行当 miss；回源结果用 `ctx.waitUntil()` 异步落 KV；25s 总预算内对瞬时 429/5xx/网络失败及部分 `missing` 做 250/750ms 温和重试，且只重试缺失 token
+- Worker：isolate 内存 + KV；**缺 label/bps/top_payout_* 的旧条目当 miss**；vault gift 仍 `top_payout≠dividend_token` 的旧 →BNB 行当 miss；回源结果用 `ctx.waitUntil()` 异步落 KV（**仅 miss 的 key**，已命中不重写）；25s 总预算内对瞬时 429/5xx/网络失败及部分 `missing` 做 250/750ms 温和重试，且只重试缺失 token
 - 后端 SQLite：同上 stale gift 规则强制回源
 
 - 插件：`chrome.storage` key `flapFeeInfo.modeCache.v3`
@@ -252,11 +252,14 @@ if lpBps > 0:              💧
 
 识别（本地、不上传、不改写剪切板；扫描上限 8KB）：
 
-- EVM：文中任意位置的 `0x` + 40 hex
-- Solana：文中任意位置的 32 字节 base58 合约地址（含 `…pump`）
-- 已知 URL 带链名时尊重链（`gmgn.ai/base/token/...` → base）
-- 裸 EVM：后台 `GET https://gmgn.ai/vas/api/v1/search_v3?q={ca}`（与搜索栏同一接口），用返回的 `chain` / `token_link.gmgn` 定链；失败才回退 BSC
+- 文中**第一个** EVM / Solana 地址才作为跳转候选（句子/推文中间可以）
+- EVM：`0x` + 40 hex；Solana：32 字节 base58（含 `…pump`）
+- 已知代币 URL 带链名时尊重链（`gmgn.ai/base/token/...` → base）；`fromUrl` 直接当代币
+- 裸地址必须经 GMGN `GET /vas/api/v1/search_v3?q={ca}` 确认：`data.coins` **精确匹配该地址**才是代币并定链；只出现在 `wallets`、或 coins 是「拿钱包地址当名字的山寨币」→ **不开 K 线**
+- 搜索失败 / 超时同样不开 K 线（避免钱包被默认成 BSC 代币）
+- 定链缓存 `chainCache.v2` 只存已确认代币（`kind=token`）；非代币仅内存记 10 分钟
 - 只把 `{kind,address,chain}` 传给后台，**原文不进 SW / storage / 日志**
+- 复制即搜仍要求整段短文本且字数在范围内；文中已有 CA 时走跳转分流（再由 search_v3 过滤钱包）
 
 跳转：
 
@@ -265,6 +268,8 @@ if lpBps > 0:              💧
 - **offscreen 仅兜底**：人不在 GMGN/Debot 时，才尝试后台读并新开标签。
 - **禁止** `chrome.tabs.update` 换地址栏（整页重载很慢）
 - 同一地址 2.5s 内不连跳
+
+可选「复制即搜」（默认关，完整包独立区块，**仅 GMGN**）：与跳转 K 线**共用一条剪切板通道**（页内 copy/cut + `clipboardchange` + 前台轮询；**offscreen 同样分流**）。读到内容后三分流：文中第一个 EVM/Sol 地址且 search_v3 确认为代币 → 跳 K 线（若已开）；整段短文本且字数在设定范围内 → 切到已开的 GMGN 标签并打开搜索、填入 `input[name=new-search-input]`；钱包地址 / 超范围 / 含空格 / 网址 → **不跳不搜**。不必先点 GMGN。两个开关独立，但只挂一套监听。同一段只处理一次，再复制才再动。默认 2–8 字，上下限可单独改（1–32）。字数按 Unicode 字形计：**中文一字 = 英文一字母 = 1**（`生米`=2，`PEPE`=4）。剥前缀 `$`/`@`/包裹引号。开启同样要确认 + `clipboardRead`；与跳转共用权限、offscreen 与 `clipJump.seen.v1` 去重，两个都关才撤回权限 / 关掉 offscreen。
 
 可选「文章重点样式」（默认关，完整包独立区块）：源自微博监控 `formatAiText` 的阅读强调（引号 / `$ticker` / 大写缩写 / 百分比 / 中英实体）。圆角胶囊；引号后固定跟「复制」。中文实体三通道（`0.7.54`）：词典整词（≥3 字）、Segmenter 单字碎片合并（重建未登录词：美联储/鲍威尔/比特币/降息）、音译字连串（卡尔达舍夫/泽连斯基）；内置词表 + 自定义词为最高优先兜底。英文：驼峰/全大写/句中首字母大写专名；**句首大写不算信号**（短推文或紧跟第二个大写词的全名除外），全名跨空格合并（Bill Gates）。`@handle` 与金额不标；孤词抑制只作用于大写/百分比/$ 等形态类命中。只对已填域名注入。
 
@@ -401,6 +406,8 @@ python tools/ctl.py watchdog-run
 | 只有 mode 无比例 | 命中旧缓存 | 清 storage 或等 miss；schema 已强制完整 payload |
 | GMGN 无 🪙BNB / 🪙USD1 | 未识别特殊 icon / 默认 BNB | 升到 `0.2.9+`；确认 `chain=bsc` |
 | Worker 403 | 无 UA / 边缘防护 | 浏览器正常；脚本请求带浏览器 UA |
+| KV Write 日账单 ≈$5 尖峰 | 0.7.57 并行回源对已 KV 命中的 key 仍 `put`（冷 isolate 反复重写热门 CA） | 升 Worker **0.7.65+**（只写真正 miss）；`wrangler deploy` |
+| Worker 仪表盘「错误」~数万/天 | 跨请求 await 共享 inflight Promise，插件 Abort 后 hang detector | 升 Worker **0.7.66+**；点 Errors→Invocation Statuses 应见 hung/exception 下降 |
 | 7777 无图标 | 未重载 0.2.x 插件 | 确认 manifest version |
 | K 线侧栏下滑徽章几十秒不更新 | settled 后 light 续扫不扫战壕；短地址未爬卡；滚动热路径过重 | 升到 **0.7.9+**；扩展重载 + 硬刷页 |
 | 钱包追踪 / 收藏栏误挂徽章 | 禁区识别不全 | **0.7.7+** 禁钱包追踪+收藏；主战壕/搜索/K 线侧栏应仍有徽章 |
@@ -408,6 +415,7 @@ python tools/ctl.py watchdog-run
 | 开资金接收后新创建只剩很少卡 | 宿主 ~2 分钟轮出 + 屏蔽砍 👨‍🍳 + 无 SW 累积 | **0.7.4+** 保留池 10 分钟/40 卡；网页筛选+阈值配合 |
 | 抽样 feeMatch:false（行 CA≠徽章） | 虚拟列表复用短窗 | **0.7.4+** 无身份不 stable + scrub 后 cache 重画 |
 | 剪切板跳转不生效 | 未授权 / iOS 禁后台读 / 文本过长或不像地址 | 弹窗里确认开启；Windows 允许读取剪切板；iOS 用「立即检测」或粘贴框 |
+| 复制短名没有弹出 GMGN 搜索 | 未开「复制即搜」/ 未授权 / 不在 GMGN 前台 / 字数超出或含空格 / 已搜过这段 | 完整包弹窗开启并刷新 GMGN；再复制一次才再搜 |
 | 文章重点样式没出现 | 未开开关 / 域名未加入 / 未授权该站 | 完整包弹窗「文章重点样式」添加域名并允许访问；刷新目标页 |
 
 ---
@@ -533,17 +541,33 @@ python tools/ctl.py watchdog-run
   - `0.7.52`：英文 CSS Highlight 按全部推文正文刷新，不再被中文重扫清空
   - `0.7.53`：英文专名改为深青绿底 + 浅字，深色主题可读
   - `0.7.54`：js-mcp 实测重构文章样式识别层 — 中文实体三通道（词典整词≥3字 + 单字碎片合并重建未登录词「美联储/鲍威尔/比特币」+ 音译字连串「卡尔达舍夫」），词表降为加分兜底；英文句首大写不再误标（Advancement 类噪音），全名跨空格合并（Bill Gates）；修整数百分比不高亮、英文高亮全页 64 上限改按卡片、@handle 不标、去 extendNoun 盲吞
+  - `0.7.64`：句子取第一个 EVM/Sol CA 跳 K 线；GMGN search_v3 的 `coins` 精确匹配才当代币，钱包地址不开 K 线；chainCache.v2
+  - `0.7.63`：剪切板三分流收紧 — 整段是 CA 才跳 K 线，字数在设定范围内才搜，句子/超范围不再误跳
+  - `0.7.62`：offscreen 在 `chrome.storage` 未注入时不再崩（改守卫 + 向 SW 拉配置）
+  - `0.7.61`：复制即搜走与跳转相同的 offscreen 通道 — 在 Telegram 等处复制短文本后直接打开 GMGN 搜索，不必先点页面
+  - `0.7.60`：修合并监听后跳转开关未写入的回归；offscreen 不再把非 CA 写入共享 seen（避免 Telegram 复制短名被当成已处理）；复制即搜只在刚开启时忽略当前剪切板，切回 GMGN 仍搜
+  - `0.7.59`：复制即搜与跳转 K 线合并为一条剪切板监听，按内容分流（CA→K 线，短文本→GMGN 搜索）
+  - `0.7.58`：完整包可选「复制即搜」— 仅 GMGN；默认关；复制短文本自动打开搜索并填入；默认 2–8 字（上下限可调）；字形计中英都算 1；同文只搜一次直到下次复制
+  - `0.7.69`：许可证骨架（默认免费）— 弹窗可存密钥；请求可选带 `Authorization: Bearer`；Worker `REQUIRE_LICENSE=0` 不强制
+  - `0.7.70`：单设备绑定 — `deviceId` + `X-Flap-Device-Id`（收费开启时 Worker 校验）
+  - `0.7.71`：恢复免费模式文案；保留许可证/设备 ID 预埋（`REQUIRE_LICENSE=0`）
+  - `0.7.68`：Worker 限流（每 IP 每 colo **100 次 / 10s** POST `/modes`）+ KV 命中后不再并行 wait_chain + 空 unknown 负缓存 6h + body 64KB 封顶；插件遇 429 拉长退避
+  - `0.7.67`：Worker/后端拒收探测 CA（全 0 尾、`abcdef`/`deadbeef` 等占位、低熵重复块）→ `invalid`，不读不写 KV；空 `unknown` 也不落 KV
+  - `0.7.66`：Worker 错误修复 — 去掉跨请求共享 upstream Promise（插件 Abort 后 joiner 挂死 → hang detector → 仪表盘「错误」暴涨）；KV 仍只写 miss
+  - `0.7.65`：Worker KV 账单修复 — 并行回源后**只对真正 KV miss 的 key `put`**；KV 全命中不再重写（此前冷 isolate 每次 mem miss 都会把已缓存 CA 再写一遍，单日可达 ~100 万次 Write ≈ $5）
   - `0.7.57`：热通道并行请求 — 主批 /modes 在途时，GMGN 列表页热 token（视口/新创建未画，上限 12）走第二条并行 /modes，不再被单飞 `batchActive` 锁排队；共享 `processModesResponse`；watchdog/resume/hardReset 同步回收热通道。Worker 同步：mem miss 后 **KV 读与回源并行**（js-mcp 实测 KV 冷读 ~250ms 且新币必 miss；新卡 ⏳→徽章 p50 1107→943ms）
  - `0.7.56`：新币徽章提速 — 插件新卡组批窗 500→200ms（满 2 张即发）、热路径单 token 组批 200→120ms；Worker `DIRECT_FILL_CAP` 12→24（首屏冷批一轮 wait_chain 回齐）；后端 `FLAP_FEE_RPC_RPS_LIMIT` 30→40（QN 24h 零 429，有余量）
  - `0.7.55`：文章样式降载与可调 — GMGN 上 observer 不订阅 characterData（战壕价格跳动不再进回调）；禁区全页清扫仅路由变化时执行；长文（>400 字）词典整词只出现一次的不标（词频降噪，复用已收集命中不加遍历）；屏蔽词（弹窗管理 + 双击胶囊即屏蔽，`skips` 存入 articleStyle.v1，覆盖词表/大写/英文高亮全通道）；胶囊配色跟随 badgeTheme 深浅主题；清 CSS.highlights 死代码；句首全名 lookahead 容忍 1–2 个空格
-- 插件当前版本：见 `extension/manifest.json`（**0.7.57**，公开无剪切板）
-- 定链缓存：`flapFeeInfo.clipJump.chainCache.v1` = `{ [ca]: { chain, at } }`（仅完整包）
+- 插件当前版本：见 `extension/manifest.json`（**0.7.71**，公开无剪切板）
+- 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - page-hook：`HOOK_VER` **56**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v4`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  
 - 尾号屏蔽：`flapFeeInfo.suffixHide.v1` = `{ enabled, rules:[{id,suffix,enabled}] }`（最多 24 条 hex 1–12 位）
 - 剪切板跳转：`flapFeeInfo.clipJump.v1` = `{ enabled:false, target:"gmgn"|"debot", sites:"both"|"gmgn"|"debot", activeTabOnly:true, reuseSiteTab:false, pageMarkCa:false, overrideHostCa:false }`（默认关；开启需确认 + `clipboardRead` 可选权限）
+- 许可证（可选，默认免费）：`flapFeeInfo.license.v1` = `{ key:"" }`；有 key 时 content 带 `Authorization: Bearer`；Worker `REQUIRE_LICENSE` 默认 `0`（不强制）；开启付费时设 `1` 并写入 KV `license:<key>` → `{ exp, plan:"flap", flap_perm?:1 }`；**发卡**：TG Bot `flap_fee` **0.01 BNB/月**（动态尾数 0.009501~0.010100）；详见 `ENABLE_FLAP_MONETIZATION.md`
+- 复制即搜（仅完整包 / 仅 GMGN）：`flapFeeInfo.clipSearch.v1` = `{ enabled:false, minChars:2, maxChars:8 }`（默认关；开启需确认 + `clipboardRead`；与跳转共用 `clipJump.seen.v1` 去重）
 - 文章重点样式（仅完整包）：`flapFeeInfo.articleStyle.v1` = `{ enabled:false, domains:[{id,host,enabled}], nouns:[{id,word,enabled}], skips:[{id,word,enabled}] }`（默认关；只改已填域名；`skips` 为屏蔽词，双击胶囊或弹窗添加，最多 48 条）
 
 ---
@@ -553,6 +577,7 @@ python tools/ctl.py watchdog-run
 | 文件 | 内容 |
 |------|------|
 | `README.md` | 用户安装与图标说明 |
+| `ENABLE_FLAP_MONETIZATION.md` | **收费启用运行手册**（Agent 按步骤开 REQUIRE_LICENSE + KV 发卡） |
 | `server/README.md` | 本地 API / 响应示例 |
 | `server/deploy-hk0.md` | VPS 部署 |
 | `cloudflare/README.md` | Worker secret / deploy |
