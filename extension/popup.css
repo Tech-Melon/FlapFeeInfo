@@ -141,7 +141,6 @@ body {
 .license-hero {
   position: relative;
   margin-bottom: 14px;
-  padding: 12px 12px 10px;
   border-radius: 14px;
   border: 1px solid color-mix(in srgb, var(--license-glow) 45%, var(--border));
   background: var(--license-bg);
@@ -155,6 +154,66 @@ body {
   inset: 0 0 auto 0;
   height: 3px;
   background: linear-gradient(90deg, #f0b429, #ffdf7a, #4da3ff);
+  pointer-events: none;
+}
+
+.license-hero-bar {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 12px 12px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.license-hero-bar:hover .license-chevron {
+  color: var(--accent);
+}
+
+.license-hero.is-collapsed .license-hero-bar {
+  padding-bottom: 12px;
+}
+
+.license-hero-body {
+  padding: 0 12px 12px;
+}
+
+.license-hero.is-collapsed .license-hero-body {
+  display: none;
+}
+
+.license-chevron {
+  flex-shrink: 0;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.license-extra-actions {
+  margin-top: 8px;
+}
+
+.license-rebind-btn {
+  width: 100%;
+  border-color: color-mix(in srgb, var(--license-glow) 55%, var(--border));
+  background: color-mix(in srgb, var(--license-glow) 12%, var(--card));
+  font-weight: 600;
+}
+
+.license-rebind-btn:hover {
+  border-color: var(--license-glow);
+}
+
+.license-pill[data-state="verified"] {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 16%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
 }
 
 .license-hero-top {
@@ -162,7 +221,8 @@ body {
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 8px;
+  flex: 1;
+  min-width: 0;
 }
 
 .license-hero-brand {

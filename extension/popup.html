@@ -17,42 +17,64 @@
       </div>
     </header>
 
-    <section class="license-hero" id="licenseHero" aria-labelledby="licenseHeroTitle">
-      <div class="license-hero-top">
-        <div class="license-hero-brand">
-          <span class="license-hero-icon" aria-hidden="true">🔑</span>
-          <div>
-            <div class="license-hero-title" id="licenseHeroTitle" data-i18n="licenseHeroTitle">访问许可证</div>
-            <div class="license-hero-sub" id="licenseHeroSub" data-i18n="licenseHeroSub">当前免费可用 · 付费后粘贴 TG Bot 密钥</div>
+    <section class="license-hero" id="licenseHero">
+      <button
+        type="button"
+        class="license-hero-bar"
+        id="licenseToggle"
+        aria-expanded="true"
+        aria-controls="licenseBody"
+      >
+        <div class="license-hero-top">
+          <div class="license-hero-brand">
+            <span class="license-hero-icon" aria-hidden="true">🔑</span>
+            <div>
+              <div class="license-hero-title" id="licenseHeroTitle" data-i18n="licenseHeroTitle">访问许可证</div>
+              <div class="license-hero-sub" id="licenseHeroSub" data-i18n="licenseHeroSub">当前免费可用 · 付费后粘贴 TG Bot 密钥</div>
+            </div>
           </div>
+          <span class="license-pill" id="licensePill" data-state="free">免费</span>
         </div>
-        <span class="license-pill" id="licensePill" data-state="free">免费</span>
+        <span class="license-chevron" id="licenseChevron" aria-hidden="true">▾</span>
+      </button>
+      <div class="license-hero-body" id="licenseBody">
+        <p class="license-hero-hint" data-i18n="licenseHint">
+          当前版本免费可用，密钥可先留空。付费开启后，在此粘贴 TG 发卡机器人发来的密钥。
+        </p>
+        <label class="license-label" for="licenseKeyInput">
+          <span data-i18n="licenseKeyLabel">访问密钥</span>
+        </label>
+        <div class="license-row">
+          <input
+            type="password"
+            id="licenseKeyInput"
+            class="license-input"
+            maxlength="128"
+            spellcheck="false"
+            autocomplete="off"
+            data-i18n-placeholder="licenseKeyPlaceholder"
+            placeholder="粘贴密钥（可留空）"
+          />
+          <button type="button" class="btn btn-primary btn-sm" id="licenseSaveBtn" data-i18n="licenseSaveBtn">
+            验证并保存
+          </button>
+          <button type="button" class="btn btn-sm btn-muted" id="licenseClearBtn" data-i18n="licenseClearBtn">
+            清除
+          </button>
+        </div>
+        <div class="license-extra-actions">
+          <button
+            type="button"
+            class="btn btn-sm license-rebind-btn"
+            id="licenseRebindBtn"
+            data-i18n="licenseRebindBtn"
+            hidden
+          >
+            换绑到此设备
+          </button>
+        </div>
+        <p class="license-status" id="licenseStatus" aria-live="polite"></p>
       </div>
-      <p class="license-hero-hint" data-i18n="licenseHint">
-        当前版本免费可用，密钥可先留空。付费开启后，在此粘贴 TG 发卡机器人发来的密钥。
-      </p>
-      <label class="license-label" for="licenseKeyInput">
-        <span data-i18n="licenseKeyLabel">访问密钥</span>
-      </label>
-      <div class="license-row">
-        <input
-          type="password"
-          id="licenseKeyInput"
-          class="license-input"
-          maxlength="128"
-          spellcheck="false"
-          autocomplete="off"
-          data-i18n-placeholder="licenseKeyPlaceholder"
-          placeholder="粘贴密钥（可留空）"
-        />
-        <button type="button" class="btn btn-primary btn-sm" id="licenseSaveBtn" data-i18n="licenseSaveBtn">
-          保存
-        </button>
-        <button type="button" class="btn btn-sm btn-muted" id="licenseClearBtn" data-i18n="licenseClearBtn">
-          清除
-        </button>
-      </div>
-      <p class="license-status" id="licenseStatus" aria-live="polite"></p>
     </section>
 
     <div class="cat-group is-hidden" id="catTools">

@@ -9,6 +9,8 @@
   const TAX_RECV_HIDE_KEY = "flapFeeInfo.taxRecvHide.v1";
   const SUFFIX_HIDE_KEY = "flapFeeInfo.suffixHide.v1";
   const LICENSE_KEY = "flapFeeInfo.license.v1";
+  const DEVICE_ID_KEY = "flapFeeInfo.deviceId.v1";
+  const LICENSE_API_BASE = "https://flap-fee-info.tech-melon.workers.dev";
   const DEFAULT_THEME = "dark";
   const DEFAULT_TAX_RECV_HIDE = { enabled: false, thresholdPct: 100 };
   const DEFAULT_SUFFIX_HIDE = { enabled: false, rules: [] };
@@ -117,12 +119,25 @@
         "当前免费可用，密钥可留空。购买 Flap 套餐后粘贴 TG Bot 发来的密钥；一钥绑定本 Chrome 配置。",
       licenseKeyLabel: "访问密钥",
       licenseKeyPlaceholder: "粘贴密钥（可留空）",
-      licenseSaveBtn: "保存",
+      licenseSaveBtn: "验证并保存",
       licenseClearBtn: "清除",
-      licenseSaved: "已保存（本机，不会上传原文到其它存储）",
+      licenseRebindBtn: "换绑到此设备",
+      licenseSaved: "验证通过，已保存",
       licenseCleared: "已清除",
       licenseEmpty: "未填写密钥（免费模式）",
       licenseInvalid: "密钥格式无效",
+      licenseVerifying: "正在验证…",
+      licenseVerifyFail: "验证失败，请检查密钥或网络",
+      licenseExpired: "密钥已过期",
+      licenseNoPerm: "密钥无 Flap 权限",
+      licenseDeviceMismatch: "此密钥已绑定其它设备，可点「换绑到此设备」",
+      licenseRebinding: "正在换绑…",
+      licenseRebound: "已换绑到本设备",
+      licenseRebindFail: "换绑失败，请稍后重试",
+      licensePillVerified: "已验证",
+      licenseHeroSubVerified: "密钥有效 · 点击展开可换绑或清除",
+      licenseHeroSubFree: "当前免费可用 · 付费后粘贴 TG Bot 密钥",
+      licenseHeroSubActive: "已保存密钥 · 点击展开管理",
       suffixDup: "该尾号已存在",
       suffixInvalid: "请输入 1–12 位十六进制字符",
     },
@@ -224,12 +239,25 @@
         "Free for now — leave blank. Paste key from TG bot after purchase; one key per Chrome profile.",
       licenseKeyLabel: "Access key",
       licenseKeyPlaceholder: "Paste key (optional)",
-      licenseSaveBtn: "Save",
+      licenseSaveBtn: "Verify & save",
       licenseClearBtn: "Clear",
-      licenseSaved: "Saved locally (not uploaded elsewhere)",
+      licenseRebindBtn: "Rebind to this device",
+      licenseSaved: "Verified and saved",
       licenseCleared: "Cleared",
       licenseEmpty: "No key (free mode)",
       licenseInvalid: "Invalid key format",
+      licenseVerifying: "Verifying…",
+      licenseVerifyFail: "Verification failed — check key or network",
+      licenseExpired: "Key expired",
+      licenseNoPerm: "Key has no Flap permission",
+      licenseDeviceMismatch: "Key bound to another device — use Rebind",
+      licenseRebinding: "Rebinding…",
+      licenseRebound: "Rebound to this device",
+      licenseRebindFail: "Rebind failed — try again later",
+      licensePillVerified: "Verified",
+      licenseHeroSubVerified: "Key valid · expand to rebind or clear",
+      licenseHeroSubFree: "Free for now · paste TG bot key when paid",
+      licenseHeroSubActive: "Key saved · expand to manage",
       suffixDup: "Suffix already exists",
       suffixInvalid: "Enter 1–12 hex characters",
     }
@@ -433,61 +461,329 @@
   }
 
   let licenseState = { ...DEFAULT_LICENSE };
+  let licenseVerified = false;
+  let licenseDeviceMismatch = false;
+  let licenseCollapsed = false;
+  let licenseBusy = false;
+  const licenseHero = document.getElementById("licenseHero");
+  const licenseToggle = document.getElementById("licenseToggle");
+  const licenseChevron = document.getElementById("licenseChevron");
+  const licenseBody = document.getElementById("licenseBody");
+  const licenseHeroSub = document.getElementById("licenseHeroSub");
   const licenseKeyInput = document.getElementById("licenseKeyInput");
   const licenseSaveBtn = document.getElementById("licenseSaveBtn");
   const licenseClearBtn = document.getElementById("licenseClearBtn");
+  const licenseRebindBtn = document.getElementById("licenseRebindBtn");
   const licenseStatus = document.getElementById("licenseStatus");
   const licensePill = document.getElementById("licensePill");
+
+  function normalizeDeviceId(raw) {
+    const id = String(raw?.id || raw || "")
+      .trim()
+      .toLowerCase();
+    if (
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)
+    ) {
+      return id;
+    }
+    return "";
+  }
+
+  function ensureDeviceId() {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.get([DEVICE_ID_KEY], (items) => {
+          if (chrome.runtime.lastError) {
+            resolve("");
+            return;
+          }
+          let id = normalizeDeviceId(items?.[DEVICE_ID_KEY]);
+          if (!id && typeof crypto !== "undefined" && crypto.randomUUID) {
+            id = crypto.randomUUID().toLowerCase();
+            chrome.storage.local.set({ [DEVICE_ID_KEY]: { id } });
+          }
+          resolve(id || "");
+        });
+      } catch {
+        resolve("");
+      }
+    });
+  }
+
+  function licenseHeaders(key, deviceId) {
+    const headers = { "Content-Type": "application/json" };
+    if (key) headers.Authorization = `Bearer ${key}`;
+    if (deviceId) headers["X-Flap-Device-Id"] = deviceId;
+    return headers;
+  }
+
+  function mapLicenseError(code) {
+    if (code === "license_expired") return t("licenseExpired");
+    if (code === "license_no_flap_perm") return t("licenseNoPerm");
+    if (code === "license_device_mismatch") return t("licenseDeviceMismatch");
+    return t("licenseVerifyFail");
+  }
+
+  async function callLicenseApi(path, key, deviceId) {
+    const res = await fetch(`${LICENSE_API_BASE}${path}`, {
+      method: "POST",
+      headers: licenseHeaders(key, deviceId),
+      body: "{}",
+      cache: "no-store"
+    });
+    const data = await res.json().catch(() => null);
+    return { res, data };
+  }
+
+  async function verifyLicenseKey(key, deviceId) {
+    const { res, data } = await callLicenseApi("/license/verify", key, deviceId);
+    if (!res.ok || !data?.ok) {
+      return {
+        ok: false,
+        error: data?.error || "license_verify_failed",
+        deviceMismatch: data?.error === "license_device_mismatch"
+      };
+    }
+    if (key && data.device_bound && data.device_match === false) {
+      return { ok: false, error: "license_device_mismatch", deviceMismatch: true };
+    }
+    return { ok: true, data };
+  }
+
+  async function rebindLicenseKey(key, deviceId) {
+    const { res, data } = await callLicenseApi("/license/rebind", key, deviceId);
+    if (!res.ok || !data?.ok) {
+      return { ok: false, error: data?.error || "license_rebind_failed" };
+    }
+    return { ok: true, data };
+  }
 
   function setLicenseStatus(msg) {
     if (licenseStatus) licenseStatus.textContent = msg || "";
   }
 
-  function updateLicensePill() {
-    if (!licensePill) return;
-    const active = Boolean(licenseState.key);
-    licensePill.dataset.state = active ? "active" : "free";
-    licensePill.textContent = active ? t("licensePillActive") : t("licensePillFree");
+  function setLicenseCollapsed(on) {
+    licenseCollapsed = on === true;
+    if (licenseHero) licenseHero.classList.toggle("is-collapsed", licenseCollapsed);
+    if (licenseToggle) licenseToggle.setAttribute("aria-expanded", licenseCollapsed ? "false" : "true");
+    if (licenseChevron) licenseChevron.textContent = licenseCollapsed ? "▸" : "▾";
   }
 
-  function renderLicenseUI(state) {
+  function toggleLicenseCollapsed() {
+    setLicenseCollapsed(!licenseCollapsed);
+  }
+
+  function updateLicenseRebindVisibility() {
+    if (!licenseRebindBtn) return;
+    licenseRebindBtn.hidden = !Boolean(licenseState.key);
+  }
+
+  function updateLicenseHeroSub() {
+    if (!licenseHeroSub) return;
+    if (!licenseState.key) {
+      licenseHeroSub.textContent = t("licenseHeroSubFree");
+      return;
+    }
+    if (licenseVerified) {
+      licenseHeroSub.textContent = t("licenseHeroSubVerified");
+      return;
+    }
+    licenseHeroSub.textContent = t("licenseHeroSubActive");
+  }
+
+  function updateLicensePill() {
+    if (!licensePill) return;
+    if (!licenseState.key) {
+      licensePill.dataset.state = "free";
+      licensePill.textContent = t("licensePillFree");
+      return;
+    }
+    if (licenseVerified) {
+      licensePill.dataset.state = "verified";
+      licensePill.textContent = t("licensePillVerified");
+      return;
+    }
+    licensePill.dataset.state = "active";
+    licensePill.textContent = t("licensePillActive");
+  }
+
+  function setLicenseBusy(on) {
+    licenseBusy = on === true;
+    if (licenseSaveBtn) licenseSaveBtn.disabled = licenseBusy;
+    if (licenseClearBtn) licenseClearBtn.disabled = licenseBusy;
+    if (licenseRebindBtn) licenseRebindBtn.disabled = licenseBusy;
+  }
+
+  function renderLicenseUI(state, opts = {}) {
     licenseState = normalizeLicense(state) || { ...DEFAULT_LICENSE };
-    if (licenseKeyInput) {
+    if (licenseKeyInput && document.activeElement !== licenseKeyInput) {
       licenseKeyInput.value = licenseState.key || "";
     }
+    if (opts.verified === true) licenseVerified = true;
+    if (opts.verified === false) licenseVerified = false;
+    if (opts.deviceMismatch === true) licenseDeviceMismatch = true;
+    if (opts.deviceMismatch === false) licenseDeviceMismatch = false;
     updateLicensePill();
+    updateLicenseHeroSub();
+    updateLicenseRebindVisibility();
     if (!licenseState.key) {
       setLicenseStatus(t("licenseEmpty"));
+      setLicenseCollapsed(false);
     }
+  }
+
+  async function applyLicenseVerificationResult(key, result, { collapseOnSuccess = true } = {}) {
+    if (!result.ok) {
+      licenseVerified = false;
+      licenseDeviceMismatch = result.deviceMismatch === true;
+      updateLicensePill();
+      updateLicenseHeroSub();
+      updateLicenseRebindVisibility();
+      setLicenseStatus(mapLicenseError(result.error));
+      setLicenseCollapsed(false);
+      return false;
+    }
+
+    licenseVerified = Boolean(key);
+    licenseDeviceMismatch = false;
+    const saved = await saveLicense(key ? { key } : { key: "" });
+    if (!saved && key) {
+      setLicenseStatus(t("licenseVerifyFail"));
+      return false;
+    }
+    if (saved) licenseState = saved;
+    updateLicensePill();
+    updateLicenseHeroSub();
+    updateLicenseRebindVisibility();
+    if (key) {
+      setLicenseStatus(t("licenseSaved"));
+      if (collapseOnSuccess) setLicenseCollapsed(true);
+    } else {
+      setLicenseStatus(t("licenseEmpty"));
+      setLicenseCollapsed(false);
+    }
+    return true;
   }
 
   async function onLicenseSave() {
+    if (licenseBusy) return;
     const raw = licenseKeyInput?.value || "";
     const next = normalizeLicense({ key: raw });
     if (!next) {
       setLicenseStatus(t("licenseInvalid"));
+      setLicenseCollapsed(false);
       return;
     }
-    const saved = await saveLicense(next);
-    if (!saved) {
+
+    if (!next.key) {
+      await applyLicenseVerificationResult("", { ok: true, data: { free: true } });
+      return;
+    }
+
+    setLicenseBusy(true);
+    setLicenseStatus(t("licenseVerifying"));
+    try {
+      const deviceId = await ensureDeviceId();
+      const result = await verifyLicenseKey(next.key, deviceId);
+      await applyLicenseVerificationResult(next.key, result, { collapseOnSuccess: true });
+    } catch {
+      setLicenseStatus(t("licenseVerifyFail"));
+      setLicenseCollapsed(false);
+    } finally {
+      setLicenseBusy(false);
+    }
+  }
+
+  async function onLicenseRebind() {
+    if (licenseBusy) return;
+    const key = String(licenseKeyInput?.value || licenseState.key || "").trim();
+    const next = normalizeLicense({ key });
+    if (!next?.key) {
       setLicenseStatus(t("licenseInvalid"));
       return;
     }
-    licenseState = saved;
-    updateLicensePill();
-    setLicenseStatus(saved.key ? t("licenseSaved") : t("licenseEmpty"));
+
+    setLicenseBusy(true);
+    setLicenseStatus(t("licenseRebinding"));
+    try {
+      const deviceId = await ensureDeviceId();
+      if (!deviceId) {
+        setLicenseStatus(t("licenseRebindFail"));
+        return;
+      }
+      const rebound = await rebindLicenseKey(next.key, deviceId);
+      if (!rebound.ok) {
+        setLicenseStatus(mapLicenseError(rebound.error) || t("licenseRebindFail"));
+        return;
+      }
+      const verify = await verifyLicenseKey(next.key, deviceId);
+      if (!verify.ok) {
+        setLicenseStatus(t("licenseRebindFail"));
+        return;
+      }
+      licenseDeviceMismatch = false;
+      await applyLicenseVerificationResult(next.key, verify, { collapseOnSuccess: true });
+      setLicenseStatus(t("licenseRebound"));
+    } catch {
+      setLicenseStatus(t("licenseRebindFail"));
+    } finally {
+      setLicenseBusy(false);
+    }
   }
 
   async function onLicenseClear() {
+    if (licenseBusy) return;
     if (licenseKeyInput) licenseKeyInput.value = "";
     await saveLicense({ key: "" });
     licenseState = { ...DEFAULT_LICENSE };
+    licenseVerified = false;
+    licenseDeviceMismatch = false;
     updateLicensePill();
+    updateLicenseHeroSub();
+    updateLicenseRebindVisibility();
     setLicenseStatus(t("licenseCleared"));
+    setLicenseCollapsed(false);
   }
 
+  async function refreshStoredLicense() {
+    if (!licenseState.key) {
+      renderLicenseUI(licenseState);
+      return;
+    }
+    setLicenseBusy(true);
+    try {
+      const deviceId = await ensureDeviceId();
+      const result = await verifyLicenseKey(licenseState.key, deviceId);
+      if (result.ok) {
+        licenseVerified = true;
+        licenseDeviceMismatch = false;
+        updateLicensePill();
+        updateLicenseHeroSub();
+        updateLicenseRebindVisibility();
+        setLicenseCollapsed(true);
+      } else {
+        licenseVerified = false;
+        licenseDeviceMismatch = result.deviceMismatch === true;
+        updateLicensePill();
+        updateLicenseHeroSub();
+        updateLicenseRebindVisibility();
+        setLicenseStatus(mapLicenseError(result.error));
+        setLicenseCollapsed(false);
+      }
+    } catch {
+      licenseVerified = false;
+      updateLicensePill();
+      updateLicenseHeroSub();
+      setLicenseCollapsed(false);
+    } finally {
+      setLicenseBusy(false);
+    }
+  }
+
+  if (licenseToggle) licenseToggle.addEventListener("click", () => toggleLicenseCollapsed());
   if (licenseSaveBtn) licenseSaveBtn.addEventListener("click", () => void onLicenseSave());
   if (licenseClearBtn) licenseClearBtn.addEventListener("click", () => void onLicenseClear());
+  if (licenseRebindBtn) licenseRebindBtn.addEventListener("click", () => void onLicenseRebind());
   if (licenseKeyInput) {
     licenseKeyInput.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter") {
@@ -1196,6 +1492,7 @@
       renderTaxRecvUI(taxRecvState);
       renderSuffixHideUI(suffixHideState);
       renderLicenseUI(loadedLicense);
+      void refreshStoredLicense();
       bindCollapseHeads();
       setSectionExpanded("theme", false);
       setSectionExpanded("taxRecv", false);
