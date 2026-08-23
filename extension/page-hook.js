@@ -647,6 +647,39 @@
     return raw.length > 6 ? raw.slice(0, 6) : raw;
   }
 
+  function gmgnTokenRowSymbol(t, multi) {
+    if (!t || typeof t !== "object") return "";
+    let sym = String(
+      t.symbol || t.name || t.ticker || t.token_symbol || t.sym || ""
+    ).trim();
+    const address = String(t.address || t.token || "").toLowerCase();
+    if (!sym && t.token && typeof t.token === "object") {
+      sym = String(t.token.symbol || t.token.name || t.token.ticker || "").trim();
+    }
+    if (!sym) {
+      const icon = String(t.logo || t.icon || t.image || t.img || "");
+      const m = icon.match(/\/quotes\/([^./?#]+)/i);
+      if (m) sym = m[1];
+    }
+    if (!sym && address) sym = symbolFromKnownStockAddress(address);
+    if (!sym && !multi && address) sym = symbolFromKnownStockAddress(address);
+    return sym;
+  }
+
+  /** GMGN 列表/WS 常只 preview 2–4 个 dividend_tokens；完整篮子靠 security 或后续 fiber */
+  function basketLikelyTruncated(basket_assets, entry) {
+    if (!entry || !entry.is_vault) return false;
+    const stockish =
+      entry.is_stocks_vault === true ||
+      (Array.isArray(basket_assets) && basket_assets.length >= 1);
+    if (!stockish) return false;
+    const n = Array.isArray(basket_assets) ? basket_assets.length : 0;
+    if (n < 2 || n > 4) return false;
+    const mkt = Number(entry.market_bps) || 0;
+    const div = Number(entry.dividend_bps) || 0;
+    return mkt >= 9000 || div >= 9000;
+  }
+
   function basketSymbolsReady(assets) {
     if (!Array.isArray(assets) || !assets.length) return false;
     if (assets.length < 2) return Boolean(assets[0]?.symbol);
@@ -655,9 +688,10 @@
     return syms[0] !== syms[1];
   }
 
-  function hostFeeBasketNeedsHydration(basket_assets, isStockVault) {
+  function hostFeeBasketNeedsHydration(basket_assets, isStockVault, entry) {
     if (!isStockVault) return false;
     if (!Array.isArray(basket_assets) || !basket_assets.length) return true;
+    if (basketLikelyTruncated(basket_assets, entry || {})) return true;
     return !basketSymbolsReady(basket_assets);
   }
 
@@ -697,43 +731,38 @@
     return "";
   }
 
+  function gmgnDividendSymbolFromTal(tal) {
+    if (!tal || typeof tal !== "object") return "";
+    const direct = String(
+      tal.dividend_symbol || tal.dividend_token_symbol || tal.ds || ""
+    ).trim();
+    if (direct) return direct;
+    const dt = tal.dividend_token;
+    if (dt && typeof dt === "object") {
+      const sym = gmgnTokenRowSymbol(dt, false);
+      if (sym) return sym;
+    }
+    const dts = coerceDividendTokenList(tal.dividend_tokens);
+    if (dts.length === 1) {
+      const sym = gmgnTokenRowSymbol(dts[0], false);
+      if (sym) return sym;
+    }
+    if (dts.length > 1) return "";
+    const dtAddr =
+      typeof dt === "string" ? dt : dt && typeof dt === "object" ? dt.address : "";
+    return symbolFromKnownTokenAddress(dtAddr) || "";
+  }
+
   function gmgnResolveDividendSymbol(item, tal, basket_assets) {
     if (basket_assets && basket_assets.length >= 2) return "";
     if (basket_assets && basket_assets[0]?.symbol) return basket_assets[0].symbol;
-    const fromTal = String(
-      tal?.dividend_symbol || tal?.dividend_token_symbol || tal?.ds || ""
-    ).trim();
+    const fromTal = gmgnDividendSymbolFromTal(tal);
     if (fromTal) return fromTal;
-    const dt = tal?.dividend_token;
-    if (dt && typeof dt === "object") {
-      const sym = String(dt.symbol || dt.name || dt.ticker || "").trim();
-      if (sym) return sym;
-    }
     const f = item?.f;
     if (f && typeof f === "object") {
-      const fs = String(
-        f.dividend_symbol || f.dividend_token_symbol || f.ds || ""
-      ).trim();
+      const fs = gmgnDividendSymbolFromTal(f);
       if (fs) return fs;
-      const fdt = f.dividend_token;
-      if (fdt && typeof fdt === "object") {
-        const sym = String(fdt.symbol || fdt.name || fdt.ticker || "").trim();
-        if (sym) return sym;
-      }
     }
-    const dts = coerceDividendTokenList(tal?.dividend_tokens);
-    if (dts.length) {
-      for (let i = 0; i < dts.length; i++) {
-        const sym = symbolFromKnownTokenAddress(dts[i]?.address || dts[i]?.token);
-        if (sym) return sym;
-      }
-    }
-    const dtAddr =
-      typeof tal?.dividend_token === "string"
-        ? tal.dividend_token
-        : tal?.dividend_token?.address;
-    const known = symbolFromKnownTokenAddress(dtAddr);
-    if (known) return known;
     return "";
   }
 
@@ -767,14 +796,12 @@
     const list = coerceDividendTokenList(tokens);
     const out = [];
     const multi = list.length > 1;
-    for (let i = 0; i < list.length && out.length < 12; i++) {
-      const t = list[i];
+    for (let i = 0; i < list.length && out.length < 12; i += 1) {
+      let t = list[i];
+      if (typeof t === "string") t = { address: t };
       if (!t || typeof t !== "object") continue;
       const address = String(t.address || t.token || "").toLowerCase();
-      let sym = String(t.symbol || t.name || t.ticker || "").trim();
-      if (!sym && address) {
-        if (!multi) sym = symbolFromKnownStockAddress(address);
-      }
+      const sym = gmgnTokenRowSymbol(t, multi);
       if (!sym) continue;
       out.push({
         address,
@@ -854,6 +881,96 @@
     return (Number(entry.market_bps) || 0) >= 10000 && (Number(entry.dividend_bps) || 0) === 0;
   }
 
+  function basketSymbolMatchesDom(domSym, rowSym) {
+    const d = compactBasketSymbol(domSym);
+    const r = compactBasketSymbol(rowSym);
+    if (!d || !r) return false;
+    if (d === r) return true;
+    const dr = String(domSym || "")
+      .replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "")
+      .toUpperCase();
+    const rr = String(rowSym || "")
+      .replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "")
+      .toUpperCase();
+    if (dr.length >= 5 && dr.endsWith("B") && dr.slice(0, -1) === r) return true;
+    if (rr.length >= 5 && rr.endsWith("B") && rr.slice(0, -1) === d) return true;
+    return false;
+  }
+
+  function dedupeBasketAssets(rows) {
+    const out = [];
+    const seenSym = new Set();
+    const seenAddr = new Set();
+    for (const row of rows) {
+      if (!row || typeof row !== "object") continue;
+      const address = String(row.address || "").toLowerCase();
+      const symbol = compactBasketSymbol(row.symbol || row.name || "");
+      const name = String(row.name || symbol || "").trim().slice(0, 48);
+      if (!symbol && !name) continue;
+      if (address && seenAddr.has(address)) continue;
+      if (symbol && seenSym.has(symbol)) continue;
+      if (address) seenAddr.add(address);
+      if (symbol) seenSym.add(symbol);
+      out.push({ address, symbol: symbol || compactBasketSymbol(name), name: name || symbol });
+    }
+    return out;
+  }
+
+  function mergeBasketWithTaxDomSymbols(assets, domSyms, entry) {
+    const rows = dedupeBasketAssets(
+      (assets || []).map((row) => {
+        if (!row || typeof row !== "object") return null;
+        const address = String(row.address || "").toLowerCase();
+        const symbol = compactBasketSymbol(row.symbol || row.name || "");
+        const name = String(row.name || symbol || "").trim().slice(0, 48);
+        if (!symbol && !name) return null;
+        return { address, symbol: symbol || compactBasketSymbol(name), name: name || symbol };
+      }).filter(Boolean)
+    );
+    if (!domSyms.length) return rows;
+    if (basketLikelyTruncated(rows, entry)) return rows;
+    if (rows.length >= 5 && domSyms.length < rows.length) return rows;
+    const usedAddr = new Set();
+    const usedSym = new Set();
+    const next = [];
+    for (const sym of domSyms) {
+      if (usedSym.has(sym)) continue;
+      const matched =
+        rows.find(
+          (a) =>
+            a &&
+            basketSymbolMatchesDom(sym, a.symbol) &&
+            (!a.address || !usedAddr.has(a.address))
+        ) ||
+        rows.find((a) => a && a.address && !usedAddr.has(a.address) && !a.symbol) ||
+        null;
+      if (!matched?.address && rows.length >= 5) continue;
+      usedSym.add(sym);
+      if (matched?.address) usedAddr.add(matched.address);
+      if (matched) {
+        const msym = compactBasketSymbol(matched.symbol) || sym;
+        usedSym.add(msym);
+        next.push({
+          address: matched.address || "",
+          symbol: msym,
+          name: matched.name || msym
+        });
+        continue;
+      }
+      next.push({ address: "", symbol: sym, name: sym });
+    }
+    for (const row of rows) {
+      if (isSingleAssetStockVault(entry) && domSyms.length === 1) break;
+      const sym = compactBasketSymbol(row.symbol);
+      if (sym && usedSym.has(sym)) continue;
+      if (row.address && usedAddr.has(row.address)) continue;
+      if (row.address) usedAddr.add(row.address);
+      if (sym) usedSym.add(sym);
+      next.push(row);
+    }
+    return dedupeBasketAssets(next);
+  }
+
   function hydrateHostFeeBasket(entry, scopeEl, source) {
     if (!entry || !entry.is_vault) return entry;
     const assets = Array.isArray(entry.basket_assets) ? entry.basket_assets : [];
@@ -879,51 +996,21 @@
         return { ...row, symbol: sym, name: row.name || sym };
       });
       if (!changed) return entry;
-      const out = { ...entry, basket_assets: next };
-      if (out.__needsChain && basketSymbolsReady(next)) out.__needsChain = false;
+      const out = { ...entry, basket_assets: dedupeBasketAssets(next) };
+      if (out.__needsChain && basketSymbolsReady(next) && !basketLikelyTruncated(next, out)) {
+        out.__needsChain = false;
+      }
       return out;
     }
-    const usedAddr = new Set();
-    const usedSym = new Set();
-    const next = [];
-    for (const sym of domSyms) {
-      if (usedSym.has(sym)) continue;
-      usedSym.add(sym);
-      const matched =
-        assets.find(
-          (a) =>
-            a &&
-            compactBasketSymbol(a.symbol) === sym &&
-            !usedAddr.has(String(a.address || ""))
-        ) ||
-        assets.find((a) => a && a.address && !usedAddr.has(a.address) && !a.symbol) ||
-        null;
-      if (matched?.address) usedAddr.add(matched.address);
-      next.push({
-        address: matched?.address || "",
-        symbol: sym,
-        name: matched?.name || sym
-      });
-    }
-    for (const row of assets) {
-      if (isSingleAssetStockVault(entry) && domSyms.length === 1) break;
-      if (!row || typeof row !== "object") continue;
-      const sym = compactBasketSymbol(row.symbol);
-      if (sym && usedSym.has(sym)) continue;
-      if (row.address && usedAddr.has(row.address)) continue;
-      if (row.address) usedAddr.add(row.address);
-      if (sym) usedSym.add(sym);
-      next.push({
-        ...row,
-        symbol: sym || compactBasketSymbol(symbolFromKnownStockAddress(row.address)) || row.symbol || ""
-      });
-    }
+    const next = mergeBasketWithTaxDomSymbols(assets, domSyms, entry);
     const out = {
       ...entry,
       basket_assets: next,
       is_stocks_vault: entry.is_stocks_vault === true || next.length >= 1
     };
-    if (out.__needsChain && basketSymbolsReady(next)) out.__needsChain = false;
+    if (out.__needsChain && basketSymbolsReady(next) && !basketLikelyTruncated(next, out)) {
+      out.__needsChain = false;
+    }
     return out;
   }
 
@@ -932,10 +1019,18 @@
     const isStockVault =
       entry.is_stocks_vault === true ||
       (Array.isArray(entry.basket_assets) && entry.basket_assets.length >= 1);
-    if (hostFeeBasketNeedsHydration(entry.basket_assets, isStockVault)) {
+    if (hostFeeBasketNeedsHydration(entry.basket_assets, isStockVault, entry)) {
       entry.__needsChain = true;
     } else if (isStockVault && basketSymbolsReady(entry.basket_assets)) {
       entry.__needsChain = false;
+      entry.__awaitSecurity = false;
+    }
+    if (basketLikelyTruncated(entry.basket_assets, entry)) {
+      entry.__awaitSecurity = true;
+      entry.__basketPendingUntil = Date.now() + 12000;
+    } else if (!entry.__needsChain) {
+      entry.__awaitSecurity = false;
+      entry.__basketPendingUntil = 0;
     }
     return entry;
   }
@@ -963,10 +1058,32 @@
   function maybeScheduleSecurityBasketFetch(entry) {
     if (!entry || entry.source !== "gmgn") return;
     const n = Array.isArray(entry.basket_assets) ? entry.basket_assets.length : 0;
-    if (n < 2 || n > 4) return;
+    if (n < 2 || n > 8) return;
     if (!entry.is_stocks_vault && n < 2) return;
-    if ((Number(entry.market_bps) || 0) < 9000) return;
+    if ((Number(entry.market_bps) || 0) < 9000 && (Number(entry.dividend_bps) || 0) < 9000) {
+      return;
+    }
     scheduleSecurityBasketFetch(entry.address);
+    const addr = String(entry.address || "").toLowerCase();
+    if (!TARGET_TOKEN_RE.test(addr)) return;
+    window.setTimeout(() => {
+      try {
+        window.dispatchEvent(
+          new CustomEvent("flap-fee-scan-card", { detail: { token: addr } })
+        );
+      } catch (_rescan) {
+        // ignore
+      }
+    }, 900);
+    window.setTimeout(() => {
+      try {
+        window.dispatchEvent(
+          new CustomEvent("flap-fee-scan-card", { detail: { token: addr } })
+        );
+      } catch (_rescan2) {
+        // ignore
+      }
+    }, 2200);
   }
 
   function scheduleSecurityBasketFetch(addr) {
@@ -1029,6 +1146,7 @@
       entry.is_vault ? 1 : 0,
       entry.buy_tax_bps || 0,
       entry.sell_tax_bps || 0,
+      (entry.basket_assets || []).length,
       (entry.basket_assets || []).map((b) => b.symbol).join("+")
     ].join("|");
   }
@@ -1130,7 +1248,13 @@
       binance_charity_bps;
     const isStockVault = is_stocks_vault || basket_assets.length > 0;
     const needsChain =
-      totalBps <= 0 || hostFeeBasketNeedsHydration(basket_assets, isStockVault);
+      totalBps <= 0 ||
+      hostFeeBasketNeedsHydration(basket_assets, isStockVault, {
+        is_vault,
+        is_stocks_vault,
+        market_bps,
+        dividend_bps
+      });
     return finalizeHostFeeEntry({
       address: addr,
       source: "gmgn",
@@ -1206,7 +1330,13 @@
       binance_charity_bps;
     const isStockVault = is_stocks_vault || basket_assets.length > 0;
     const needsChain =
-      totalBps <= 0 || hostFeeBasketNeedsHydration(basket_assets, isStockVault);
+      totalBps <= 0 ||
+      hostFeeBasketNeedsHydration(basket_assets, isStockVault, {
+        is_vault,
+        is_stocks_vault,
+        market_bps,
+        dividend_bps
+      });
     return finalizeHostFeeEntry({
       address: addr,
       source: "debot",
@@ -1448,13 +1578,8 @@
     );
     if (hasReferral) {
       const tal = scrapeGmgnTaxAllocationFromFiber(el);
-      const dts = coerceDividendTokenList(tal?.dividend_tokens);
-      if (dts.length) {
-        for (let i = 0; i < dts.length; i++) {
-          const sym = symbolFromKnownTokenAddress(dts[i]?.address || dts[i]?.token);
-          if (sym) return sym;
-        }
-      }
+      const sym = gmgnDividendSymbolFromTal(tal);
+      if (sym) return sym;
       return "BNB";
     }
     return "";
@@ -1482,10 +1607,17 @@
 
   function applyDomSymbolsToHostFee(entry, scopeEl, source) {
     if (!entry || !(scopeEl instanceof HTMLElement)) return entry;
-    const domSym =
-      source === "debot"
-        ? debotSymbolFromPoolDom(scopeEl)
-        : gmgnSymbolFromTaxDom(scopeEl);
+    if (source === "gmgn") {
+      const divSym = gmgnSymbolFromTaxDom(scopeEl);
+      if (!entry.dividend_symbol && entry.dividend_bps > 0 && divSym) {
+        entry.dividend_symbol = divSym;
+      }
+      if (!entry.top_payout_symbol) {
+        entry.top_payout_symbol = entry.dividend_symbol || entry.quote_symbol || "";
+      }
+      return entry;
+    }
+    const domSym = debotSymbolFromPoolDom(scopeEl);
     if (domSym) {
       if (!entry.dividend_symbol && entry.dividend_bps > 0) {
         entry.dividend_symbol = domSym;

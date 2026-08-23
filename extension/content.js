@@ -703,6 +703,87 @@
     return (Number(entry.market_bps) || 0) >= 10000 && (Number(entry.dividend_bps) || 0) === 0;
   }
 
+  function basketSymbolMatchesDom(domSym, rowSym) {
+    const d = compactBasketSymbol(domSym);
+    const r = compactBasketSymbol(rowSym);
+    if (!d || !r) return false;
+    if (d === r) return true;
+    const dr = String(domSym || "")
+      .replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "")
+      .toUpperCase();
+    const rr = String(rowSym || "")
+      .replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "")
+      .toUpperCase();
+    if (dr.length >= 5 && dr.endsWith("B") && dr.slice(0, -1) === r) return true;
+    if (rr.length >= 5 && rr.endsWith("B") && rr.slice(0, -1) === d) return true;
+    return false;
+  }
+
+  function dedupeBasketAssets(rows) {
+    const out = [];
+    const seenSym = new Set();
+    const seenAddr = new Set();
+    for (const row of rows) {
+      if (!row || typeof row !== "object") continue;
+      const address = String(row.address || "").toLowerCase();
+      const symbol = compactBasketSymbol(row.symbol || row.name || "");
+      const name = String(row.name || symbol || "").trim().slice(0, 48);
+      if (!symbol && !name) continue;
+      if (address && seenAddr.has(address)) continue;
+      if (symbol && seenSym.has(symbol)) continue;
+      if (address) seenAddr.add(address);
+      if (symbol) seenSym.add(symbol);
+      out.push({ address, symbol: symbol || compactBasketSymbol(name), name: name || symbol });
+    }
+    return out;
+  }
+
+  function mergeBasketWithTaxDomSymbols(assets, domSyms, entry) {
+    const rows = normalizeBasketAssets(assets);
+    if (!domSyms.length) return rows;
+    if (basketLikelyTruncated(rows, entry)) return rows;
+    if (rows.length >= 5 && domSyms.length < rows.length) return rows;
+    const usedAddr = new Set();
+    const usedSym = new Set();
+    const next = [];
+    for (const sym of domSyms) {
+      if (usedSym.has(sym)) continue;
+      const matched =
+        rows.find(
+          (a) =>
+            a &&
+            basketSymbolMatchesDom(sym, a.symbol) &&
+            (!a.address || !usedAddr.has(a.address))
+        ) ||
+        rows.find((a) => a && a.address && !usedAddr.has(a.address) && !a.symbol) ||
+        null;
+      if (!matched?.address && rows.length >= 5) continue;
+      usedSym.add(sym);
+      if (matched?.address) usedAddr.add(matched.address);
+      if (matched) {
+        const msym = compactBasketSymbol(matched.symbol) || sym;
+        usedSym.add(msym);
+        next.push({
+          address: matched.address || "",
+          symbol: msym,
+          name: matched.name || msym
+        });
+        continue;
+      }
+      next.push({ address: "", symbol: sym, name: sym });
+    }
+    for (const row of rows) {
+      if (isSingleAssetStockVault(entry) && domSyms.length === 1) break;
+      const sym = compactBasketSymbol(row.symbol);
+      if (sym && usedSym.has(sym)) continue;
+      if (row.address && usedAddr.has(row.address)) continue;
+      if (row.address) usedAddr.add(row.address);
+      if (sym) usedSym.add(sym);
+      next.push(row);
+    }
+    return dedupeBasketAssets(next);
+  }
+
   function enrichBasketFromTaxDom(card, entry) {
     if (!entry || !(card instanceof HTMLElement)) return { entry, changed: false };
     if (!entry.is_vault) return { entry, changed: false };
@@ -714,36 +795,7 @@
       .map((s) => compactBasketSymbol(s))
       .filter(Boolean);
     if (!domSyms.length) return { entry, changed: false };
-    // Tax 芯片图标顺序 = 用户可见真相；API dividend_tokens 顺序常与芯片不一致
-    const usedAddr = new Set();
-    const usedSym = new Set();
-    const next = [];
-    for (const sym of domSyms) {
-      if (usedSym.has(sym)) continue;
-      usedSym.add(sym);
-      const matched =
-        assets.find(
-          (a) => a && compactBasketSymbol(a.symbol) === sym && !usedAddr.has(a.address || "")
-        ) ||
-        assets.find((a) => a && a.address && !usedAddr.has(a.address) && !a.symbol) ||
-        null;
-      if (matched?.address) usedAddr.add(matched.address);
-      next.push({
-        address: matched?.address || "",
-        symbol: sym,
-        name: matched?.name || sym
-      });
-    }
-    for (const row of assets) {
-      if (isSingleAssetStockVault(entry) && domSyms.length === 1) break;
-      if (!row) continue;
-      const sym = compactBasketSymbol(row.symbol);
-      if (sym && usedSym.has(sym)) continue;
-      if (row.address && usedAddr.has(row.address)) continue;
-      if (row.address) usedAddr.add(row.address);
-      if (sym) usedSym.add(sym);
-      next.push(row);
-    }
+    const next = mergeBasketWithTaxDomSymbols(assets, domSyms, entry);
     if (!next.length) return { entry, changed: false };
     const beforeSig = assets.map((a) => `${a.address}:${a.symbol}`).join("|");
     const afterSig = next.map((a) => `${a.address}:${a.symbol}`).join("|");
@@ -753,7 +805,9 @@
       basket_assets: next,
       is_stocks_vault: entry.is_stocks_vault || next.length >= 1
     };
-    if (out.__needsChain && basketSymbolsReady(next)) out.__needsChain = false;
+    if (out.__needsChain && basketSymbolsReady(next) && !basketLikelyTruncated(next, out)) {
+      out.__needsChain = false;
+    }
     return { entry: out, changed: true };
   }
 
@@ -768,16 +822,39 @@
     if (nowPending) return;
     try {
       const q = resolveQuoteSymbol(card, after);
-      const nextLabel = computeBadgePresentation(after, q, tok).label || "";
-      const icon = card.querySelector?.(".gmgn-fee-mode-icon");
-      const textEl = icon?.querySelector?.(".gmgn-fee-mode-icon__text");
-      const shown = textEl ? textEl.textContent : icon?.textContent || "";
-      if (shown && nextLabel && shown !== nextLabel) {
+      const beforeP = computeBadgePresentation(before, q, tok);
+      const afterP = computeBadgePresentation(after, q, tok);
+      const labelChanged = beforeP.label && afterP.label && beforeP.label !== afterP.label;
+      const countChanged = (beforeP.basketCount || 0) !== (afterP.basketCount || 0);
+      if (labelChanged || countChanged) {
         applyModeToKnownCards(tok, after, [card]);
       }
     } catch (_repaint) {
       // ignore
     }
+  }
+
+  function dividendPayoutLooksNative(entry) {
+    const addr = String(entry?.dividend_token || entry?.top_payout_token || "")
+      .trim()
+      .toLowerCase();
+    return (
+      !addr ||
+      addr === WBNB_ADDRESS ||
+      addr === "0x0000000000000000000000000000000000000000"
+    );
+  }
+
+  /** GMGN Tax 芯片内 /quotes 图标 → 分红代币（非底池 BNB） */
+  function extractDividendSymbolFromTaxDom(card) {
+    if (!card?.querySelector || !isGmgnHost()) return "";
+    const tax = card.querySelector(".trenches-tax");
+    if (!tax) return "";
+    const img = tax.querySelector('img[src*="/quotes/"], img[src*="/static/quotes/"]');
+    if (!img) return "";
+    const src = img.currentSrc || img.getAttribute("src") || "";
+    const m = src.match(/\/quotes\/([^./?#]+)/i);
+    return m ? compactBasketSymbol(m[1]) : "";
   }
 
   function enrichEntrySymbolsFromDom(card, entry) {
@@ -799,7 +876,14 @@
         changed = true;
       }
     }
-    if (!out.dividend_symbol && out.dividend_bps > 0 && domQuote) {
+    if (!out.dividend_symbol && out.dividend_bps > 0) {
+      const divFromTax = extractDividendSymbolFromTaxDom(card);
+      if (divFromTax) {
+        out.dividend_symbol = divFromTax;
+        changed = true;
+      }
+    }
+    if (!out.dividend_symbol && out.dividend_bps > 0 && domQuote && dividendPayoutLooksNative(out)) {
       out.dividend_symbol = domQuote;
       changed = true;
     }
@@ -808,13 +892,16 @@
       changed = true;
     }
     if (!out.top_payout_symbol) {
-      out.top_payout_symbol = out.dividend_symbol || out.quote_symbol || domQuote;
+      out.top_payout_symbol =
+        out.dividend_symbol ||
+        out.quote_symbol ||
+        (dividendPayoutLooksNative(out) ? domQuote : "");
       if (out.top_payout_symbol) changed = true;
     }
     if (out.__needsChain) {
       const assets = normalizeBasketAssets(out.basket_assets);
       const stockVault = out.is_vault && (out.is_stocks_vault || assets.length >= 2);
-      if (!stockVault || basketSymbolsReady(assets)) {
+      if ((!stockVault || basketSymbolsReady(assets)) && !basketLikelyTruncated(assets, out)) {
         out.__needsChain = false;
         changed = true;
       }
@@ -1596,7 +1683,10 @@
           }
           return taxMount;
         }
-        // 主战壕列：Tax 未就绪时不挂短地址行（会掉到头像/合约下方）。
+        // GMGN 用户关闭「税收」展示时无 Tax 芯片 → 挂代币名行（与 Tax 同高度带）
+        const nameMount = findGmgnTrenchNameMount(card);
+        if (nameMount) return nameMount;
+        // 主战壕列：无 Tax/名行时不挂短地址行（会掉到头像/合约下方）。
         if (isGmgnFixedTrenchCard(card)) return null;
         // Token-page side cards must never fall back to the short-address row:
         // overflow wrappers can make that path climb into avatar/trade columns.
@@ -3452,6 +3542,10 @@
     const kind = target?.dataset?.flapMount || "";
     if (kind === "gmgn-trench-tax") {
       placeGmgnListTaxBadge(target, icon);
+      return;
+    }
+    if (kind === "gmgn-trench-name") {
+      placeGmgnListNameBadge(target, icon);
       return;
     }
     // 0.4.50: address leaf/row only. Metrics/tax mounts should not be used for header.
@@ -5502,7 +5596,7 @@
       const ok = renderMode(card, token, entry, { forceRemount: true });
       if (ok) return true;
 
-      // GMGN: 仅 Tax 芯片就绪时快绘；主战壕禁止 findCompactRowMount（会掉到头像下）。
+      // GMGN: Tax 芯片就绪时快绘；无 Tax 时试代币名行（用户关闭 GMGN 税收展示）
       if (isGmgnHost()) {
         const taxMount = findTaxTag(card);
         if (taxMount instanceof HTMLElement) {
@@ -5517,6 +5611,25 @@
             try {
               taxMount.appendChild(icon);
             } catch (_err3) {
+              return false;
+            }
+          }
+          const er = icon.getBoundingClientRect();
+          return er.width >= 2 && er.height >= 2;
+        }
+        const nameMount = findGmgnTrenchNameMount(card);
+        if (nameMount instanceof HTMLElement) {
+          removeAllBadgesForCard(card, token);
+          icon = document.createElement("span");
+          icon.dataset[ICON_MARK] = "1";
+          icon.dataset.feePosMode = "default";
+          applyBadgeUi(icon, presentation, token);
+          try {
+            placeGmgnListNameBadge(nameMount, icon);
+          } catch (_err2b) {
+            try {
+              nameMount.appendChild(icon);
+            } catch (_err3b) {
               return false;
             }
           }
@@ -11170,6 +11283,26 @@
     return syms[0] !== syms[1];
   }
 
+  function basketLikelyTruncated(assets, entry) {
+    if (!entry || !entry.is_vault) return false;
+    const stockish = entry.is_stocks_vault || (Array.isArray(assets) && assets.length >= 1);
+    if (!stockish) return false;
+    const n = normalizeBasketAssets(assets).length;
+    if (n < 2 || n > 4) return false;
+    const mkt = Number(entry.market_bps) || 0;
+    const div = Number(entry.dividend_bps) || 0;
+    return mkt >= 9000 || div >= 9000;
+  }
+
+  function basketSecurityPending(entry) {
+    if (!entry || typeof entry !== "object") return false;
+    if (entry.__awaitSecurity === true) {
+      const until = Number(entry.__basketPendingUntil) || 0;
+      if (!until || Date.now() < until) return true;
+    }
+    return basketLikelyTruncated(entry.basket_assets, entry) && entry.__needsChain === true;
+  }
+
   function isStockVaultEntry(entry) {
     if (!entry || !entry.is_vault) return false;
     const assets = normalizeBasketAssets(entry.basket_assets);
@@ -11180,6 +11313,8 @@
   function isHostFeeEntryPending(entry) {
     if (!entry || isFeeLoadingEntry(entry)) return false;
     if (entry.__needsChain === true) return true;
+    if (basketSecurityPending(entry)) return true;
+    if (basketLikelyTruncated(entry.basket_assets, entry)) return true;
     if (isStockVaultEntry(entry) && !basketSymbolsReady(entry.basket_assets)) return true;
     return false;
   }
@@ -11195,7 +11330,7 @@
       if (!symbol && !name) continue;
       out.push({ address, symbol: symbol || compactBasketSymbol(name), name: name || symbol });
     }
-    return out;
+    return dedupeBasketAssets(out);
   }
 
   function normalizeResult(result) {
@@ -11238,6 +11373,9 @@
       basket_assets: normalizeBasketAssets(result.basket_assets),
       source_host: typeof result.source_host === "string" ? result.source_host : "",
       __needsChain: result.__needsChain === true,
+      __awaitSecurity: result.__awaitSecurity === true,
+      __basketPendingUntil:
+        typeof result.__basketPendingUntil === "number" ? result.__basketPendingUntil : 0,
       fetched_at: typeof result.fetched_at === "number" ? result.fetched_at : null
     };
   }
@@ -12565,11 +12703,29 @@
     const pb = normalizeBasketAssets(prev.basket_assets).length;
     const nb = normalizeBasketAssets(entry.basket_assets).length;
     if (nb > pb) return true;
+    if (
+      nb < pb &&
+      nb <= 4 &&
+      entry.source_host &&
+      (prev.is_stocks_vault || prev.is_vault)
+    ) {
+      return false;
+    }
     if (entry.__needsChain !== true && prev.__needsChain === true) return true;
     if (
       entry.source_host &&
       basketSymbolsReady(entry.basket_assets) &&
       !basketSymbolsReady(prev.basket_assets)
+    ) {
+      return true;
+    }
+    if (
+      !entry.source_host &&
+      prev.source_host &&
+      entry.dividend_symbol &&
+      prev.dividend_symbol &&
+      compactDisplaySymbol(entry.dividend_symbol) !==
+        compactDisplaySymbol(prev.dividend_symbol)
     ) {
       return true;
     }
@@ -12617,6 +12773,21 @@
       if (!entry) continue;
       entry.source_host = raw.source === "debot" ? "debot" : "gmgn";
       entry.__needsChain = raw.__needsChain === true;
+      entry.__awaitSecurity = raw.__awaitSecurity === true;
+      entry.__basketPendingUntil =
+        typeof raw.__basketPendingUntil === "number" ? raw.__basketPendingUntil : 0;
+      if (
+        entry.__awaitSecurity &&
+        entry.__basketPendingUntil > 0 &&
+        Date.now() >= entry.__basketPendingUntil
+      ) {
+        if (basketLikelyTruncated(entry.basket_assets, entry)) {
+          entry.__basketPendingUntil = Date.now() + 12000;
+        } else {
+          entry.__awaitSecurity = false;
+          if (basketSymbolsReady(entry.basket_assets)) entry.__needsChain = false;
+        }
+      }
       const prev = modeCache.get(token);
       if (prev && !hostFeeEntryShouldApply(prev, entry)) continue;
       modeCache.set(token, entry);
@@ -14448,6 +14619,96 @@
     taxEl.insertAdjacentElement("afterend", icon);
   }
 
+  /** GMGN 关闭税收展示时：挂代币名行右侧（与 Tax 同视觉带）。 */
+  function placeGmgnListNameBadge(nameEl, icon) {
+    if (!(nameEl instanceof HTMLElement) || !(icon instanceof HTMLElement)) return;
+    icon.dataset.feeMountSide = "name-after";
+    nameEl.insertAdjacentElement("afterend", icon);
+  }
+
+  function gmgnLeafLooksLikeTokenName(text) {
+    const t = String(text || "").replace(/\s+/g, " ").trim();
+    if (!t || t.length < 1 || t.length > 36) return false;
+    if (/^Tax\s/i.test(t) || /^Fees?\s/i.test(t)) return false;
+    if (/^(MC|V|L|H|F|Run|AI报告)/i.test(t)) return false;
+    if (TARGET_SHORT_TOKEN_RE.test(t) || SHORT_TOKEN_RE.test(t)) return false;
+    if (/^0x[a-fA-F0-9]/i.test(t)) return false;
+    if (/^[\d$.,]+%?$/.test(t)) return false;
+    if (/^⚡|^(BNB|SOL|ETH|WBNB)$/i.test(t)) return false;
+    return true;
+  }
+
+  /**
+   * GMGN 战壕 TokenItem：用户设置里关闭「税收」后无 Tax 芯片。
+   * 回退到代币名行（原 Tax 左侧同一高度带），避免整卡不画徽章。
+   */
+  function findGmgnTrenchNameMount(card) {
+    if (!(card instanceof HTMLElement) || !isGmgnHost()) return null;
+    if (findTaxTag(card)) return null;
+
+    const cached = gmgnTaxMountCache.get(card);
+    if (
+      cached &&
+      cached.kind === "name" &&
+      cached.el instanceof HTMLElement &&
+      document.contains(cached.el) &&
+      card.contains(cached.el) &&
+      Date.now() - cached.at < GMGN_TAX_MOUNT_CACHE_MS
+    ) {
+      return cached.el;
+    }
+
+    const cr = card.getBoundingClientRect();
+    if (cr.width < 120 || cr.height < 40) return null;
+
+    const leaves = card.querySelectorAll("span, div, p, a");
+    const max = Math.min(leaves.length, 140);
+    let bestLeaf = null;
+    let bestScore = Infinity;
+
+    for (let i = 0; i < max; i += 1) {
+      const el = leaves[i];
+      if (!(el instanceof HTMLElement)) continue;
+      if (el.matches(`[${ICON_DATA}="1"]`) || el.querySelector(`[${ICON_DATA}="1"]`)) continue;
+      if (el.childElementCount > 3) continue;
+      const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+      if (!gmgnLeafLooksLikeTokenName(text)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      if (r.width > 220 || r.height > 36) continue;
+      if (r.top > cr.top + cr.height * 0.48) continue;
+      if (r.left > cr.left + cr.width * 0.78) continue;
+      const score = r.top * 1000 + r.left;
+      if (score < bestScore) {
+        bestScore = score;
+        bestLeaf = el;
+      }
+    }
+
+    if (!(bestLeaf instanceof HTMLElement)) return null;
+
+    let row = bestLeaf;
+    const leafRect = bestLeaf.getBoundingClientRect();
+    for (let depth = 0; depth < 4 && row.parentElement instanceof HTMLElement; depth += 1) {
+      const parent = row.parentElement;
+      const pr = parent.getBoundingClientRect();
+      if (
+        pr.height > 0 &&
+        pr.height <= 44 &&
+        pr.width >= leafRect.width &&
+        pr.width <= cr.width * 0.92
+      ) {
+        row = parent;
+      } else {
+        break;
+      }
+    }
+
+    row.dataset.flapMount = "gmgn-trench-name";
+    gmgnTaxMountCache.set(card, { at: Date.now(), el: row, kind: "name" });
+    return row;
+  }
+
   function placeBesideTaxChip(target, icon) {
     if (!(target instanceof HTMLElement) || !(icon instanceof HTMLElement)) return;
     if (isGmgnHost() && !isGmgnTokenPage()) {
@@ -14491,11 +14752,13 @@
     if (!isGmgnFixedTrenchCard(card)) return false;
     if (!(icon instanceof HTMLElement)) return false;
     if (icon.dataset.feeLoading === "1") return false;
-    if (icon.dataset.feeMountSide !== "tax-after") return true;
-    const tax = findTaxTag(card);
-    if (!(tax instanceof HTMLElement)) return false;
+    const side = icon.dataset.feeMountSide || "";
+    if (side !== "tax-after" && side !== "name-after") return true;
+    const anchor =
+      side === "tax-after" ? findTaxTag(card) : findGmgnTrenchNameMount(card);
+    if (!(anchor instanceof HTMLElement)) return false;
     try {
-      const tr = tax.getBoundingClientRect();
+      const tr = anchor.getBoundingClientRect();
       const ir = icon.getBoundingClientRect();
       if (tr.width <= 0 || ir.width <= 0) return false;
       if (Math.abs(ir.top - tr.top) > 18) return true;
@@ -14514,6 +14777,7 @@
       const cached = gmgnTaxMountCache.get(card);
       if (
         cached &&
+        cached.kind !== "name" &&
         cached.el instanceof HTMLElement &&
         document.contains(cached.el) &&
         card.contains(cached.el) &&
@@ -14563,7 +14827,7 @@
     });
     const hit = candidates[0];
     if (isGmgnHost() && hit) {
-      gmgnTaxMountCache.set(card, { at: Date.now(), el: hit });
+      gmgnTaxMountCache.set(card, { at: Date.now(), el: hit, kind: "tax" });
     }
     return hit;
   }

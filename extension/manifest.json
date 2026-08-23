@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.4",
-  "description": "FlapFeeInfo 0.8.4: 修复金库屏蔽「税收金库」勾选无法保存。",
+  "version": "0.8.5",
+  "description": "FlapFeeInfo 0.8.5: 修复币股金库篮子 11/3 错显（DOM 合并去重 + 拒绝 preview 降级）。",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",
