@@ -695,27 +695,89 @@
     return "";
   }
 
+  function isSingleAssetStockVault(entry) {
+    if (!entry || !entry.is_vault) return false;
+    const assets = normalizeBasketAssets(entry.basket_assets);
+    const stockish = entry.is_stocks_vault || assets.length >= 1;
+    if (!stockish) return false;
+    return (Number(entry.market_bps) || 0) >= 10000 && (Number(entry.dividend_bps) || 0) === 0;
+  }
+
   function enrichBasketFromTaxDom(card, entry) {
     if (!entry || !(card instanceof HTMLElement)) return { entry, changed: false };
+    if (!entry.is_vault) return { entry, changed: false };
     const assets = normalizeBasketAssets(entry.basket_assets);
-    if (!entry.is_vault || assets.length < 2) return { entry, changed: false };
-    const domSyms = extractBasketSymbolsFromTaxDom(card);
-    if (!domSyms.length) return { entry, changed: false };
-    let changed = false;
-    const next = assets.map((row, idx) => {
-      if (!row || row.symbol) return row;
-      const sym = domSyms[idx] || domSyms.find((s) => !assets.some((a) => a.symbol === s));
-      if (!sym) return row;
-      changed = true;
-      return { ...row, symbol: sym };
-    });
-    if (!changed) return { entry, changed: false };
-    const out = { ...entry, basket_assets: next };
-    if (out.__needsChain && next.filter((a) => a.symbol).length >= 2) {
-      out.__needsChain = false;
-      changed = true;
+    if (isSingleAssetStockVault(entry) && assets.length === 1) {
+      return { entry, changed: false };
     }
+    const domSyms = extractBasketSymbolsFromTaxDom(card)
+      .map((s) => compactBasketSymbol(s))
+      .filter(Boolean);
+    if (!domSyms.length) return { entry, changed: false };
+    // Tax 芯片图标顺序 = 用户可见真相；API dividend_tokens 顺序常与芯片不一致
+    const usedAddr = new Set();
+    const usedSym = new Set();
+    const next = [];
+    for (const sym of domSyms) {
+      if (usedSym.has(sym)) continue;
+      usedSym.add(sym);
+      const matched =
+        assets.find(
+          (a) => a && compactBasketSymbol(a.symbol) === sym && !usedAddr.has(a.address || "")
+        ) ||
+        assets.find((a) => a && a.address && !usedAddr.has(a.address) && !a.symbol) ||
+        null;
+      if (matched?.address) usedAddr.add(matched.address);
+      next.push({
+        address: matched?.address || "",
+        symbol: sym,
+        name: matched?.name || sym
+      });
+    }
+    for (const row of assets) {
+      if (isSingleAssetStockVault(entry) && domSyms.length === 1) break;
+      if (!row) continue;
+      const sym = compactBasketSymbol(row.symbol);
+      if (sym && usedSym.has(sym)) continue;
+      if (row.address && usedAddr.has(row.address)) continue;
+      if (row.address) usedAddr.add(row.address);
+      if (sym) usedSym.add(sym);
+      next.push(row);
+    }
+    if (!next.length) return { entry, changed: false };
+    const beforeSig = assets.map((a) => `${a.address}:${a.symbol}`).join("|");
+    const afterSig = next.map((a) => `${a.address}:${a.symbol}`).join("|");
+    if (beforeSig === afterSig) return { entry, changed: false };
+    const out = {
+      ...entry,
+      basket_assets: next,
+      is_stocks_vault: entry.is_stocks_vault || next.length >= 1
+    };
+    if (out.__needsChain && basketSymbolsReady(next)) out.__needsChain = false;
     return { entry: out, changed: true };
+  }
+
+  function maybeRepaintAfterEntryEnrich(tok, card, before, after) {
+    if (!card || !after || after === before) return;
+    const wasPending = before && isHostFeeEntryPending(before);
+    const nowPending = isHostFeeEntryPending(after);
+    if (wasPending && !nowPending) {
+      applyModeToKnownCards(tok, after, [card]);
+      return;
+    }
+    if (nowPending) return;
+    try {
+      const q = resolveQuoteSymbol(card, after);
+      const nextLabel = computeBadgePresentation(after, q, tok).label || "";
+      const icon = card.querySelector?.(".gmgn-fee-mode-icon");
+      const textEl = icon?.querySelector?.(".gmgn-fee-mode-icon__text");
+      const shown = textEl ? textEl.textContent : icon?.textContent || "";
+      if (shown && nextLabel && shown !== nextLabel) {
+        applyModeToKnownCards(tok, after, [card]);
+      }
+    } catch (_repaint) {
+      // ignore
+    }
   }
 
   function enrichEntrySymbolsFromDom(card, entry) {
@@ -749,9 +811,13 @@
       out.top_payout_symbol = out.dividend_symbol || out.quote_symbol || domQuote;
       if (out.top_payout_symbol) changed = true;
     }
-    if (out.__needsChain && (out.dividend_bps || 0) + (out.market_bps || 0) > 0) {
-      out.__needsChain = false;
-      changed = true;
+    if (out.__needsChain) {
+      const assets = normalizeBasketAssets(out.basket_assets);
+      const stockVault = out.is_vault && (out.is_stocks_vault || assets.length >= 2);
+      if (!stockVault || basketSymbolsReady(assets)) {
+        out.__needsChain = false;
+        changed = true;
+      }
     }
     return changed ? out : entry;
   }
@@ -776,19 +842,28 @@
       entry = resolveEntry(tok);
     }
     if (entry && card instanceof HTMLElement) {
+      const before = entry;
       const enriched = enrichEntrySymbolsFromDom(card, entry);
       if (enriched !== entry) {
         modeCache.set(tok, enriched);
+        maybeRepaintAfterEntryEnrich(tok, card, before, enriched);
         entry = enriched;
       }
     }
     return entry;
   }
 
+  function isEntryReadyForDisplay(card, token) {
+    const entry = getEntryForCard(card, token);
+    return entry && !isHostFeeEntryPending(entry);
+  }
+
   function paintHostFeeDeferHit(card, tok) {
     const hit = getEntryForCard(card, tok);
-    if (hit && card instanceof HTMLElement) {
+    if (hit && card instanceof HTMLElement && !isHostFeeEntryPending(hit)) {
       paintListCardFromCacheFast(card, tok, hit) || renderMode(card, tok, hit);
+    } else if (hit && isHostFeeEntryPending(hit)) {
+      renderMode(card, tok, FEE_LOADING_ENTRY);
     }
   }
 
@@ -796,7 +871,7 @@
     hostFeeDeferWaiters.delete(tok);
     if (!waiter) return;
     const { card, options } = waiter;
-    if (resolveEntry(tok)) {
+    if (isEntryReadyForDisplay(card, tok)) {
       paintHostFeeDeferHit(card, tok);
       return;
     }
@@ -820,7 +895,7 @@
         Date.now() - hostFeeDeferPollStartedAt >= HOST_FEE_QUEUE_MAX_MS;
       const toFinish = [];
       for (const [tok, waiter] of hostFeeDeferWaiters) {
-        if (resolveEntry(tok)) {
+        if (isEntryReadyForDisplay(waiter.card, tok)) {
           paintHostFeeDeferHit(waiter.card, tok);
           hostFeeDeferWaiters.delete(tok);
           continue;
@@ -969,8 +1044,8 @@
         return false;
       }
     }
-    // 有正式缓存时绝不画 ⏳（调用方应走真徽章路径）
-    if (getEntryForCard(card, tok)) return false;
+    // 有正式缓存时绝不画 ⏳（调用方应走真徽章路径；未稳定仍算待加载）
+    if (isEntryReadyForDisplay(card, tok)) return false;
     // 先拆光错徽章，再挂 ⏳
     enforceIdentityOnCard(card);
     try {
@@ -2975,7 +3050,14 @@
 
     const existingGood = findGmgnHeaderBadgeEl(urlTok);
     if (existingGood) {
-      const entryHit = resolveEntry(urlTok);
+      const headerCard =
+        existingGood.closest(`[${CARD_DATA}]`) ||
+        climbGmgnHeaderCardFromLeaf(existingGood) ||
+        existingGood.parentElement;
+      const entryHit = getEntryForCard(
+        headerCard instanceof HTMLElement ? headerCard : existingGood,
+        urlTok
+      );
       if (entryHit) {
         try {
           const q =
@@ -2997,7 +3079,6 @@
       return true;
     }
 
-    const entry = resolveEntry(urlTok);
     const addrLeaf = findGmgnHeaderAddressMount();
     // A committed token URL is not sufficient: wait for the official address row.
     // Falling back to the page root can mount into the outgoing trench subtree.
@@ -3009,6 +3090,7 @@
     removeStaleTokenHeaderBadges(urlTok);
     const host = climbGmgnHeaderCardFromLeaf(addrLeaf) || addrLeaf;
     const markHost = host instanceof HTMLElement ? host : addrLeaf;
+    const entry = getEntryForCard(markHost, urlTok) || resolveEntry(urlTok);
     markHost.dataset[CARD_MARK] = urlTok;
     try {
       markHost.setAttribute(CARD_DATA, urlTok);
@@ -5375,8 +5457,8 @@
       wipeForbiddenMountBadges(card, true);
       return false;
     }
-    // 加载占位禁止走 cache-fast「真徽章」路径
-    if (isFeeLoadingEntry(entry)) return false;
+    // 加载占位 / host-fee 未稳定禁止走 cache-fast「真徽章」路径
+    if (isFeeLoadingEntry(entry) || isHostFeeEntryPending(entry)) return false;
     // 行 CA 必须匹配 token，禁止用缓存画错行
     const idCa = extractCardHrefToken(card);
     if (idCa && idCa !== token) return false;
@@ -5660,7 +5742,7 @@
     });
   }
 
-  const PAGE_HOOK_VER = "76";
+  const PAGE_HOOK_VER = "80";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -11057,16 +11139,61 @@
     return raw.length > 4 ? raw.slice(0, 4) : raw;
   }
 
+  /** 币股篮子专用：保留 FXION/NVDAON 等区分度，仅剥 Flap 常见尾缀 B（NVDAB→NVDA） */
+  function compactBasketSymbol(symbol) {
+    const s = String(symbol || "").trim();
+    if (!s) return "";
+    const cleaned = s.replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "");
+    if (!cleaned) return "";
+    if (/[\u4e00-\u9fff]/.test(cleaned)) {
+      return cleaned.length > 6 ? cleaned.slice(0, 6) : cleaned;
+    }
+    const raw = cleaned.toUpperCase();
+    if (raw === "WBNB") return "BNB";
+    // NVDAB→NVDA（{5,}B 会先吃掉整串导致永远不剥尾缀 B）
+    if (raw.length >= 5 && raw.endsWith("B") && raw !== "BNB") {
+      return raw.slice(0, -1);
+    }
+    return raw.length > 6 ? raw.slice(0, 6) : raw;
+  }
+
+  function basketDisplaySymbols(assets) {
+    return (assets || []).map((a) => compactBasketSymbol(a.symbol)).filter(Boolean);
+  }
+
+  function basketSymbolsReady(assets) {
+    const rows = normalizeBasketAssets(assets);
+    if (!rows.length) return false;
+    if (rows.length < 2) return Boolean(rows[0]?.symbol);
+    const syms = basketDisplaySymbols(rows);
+    if (syms.length < 2) return false;
+    return syms[0] !== syms[1];
+  }
+
+  function isStockVaultEntry(entry) {
+    if (!entry || !entry.is_vault) return false;
+    const assets = normalizeBasketAssets(entry.basket_assets);
+    return Boolean(entry.is_stocks_vault || assets.length >= 1);
+  }
+
+  /** host-fee / DOM 未齐：继续 ⏳，避免 NVDA&NVDA 或错分红先闪出来 */
+  function isHostFeeEntryPending(entry) {
+    if (!entry || isFeeLoadingEntry(entry)) return false;
+    if (entry.__needsChain === true) return true;
+    if (isStockVaultEntry(entry) && !basketSymbolsReady(entry.basket_assets)) return true;
+    return false;
+  }
+
   function normalizeBasketAssets(raw) {
     if (!Array.isArray(raw)) return [];
     const out = [];
     for (const row of raw) {
       if (!row || typeof row !== "object") continue;
       const address = typeof row.address === "string" ? row.address.toLowerCase() : "";
-      const symbol = compactDisplaySymbol(row.symbol || row.name || "");
+      const symbol = compactBasketSymbol(row.symbol || row.name || "");
       const name = String(row.name || symbol || "").trim().slice(0, 48);
       if (!symbol && !name) continue;
-      out.push({ address, symbol: symbol || compactDisplaySymbol(name), name: name || symbol });
+      out.push({ address, symbol: symbol || compactBasketSymbol(name), name: name || symbol });
     }
     return out;
   }
@@ -11569,7 +11696,7 @@
     const syms = [];
     const seen = new Set();
     const pushSym = (raw) => {
-      const sym = compactDisplaySymbol(raw);
+      const sym = compactBasketSymbol(raw);
       if (!sym || sym === "BNB" || seen.has(sym)) return;
       seen.add(sym);
       syms.push(sym);
@@ -11589,7 +11716,9 @@
     }
     const tax = card.querySelector(".trenches-tax");
     if (!tax) return syms;
-    tax.querySelectorAll('img[src*="/quotes/"], img[src*="/static/quotes/"]').forEach((img) => {
+    tax
+      .querySelectorAll('img[src*="/quotes/"], img[src*="/static/quotes/"]')
+      .forEach((img) => {
       const src = img.currentSrc || img.getAttribute("src") || "";
       const m = src.match(/\/quotes\/([^./?#]+)/i);
       if (m) pushSym(m[1]);
@@ -12429,6 +12558,25 @@
     return { mode, top_segment };
   }
 
+  function hostFeeEntryShouldApply(prev, entry) {
+    if (!prev) return true;
+    if (entry.source_host && !prev.source_host) return true;
+    if (entry.is_stocks_vault && !prev.is_stocks_vault) return true;
+    const pb = normalizeBasketAssets(prev.basket_assets).length;
+    const nb = normalizeBasketAssets(entry.basket_assets).length;
+    if (nb > pb) return true;
+    if (entry.__needsChain !== true && prev.__needsChain === true) return true;
+    if (
+      entry.source_host &&
+      basketSymbolsReady(entry.basket_assets) &&
+      !basketSymbolsReady(prev.basket_assets)
+    ) {
+      return true;
+    }
+    if (prev.source_host && prev.__needsChain !== true && !entry.source_host) return false;
+    return !prev.source_host || prev.__needsChain === true;
+  }
+
   function applyHostFeeEntries(entries) {
     if (!isBadgeAccessAllowed()) return;
     if (!Array.isArray(entries) || !entries.length) return;
@@ -12470,7 +12618,7 @@
       entry.source_host = raw.source === "debot" ? "debot" : "gmgn";
       entry.__needsChain = raw.__needsChain === true;
       const prev = modeCache.get(token);
-      if (prev && !prev.source_host && prev.__needsChain !== true) continue;
+      if (prev && !hostFeeEntryShouldApply(prev, entry)) continue;
       modeCache.set(token, entry);
       if (!entry.__needsChain) {
         missingRetryState.delete(token);
@@ -12494,11 +12642,12 @@
       let eff = entry;
       const cards = findCardsByCa(token);
       for (let ci = 0; ci < cards.length; ci += 1) {
+        const before = eff;
         const enriched = enrichEntrySymbolsFromDom(cards[ci], eff);
         if (enriched !== eff) {
           eff = enriched;
           modeCache.set(token, eff);
-          break;
+          maybeRepaintAfterEntryEnrich(token, cards[ci], before, enriched);
         }
       }
       applyModeToKnownCards(token, eff, cards);
@@ -13369,7 +13518,7 @@
   }
 
   function basketPairText(assets) {
-    const syms = (assets || []).map((a) => compactDisplaySymbol(a.symbol)).filter(Boolean);
+    const syms = basketDisplaySymbols(assets);
     if (syms.length >= 2) return `${syms[0]}&${syms[1]}`;
     if (syms.length === 1) return syms[0];
     return "";
@@ -13387,7 +13536,9 @@
     const basketAssets = getBasketAssetsForDisplay(entry);
     const basketPair = basketPairText(basketAssets);
     const useStockGift = Boolean(
-      entry.is_vault && basketPair && (entry.is_stocks_vault || basketAssets.length >= 2)
+      entry.is_vault &&
+        basketPair &&
+        (entry.is_stocks_vault || basketAssets.length >= 1)
     );
     const candidates = [];
     if ((entry.dividend_bps || 0) > 0 && prefs.holder !== false) {
@@ -13524,8 +13675,8 @@
     const solidDarkClass =
       theme === "dark" && badgeSolidDark ? "gmgn-fee-mode-icon--solid-dark" : "";
     const tok = String(token || "").toLowerCase();
-    // 未就绪：固定 emoji + 待加载（不拼 半截 fee，避免突变）
-    if (isFeeLoadingEntry(entry)) {
+    // 未就绪：固定 emoji + 待加载（不拼半截 fee / 错篮子，避免突变）
+    if (isFeeLoadingEntry(entry) || isHostFeeEntryPending(entry)) {
       const label = loadingBadgeLabel();
       const title = loadingBadgeTitle();
       const className = [
@@ -13561,9 +13712,7 @@
     const basketAssets = getBasketAssetsForDisplay(entry);
     const basketCount = basketAssets.length;
     // For muted "&" between first two symbols (e.g. SPCX&TSLA).
-    const pairSyms = basketAssets
-      .map((a) => compactDisplaySymbol(a.symbol))
-      .filter(Boolean);
+    const pairSyms = basketDisplaySymbols(basketAssets);
     const basketPair =
       pairSyms.length >= 2 && label.includes(`${pairSyms[0]}&${pairSyms[1]}`)
         ? { left: pairSyms[0], right: pairSyms[1] }

@@ -9,7 +9,7 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 76;
+  const HOOK_VER = 80;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -522,12 +522,19 @@
 
   function gmgnLaunchpadFamily(item) {
     const raw =
-      item?.launchpad ||
       item?.launchpad_platform ||
-      item?.f?.launchpad ||
+      item?.launchpad ||
+      item?.launchpad_platform_name ||
       item?.f?.launchpad_platform ||
+      item?.f?.launchpad ||
+      item?.f?.launchpad_platform_name ||
       "";
     return String(raw || "").toLowerCase();
+  }
+
+  function gmgnIsFlapStocksLaunchpad(item) {
+    const lp = gmgnLaunchpadFamily(item);
+    return lp.includes("flap_stock") || lp.includes("flap_stocks");
   }
 
   /**
@@ -537,6 +544,7 @@
   function gmgnVaultKind(tal, item) {
     if (!tal || typeof tal !== "object") return null;
     if (gmgnHasBasketTokens(tal) || tal.is_stocks_vault === true) return "stock";
+    if (gmgnIsFlapStocksLaunchpad(item)) return "stock";
     if (isGmgnVaultTal(tal)) return "tax";
     const lp = gmgnLaunchpadFamily(item);
     if (!lp.includes("flap")) return null;
@@ -580,6 +588,9 @@
   let hostFeePending = [];
   let hostFeeFlushTimer = 0;
   const HOST_FEE_DEDUPE_MS = 8000;
+  const SECURITY_BASKET_FETCH_GAP_MS = 45000;
+  const securityBasketInflight = new Set();
+  const securityBasketLastAt = new Map();
 
   function ratioToBps(v) {
     if (v == null || v === "") return 0;
@@ -618,6 +629,37 @@
     "0x02fca66c1d1afb4e2a7884261eb00f63598a7436": "FXION",
     "0x9b8e987e6fec8cf1380c4dca7071e2c7853aeea1": "NVDAB"
   };
+
+  function compactBasketSymbol(symbol) {
+    const s = String(symbol || "").trim();
+    if (!s) return "";
+    const cleaned = s.replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "");
+    if (!cleaned) return "";
+    if (/[\u4e00-\u9fff]/.test(cleaned)) {
+      return cleaned.length > 6 ? cleaned.slice(0, 6) : cleaned;
+    }
+    const raw = cleaned.toUpperCase();
+    if (raw === "WBNB") return "BNB";
+    // NVDAB→NVDA（{5,}B 会先吃掉整串导致永远不剥尾缀 B）
+    if (raw.length >= 5 && raw.endsWith("B") && raw !== "BNB") {
+      return raw.slice(0, -1);
+    }
+    return raw.length > 6 ? raw.slice(0, 6) : raw;
+  }
+
+  function basketSymbolsReady(assets) {
+    if (!Array.isArray(assets) || !assets.length) return false;
+    if (assets.length < 2) return Boolean(assets[0]?.symbol);
+    const syms = assets.map((a) => compactBasketSymbol(a?.symbol || "")).filter(Boolean);
+    if (syms.length < 2) return false;
+    return syms[0] !== syms[1];
+  }
+
+  function hostFeeBasketNeedsHydration(basket_assets, isStockVault) {
+    if (!isStockVault) return false;
+    if (!Array.isArray(basket_assets) || !basket_assets.length) return true;
+    return !basketSymbolsReady(basket_assets);
+  }
 
   function symbolFromKnownStockAddress(addr) {
     const a = String(addr || "")
@@ -724,13 +766,16 @@
   function normalizeGmgnBasket(tokens) {
     const list = coerceDividendTokenList(tokens);
     const out = [];
-    for (let i = 0; i < list.length && out.length < 8; i++) {
+    const multi = list.length > 1;
+    for (let i = 0; i < list.length && out.length < 12; i++) {
       const t = list[i];
       if (!t || typeof t !== "object") continue;
       const address = String(t.address || t.token || "").toLowerCase();
       let sym = String(t.symbol || t.name || t.ticker || "").trim();
-      if (!sym && address) sym = symbolFromKnownStockAddress(address);
-      if (!sym && !address) continue;
+      if (!sym && address) {
+        if (!multi) sym = symbolFromKnownStockAddress(address);
+      }
+      if (!sym) continue;
       out.push({
         address,
         symbol: sym.slice(0, 16),
@@ -752,13 +797,14 @@
     }
     if (!Array.isArray(raw)) return [];
     const out = [];
-    for (let i = 0; i < raw.length && out.length < 8; i++) {
+    for (let i = 0; i < raw.length && out.length < 12; i++) {
       const t = raw[i];
       if (!t || typeof t !== "object") continue;
       const address = String(t.address || t.token || "").toLowerCase();
       let sym = String(t.symbol || t.name || t.ticker || "").trim();
-      if (!sym && address) sym = symbolFromKnownStockAddress(address);
-      if (!sym && !address) continue;
+      const multi = raw.length > 1;
+      if (!sym && address && !multi) sym = symbolFromKnownStockAddress(address);
+      if (!sym) continue;
       out.push({
         address,
         symbol: sym.slice(0, 16),
@@ -773,11 +819,8 @@
     const syms = [];
     const seen = new Set();
     const pushSym = (raw) => {
-      const sym = String(raw || "")
-        .trim()
-        .toUpperCase()
-        .replace(/[^A-Z0-9]/g, "");
-      if (!sym || sym === "BNB" || sym === "WBNB" || seen.has(sym)) return;
+      const sym = compactBasketSymbol(raw);
+      if (!sym || sym === "BNB" || seen.has(sym)) return;
       seen.add(sym);
       syms.push(sym);
     };
@@ -802,22 +845,99 @@
     return syms;
   }
 
+  function isSingleAssetStockVault(entry) {
+    if (!entry || !entry.is_vault) return false;
+    const stockish =
+      entry.is_stocks_vault === true ||
+      (Array.isArray(entry.basket_assets) && entry.basket_assets.length >= 1);
+    if (!stockish) return false;
+    return (Number(entry.market_bps) || 0) >= 10000 && (Number(entry.dividend_bps) || 0) === 0;
+  }
+
   function hydrateHostFeeBasket(entry, scopeEl, source) {
-    if (!entry || !Array.isArray(entry.basket_assets) || !entry.basket_assets.length) return entry;
-    const domSyms = stockSymbolsFromTaxDom(scopeEl, source);
-    let changed = false;
-    const next = entry.basket_assets.map((row, idx) => {
-      if (!row || typeof row !== "object") return row;
-      if (row.symbol) return row;
-      const fromDom = domSyms[idx] || "";
-      const fromAddr = symbolFromKnownStockAddress(row.address);
-      const sym = fromDom || fromAddr;
-      if (!sym) return row;
-      changed = true;
-      return { ...row, symbol: sym.slice(0, 16), name: row.name || sym };
-    });
-    if (!changed) return entry;
-    return { ...entry, basket_assets: next };
+    if (!entry || !entry.is_vault) return entry;
+    const assets = Array.isArray(entry.basket_assets) ? entry.basket_assets : [];
+    if (
+      isSingleAssetStockVault(entry) &&
+      assets.length === 1 &&
+      compactBasketSymbol(assets[0]?.symbol || "")
+    ) {
+      return entry;
+    }
+    const domSyms = stockSymbolsFromTaxDom(scopeEl, source)
+      .map((s) => compactBasketSymbol(s))
+      .filter(Boolean);
+    if (!domSyms.length) {
+      // 无 DOM 时仍可用已知地址补符号
+      let changed = false;
+      const next = assets.map((row) => {
+        if (!row || typeof row !== "object" || row.symbol) return row;
+        const fromAddr = symbolFromKnownStockAddress(row.address);
+        if (!fromAddr) return row;
+        changed = true;
+        const sym = compactBasketSymbol(fromAddr);
+        return { ...row, symbol: sym, name: row.name || sym };
+      });
+      if (!changed) return entry;
+      const out = { ...entry, basket_assets: next };
+      if (out.__needsChain && basketSymbolsReady(next)) out.__needsChain = false;
+      return out;
+    }
+    const usedAddr = new Set();
+    const usedSym = new Set();
+    const next = [];
+    for (const sym of domSyms) {
+      if (usedSym.has(sym)) continue;
+      usedSym.add(sym);
+      const matched =
+        assets.find(
+          (a) =>
+            a &&
+            compactBasketSymbol(a.symbol) === sym &&
+            !usedAddr.has(String(a.address || ""))
+        ) ||
+        assets.find((a) => a && a.address && !usedAddr.has(a.address) && !a.symbol) ||
+        null;
+      if (matched?.address) usedAddr.add(matched.address);
+      next.push({
+        address: matched?.address || "",
+        symbol: sym,
+        name: matched?.name || sym
+      });
+    }
+    for (const row of assets) {
+      if (isSingleAssetStockVault(entry) && domSyms.length === 1) break;
+      if (!row || typeof row !== "object") continue;
+      const sym = compactBasketSymbol(row.symbol);
+      if (sym && usedSym.has(sym)) continue;
+      if (row.address && usedAddr.has(row.address)) continue;
+      if (row.address) usedAddr.add(row.address);
+      if (sym) usedSym.add(sym);
+      next.push({
+        ...row,
+        symbol: sym || compactBasketSymbol(symbolFromKnownStockAddress(row.address)) || row.symbol || ""
+      });
+    }
+    const out = {
+      ...entry,
+      basket_assets: next,
+      is_stocks_vault: entry.is_stocks_vault === true || next.length >= 1
+    };
+    if (out.__needsChain && basketSymbolsReady(next)) out.__needsChain = false;
+    return out;
+  }
+
+  function finalizeHostFeeEntry(entry) {
+    if (!entry) return entry;
+    const isStockVault =
+      entry.is_stocks_vault === true ||
+      (Array.isArray(entry.basket_assets) && entry.basket_assets.length >= 1);
+    if (hostFeeBasketNeedsHydration(entry.basket_assets, isStockVault)) {
+      entry.__needsChain = true;
+    } else if (isStockVault && basketSymbolsReady(entry.basket_assets)) {
+      entry.__needsChain = false;
+    }
+    return entry;
   }
 
   function gmgnSecurityTaxBps(item) {
@@ -832,6 +952,69 @@
       buy: ratioToBps(sec.buy_tax ?? sec.buy_tax_rate ?? sec.buyTax),
       sell: ratioToBps(sec.sell_tax ?? sec.sell_tax_rate ?? sec.sellTax)
     };
+  }
+
+  function gmgnChainKey() {
+    const path = String(location.pathname || "");
+    const m = path.match(/\/(bsc|eth|base|sol|tron)(?:\/|$)/i);
+    return m ? m[1].toLowerCase() : "bsc";
+  }
+
+  function maybeScheduleSecurityBasketFetch(entry) {
+    if (!entry || entry.source !== "gmgn") return;
+    const n = Array.isArray(entry.basket_assets) ? entry.basket_assets.length : 0;
+    if (n < 2 || n > 4) return;
+    if (!entry.is_stocks_vault && n < 2) return;
+    if ((Number(entry.market_bps) || 0) < 9000) return;
+    scheduleSecurityBasketFetch(entry.address);
+  }
+
+  function scheduleSecurityBasketFetch(addr) {
+    const a = String(addr || "")
+      .trim()
+      .toLowerCase();
+    if (!TARGET_TOKEN_RE.test(a) || securityBasketInflight.has(a)) return;
+    const last = securityBasketLastAt.get(a) || 0;
+    if (Date.now() - last < SECURITY_BASKET_FETCH_GAP_MS) return;
+    securityBasketInflight.add(a);
+    window.setTimeout(() => {
+      void fetchGmgnSecurityBasket(a).finally(() => {
+        securityBasketInflight.delete(a);
+      });
+    }, 0);
+  }
+
+  async function fetchGmgnSecurityBasket(addr) {
+    const a = String(addr || "")
+      .trim()
+      .toLowerCase();
+    if (!TARGET_TOKEN_RE.test(a)) return;
+    const url = `https://gmgn.ai/api/v1/mutil_window_token_security_launchpad?chain=${encodeURIComponent(
+      gmgnChainKey()
+    )}&address=${encodeURIComponent(a)}`;
+    try {
+      const res = await fetch(url, { credentials: "include" });
+      if (!res.ok) return;
+      const json = await res.json();
+      const lp = json?.data?.launchpad;
+      const sec = json?.data?.security || json?.data?.token?.security;
+      const tal = sec?.tax_allocation || sec?.s_tal;
+      if (!tal || typeof tal !== "object") return;
+      collectHostFeesFromGmgnItem({
+        a,
+        s_tal: tal,
+        security: sec,
+        launchpad: lp?.launchpad,
+        launchpad_platform: lp?.launchpad_platform,
+        f: {
+          launchpad: lp?.launchpad,
+          launchpad_platform: lp?.launchpad_platform
+        }
+      });
+      securityBasketLastAt.set(a, Date.now());
+    } catch (_sec) {
+      // ignore
+    }
   }
 
   function hostFeeSig(entry) {
@@ -878,6 +1061,7 @@
     if (prev && prev.sig === sig && now - prev.at < HOST_FEE_DEDUPE_MS) return;
     hostFeeDedupe.set(addr, { sig, at: now });
     hostFeePending.push(entry);
+    maybeScheduleSecurityBasketFetch(entry);
     if (hostFeeFlushTimer) return;
     hostFeeFlushTimer = window.setTimeout(() => {
       hostFeeFlushTimer = 0;
@@ -926,10 +1110,13 @@
     );
     const is_vault = isGmgnVaultTal(tal);
     const basket_assets = normalizeGmgnBasket(tal.dividend_tokens);
+    const vaultKind = gmgnVaultKind(tal, item);
     const is_stocks_vault =
       tal.is_stocks_vault === true ||
       tal.is_stocks_vault === 1 ||
       tal.is_stocks_vault === "true" ||
+      vaultKind === "stock" ||
+      gmgnIsFlapStocksLaunchpad(item) ||
       basket_assets.length >= 2;
     const tax = gmgnSecurityTaxBps(item);
     const quote_symbol = gmgnResolveQuoteSymbol(item, tal);
@@ -943,9 +1130,8 @@
       binance_charity_bps;
     const isStockVault = is_stocks_vault || basket_assets.length > 0;
     const needsChain =
-      totalBps <= 0 ||
-      (isStockVault && basket_assets.length < 2);
-    return {
+      totalBps <= 0 || hostFeeBasketNeedsHydration(basket_assets, isStockVault);
+    return finalizeHostFeeEntry({
       address: addr,
       source: "gmgn",
       dividend_bps,
@@ -966,7 +1152,7 @@
       dividend_symbol,
       top_payout_symbol: dividend_symbol || quote_symbol,
       __needsChain: needsChain
-    };
+    });
   }
 
   function debotHostFeeFromRow(row) {
@@ -1020,9 +1206,8 @@
       binance_charity_bps;
     const isStockVault = is_stocks_vault || basket_assets.length > 0;
     const needsChain =
-      totalBps <= 0 ||
-      (isStockVault && basket_assets.length < 2);
-    return {
+      totalBps <= 0 || hostFeeBasketNeedsHydration(basket_assets, isStockVault);
+    return finalizeHostFeeEntry({
       address: addr,
       source: "debot",
       dividend_bps,
@@ -1043,7 +1228,7 @@
       dividend_symbol,
       top_payout_symbol: dividend_symbol || quote_symbol,
       __needsChain: needsChain
-    };
+    });
   }
 
   function collectHostFeesFromGmgnItem(item) {
@@ -1182,11 +1367,22 @@
         }
       }
       if (u.includes("mutil_window_token_security_launchpad")) {
+        const lp = json?.data?.launchpad;
         const sec = json?.data?.security || json?.data?.token?.security;
         const tal = sec?.tax_allocation || sec?.s_tal;
-        const ca = String(json?.data?.address || "").toLowerCase();
+        const ca = String(json?.data?.address || lp?.address || "").toLowerCase();
         if (tal && TARGET_TOKEN_RE.test(ca)) {
-          collectHostFeesFromGmgnItem({ a: ca, s_tal: tal, security: sec });
+          collectHostFeesFromGmgnItem({
+            a: ca,
+            s_tal: tal,
+            security: sec,
+            launchpad: lp?.launchpad,
+            launchpad_platform: lp?.launchpad_platform,
+            f: {
+              launchpad: lp?.launchpad,
+              launchpad_platform: lp?.launchpad_platform
+            }
+          });
         }
       }
     } catch (_e) {
@@ -1301,6 +1497,42 @@
     return entry;
   }
 
+  function scrapeGmgnLaunchpadFromFiber(root) {
+    const fiberKey = Object.keys(root).find((k) => k.startsWith("__reactFiber"));
+    if (!fiberKey) return "";
+    let found = "";
+    const pickLp = (p) => {
+      if (!p || typeof p !== "object") return "";
+      const candidates = [
+        p.launchpad_platform,
+        p.launchpad_platform_name,
+        p.launchpad,
+        p.fallbackToken?.launchpad_platform,
+        p.fallbackToken?.launchpad,
+        p.token?.launchpad_platform,
+        p.token?.launchpad,
+        p.security?.launchpad_platform
+      ];
+      for (let i = 0; i < candidates.length; i++) {
+        const s = String(candidates[i] || "").trim();
+        if (s) return s;
+      }
+      return "";
+    };
+    const walk = (node, depth) => {
+      if (!node || depth > 55 || found) return;
+      const lp = pickLp(node.memoizedProps);
+      if (lp) {
+        found = lp;
+        return;
+      }
+      walk(node.child, depth + 1);
+      walk(node.sibling, depth + 1);
+    };
+    walk(root[fiberKey], 0);
+    return found;
+  }
+
   function scrapeGmgnTaxAllocationFromFiber(root) {
     const fiberKey = Object.keys(root).find((k) => k.startsWith("__reactFiber"));
     if (!fiberKey) return null;
@@ -1374,11 +1606,23 @@
 
   function gmgnAddrFromCard(card) {
     if (!(card instanceof HTMLElement)) return "";
+    const dataLeaf =
+      card.querySelector?.("#token-base-address, [data-addr]") ||
+      (card.matches?.("#token-base-address, [data-addr]") ? card : null);
+    if (dataLeaf instanceof HTMLElement) {
+      const raw =
+        dataLeaf.getAttribute?.("data-addr") ||
+        dataLeaf.getAttribute?.("title") ||
+        dataLeaf.textContent ||
+        "";
+      const dm = String(raw).match(/0x[a-fA-F0-9]{40}/i);
+      if (dm) return dm[0].toLowerCase();
+    }
     const href =
       card.getAttribute("href") ||
       card.querySelector?.("[href*='/bsc/token/0x']")?.getAttribute("href") ||
       "";
-    const m = href.match(/0x[a-fA-F0-9]{40}/);
+    const m = href.match(/0x[a-fA-F0-9]{40}/i);
     return m ? m[0].toLowerCase() : "";
   }
 
@@ -1428,11 +1672,17 @@
     if (!TARGET_TOKEN_RE.test(addr)) return;
     const tal = scrapeGmgnTaxAllocationFromFiber(card);
     if (!tal) return;
-    let entry = gmgnHostFeeFromItem({ a: addr, tax_allocation: tal });
+    const launchpad_platform = scrapeGmgnLaunchpadFromFiber(card);
+    let entry = gmgnHostFeeFromItem({
+      a: addr,
+      tax_allocation: tal,
+      launchpad_platform,
+      f: launchpad_platform ? { launchpad_platform } : undefined
+    });
     if (!entry) return;
     entry = applyDomSymbolsToHostFee(entry, card, "gmgn");
     entry = hydrateHostFeeBasket(entry, card, "gmgn");
-    queueHostFeeEntry(entry);
+    queueHostFeeEntry(finalizeHostFeeEntry(entry));
   }
 
   function processDebotReactTaxCard(card) {
@@ -1450,7 +1700,7 @@
     if (!entry) return;
     entry = applyDomSymbolsToHostFee(entry, scope, "debot");
     entry = hydrateHostFeeBasket(entry, scope, "debot");
-    queueHostFeeEntry(entry);
+    queueHostFeeEntry(finalizeHostFeeEntry(entry));
   }
 
   const GMGN_HOST_FEE_ROOT_SEL =
@@ -1494,11 +1744,23 @@
         if (col instanceof HTMLElement) push(col);
       }
     } else if (/gmgn\.ai/i.test(host)) {
-      document.querySelectorAll(GMGN_HOST_FEE_ROOT_SEL).forEach((el) => push(el));
-      if (!roots.length) {
-        const sample = document.querySelector('[href*="/bsc/token/0x"]');
-        const col = sample?.closest?.("div.flex.flex-col");
-        if (col instanceof HTMLElement) push(col);
+      if (/\/token\//i.test(path)) {
+        const header = document.querySelector(
+          '#token-base-address, [data-addr], [title^="0x"], [data-clipboard-text^="0x"]'
+        );
+        if (header instanceof HTMLElement) {
+          const box =
+            header.closest?.("div.flex, header, main, [class*='token']") ||
+            header.parentElement;
+          if (box instanceof HTMLElement) push(box);
+        }
+      } else {
+        document.querySelectorAll(GMGN_HOST_FEE_ROOT_SEL).forEach((el) => push(el));
+        if (!roots.length) {
+          const sample = document.querySelector('[href*="/bsc/token/0x"]');
+          const col = sample?.closest?.("div.flex.flex-col");
+          if (col instanceof HTMLElement) push(col);
+        }
       }
     }
     return roots.slice(0, HOST_FEE_OBSERVE_MAX_ROOTS);
