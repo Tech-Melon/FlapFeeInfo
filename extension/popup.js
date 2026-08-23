@@ -1017,7 +1017,7 @@
   function readVaultHideFromUI() {
     return normalizeVaultHide({
       enabled: vaultHideEnabled?.checked === true,
-      hideTaxVault: vaultHideState.hideTaxVault === true,
+      hideTaxVault: vaultHideTax?.checked === true,
       hideStockVault: vaultHideStock?.checked === true
     });
   }

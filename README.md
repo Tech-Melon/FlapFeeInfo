@@ -138,10 +138,11 @@ FlapFeeInfo\extension
 3. 点当前插件的 `重新加载`（或重新「加载已解压」指向 `extension/`）。
 4. **硬刷新** GMGN / Debot 目标页（否则可能仍是旧 content script）。
 
-当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.3**）。
+当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.4**）。
 
 ### 0.8.x 要点（近期）
 
+- **0.8.4**：修复金库屏蔽「屏蔽税收金库」勾选无法保存；总开关关闭时也可先勾选子项
 - **0.8.3**：币股 📈 单资产识别；篮子成分数量补全（security 拉全量）；单资产去 phantom 第二项；Tax 芯片顺序优先
 - **0.7.99**：GMGN/Debot 战壕快路径；徽章展示与金库/币龄列表过滤；久置切回更稳
 
