@@ -14,6 +14,15 @@
     '[data-sentry-source-file="PumpSubX.tsx"], [data-sentry-source-file="PumpSubAX.tsx"]';
   const GMGN_FIXED_SEARCH_ROOT_SELECTOR =
     '[data-sentry-source-file="SearchModalDetail.tsx"]';
+  // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
+  // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
+  const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.15: 顶栏 settled 后若侧栏仍有未画卡，禁止改 light-scan，继续扫 PumpSub。
+  // 0.8.14: K 线刷新后侧栏按 TokenItem 列轮询补画（禁 8ms/顶栏 href 把新创建饿死）。
+  // 0.8.13: K 线内嵌战壕新卡走 collectGmgnNewCardMutations + 视口快补（顶栏 settled 后不再饿死）。
+  // 0.8.12: K 线顶栏用 resolveQuoteSymbol；👨‍🍳 箭头把 NVDA/NVDAB 当股票芯片。
+  // 0.8.11: 新创建 host-fee 分红未齐先 ⏳；不取消 /modes；Tax 股票芯片不当底池。
+  // 0.8.10: 战壕→K线返回 — 徽章贴 .trenches-tax 右侧同行；name-after 当 Tax 已在则重挂。
   // 0.7.57: 热通道 — 主批 /modes 在途时，视口/新创建热 token 走第二条并行请求
   //          （GMGN 列表页 only，上限 12），消除新币撞上冷大批要排队的竞态；
   //          watchdog/resume/hardReset 同步回收热通道。
@@ -390,7 +399,7 @@
   const DEBUG_LOG = false;
   // Steady-state: painted badges free; unpainted prioritized.
   // v3: top_payout_symbol always annotated on largest tax segment (→SYM never omitted).
-  const PERSISTENT_CACHE_KEY = "flapFeeInfo.modeCache.v4";
+  const PERSISTENT_CACHE_KEY = "flapFeeInfo.modeCache.v5";
   // Popup toggles: which badge parts to show (default all true).
   const DISPLAY_PREFS_KEY = "flapFeeInfo.displayPrefs.v1";
   const DEFAULT_DISPLAY_PREFS = {
@@ -721,7 +730,6 @@
 
   function dedupeBasketAssets(rows) {
     const out = [];
-    const seenSym = new Set();
     const seenAddr = new Set();
     for (const row of rows) {
       if (!row || typeof row !== "object") continue;
@@ -729,10 +737,11 @@
       const symbol = compactBasketSymbol(row.symbol || row.name || "");
       const name = String(row.name || symbol || "").trim().slice(0, 48);
       if (!symbol && !name) continue;
-      if (address && seenAddr.has(address)) continue;
-      if (symbol && seenSym.has(symbol)) continue;
-      if (address) seenAddr.add(address);
-      if (symbol) seenSym.add(symbol);
+      if (address) {
+        if (seenAddr.has(address)) continue;
+        seenAddr.add(address);
+      }
+      // 无 address 时不去 symbol 重：同 symbol 双成分（如两个 SPCX）只能靠 address 区分
       out.push({ address, symbol: symbol || compactBasketSymbol(name), name: name || symbol });
     }
     return out;
@@ -775,10 +784,11 @@
     for (const row of rows) {
       if (isSingleAssetStockVault(entry) && domSyms.length === 1) break;
       const sym = compactBasketSymbol(row.symbol);
-      if (sym && usedSym.has(sym)) continue;
-      if (row.address && usedAddr.has(row.address)) continue;
-      if (row.address) usedAddr.add(row.address);
-      if (sym) usedSym.add(sym);
+      const addr = String(row.address || "").toLowerCase();
+      if (addr && usedAddr.has(addr)) continue;
+      if (!addr && sym && usedSym.has(sym)) continue;
+      if (addr) usedAddr.add(addr);
+      else if (sym) usedSym.add(sym);
       next.push(row);
     }
     return dedupeBasketAssets(next);
@@ -835,6 +845,8 @@
   }
 
   function dividendPayoutLooksNative(entry) {
+    const sym = compactDisplaySymbol(entry?.dividend_symbol || "");
+    if (sym && sym !== "BNB" && sym !== "WBNB") return false;
     const addr = String(entry?.dividend_token || entry?.top_payout_token || "")
       .trim()
       .toLowerCase();
@@ -857,6 +869,16 @@
     return m ? compactBasketSymbol(m[1]) : "";
   }
 
+  /** Tax 已画出分红图标，但 host-fee 仍是 BNB / 缺符号 → 必须重挂 */
+  function isGmgnHostFeeDomMismatch(card, entry) {
+    if (!isGmgnHost() || !entry || !entry.source_host) return false;
+    if ((Number(entry.dividend_bps) || 0) <= 0) return false;
+    const taxDiv = extractDividendSymbolFromTaxDom(card);
+    if (!taxDiv || taxDiv === "BNB") return false;
+    const cur = compactBasketSymbol(entry.dividend_symbol || "");
+    return !cur || cur === "BNB" || dividendPayoutLooksNative(entry);
+  }
+
   function enrichEntrySymbolsFromDom(card, entry) {
     if (!entry || !(card instanceof HTMLElement)) return entry;
     const domQuote = extractQuoteSymbolFromDom(card);
@@ -876,19 +898,41 @@
         changed = true;
       }
     }
-    if (!out.dividend_symbol && out.dividend_bps > 0) {
-      const divFromTax = extractDividendSymbolFromTaxDom(card);
-      if (divFromTax) {
+    const divFromTax = extractDividendSymbolFromTaxDom(card);
+    if (divFromTax && out.dividend_bps > 0) {
+      const cur = compactBasketSymbol(out.dividend_symbol || "");
+      // Tax 芯片图标后到：host-fee 常先写成 BNB，必须升级成 QQQB/GMEB
+      if (!cur || (dividendPayoutLooksNative(out) && divFromTax !== "BNB" && divFromTax !== cur)) {
         out.dividend_symbol = divFromTax;
+        if (out.top_payout_symbol) {
+          const topCur = compactBasketSymbol(out.top_payout_symbol);
+          if (!topCur || topCur === "BNB" || topCur === cur) {
+            out.top_payout_symbol = divFromTax;
+          }
+        } else {
+          out.top_payout_symbol = divFromTax;
+        }
         changed = true;
       }
     }
-    if (!out.dividend_symbol && out.dividend_bps > 0 && domQuote && dividendPayoutLooksNative(out)) {
+    if (
+      !out.dividend_symbol &&
+      out.dividend_bps > 0 &&
+      domQuote &&
+      isRealPoolQuoteSymbol(domQuote) &&
+      !looksLikeStockQuoteChip(domQuote, out) &&
+      dividendPayoutLooksNative(out)
+    ) {
       out.dividend_symbol = domQuote;
       changed = true;
     }
-    if (!out.quote_symbol && domQuote) {
-      out.quote_symbol = domQuote;
+    if (
+      !out.quote_symbol &&
+      domQuote &&
+      isRealPoolQuoteSymbol(domQuote) &&
+      !looksLikeStockQuoteChip(domQuote, out)
+    ) {
+      out.quote_symbol = displayPoolQuoteSymbol(domQuote);
       changed = true;
     }
     if (!out.top_payout_symbol) {
@@ -1166,11 +1210,10 @@
    */
   function isGmgnTokenTrenchSidebarEl(el) {
     if (!(el instanceof HTMLElement) || !isGmgnTokenPage()) return false;
+    if (!el.closest?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR)) return false;
     try {
       const r = el.getBoundingClientRect();
       if (r.width < 60 || r.height < 28) return false;
-      // 侧栏在屏左；图表主区通常 left > ~36% 视口
-      if (r.left > window.innerWidth * 0.42) return false;
       if (r.top < 52) return false;
       // 排除顶栏地址/总税率锁
       if (isGmgnHeaderMarkedCard(el) || isGmgnTokenHeaderCard(el)) return false;
@@ -1179,6 +1222,44 @@
     } catch (_e) {
       return false;
     }
+  }
+
+  /** K 线侧栏还有未画的 7777/8888/ffff TokenItem（刷新后顶栏先就绪时不能改 light-scan）。 */
+  function hasUnpaintedGmgnSidebarTargets() {
+    if (!isGmgnHost() || !isGmgnTokenPage()) return false;
+    try {
+      const roots = document.querySelectorAll(GMGN_FIXED_TRENCH_ROOT_SELECTOR);
+      const hrefSel =
+        "[href*='/bsc/token/'][href*='7777'], [href*='/bsc/token/'][href*='8888'], " +
+        "[href*='/bsc/token/'][href*='ffff'], [href*='/token/'][href*='7777'], " +
+        "[href*='/token/'][href*='8888'], [href*='/token/'][href*='ffff']";
+      for (let ri = 0; ri < roots.length; ri += 1) {
+        const root = roots[ri];
+        if (!(root instanceof HTMLElement)) continue;
+        const cards = root.querySelectorAll(
+          '[data-sentry-source-file="TokenItem.tsx"]'
+        );
+        const lim = Math.min(cards.length, 18);
+        for (let i = 0; i < lim; i += 1) {
+          const card = cards[i];
+          if (!(card instanceof HTMLElement)) continue;
+          const r = card.getBoundingClientRect();
+          if (r.width < 180 || r.height < 56 || r.bottom < 80 || r.top > window.innerHeight) {
+            continue;
+          }
+          const href = card.getAttribute("href") || "";
+          if (!TARGET_TOKEN_RE.test(extractAnyToken(href) || "")) {
+            const inner = card.querySelector(hrefSel);
+            const h2 = inner ? inner.getAttribute("href") || "" : "";
+            if (!TARGET_TOKEN_RE.test(extractAnyToken(h2) || "")) continue;
+          }
+          if (!card.querySelector(`[${ICON_DATA}="1"]`)) return true;
+        }
+      }
+    } catch (_err) {
+      return false;
+    }
+    return false;
   }
 
   function isNearGmgnTokenTrenchViewport(el) {
@@ -1200,48 +1281,86 @@
   function paintUnpaintedTargetViewportQuick(reason, rootHint = null, bypassGap = false) {
     if (!isGmgnHost()) return 0;
     if (!isExtensionContextValid() || !isTabVisible()) return 0;
-    if (isTokenEnterTransitionActive()) return 0;
+    const tokenPage = isGmgnTokenPage() || isTokenDetailRoute();
+    // K 线侧栏与首页战壕一样要补画；进 K 线过渡只挡首页整列扫描，不挡侧栏。
+    if (isTokenEnterTransitionActive() && !tokenPage) return 0;
     if (shouldDeferGmgnTrenchResizeWork()) return 0;
     if (isGmgnScrollCooling()) return 0;
     const now = Date.now();
     if (!bypassGap && now - lastViewportQuickAt < GMGN_VIEWPORT_QUICK_MIN_GAP_MS) return 0;
     lastViewportQuickAt = now;
-    const tokenPage = isGmgnTokenPage() || isTokenDetailRoute();
     let painted = 0;
     let queued = 0;
-    const cap = 10;
+    const cap = tokenPage ? 16 : 10;
     const t0 = performance.now();
-    const msCap = tokenPage ? 8 : 12;
+    const msCap = tokenPage ? 24 : 12;
     try {
-      const selector =
+      const hrefSelector =
         '[href*="/bsc/token/"][href*="0x"], [href*="/token/"][href*="0x"]';
+      const itemSelector = '[data-sentry-source-file="TokenItem.tsx"]';
       const items = [];
       const seen = new Set();
       const seenCards = new Set();
       const roots =
         rootHint instanceof HTMLElement && rootHint.isConnected
           ? [rootHint]
-          : getScanRoots();
+          : tokenPage
+            ? Array.from(document.querySelectorAll(GMGN_FIXED_TRENCH_ROOT_SELECTOR)).filter(
+                (root) => {
+                  if (!(root instanceof HTMLElement) || !root.isConnected) return false;
+                  const r = root.getBoundingClientRect();
+                  return (
+                    r.width >= 180 &&
+                    r.height >= 120 &&
+                    r.bottom > 0 &&
+                    r.top < window.innerHeight
+                  );
+                }
+              )
+            : getScanRoots();
       const fixedTrenchRoot = rootHint instanceof HTMLElement
         ? rootHint.matches?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR)
           ? rootHint
           : rootHint.closest?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR)
         : null;
-      const itemCap = tokenPage ? 100 : 80;
-      for (const root of roots) {
-        if (!(root instanceof HTMLElement) || !root.isConnected) continue;
-        if (root.matches?.(selector) && !seen.has(root)) {
-          seen.add(root);
-          items.push(root);
+      if (tokenPage && !fixedTrenchRoot) {
+        const buckets = roots.map((root) =>
+          Array.from(root.querySelectorAll?.(itemSelector) || []).filter((el) => {
+            if (!(el instanceof HTMLElement)) return false;
+            const r = el.getBoundingClientRect();
+            return r.width >= 180 && r.height >= 56 && r.bottom > 0 && r.top < window.innerHeight + 80;
+          })
+        );
+        const unpainted = [];
+        const paintedCards = [];
+        const maxRows = Math.max(0, ...buckets.map((b) => b.length));
+        for (let row = 0; row < maxRows; row += 1) {
+          for (let b = 0; b < buckets.length; b += 1) {
+            const el = buckets[b][row];
+            if (!el || seen.has(el)) continue;
+            seen.add(el);
+            if (el.querySelector?.(`[${ICON_DATA}="1"]`)) paintedCards.push(el);
+            else unpainted.push(el);
+          }
         }
-        const nested = root.querySelectorAll(selector);
-        for (let i = 0; i < nested.length && items.length < itemCap; i += 1) {
-          const item = nested[i];
-          if (seen.has(item)) continue;
-          seen.add(item);
-          items.push(item);
+        items.push(...unpainted, ...paintedCards);
+      } else {
+        const itemCap = tokenPage ? 100 : 80;
+        for (const root of roots) {
+          if (!(root instanceof HTMLElement) || !root.isConnected) continue;
+          if (root.matches?.(hrefSelector) && !seen.has(root)) {
+            seen.add(root);
+            items.push(root);
+          }
+          const nested = root.querySelectorAll(hrefSelector);
+          for (let i = 0; i < nested.length && items.length < itemCap; i += 1) {
+            const item = nested[i];
+            if (seen.has(item)) continue;
+            seen.add(item);
+            items.push(item);
+          }
+          if (items.length >= itemCap) break;
         }
-        if (items.length >= itemCap) break;
       }
       for (let i = 0; i < items.length; i += 1) {
         if (painted + queued >= cap) break;
@@ -1686,6 +1805,13 @@
         // GMGN 用户关闭「税收」展示时无 Tax 芯片 → 挂代币名行（与 Tax 同高度带）
         const nameMount = findGmgnTrenchNameMount(card);
         if (nameMount) return nameMount;
+        if (isGmgnTokenPage() && isGmgnTokenTrenchSidebarEl(card)) {
+          const row = card.querySelector?.(".trenches-tax");
+          if (row instanceof HTMLElement) {
+            row.dataset.flapMount = "gmgn-trench-tax";
+            return row;
+          }
+        }
         // 主战壕列：无 Tax/名行时不挂短地址行（会掉到头像/合约下方）。
         if (isGmgnFixedTrenchCard(card)) return null;
         // Token-page side cards must never fall back to the short-address row:
@@ -3151,8 +3277,10 @@
       if (entryHit) {
         try {
           const q =
-            normalizeQuoteSymbol(entryHit.quote_symbol || "", { allowCjk: true }) ||
-            "BNB";
+            resolveQuoteSymbol(
+              headerCard instanceof HTMLElement ? headerCard : existingGood,
+              entryHit
+            ) || "BNB";
           const presentation = computeBadgePresentation(entryHit, q, urlTok);
           if (presentation.label) {
             const textEl = existingGood.querySelector(".gmgn-fee-mode-icon__text");
@@ -3319,7 +3447,6 @@
       let q = "";
       if (!isFeeLoadingEntry(entry)) {
         q =
-          normalizeQuoteSymbol(entry.quote_symbol || "", { allowCjk: true }) ||
           (host instanceof HTMLElement ? resolveQuoteSymbol(host, entry) : "") ||
           "BNB";
       }
@@ -4647,7 +4774,9 @@
       if (shouldDeferGmgnTrenchResizeWork()) return;
       // Boot/progressive scans own the unsettled phase. Once the header is stable,
       // this queue updates only changed trench rows and never wakes the chart scanner.
-      if (isSpaQuiet() || !isTokenPageSettledWithBadge() || quickHasOpenOverlay()) return;
+      if (isSpaQuiet() || quickHasOpenOverlay()) return;
+      // 顶栏未稳时仍处理侧栏新卡，避免进 K 线后新创建空窗。
+      if (!isTokenPageSettledWithBadge() && gmgnEmbeddedDirtyCards.size === 0) return;
       // 滚动冷却中：不丢队列，等停滚后再补（避免 180ms 空转）
       if (isGmgnScrollCooling()) {
         const wait = Math.max(
@@ -4663,6 +4792,11 @@
 
       const cards = Array.from(gmgnEmbeddedDirtyCards);
       gmgnEmbeddedDirtyCards.clear();
+      cards.sort((a, b) => {
+        const ab = a.querySelector?.(`[${ICON_DATA}="1"]`) ? 1 : 0;
+        const bb = b.querySelector?.(`[${ICON_DATA}="1"]`) ? 1 : 0;
+        return ab - bb;
+      });
       let processed = 0;
       let painted = 0;
       let queued = 0;
@@ -5476,8 +5610,11 @@
         if (existing && existing.dataset.feeToken === token) {
           const er = existing.getBoundingClientRect();
           if (er.width >= 2 && er.height >= 2) {
-            // 占位要换成真数据
-            if (existing.dataset.feeLoading === "1") {
+            // 占位 / 掉到标题下一行 / 塞进 Tax 内芯 → 必须重挂
+            if (
+              existing.dataset.feeLoading === "1" ||
+              isGmgnTrenchMisplacedBadge(card, existing)
+            ) {
               if (paintListCardFromCacheFast(card, token, entry)) painted += 1;
             } else {
               painted += 1;
@@ -5551,8 +5688,18 @@
       wipeForbiddenMountBadges(card, true);
       return false;
     }
-    // 加载占位 / host-fee 未稳定禁止走 cache-fast「真徽章」路径
-    if (isFeeLoadingEntry(entry) || isHostFeeEntryPending(entry)) return false;
+    // 加载占位 / host-fee 未稳定：画 ⏳，禁止用 preview 当真徽章
+    if (isFeeLoadingEntry(entry) || isHostFeeEntryPending(entry)) {
+      return renderMode(card, token, FEE_LOADING_ENTRY);
+    }
+    // K→战壕 / 刷新后虚拟列表复用：强制重挂，避免 Tax 旁徽章漂到卡片中部
+    if (
+      isGmgnHost() &&
+      isGmgnFixedTrenchCard(card) &&
+      (isSpaListReturnSoft() || isListReturnTransitionActive())
+    ) {
+      return renderMode(card, token, entry, { forceRemount: true });
+    }
     // 行 CA 必须匹配 token，禁止用缓存画错行
     const idCa = extractCardHrefToken(card);
     if (idCa && idCa !== token) return false;
@@ -6190,8 +6337,13 @@
           } else if (hasGmgnTokenHeaderBadge()) {
             gmgnHeaderMissSince = 0;
             armGmgnHeaderDomWatch();
-            // Header OK — still light-kick left trench occasionally.
-            nextMs = TOKEN_GUARDIAN_HEALTHY_MS;
+            // 顶栏已稳：补画侧栏新创建/新进 CA（light-scan 不含战壕列）。
+            try {
+              paintUnpaintedTargetViewportQuick("token-guardian", null, true);
+            } catch (_trenchKick) {
+              // ignore
+            }
+            nextMs = 900;
           } else {
             if (!gmgnHeaderMissSince) gmgnHeaderMissSince = Date.now();
             const missAge = Date.now() - gmgnHeaderMissSince;
@@ -7097,6 +7249,21 @@
     if (listReturn && !isListReturnTransitionActive()) {
       armListReturnDomWatch();
       if (!isGmgnHost()) armListReturnKeepAlive();
+      if (isGmgnHost()) {
+        const scheduleRepair = (ms) => {
+          window.setTimeout(() => {
+            if (!isExtensionContextValid() || !isTabVisible()) return;
+            try {
+              repairGmgnTrenchBadgesAfterListReturn("list-return");
+            } catch (_rep) {
+              // ignore
+            }
+          }, ms);
+        };
+        scheduleRepair(120);
+        scheduleRepair(480);
+        scheduleRepair(1200);
+      }
     } else if (listReturn) {
       tryFinishListReturnTransition("route-settle");
     }
@@ -7957,6 +8124,14 @@
       }
       if (existing.dataset.feeLoading === "1") return false;
       if (isGmgnTrenchMisplacedBadge(card, existing)) return false;
+      const stableEntry = resolveEntry(marked);
+      if (stableEntry && isHostFeeEntryPending(stableEntry)) return false;
+      if (stableEntry && isGmgnHostFeeDomMismatch(card, stableEntry)) return false;
+      if (stableEntry) {
+        const wantBasket = getBasketAssetsForDisplay(stableEntry).length;
+        const haveBasket = Number(existing.dataset.feeBasketCount || 0);
+        if (wantBasket !== haveBasket) return false;
+      }
       // Text may lag dataset for a frame; prefer sig, fall back to text once.
       if (existing.textContent && existing.textContent !== existing.dataset.feeSig) {
         return false;
@@ -8059,9 +8234,16 @@
     scanGeneration += 1;
 
     // Capture before getCandidateNodes consumes pendingLightScan.
-    // Token SPA: never light-scan until HEADER badge is real (ghost list must not starve).
-    let lightScan =
-      pendingLightScan || (isTokenPageSettledWithBadge() && isTokenDetailRoute());
+    // Token SPA: header 就绪后才允许 light-scan；侧栏还有未画卡时必须继续扫战壕。
+    let lightScan = pendingLightScan;
+    if (
+      !lightScan &&
+      isTokenPageSettledWithBadge() &&
+      isTokenDetailRoute() &&
+      !(isGmgnTokenPage() && hasUnpaintedGmgnSidebarTargets())
+    ) {
+      lightScan = true;
+    }
     if (isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge()) {
       lightScan = false;
       pendingLightScan = false;
@@ -8408,6 +8590,11 @@
           document.contains(existing) &&
           existing.dataset.feeToken === token
         ) {
+          if (isGmgnTrenchMisplacedBadge(card, existing)) {
+            renderMode(card, token, entry, { forceRemount: true });
+            rendered += 1;
+            continue;
+          }
           // 正式数据已到：立刻把 ⏳待加载 换成真徽章
           if (existing.dataset.feeLoading === "1") {
             renderMode(card, token, entry, { forceRemount: false });
@@ -8421,7 +8608,8 @@
           if (
             label &&
             existing.dataset.feeSig === label &&
-            existing.textContent === existing.dataset.feeSig
+            existing.textContent === existing.dataset.feeSig &&
+            String(existing.dataset.feeBasketCount || "0") === String(basketCount || 0)
           ) {
             // Keep absolute coords in sync; mode mismatch → fall through to remount.
             const pos = getActiveBadgePosition(card);
@@ -9110,6 +9298,16 @@
     ) {
       forceRefresh = true;
     }
+    if (isGmgnTokenPage() && scanRootsCache.roots.length > 0) {
+      const trenchN = document.querySelectorAll(GMGN_FIXED_TRENCH_ROOT_SELECTOR).length;
+      let cachedTrenchN = 0;
+      for (let i = 0; i < scanRootsCache.roots.length; i += 1) {
+        if (scanRootsCache.roots[i]?.matches?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR)) {
+          cachedTrenchN += 1;
+        }
+      }
+      if (trenchN > cachedTrenchN) forceRefresh = true;
+    }
     if (
       !forceRefresh &&
       scanRootsCache.roots.length > 0 &&
@@ -9294,13 +9492,23 @@
       return uniqFast;
     }
     const host = location.hostname || "";
-    // 0.4.41: GMGN K-line settled light-scan must NOT rewalk 三列战壕 on every chart mutation.
-    // 0.4.22 still did side boards; real-world chart thrash made that the remaining jank.
+    // 0.4.41: 图表 mutation 不要扫整页。侧栏仍有未画卡时把 PumpSub 列加进 light roots。
     if (host.endsWith("gmgn.ai") && isGmgnTokenPage()) {
+      if (hasUnpaintedGmgnSidebarTargets()) {
+        getGmgnFixedSurfaceRoots().forEach((el) => {
+          if (!(el instanceof HTMLElement)) return;
+          if (el.matches?.(GMGN_FIXED_SEARCH_ROOT_SELECTOR)) return;
+          if (!el.matches?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR)) return;
+          const r = el.getBoundingClientRect();
+          if (r.width >= 180 && r.height >= 120 && r.top < window.innerHeight) {
+            roots.push(el);
+          }
+        });
+      }
       const uniqTok = [];
       for (const r of roots) {
         if (!uniqTok.includes(r) && r.isConnected) uniqTok.push(r);
-        if (uniqTok.length >= 3) break;
+        if (uniqTok.length >= 4) break;
       }
       return uniqTok;
     }
@@ -10457,7 +10665,7 @@
    * GMGN list: 视口上带 / 新创建列 未画正式徽章（可有 ⏳）→ 热路径。
    */
   function isGmgnHotUnpaintedToken(token) {
-    if (!isGmgnHost() || isTokenDetailRoute() || !token) return false;
+    if (!isGmgnHost() || !token) return false;
     try {
       // 已有正式徽章（非 loading）→ 非热
       const icon = document.querySelector(
@@ -10904,6 +11112,20 @@
       });
       confirmed.forEach(([token, entry]) => {
         applyModeToKnownCards(token, entry, cardsByToken.get(token) || []);
+        try {
+          const wantBasket = getBasketAssetsForDisplay(entry).length;
+          (cardsByToken.get(token) || []).forEach((card) => {
+            const icon = card.querySelector?.(`[${ICON_DATA}="1"]`);
+            if (
+              icon instanceof HTMLElement &&
+              Number(icon.dataset.feeBasketCount || 0) !== wantBasket
+            ) {
+              delete icon.dataset.feeSig;
+            }
+          });
+        } catch (_bcSig) {
+          // ignore
+        }
         // Tax-recv hide: use fee market_bps when list-hook missed first paint.
         try {
           ingestFeeEntryForTaxRecv(token, entry);
@@ -10912,6 +11134,7 @@
         }
       });
       persistConfirmedModes(confirmed);
+      broadcastBasketAddrCache(confirmed);
       if (taxRecvHidePrefs.enabled) {
         scheduleTaxRecvHideApply(40);
       }
@@ -10925,9 +11148,13 @@
       }
       // GMGN list: paint newly-cached viewport rows immediately (bounded).
       // Debot already applies via known marks; skip to avoid extra main-thread work.
-      if (isGmgnHost() && !isTokenDetailRoute()) {
+      if (isGmgnHost()) {
         try {
-          paintGmgnCachedViewportCards("request-ok");
+          if (isTokenDetailRoute()) {
+            paintUnpaintedTargetViewportQuick("request-ok", null, true);
+          } else {
+            paintGmgnCachedViewportCards("request-ok");
+          }
         } catch (_errPaint) {
           // ignore
         }
@@ -11253,6 +11480,11 @@
   }
 
   /** 币股篮子专用：保留 FXION/NVDAON 等区分度，仅剥 Flap 常见尾缀 B（NVDAB→NVDA） */
+  const STOCK_CHIP_ALIASES = {
+    FXION: "FXIO",
+    NVDAON: "NVDA"
+  };
+
   function compactBasketSymbol(symbol) {
     const s = String(symbol || "").trim();
     if (!s) return "";
@@ -11267,6 +11499,8 @@
     if (raw.length >= 5 && raw.endsWith("B") && raw !== "BNB") {
       return raw.slice(0, -1);
     }
+    const aliased = STOCK_CHIP_ALIASES[raw];
+    if (aliased) return aliased.length > 6 ? aliased.slice(0, 6) : aliased;
     return raw.length > 6 ? raw.slice(0, 6) : raw;
   }
 
@@ -11288,7 +11522,7 @@
     const stockish = entry.is_stocks_vault || (Array.isArray(assets) && assets.length >= 1);
     if (!stockish) return false;
     const n = normalizeBasketAssets(assets).length;
-    if (n < 2 || n > 4) return false;
+    if (n < 3 || n > 4) return false;
     const mkt = Number(entry.market_bps) || 0;
     const div = Number(entry.dividend_bps) || 0;
     return mkt >= 9000 || div >= 9000;
@@ -11314,8 +11548,15 @@
     if (!entry || isFeeLoadingEntry(entry)) return false;
     if (entry.__needsChain === true) return true;
     if (basketSecurityPending(entry)) return true;
-    if (basketLikelyTruncated(entry.basket_assets, entry)) return true;
     if (isStockVaultEntry(entry) && !basketSymbolsReady(entry.basket_assets)) return true;
+    // 新创建 WS preview：分红常先落成 BNB，Tax 图标 / /modes 未到之前不画真徽章
+    if (
+      entry.source_host &&
+      (Number(entry.dividend_bps) || 0) > 0 &&
+      dividendPayoutLooksNative(entry)
+    ) {
+      return true;
+    }
     return false;
   }
 
@@ -11664,12 +11905,22 @@
   }
 
   function looksLikeStockQuoteChip(sym, entry) {
-    const s = String(sym || "").toUpperCase();
+    const s = String(sym || "")
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "");
     if (!s || isRealPoolQuoteSymbol(s)) return false;
     if (stockChipMatchesBasket(s, entry)) return true;
     if (s === "FXION" || s === "FXIO") return true;
     // GMGN 币股芯片常见 NVDAB / SPCXB / TSLAB，不是 LP quote。
     if (s.length >= 4 && s.endsWith("B") && s !== "WBTC") return true;
+    // compactDisplaySymbol 会把 NVDAB→NVDA，创作者箭头仍不能用股票名
+    if (
+      /^(NVDA|FXIO|SPCX|GME|QQQ|MSFT|AAPL|TSLA|AMD|INTC|META|AMZN|GOOG|NFLX|COIN|MSTR|HOOD|PLTR|BABA|NIO|SOXL)(ON)?$/.test(
+        s
+      )
+    ) {
+      return true;
+    }
     return false;
   }
 
@@ -11709,7 +11960,12 @@
       }
       return vaultDefaultPoolQuote();
     }
-    return normalizeQuoteSymbol(entry.quote_symbol || "", { allowCjk: true });
+    const apiQ = normalizeQuoteSymbol(entry.quote_symbol || "", { allowCjk: true });
+    if (apiQ && isRealPoolQuoteSymbol(apiQ) && !looksLikeStockQuoteChip(apiQ, entry)) {
+      return displayPoolQuoteSymbol(apiQ);
+    }
+    if (siteStrategy.name === "gmgn") return vaultDefaultPoolQuote();
+    return apiQ;
   }
 
   /**
@@ -11736,8 +11992,14 @@
       return vaultDefaultPoolQuote();
     }
 
-    if (fromDom) return fromDom;
-    if (fromApi) return fromApi;
+    // 普通税币：GMGN Tax 芯片里的 /quotes 是分红/篮子，不是 LP。
+    // 卡片中部 NVDAB/QQQB 股票芯片同样不是底池（ORIX 👨‍🍳 误成 →NVDA）。
+    if (fromDom && isRealPoolQuoteSymbol(fromDom) && !looksLikeStockQuoteChip(fromDom, entry)) {
+      return displayPoolQuoteSymbol(fromDom);
+    }
+    if (fromApi && isRealPoolQuoteSymbol(fromApi) && !looksLikeStockQuoteChip(fromApi, entry)) {
+      return displayPoolQuoteSymbol(fromApi);
+    }
 
     // Only when API empty AND no DOM chip — typical WBNB pair on GMGN has no quote icon.
     if (siteStrategy.name === "gmgn") {
@@ -11782,31 +12044,40 @@
       }
     }
 
-    // GMGN RWA / stock quote icon: alt="NVDAB quote icon", src=/static/quotes/...
-    const quoteImg = card.querySelector(
-      'img[alt$=" quote icon"], img[alt*=" quote icon"], img[src*="/static/quotes/"]'
-    );
-    if (quoteImg) {
-      const alt = quoteImg.getAttribute("alt") || "";
-      const fromAlt = normalizeQuoteSymbol(alt.replace(/\s*quote\s*icon\s*$/i, ""), {
-        allowCjk: true
-      });
-      if (fromAlt) return fromAlt;
-      const src = quoteImg.currentSrc || quoteImg.getAttribute("src") || "";
-      const fromSrc = src.match(/\/quotes\/([^./?#]+)/i);
-      if (fromSrc) {
-        const sym = normalizeQuoteSymbol(fromSrc[1], { allowCjk: true });
-        if (sym) return sym;
-      }
-    }
+    const gmgnTax = isGmgnHost() ? card.querySelector(".trenches-tax") : null;
 
-    // GMGN special base quotes: USD1 / USDT / WETH (not under /static/quotes/)
+    // GMGN special base quotes: USD1 / USDT / WETH（Tax 内图标是分红，不当 LP）
     const specialImgs = card.querySelectorAll(
       'img[data-icon], img[src*="/static/icons/icon_usd"], img[src*="/static/icons/icon_usdt"], img[src*="/static/icons/icon_usdc"], img[src*="/static/icons/icon_weth"]'
     );
     for (let i = 0; i < specialImgs.length; i += 1) {
-      const special = matchGmgnSpecialQuoteIcon(specialImgs[i]);
+      const img = specialImgs[i];
+      if (gmgnTax && gmgnTax.contains(img)) continue;
+      const special = matchGmgnSpecialQuoteIcon(img);
       if (special) return special;
+    }
+
+    // GMGN /static/quotes：仅真实 LP（USD1 等）。Tax 内与股票芯片一律跳过。
+    const quoteImgs = card.querySelectorAll(
+      'img[alt$=" quote icon"], img[alt*=" quote icon"], img[src*="/static/quotes/"]'
+    );
+    for (let i = 0; i < quoteImgs.length; i += 1) {
+      const quoteImg = quoteImgs[i];
+      if (gmgnTax && gmgnTax.contains(quoteImg)) continue;
+      const alt = quoteImg.getAttribute("alt") || "";
+      const fromAlt = normalizeQuoteSymbol(alt.replace(/\s*quote\s*icon\s*$/i, ""), {
+        allowCjk: true
+      });
+      const src = quoteImg.currentSrc || quoteImg.getAttribute("src") || "";
+      const fromSrc = src.match(/\/quotes\/([^./?#]+)/i);
+      const sym =
+        fromAlt ||
+        (fromSrc ? normalizeQuoteSymbol(fromSrc[1], { allowCjk: true }) : "");
+      if (!sym) continue;
+      if (isGmgnHost() && (!isRealPoolQuoteSymbol(sym) || looksLikeStockQuoteChip(sym))) {
+        continue;
+      }
+      return sym;
     }
 
     // Debot coin / bstocks images (fallback when aria missing)
@@ -12696,20 +12967,69 @@
     return { mode, top_segment };
   }
 
+  function collectBasketAddrRows(entries) {
+    const rows = [];
+    const seen = new Set();
+    const ingest = (entry) => {
+      if (!entry || !Array.isArray(entry.basket_assets)) return;
+      for (const b of entry.basket_assets) {
+        const a = String(b?.address || "").toLowerCase();
+        const s = String(b?.symbol || b?.name || "").trim();
+        if (!/^0x[a-f0-9]{40}$/.test(a) || !s || seen.has(a)) continue;
+        seen.add(a);
+        rows.push({ address: a, symbol: s });
+      }
+    };
+    if (!entries) return rows;
+    if (Array.isArray(entries)) {
+      for (const item of entries) {
+        if (Array.isArray(item) && item[1]) ingest(item[1]);
+        else ingest(item);
+      }
+    }
+    return rows;
+  }
+
+  function broadcastBasketAddrCache(entries) {
+    const rows = collectBasketAddrRows(entries);
+    if (!rows.length) return;
+    try {
+      window.postMessage({ source: "flap-fee-info", type: "basket-addr-cache", rows }, "*");
+    } catch (_bc) {
+      // ignore
+    }
+  }
+
   function hostFeeEntryShouldApply(prev, entry) {
     if (!prev) return true;
-    if (entry.source_host && !prev.source_host) return true;
     if (entry.is_stocks_vault && !prev.is_stocks_vault) return true;
     const pb = normalizeBasketAssets(prev.basket_assets).length;
     const nb = normalizeBasketAssets(entry.basket_assets).length;
     if (nb > pb) return true;
     if (
       nb < pb &&
-      nb <= 4 &&
       entry.source_host &&
       (prev.is_stocks_vault || prev.is_vault)
     ) {
       return false;
+    }
+    if (
+      entry.source_host &&
+      !prev.source_host &&
+      prev.__needsChain !== true &&
+      basketSymbolsReady(prev.basket_assets) &&
+      basketSymbolsReady(entry.basket_assets) &&
+      pb > 0 &&
+      pb === nb
+    ) {
+      const prevSyms = basketDisplaySymbols(prev.basket_assets).sort().join(",");
+      const nextSyms = basketDisplaySymbols(entry.basket_assets).sort().join(",");
+      if (prevSyms && nextSyms && prevSyms !== nextSyms) return false;
+    }
+    if (entry.source_host && !prev.source_host) {
+      if (nb > pb) return true;
+      if (prev.label && prev.__needsChain !== true) return false;
+      return true;
     }
     if (entry.__needsChain !== true && prev.__needsChain === true) return true;
     if (
@@ -12781,7 +13101,10 @@
         entry.__basketPendingUntil > 0 &&
         Date.now() >= entry.__basketPendingUntil
       ) {
-        if (basketLikelyTruncated(entry.basket_assets, entry)) {
+        if (
+          basketLikelyTruncated(entry.basket_assets, entry) &&
+          normalizeBasketAssets(entry.basket_assets).length >= 3
+        ) {
           entry.__basketPendingUntil = Date.now() + 12000;
         } else {
           entry.__awaitSecurity = false;
@@ -12789,12 +13112,14 @@
         }
       }
       const prev = modeCache.get(token);
+      if (prev && !prev.source_host && prev.__needsChain !== true) {
+        // 链上结果已落盘：host-fee preview 不得覆盖
+        continue;
+      }
       if (prev && !hostFeeEntryShouldApply(prev, entry)) continue;
       modeCache.set(token, entry);
-      if (!entry.__needsChain) {
-        missingRetryState.delete(token);
-        requestQueue.delete(token);
-      }
+      // WS/列表 preview 经常缺分红符号；不要因为 host-fee「看起来完整」就取消 /modes
+      queueToken(token, { deferFlush: true });
       confirmed.push([token, entry]);
       try {
         ingestFeeEntryForTaxRecv(token, entry);
@@ -12809,6 +13134,7 @@
     if (confirmed.some(([, e]) => e.source_host === "debot")) {
       noteDebotHostFeeSeen();
     }
+    broadcastBasketAddrCache(confirmed.map(([, e]) => e));
     confirmed.forEach(([token, entry]) => {
       let eff = entry;
       const cards = findCardsByCa(token);
@@ -12823,10 +13149,12 @@
       }
       applyModeToKnownCards(token, eff, cards);
     });
-    if (isGmgnHost() && !isTokenDetailRoute()) {
+    if (isGmgnHost()) {
       try {
         paintUnpaintedTargetViewportQuick("host-fee", null, true);
-        paintGmgnCachedViewportCards("host-fee");
+        if (!isTokenDetailRoute()) {
+          paintGmgnCachedViewportCards("host-fee");
+        }
       } catch (_p) {
         // ignore
       }
@@ -12838,16 +13166,8 @@
       }
     }
     scheduleTaxRecvHideApply(30);
-    if (confirmed.some(([, e]) => e.__needsChain !== true)) {
-      cancelHostFeeGraceFlush();
-    }
-    confirmed.forEach(([token, entry]) => {
-      if (entry.__needsChain === true) queueToken(token, { deferFlush: true });
-    });
-    if (confirmed.some(([, e]) => e.__needsChain === true)) {
+    if (requestQueue.size > 0) {
       maybeFlushRequestQueue("host-fee-upgrade");
-    } else if (requestQueue.size === 0) {
-      cancelHostFeeGraceFlush();
     }
     if (needsHostTaxFeedPoll() && requestQueue.size > 0) {
       scheduleHostTaxFeedRetry("host-fee-done");
@@ -13776,7 +14096,19 @@
         top === "giggle" ||
         top === "binance"
       ) {
-        topSym = compactDisplaySymbol(entry.quote_symbol || domQuote || "");
+        const srcQ = entry.quote_symbol || domQuote || "";
+        if (
+          looksLikeStockQuoteChip(srcQ, entry) ||
+          looksLikeStockQuoteChip(compactBasketSymbol(srcQ), entry) ||
+          looksLikeStockQuoteChip(compactDisplaySymbol(srcQ), entry)
+        ) {
+          const fallback = domQuote || vaultDefaultPoolQuote();
+          topSym = looksLikeStockQuoteChip(fallback, entry)
+            ? compactDisplaySymbol(vaultDefaultPoolQuote())
+            : compactDisplaySymbol(fallback);
+        } else {
+          topSym = compactDisplaySymbol(srcQ);
+        }
       } else if (top === entry.top_segment) {
         topSym = compactDisplaySymbol(entry.top_payout_symbol || domQuote || "");
       }
@@ -14612,17 +14944,46 @@
     });
   }
 
-  /** GMGN 战壕列表：徽章紧贴 Tax 芯片右侧，避免 beforebegin 换行掉到下一行。 */
+  function findGmgnTrenchTaxHost(card) {
+    if (!(card instanceof HTMLElement) || !isGmgnHost()) return null;
+    const host = card.querySelector(GMGN_TRENCH_TAX_SELECTOR);
+    if (!(host instanceof HTMLElement)) return null;
+    try {
+      const r = host.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0 || r.height > 40) return null;
+    } catch (_err) {
+      return null;
+    }
+    return host;
+  }
+
+  function resolveGmgnTaxMountHost(taxEl) {
+    if (!(taxEl instanceof HTMLElement)) return taxEl;
+    const dedicated = taxEl.closest?.(GMGN_TRENCH_TAX_SELECTOR);
+    if (dedicated instanceof HTMLElement) return dedicated;
+    return taxEl;
+  }
+
+  /** GMGN 战壕列表：徽章紧贴 .trenches-tax 右侧，避免塞进 16px 内芯或掉到下一行。 */
   function placeGmgnListTaxBadge(taxEl, icon) {
     if (!(taxEl instanceof HTMLElement) || !(icon instanceof HTMLElement)) return;
     icon.dataset.feeMountSide = "tax-after";
-    taxEl.insertAdjacentElement("afterend", icon);
+    const host = resolveGmgnTaxMountHost(taxEl);
+    host.insertAdjacentElement("afterend", icon);
   }
 
-  /** GMGN 关闭税收展示时：挂代币名行右侧（与 Tax 同视觉带）。 */
+  /** GMGN 关闭税收展示时：挂进代币名行内部右侧（与 Tax 同视觉带）。 */
   function placeGmgnListNameBadge(nameEl, icon) {
     if (!(nameEl instanceof HTMLElement) || !(icon instanceof HTMLElement)) return;
     icon.dataset.feeMountSide = "name-after";
+    if (nameEl.dataset.flapMount === "gmgn-trench-name") {
+      try {
+        nameEl.appendChild(icon);
+        return;
+      } catch (_err) {
+        // fall through
+      }
+    }
     nameEl.insertAdjacentElement("afterend", icon);
   }
 
@@ -14735,27 +15096,93 @@
     anchor.insertAdjacentElement("beforebegin", icon);
   }
 
-  /** GMGN 主战壕三列（非搜索弹层 / 非 K 线顶栏）。 */
+  /** GMGN 主战壕三列（含 K 线左侧内嵌战壕，不含搜索弹层 / 顶栏）。 */
   function isGmgnFixedTrenchCard(card) {
-    return (
-      isGmgnHost() &&
-      card instanceof HTMLElement &&
-      card.dataset.flapOverlayCard !== "1" &&
-      !isInsideOverlayDialog(card) &&
-      !isGmgnTokenPage() &&
-      !!card.closest?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR)
-    );
+    if (
+      !isGmgnHost() ||
+      !(card instanceof HTMLElement) ||
+      card.dataset.flapOverlayCard === "1" ||
+      isInsideOverlayDialog(card)
+    ) {
+      return false;
+    }
+    if (!card.closest?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR)) return false;
+    if (isGmgnTokenPage()) return isGmgnTokenTrenchSidebarEl(card);
+    return true;
   }
 
-  /** 战壕徽章误挂到头像/短地址行（Tax 右侧才是正确位置）。 */
+  function repairGmgnTrenchBadgesAfterListReturn(_reason) {
+    if (!isGmgnHost() || isGmgnTokenPage()) return 0;
+    let repaired = 0;
+    const icons = Array.from(document.querySelectorAll(`[${ICON_DATA}="1"]`));
+    for (let i = 0; i < icons.length; i += 1) {
+      const icon = icons[i];
+      if (!(icon instanceof HTMLElement)) continue;
+      if (icon.dataset.feeHeader === "1") continue;
+      const card =
+        icon.closest(`[${CARD_DATA}]`) ||
+        icon.closest('div[href*="/token/"]') ||
+        icon.closest('a[href*="/token/"]');
+      if (!(card instanceof HTMLElement)) {
+        try {
+          icon.remove();
+          repaired += 1;
+        } catch (_orphan) {
+          // ignore
+        }
+        continue;
+      }
+      if (!isGmgnFixedTrenchCard(card)) continue;
+      const tok = String(icon.dataset.feeToken || card.dataset[CARD_MARK] || "")
+        .trim()
+        .toLowerCase();
+      if (!TARGET_TOKEN_RE.test(tok)) continue;
+      const misplaced = isGmgnTrenchMisplacedBadge(card, icon);
+      if (!misplaced) continue;
+      removeAllBadgesForCard(card, tok);
+      repaired += 1;
+      const entry = resolveEntry(tok);
+      if (entry && !isHostFeeEntryPending(entry)) {
+        renderMode(card, tok, entry, { forceRemount: true });
+      }
+    }
+    return repaired;
+  }
+
+  /** 战壕徽章必须贴在 .trenches-tax 右侧同行；name-after 在 Tax 已出现时算错位。 */
   function isGmgnTrenchMisplacedBadge(card, icon) {
     if (!isGmgnFixedTrenchCard(card)) return false;
     if (!(icon instanceof HTMLElement)) return false;
+    const taxHost = findGmgnTrenchTaxHost(card);
+    if (taxHost) {
+      if (icon.dataset.feeMountSide !== "tax-after") return true;
+      if (icon.previousElementSibling !== taxHost) return true;
+      try {
+        const tr = taxHost.getBoundingClientRect();
+        const ir = icon.getBoundingClientRect();
+        if (tr.width <= 0 || ir.width <= 0) return true;
+        if (Math.abs(ir.top - tr.top) > 10) return true;
+        if (ir.left + 2 < tr.right - 6) return true;
+      } catch (_geo) {
+        return true;
+      }
+      return false;
+    }
     if (icon.dataset.feeLoading === "1") return false;
+    if (!card.contains(icon)) {
+      try {
+        const cr = card.getBoundingClientRect();
+        const ir = icon.getBoundingClientRect();
+        if (cr.width <= 0 || ir.width <= 0) return true;
+        if (Math.abs(ir.top - cr.top) > cr.height * 0.65) return true;
+        if (ir.left < cr.left - 8 || ir.left > cr.right + 24) return true;
+      } catch (_out) {
+        return true;
+      }
+    }
     const side = icon.dataset.feeMountSide || "";
-    if (side !== "tax-after" && side !== "name-after") return true;
-    const anchor =
-      side === "tax-after" ? findTaxTag(card) : findGmgnTrenchNameMount(card);
+    if (side !== "name-after") return true;
+    const anchor = findGmgnTrenchNameMount(card);
     if (!(anchor instanceof HTMLElement)) return false;
     try {
       const tr = anchor.getBoundingClientRect();
@@ -14784,6 +15211,12 @@
         Date.now() - cached.at < GMGN_TAX_MOUNT_CACHE_MS
       ) {
         return cached.el;
+      }
+      const dedicated = findGmgnTrenchTaxHost(card);
+      if (dedicated) {
+        dedicated.dataset.flapMount = "gmgn-trench-tax";
+        gmgnTaxMountCache.set(card, { at: Date.now(), el: dedicated, kind: "tax" });
+        return dedicated;
       }
     }
 
@@ -15320,6 +15753,7 @@
                 fetched_at: Math.floor(value.fetchedAt / 1000)
               });
             });
+            broadcastBasketAddrCache([...persistentCache.values()]);
           }
         } catch (error) {
           if (!String(error?.message || error).includes("Extension context invalidated")) {
@@ -15542,7 +15976,8 @@
     // take a direct bounded path and do not wait for the regular scan interval.
     if (isGmgnHost()) {
       if (!gmgnMutationLooksRelevant(records)) return;
-      if (!isTokenDetailRoute() && collectGmgnNewCardMutations(records) > 0) return;
+      // K 线内嵌战壕与首页一样：新卡走独立快路径，不把插入交给 chart light-scan。
+      if (collectGmgnNewCardMutations(records) > 0) return;
     }
     if (isDebotHost() && !debotMutationLooksRelevant(records)) {
       return;
@@ -15790,7 +16225,22 @@
           light: false,
           bypassForceGap: true
         });
+        try {
+          paintUnpaintedTargetViewportQuick("boot-trench-800", null, true);
+        } catch (_trench800) {
+          // ignore
+        }
       }, 800);
+      [1400, 2400, 4000].forEach((ms) => {
+        window.setTimeout(() => {
+          if (!isExtensionContextValid() || !isTabVisible() || !isGmgnTokenPage()) return;
+          try {
+            paintUnpaintedTargetViewportQuick(`boot-trench-${ms}`, null, true);
+          } catch (_bootTrench) {
+            // ignore
+          }
+        }, ms);
+      });
     } else {
       scheduleScan(GMGN_FIRST_SCAN_DELAY_MS, { force: true, immediate: false });
     }

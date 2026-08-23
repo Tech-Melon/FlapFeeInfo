@@ -558,10 +558,16 @@ python tools/ctl.py watchdog-run
   - `0.7.57`：热通道并行请求 — 主批 /modes 在途时，GMGN 列表页热 token（视口/新创建未画，上限 12）走第二条并行 /modes，不再被单飞 `batchActive` 锁排队；共享 `processModesResponse`；watchdog/resume/hardReset 同步回收热通道。Worker 同步：mem miss 后 **KV 读与回源并行**（js-mcp 实测 KV 冷读 ~250ms 且新币必 miss；新卡 ⏳→徽章 p50 1107→943ms）
  - `0.7.56`：新币徽章提速 — 插件新卡组批窗 500→200ms（满 2 张即发）、热路径单 token 组批 200→120ms；Worker `DIRECT_FILL_CAP` 12→24（首屏冷批一轮 wait_chain 回齐）；后端 `FLAP_FEE_RPC_RPS_LIMIT` 30→40（QN 24h 零 429，有余量）
  - `0.7.55`：文章样式降载与可调 — GMGN 上 observer 不订阅 characterData（战壕价格跳动不再进回调）；禁区全页清扫仅路由变化时执行；长文（>400 字）词典整词只出现一次的不标（词频降噪，复用已收集命中不加遍历）；屏蔽词（弹窗管理 + 双击胶囊即屏蔽，`skips` 存入 articleStyle.v1，覆盖词表/大写/英文高亮全通道）；胶囊配色跟随 badgeTheme 深浅主题；清 CSS.highlights 死代码；句首全名 lookahead 容忍 1–2 个空格
-- 插件当前版本：见 `extension/manifest.json`（**0.7.71**，公开无剪切板）
+ - `0.8.10`：GMGN 战壕徽章挂 `.trenches-tax` 右侧同行；K 线返回后 name-after / Tax 内芯错位强制重挂
+ - `0.8.11`：新创建 host-fee 分红仍是 BNB 时先 ⏳；host-fee 不再取消 /modes；Tax 股票芯片不当底池
+ - `0.8.12`：K 线顶栏底池与战壕同一过滤；👨‍🍳 箭头忽略 NVDAB/NVDA 股票芯片
+ - `0.8.13`：K 线内嵌战壕新卡走首页同一快路径；host-fee/modes/guardian 视口快补侧栏
+ - `0.8.14`：K 线刷新后按 TokenItem 列轮询补画新创建（不再被顶栏 href / 8ms 预算饿死）
+ - `0.8.15`：顶栏 settled 后侧栏仍有未画卡则禁止 light-scan，继续扫 PumpSub 新创建
+- 插件当前版本：见 `extension/manifest.json`（**0.8.15**，公开无剪切板）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
-- page-hook：`HOOK_VER` **56**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
-- 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v4`）  
+- page-hook：`HOOK_VER` **80**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+- 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  
 - 尾号屏蔽：`flapFeeInfo.suffixHide.v1` = `{ enabled, rules:[{id,suffix,enabled}] }`（最多 24 条 hex 1–12 位）

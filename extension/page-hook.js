@@ -624,11 +624,85 @@
     return "";
   }
 
-  /** Flap 币股 vault 常见篮子成分（GMGN/Debot 列表常只给 address） */
+  const VAULT_STOCK_ADDR_LS = "flapFeeInfo.basketAddr.v1";
+  /** Flap 币股 vault 篮子成分 address → 链上 symbol（GMGN 芯片名勿硬编码；/modes 可回填扩展） */
   const KNOWN_VAULT_STOCK_SYMBOL_BY_ADDR = {
-    "0x02fca66c1d1afb4e2a7884261eb00f63598a7436": "FXION",
-    "0x9b8e987e6fec8cf1380c4dca7071e2c7853aeea1": "NVDAB"
+    "0x02fca66c1d1afb4e2a7884261eb00f63598a7436": "NVDA",
+    "0x9b8e987e6fec8cf1380c4dca7071e2c7853aeea1": "FXIO",
+    "0x205812cdbed920aff76c6580abd681a46d11efc7": "QQQB",
+    "0xa9ee28c80f960b889dfbd1902055218cba016f75": "NVDA",
+    "0x390a684ef9cade28a7ad0dfa61ab1eb3842618c4": "AAPL",
+    "0x2494b603319d4d9f9715c9f4496d9e0364b59d93": "TSLA",
+    "0x5b1910eaad6450e50f816082aa078c41f10c292f": "TSLA",
+    "0x6bfe75d1ad432050ea973c3a3dcd88f02e2444c3": "MSFT",
+    "0x091fc7778e6932d4009b087b191d1ee3bac5729a": "GOOG",
+    "0xd0a58bc9d88d3ff48c0294cb7e45937d0e41a928": "SPCX",
+    "0x0cde6936d305d5b34667fc46425e852efd73559a": "QQQO",
+    "0x6a708ead771238919d85930b5a0f10454e1c331a": "SPYO",
+    "0xbe9d156892e55e7154bcd3cb0fea677f9d3103e1": "SPCX",
+    "0xcdf2f3e0fa43c47a6662a91c9e4a7c5f69762699": "MUB",
+    "0x75fd4cf6f8392e41e70391d60c90c0d5211603a1": "AMDB",
+    "0x431a3bee82e2ca41e49895cbece5bb0f76a89b7a": "AAPL",
+    "0x7138b48df7d98d7e3cc221bfe7192d0a178182d8": "SPYB",
+    "0x3f53de71c126bdabae20f9cd64848d317f6c3238": "GOOG"
   };
+
+  /** GMGN /quotes 芯片名 → 链上 symbol（FXION 等无尾缀 B，compact 剥不掉） */
+  const STOCK_CHIP_ALIASES = {
+    FXION: "FXIO",
+    NVDAON: "NVDA"
+  };
+
+  function loadVaultStockAddrCache() {
+    try {
+      const raw = localStorage.getItem(VAULT_STOCK_ADDR_LS);
+      if (!raw) return;
+      const obj = JSON.parse(raw);
+      if (!obj || typeof obj !== "object") return;
+      for (const [a, s] of Object.entries(obj)) {
+        const addr = String(a || "")
+          .trim()
+          .toLowerCase();
+        const sym = String(s || "").trim();
+        if (/^0x[a-f0-9]{40}$/.test(addr) && sym) {
+          KNOWN_VAULT_STOCK_SYMBOL_BY_ADDR[addr] = sym;
+        }
+      }
+    } catch (_ls) {
+      // ignore
+    }
+  }
+
+  function saveVaultStockAddrCache() {
+    try {
+      localStorage.setItem(
+        VAULT_STOCK_ADDR_LS,
+        JSON.stringify(KNOWN_VAULT_STOCK_SYMBOL_BY_ADDR)
+      );
+    } catch (_ls) {
+      // ignore
+    }
+  }
+
+  function learnVaultStockSymbols(rows) {
+    if (!Array.isArray(rows) || !rows.length) return false;
+    let changed = false;
+    for (const row of rows) {
+      const a = String(row?.address || "")
+        .trim()
+        .toLowerCase();
+      const s = String(row?.symbol || row?.name || "").trim();
+      if (!/^0x[a-f0-9]{40}$/.test(a) || !s) continue;
+      if (KNOWN_VAULT_STOCK_SYMBOL_BY_ADDR[a] !== s) {
+        KNOWN_VAULT_STOCK_SYMBOL_BY_ADDR[a] = s;
+        changed = true;
+      }
+    }
+    if (changed) saveVaultStockAddrCache();
+    return changed;
+  }
+
+  loadVaultStockAddrCache();
 
   function compactBasketSymbol(symbol) {
     const s = String(symbol || "").trim();
@@ -644,7 +718,19 @@
     if (raw.length >= 5 && raw.endsWith("B") && raw !== "BNB") {
       return raw.slice(0, -1);
     }
+    const aliased = STOCK_CHIP_ALIASES[raw];
+    if (aliased) return aliased.length > 6 ? aliased.slice(0, 6) : aliased;
     return raw.length > 6 ? raw.slice(0, 6) : raw;
+  }
+
+  function resolveStockBasketSymbol(sym, address) {
+    const a = String(address || "")
+      .trim()
+      .toLowerCase();
+    if (a && KNOWN_VAULT_STOCK_SYMBOL_BY_ADDR[a]) {
+      return compactBasketSymbol(KNOWN_VAULT_STOCK_SYMBOL_BY_ADDR[a]);
+    }
+    return compactBasketSymbol(sym);
   }
 
   function gmgnTokenRowSymbol(t, multi) {
@@ -663,10 +749,10 @@
     }
     if (!sym && address) sym = symbolFromKnownStockAddress(address);
     if (!sym && !multi && address) sym = symbolFromKnownStockAddress(address);
-    return sym;
+    return resolveStockBasketSymbol(sym, address);
   }
 
-  /** GMGN 列表/WS 常只 preview 2–4 个 dividend_tokens；完整篮子靠 security 或后续 fiber */
+  /** GMGN 列表/WS 常只 preview 3–4 个 dividend_tokens；2 成分 vault 常为完整篮子 */
   function basketLikelyTruncated(basket_assets, entry) {
     if (!entry || !entry.is_vault) return false;
     const stockish =
@@ -674,7 +760,7 @@
       (Array.isArray(basket_assets) && basket_assets.length >= 1);
     if (!stockish) return false;
     const n = Array.isArray(basket_assets) ? basket_assets.length : 0;
-    if (n < 2 || n > 4) return false;
+    if (n < 3 || n > 4) return false;
     const mkt = Number(entry.market_bps) || 0;
     const div = Number(entry.dividend_bps) || 0;
     return mkt >= 9000 || div >= 9000;
@@ -832,6 +918,7 @@
       const multi = raw.length > 1;
       if (!sym && address && !multi) sym = symbolFromKnownStockAddress(address);
       if (!sym) continue;
+      sym = resolveStockBasketSymbol(sym, address);
       out.push({
         address,
         symbol: sym.slice(0, 16),
@@ -899,7 +986,6 @@
 
   function dedupeBasketAssets(rows) {
     const out = [];
-    const seenSym = new Set();
     const seenAddr = new Set();
     for (const row of rows) {
       if (!row || typeof row !== "object") continue;
@@ -907,10 +993,10 @@
       const symbol = compactBasketSymbol(row.symbol || row.name || "");
       const name = String(row.name || symbol || "").trim().slice(0, 48);
       if (!symbol && !name) continue;
-      if (address && seenAddr.has(address)) continue;
-      if (symbol && seenSym.has(symbol)) continue;
-      if (address) seenAddr.add(address);
-      if (symbol) seenSym.add(symbol);
+      if (address) {
+        if (seenAddr.has(address)) continue;
+        seenAddr.add(address);
+      }
       out.push({ address, symbol: symbol || compactBasketSymbol(name), name: name || symbol });
     }
     return out;
@@ -962,10 +1048,11 @@
     for (const row of rows) {
       if (isSingleAssetStockVault(entry) && domSyms.length === 1) break;
       const sym = compactBasketSymbol(row.symbol);
-      if (sym && usedSym.has(sym)) continue;
-      if (row.address && usedAddr.has(row.address)) continue;
-      if (row.address) usedAddr.add(row.address);
-      if (sym) usedSym.add(sym);
+      const addr = String(row.address || "").toLowerCase();
+      if (addr && usedAddr.has(addr)) continue;
+      if (!addr && sym && usedSym.has(sym)) continue;
+      if (addr) usedAddr.add(addr);
+      else if (sym) usedSym.add(sym);
       next.push(row);
     }
     return dedupeBasketAssets(next);
@@ -992,7 +1079,7 @@
         const fromAddr = symbolFromKnownStockAddress(row.address);
         if (!fromAddr) return row;
         changed = true;
-        const sym = compactBasketSymbol(fromAddr);
+        const sym = resolveStockBasketSymbol(fromAddr, row.address);
         return { ...row, symbol: sym, name: row.name || sym };
       });
       if (!changed) return entry;
@@ -1026,8 +1113,11 @@
       entry.__awaitSecurity = false;
     }
     if (basketLikelyTruncated(entry.basket_assets, entry)) {
-      entry.__awaitSecurity = true;
-      entry.__basketPendingUntil = Date.now() + 12000;
+      const n = Array.isArray(entry.basket_assets) ? entry.basket_assets.length : 0;
+      if (n >= 3) {
+        entry.__awaitSecurity = true;
+        entry.__basketPendingUntil = Date.now() + 12000;
+      }
     } else if (!entry.__needsChain) {
       entry.__awaitSecurity = false;
       entry.__basketPendingUntil = 0;
@@ -1570,7 +1660,7 @@
     if (img) {
       const src = img.currentSrc || img.getAttribute("src") || "";
       const m = src.match(/\/quotes\/([^./?#]+)/i);
-      if (m) return String(m[1]).trim().toUpperCase();
+      if (m) return compactBasketSymbol(m[1]);
     }
     // BNB/WBNB 分红：GMGN 用 external-res 或 BNB 图标，无 /static/quotes/
     const hasReferral = tax.querySelector(
@@ -1580,7 +1670,7 @@
       const tal = scrapeGmgnTaxAllocationFromFiber(el);
       const sym = gmgnDividendSymbolFromTal(tal);
       if (sym) return sym;
-      return "BNB";
+      return "";
     }
     return "";
   }
@@ -3565,6 +3655,10 @@
       try {
         const data = event.data;
         if (!data || data.source !== "flap-fee-info") return;
+        if (data.type === "basket-addr-cache") {
+          learnVaultStockSymbols(data.rows);
+          return;
+        }
         if (data.type === "tax-recv-prefs") {
           const was = anyFilterEnabled();
           applyPrefsObject(data.prefs || {});

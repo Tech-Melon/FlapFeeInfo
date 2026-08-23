@@ -23,6 +23,10 @@ Cloudflare Worker
   REQUIRE_LICENSE=0  → 不校验（当前）
   REQUIRE_LICENSE=1  → 读 KV；无/过期/无 flap_perm → 401
         ↓
+插件 content.js（0.7.97+）
+  启动 POST /license/verify（可无 Bearer）→ enforced=true 且无有效密钥
+  → 封锁 host-fee 快路径、chrome.storage 缓存展示、/modes 入队与徽章绘制
+        ↓
 VPS Python API（算链上税收分配，与许可无关）
 ```
 
