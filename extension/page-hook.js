@@ -9,7 +9,7 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 80;
+  const HOOK_VER = 86;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -517,7 +517,8 @@
   }
 
   function gmgnHasBasketTokens(tal) {
-    return coerceDividendTokenList(tal?.dividend_tokens).length > 0;
+    // 单枚 dividend_tokens 是 💎 分红币（如 NVDAB），不是币股篮子。
+    return coerceDividendTokenList(tal?.dividend_tokens).length >= 2;
   }
 
   function gmgnLaunchpadFamily(item) {
@@ -544,7 +545,6 @@
   function gmgnVaultKind(tal, item) {
     if (!tal || typeof tal !== "object") return null;
     if (gmgnHasBasketTokens(tal) || tal.is_stocks_vault === true) return "stock";
-    if (gmgnIsFlapStocksLaunchpad(item)) return "stock";
     if (isGmgnVaultTal(tal)) return "tax";
     const lp = gmgnLaunchpadFamily(item);
     if (!lp.includes("flap")) return null;
@@ -800,21 +800,45 @@
   }
 
   function gmgnResolveQuoteSymbol(item, tal) {
+    const pool = item && typeof item.pool === "object" ? item.pool : null;
+    const data = item && typeof item.data === "object" ? item.data : null;
     const candidates = [
       item?.quote_symbol,
       item?.quote,
-      item?.q,
+      pool?.quote_symbol,
+      pool?.quote,
+      data?.quote_symbol,
       item?.f?.quote_symbol,
       item?.f?.quote,
-      item?.f?.q,
+      item?.f?.pool?.quote_symbol,
       tal?.quote_symbol,
       tal?.quote
     ];
+    let nativeHit = "";
     for (let i = 0; i < candidates.length; i++) {
       const s = String(candidates[i] || "").trim();
-      if (s) return s;
+      if (!s || s.length > 16) continue;
+      if (/^(BNB|WBNB)$/i.test(s)) {
+        if (!nativeHit) nativeHit = s;
+        continue;
+      }
+      if (/^[A-Za-z][A-Za-z0-9]{1,15}$/.test(s)) return s;
     }
-    return "";
+    const qAddr = String(
+      item?.quote_address ||
+        item?.quote_token ||
+        pool?.quote_address ||
+        data?.quote_address ||
+        item?.launch_quote_address ||
+        ""
+    )
+      .trim()
+      .toLowerCase();
+    const fromStock = symbolFromKnownStockAddress(qAddr);
+    if (fromStock) return fromStock;
+    const fromKnown = symbolFromKnownTokenAddress(qAddr);
+    if (fromKnown) return fromKnown;
+    return nativeHit || "";
   }
 
   function gmgnDividendSymbolFromTal(tal) {
@@ -859,8 +883,89 @@
       u.includes("trenches_rank") ||
       /meme\/v\d+\/ranks/i.test(u) ||
       u.includes("mutil_window_token_security_launchpad") ||
+      u.includes("mutil_window_token_info") ||
+      u.includes("multi_token_info") ||
       u.includes("token_info_brief")
     );
+  }
+
+  const WBNB_ADDR = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c";
+  let hostFeeQuotePatchTimer = 0;
+  const hostFeeQuotePatchPending = [];
+  const hostFeeQuotePatchDedupe = new Map();
+
+  function gmgnQuoteLooksNative(sym, addr) {
+    const s = String(sym || "").trim().toUpperCase();
+    const a = String(addr || "").trim().toLowerCase();
+    const nativeSym = !s || s === "BNB" || s === "WBNB";
+    const nativeAddr =
+      !a ||
+      a === WBNB_ADDR ||
+      a === "0x0000000000000000000000000000000000000000";
+    return nativeSym && nativeAddr;
+  }
+
+  function gmgnQuotePatchFromItem(item) {
+    if (!item || typeof item !== "object") return null;
+    const addr = gmgnAddr(item);
+    if (!TARGET_TOKEN_RE.test(addr)) return null;
+    const pool = item.pool && typeof item.pool === "object" ? item.pool : null;
+    const quote_symbol = String(
+      (pool && (pool.quote_symbol || pool.quote)) ||
+        item.quote_symbol ||
+        item.quote ||
+        ""
+    ).trim();
+    const quote_token = String(
+      (pool && (pool.quote_address || pool.quote_token)) ||
+        item.quote_address ||
+        item.quote_token ||
+        item.launch_quote_address ||
+        ""
+    )
+      .trim()
+      .toLowerCase();
+    if (gmgnQuoteLooksNative(quote_symbol, quote_token)) return null;
+    if (!quote_symbol && !/^0x[a-f0-9]{40}$/.test(quote_token)) return null;
+    return { address: addr, quote_symbol, quote_token };
+  }
+
+  function queueHostFeeQuotePatch(patch) {
+    if (!patch || !patch.address) return;
+    const key = `${patch.address}|${patch.quote_symbol}|${patch.quote_token}`;
+    const now = Date.now();
+    const prev = hostFeeQuotePatchDedupe.get(patch.address);
+    if (prev && prev.key === key && now - prev.at < HOST_FEE_DEDUPE_MS) return;
+    hostFeeQuotePatchDedupe.set(patch.address, { key, at: now });
+    hostFeeQuotePatchPending.push(patch);
+    if (hostFeeQuotePatchTimer) return;
+    hostFeeQuotePatchTimer = window.setTimeout(() => {
+      hostFeeQuotePatchTimer = 0;
+      const batch = hostFeeQuotePatchPending.splice(0, 48);
+      if (!batch.length) return;
+      try {
+        window.postMessage(
+          { source: "flap-fee-info", type: "host-fee-quote-patch", entries: batch },
+          "*"
+        );
+      } catch (_pm) {
+        // ignore
+      }
+    }, 0);
+  }
+
+  function collectGmgnPoolQuotesFromJson(json) {
+    if (!json || typeof json !== "object") return;
+    const data = json.data;
+    let rows = null;
+    if (Array.isArray(data)) rows = data;
+    else if (data && Array.isArray(data.tokens)) rows = data.tokens;
+    else if (Array.isArray(json.tokens)) rows = json.tokens;
+    if (!rows || !rows.length) return;
+    for (let i = 0; i < rows.length; i += 1) {
+      const patch = gmgnQuotePatchFromItem(rows[i]);
+      if (patch) queueHostFeeQuotePatch(patch);
+    }
   }
 
   function gmgnIsFourmeme(item, tal) {
@@ -1237,7 +1342,9 @@
       entry.buy_tax_bps || 0,
       entry.sell_tax_bps || 0,
       (entry.basket_assets || []).length,
-      (entry.basket_assets || []).map((b) => b.symbol).join("+")
+      (entry.basket_assets || []).map((b) => b.symbol).join("+"),
+      entry.quote_symbol || "",
+      entry.quote_token || ""
     ].join("|");
   }
 
@@ -1324,7 +1431,6 @@
       tal.is_stocks_vault === 1 ||
       tal.is_stocks_vault === "true" ||
       vaultKind === "stock" ||
-      gmgnIsFlapStocksLaunchpad(item) ||
       basket_assets.length >= 2;
     const tax = gmgnSecurityTaxBps(item);
     const quote_symbol = gmgnResolveQuoteSymbol(item, tal);
@@ -1337,8 +1443,14 @@
       giggle_charity_bps +
       binance_charity_bps;
     const isStockVault = is_stocks_vault || basket_assets.length > 0;
+    const divSym = String(dividend_symbol || "").trim().toUpperCase();
+    const dividendNeedsChain =
+      dividend_bps > 0 && (!divSym || divSym === "BNB" || divSym === "WBNB");
+    const vaultNeedsBasket = is_vault && !basketSymbolsReady(basket_assets);
     const needsChain =
       totalBps <= 0 ||
+      dividendNeedsChain ||
+      vaultNeedsBasket ||
       hostFeeBasketNeedsHydration(basket_assets, isStockVault, {
         is_vault,
         is_stocks_vault,
@@ -1363,6 +1475,11 @@
         .trim()
         .toLowerCase(),
       quote_symbol,
+      quote_token: String(
+        item?.quote_address || item?.quote_token || item?.pool?.quote_address || ""
+      )
+        .trim()
+        .toLowerCase(),
       dividend_symbol,
       top_payout_symbol: dividend_symbol || quote_symbol,
       __needsChain: needsChain
@@ -1419,8 +1536,14 @@
       giggle_charity_bps +
       binance_charity_bps;
     const isStockVault = is_stocks_vault || basket_assets.length > 0;
+    const divSym = String(dividend_symbol || "").trim().toUpperCase();
+    const dividendNeedsChain =
+      dividend_bps > 0 && (!divSym || divSym === "BNB" || divSym === "WBNB");
+    const vaultNeedsBasket = is_vault && !basketSymbolsReady(basket_assets);
     const needsChain =
       totalBps <= 0 ||
+      dividendNeedsChain ||
+      vaultNeedsBasket ||
       hostFeeBasketNeedsHydration(basket_assets, isStockVault, {
         is_vault,
         is_stocks_vault,
@@ -1481,6 +1604,7 @@
     if (d > 4) return;
     let handled = false;
     try {
+      collectGmgnPoolQuotesFromJson(json);
       // GMGN WS delta / update
       if (
         json.channel === "trenches_delta" ||
@@ -1575,6 +1699,7 @@
     try {
       const json = JSON.parse(text);
       collectHostFeesFromJson(json);
+      collectGmgnPoolQuotesFromJson(json);
       if (/meme\/v\d+\/ranks/i.test(u)) {
         flushHostFeePendingNow();
         try {
@@ -1652,8 +1777,79 @@
     }
   }
 
+  function gmgnSymbolFromPoolDom(el) {
+    if (!(el instanceof HTMLElement)) return "";
+    const bar = el.closest('[data-sentry-component="BaseInfoBar"]') || el;
+    const imgs = bar.querySelectorAll(
+      'img[src*="/static/quotes/"], img[src*="/quotes/"]'
+    );
+    for (let i = 0; i < imgs.length; i += 1) {
+      const img = imgs[i];
+      if (
+        img.closest?.(
+          '.trenches-tax, [data-sentry-component="TaxDividendTokenIcon"], [data-sentry-component="TaxDividendTokenIcons"], [data-sentry-component="ListTaxInfo"]'
+        )
+      ) {
+        continue;
+      }
+      const src = img.currentSrc || img.getAttribute("src") || "";
+      if (/\/static\/lpp\//i.test(src)) continue;
+      const m = src.match(/\/quotes\/([^./?#]+)/i);
+      if (!m) continue;
+      let file = String(m[1] || "")
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "");
+      const ver = file.match(/^([A-Z]{2,8})\d+$/);
+      if (ver) file = ver[1];
+      const sym = compactBasketSymbol(file);
+      if (sym) return sym;
+    }
+    return "";
+  }
+
+  function scrapeTokenInfoFromEl(el) {
+    if (!(el instanceof HTMLElement)) return null;
+    const fiberKey = Object.keys(el).find((k) => k.startsWith("__reactFiber"));
+    if (!fiberKey) return null;
+    let f = el[fiberKey];
+    for (let i = 0; i < 10 && f; i += 1) {
+      const p = f.memoizedProps || f.pendingProps;
+      const ti = p && p.tokenInfo;
+      if (ti && typeof ti === "object") {
+        const address = String(ti.address || ti.token || "")
+          .trim()
+          .toLowerCase();
+        const symbol = String(ti.symbol || ti.name || ti.ticker || "").trim();
+        if (symbol || address) return { address, symbol };
+      }
+      f = f.return;
+    }
+    return null;
+  }
+
+  function gmgnDividendTokenInfosFromDom(el) {
+    if (!(el instanceof HTMLElement)) return [];
+    const icons = el.querySelectorAll('[data-sentry-component="TaxDividendTokenIcon"]');
+    const out = [];
+    const seen = new Set();
+    for (let i = 0; i < icons.length; i += 1) {
+      const ti = scrapeTokenInfoFromEl(icons[i]);
+      if (!ti) continue;
+      const key = `${ti.address}|${ti.symbol}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(ti);
+    }
+    return out;
+  }
+
   function gmgnSymbolFromTaxDom(el) {
     if (!(el instanceof HTMLElement)) return "";
+    const infos = gmgnDividendTokenInfosFromDom(el);
+    if (infos.length === 1 && infos[0].symbol) {
+      const fromAddr = symbolFromKnownTokenAddress(infos[0].address);
+      return compactBasketSymbol(fromAddr || infos[0].symbol);
+    }
     const tax = el.querySelector(".trenches-tax");
     if (!tax) return "";
     const img = tax.querySelector('img[src*="/static/quotes/"]');
@@ -1698,9 +1894,26 @@
   function applyDomSymbolsToHostFee(entry, scopeEl, source) {
     if (!entry || !(scopeEl instanceof HTMLElement)) return entry;
     if (source === "gmgn") {
+      const infos = gmgnDividendTokenInfosFromDom(scopeEl);
+      if (infos.length) learnVaultStockSymbols(infos);
       const divSym = gmgnSymbolFromTaxDom(scopeEl);
       if (!entry.dividend_symbol && entry.dividend_bps > 0 && divSym) {
         entry.dividend_symbol = divSym;
+      }
+      if (!entry.quote_symbol) {
+        const poolSym = gmgnSymbolFromPoolDom(scopeEl);
+        if (poolSym) entry.quote_symbol = poolSym;
+      }
+      if (
+        (!entry.basket_assets || !entry.basket_assets.length) &&
+        infos.length >= 2
+      ) {
+        entry.basket_assets = infos.map((t) => ({
+          address: t.address || "",
+          symbol: compactBasketSymbol(t.symbol) || t.symbol,
+          name: t.symbol || ""
+        }));
+        entry.is_stocks_vault = true;
       }
       if (!entry.top_payout_symbol) {
         entry.top_payout_symbol = entry.dividend_symbol || entry.quote_symbol || "";
@@ -1753,6 +1966,38 @@
     };
     walk(root[fiberKey], 0);
     return found;
+  }
+
+  function scrapeGmgnQuoteFromFiber(root) {
+    const fiberKey = Object.keys(root).find((k) => k.startsWith("__reactFiber"));
+    if (!fiberKey) return { address: "", symbol: "" };
+    let found = null;
+    const pick = (p) => {
+      if (!p || typeof p !== "object") return null;
+      const data = p.data && typeof p.data === "object" ? p.data : null;
+      const addr = String(
+        (data && data.quote_address) || p.quote_address || p.quote_token || ""
+      )
+        .trim()
+        .toLowerCase();
+      const sym = String(
+        (data && data.quote_symbol) || p.quote_symbol || ""
+      ).trim();
+      if (/^0x[a-f0-9]{40}$/.test(addr) || sym) return { address: addr, symbol: sym };
+      return null;
+    };
+    const walk = (node, depth) => {
+      if (!node || depth > 55 || found) return;
+      const hit = pick(node.memoizedProps);
+      if (hit) {
+        found = hit;
+        return;
+      }
+      walk(node.child, depth + 1);
+      walk(node.sibling, depth + 1);
+    };
+    walk(root[fiberKey], 0);
+    return found || { address: "", symbol: "" };
   }
 
   function scrapeGmgnTaxAllocationFromFiber(root) {
@@ -1895,10 +2140,13 @@
     const tal = scrapeGmgnTaxAllocationFromFiber(card);
     if (!tal) return;
     const launchpad_platform = scrapeGmgnLaunchpadFromFiber(card);
+    const quote = scrapeGmgnQuoteFromFiber(card);
     let entry = gmgnHostFeeFromItem({
       a: addr,
       tax_allocation: tal,
       launchpad_platform,
+      quote_symbol: quote.symbol,
+      quote_address: quote.address,
       f: launchpad_platform ? { launchpad_platform } : undefined
     });
     if (!entry) return;

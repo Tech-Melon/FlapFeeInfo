@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.15",
-  "description": "FlapFeeInfo 0.8.15: 刷新 K 线后新创建未画完前不切 light-scan，整列补齐徽章。",
+  "version": "0.8.27",
+  "description": "FlapFeeInfo 0.8.27: 底池优先 Tax 外 quotes 文件名，BNB 当未齐回退。",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

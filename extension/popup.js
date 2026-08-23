@@ -616,9 +616,17 @@
     setLicenseCollapsed(!licenseCollapsed);
   }
 
+  function currentLicenseKey() {
+    return String(licenseKeyInput?.value || licenseState.key || "").trim();
+  }
+
   function updateLicenseRebindVisibility() {
     if (!licenseRebindBtn) return;
-    licenseRebindBtn.hidden = !Boolean(licenseState.key);
+    const typed = currentLicenseKey();
+    const show = Boolean(typed) && licenseDeviceMismatch === true;
+    licenseRebindBtn.hidden = !show;
+    const wrap = document.getElementById("licenseExtraActions");
+    if (wrap) wrap.hidden = !show;
   }
 
   function updateLicenseHeroSub() {
@@ -679,6 +687,11 @@
     if (!result.ok) {
       licenseVerified = false;
       licenseDeviceMismatch = result.deviceMismatch === true;
+      // 新设备验证冲突：先把密钥留在本机，才能显示并点击「换绑到此设备」
+      if (licenseDeviceMismatch && key) {
+        const saved = await saveLicense({ key });
+        if (saved) licenseState = saved;
+      }
       updateLicensePill();
       updateLicenseHeroSub();
       updateLicenseRebindVisibility();
@@ -833,6 +846,13 @@
         ev.preventDefault();
         void onLicenseSave();
       }
+    });
+    licenseKeyInput.addEventListener("input", () => {
+      const typed = String(licenseKeyInput.value || "").trim();
+      if (typed !== String(licenseState.key || "").trim()) {
+        licenseDeviceMismatch = false;
+      }
+      updateLicenseRebindVisibility();
     });
   }
 

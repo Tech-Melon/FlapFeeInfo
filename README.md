@@ -138,10 +138,22 @@ FlapFeeInfo\extension
 3. 点当前插件的 `重新加载`（或重新「加载已解压」指向 `extension/`）。
 4. **硬刷新** GMGN / Debot 目标页（否则可能仍是旧 content script）。
 
-当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.15**）。
+当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.27**）。
 
 ### 0.8.x 要点（近期）
 
+- **0.8.27**：底池/分红按稳妥回退链 — Tax 外/内 quotes 文件名优先，空/`BNB` 不压过 `quote_address` 目录
+- **0.8.26**：同一密钥在新设备验证冲突时显示「换绑到此设备」，不必先在旧设备保存过
+- **0.8.25**：GMGN 后补 `pool.quote`（NVDAB 等）会升级默认 🦋BNB；Tax 外池芯片与徽章不一致时重挂
+- **0.8.24**：文章重点样式可填带路径网址（如 `debot.ai/popout/xTracker`），不再误对整个 `debot.ai` 生效
+- **0.8.23**：Debot 卡片列停滚后对该列 cache-first 补画 + href 纠错（不再等 650ms 空闲扫描）
+- **0.8.22**：金库新卡缺篮子先 ⏳，WS/Tax 补全后升级 📈，不再停在 🎁→BNB
+- **0.8.21**：GMGN/Debot 新创建 host-fee 分红仍是 BNB 时继续打 `/modes`，不再永远卡 ⏳
+- **0.8.20**：Debot 徽章挂名称列外侧，长标题/待加仓不再把 Tax 旁徽章裁掉
+- **0.8.19**：Debot 战壕按行卡局部扫（对齐 GMGN）；pending 快重试；徽章挂 Tax 旁
+- **0.8.18**：tooltip 远端文案改 `textContent`，堵住篮子 `name` 的 `innerHTML`（issue #1）
+- **0.8.17**：GMGN 底池/税收图按角色解析；新 quote 走 `quotes.json`，新分红可读 Tax 芯片 `tokenInfo`
+- **0.8.16**：非 vault 底池认 SPCX 等 Tax 外芯片，不再误回退 BNB（币股 vault 仍是 BNB）
 - **0.8.15**：刷新 K 线后新创建未画完前不切 light-scan，整列补齐
 - **0.8.14**：刷新 K 线后「新创建」整列补画（不再只挂第一张）
 - **0.8.13**：K 线左侧战壕「新创建 / 待开盘 / 已开盘」新进 CA 即时补画徽章

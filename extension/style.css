@@ -86,6 +86,14 @@
   flex-shrink: 0 !important;
 }
 
+/* Trench row: sit beside the overflow-hidden name column, aligned with Tax. */
+.gmgn-fee-mode-icon--debot[data-fee-mount-side="tax-col"] {
+  align-self: flex-start;
+  margin-top: 12px;
+  margin-left: 4px;
+  margin-right: 6px;
+}
+
 .gmgn-fee-mode-icon--gmgn {
   margin-left: 0;
   margin-right: 6px;

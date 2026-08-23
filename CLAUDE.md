@@ -219,8 +219,12 @@ if lpBps > 0:              💧
 | Debot / Gungnir | `[aria-label*="流动池"]` / `img[alt]`（如 `BNB 流动池`） |
 | GMGN RWA/美股 | `img[alt$=" quote icon"]` 或 `/static/quotes/{sym}.png` |
 | GMGN 特殊报价 | `data-icon` / `/static/icons/icon_usd1_*` 等 → `USD1` / `USDT` / `USDC` / `WETH` |
-| GMGN 默认 BNB 池 | **常无图标**；BSC 上无特殊报价时默认 `BNB` |
-| **币股 vault** | 忽略 `/static/quotes/nvdab.png`、Debot bstocks 等股票芯片；Helper `quote` 为空时底池固定 `BNB` |
+| GMGN 默认 BNB 池 | **常无图标**（`quote_address=0x0`）；BSC 上无特殊报价时默认 `BNB` |
+| GMGN 税收分红图 | `TaxDividendTokenIcon`（`TaxDividendTokenIcons.tsx`）：`/static/quotes/{title}.png` 或 `external-res` logo；fiber `tokenInfo.{address,symbol}` |
+| GMGN 底池图 | Tax **外** `LaunchpadImageIcon` 的 `/static/quotes/`；**不是** `/static/lpp/` 发射台 logo |
+| GMGN 报价目录 | 同源 `/static/config/quotes.json`（`v`+`configs.{chain}[]`：`ca/title/iconSrcDark`）；新池子随 GMGN 更新，插件启动拉取 |
+| GMGN 非 vault 底池 | Tax 外 quotes 芯片 + `quote_address` 目录映射（`SPCXB`→`SPCX`、`QQQB`、`XAUT0`）；禁止当股票芯片回退 BNB |
+| **币股 vault** | 忽略 Tax 内 `TaxDividendTokenIcon` 篮子芯片；Helper `quote` 为空时底池固定 `BNB` |
 
 - 扫卡间隔：`SCAN_INTERVAL_MS = 500`  
 - Tab 恢复：仅 in-flight ≥12s 才 force recover，避免 Abort 风暴（`0.2.7+`）  
@@ -233,6 +237,7 @@ if lpBps > 0:              💧
 | `0x556f0944357fb9a789c4a374095d3ce9ffba7777` | fee `💎90%👨‍🍳10%` hybrid；有报价时 `🪙… \| 💎90%👨‍🍳10%` |
 | `0x789476401ce0df8805f6e8a9a1e7439aac117777` | `🎁100%` gift（币股 vault） |
 | `0x7f048908f1fcc57d836c258143004c4597937777` | 币股 `🦋BNB \| 📈NVDA&FXIO`（底池是 BNB，不是 NVDAB） |
+| `0x78471d87a30d2b073d1a775eccee299393157777` | 非 vault SPCX 底池 `🦋SPCX \| 💎→SPCX`（`Glorb/SPCXB`，禁止回退 BNB） |
 | `0x28e9053bd9c4057da73e99282818cc5c4bc07777` | 币股 `🦋BNB \| 📈FXIO`（底池是 BNB，不是 FXION） |
 | `0x28b8aa38bbcb083a481383151c03074463ceffff` | Four v2 慈善 `🎓50%💛50%` hybrid；有报价时 `🖐️GMEB \| 🎓50%→GMEB💛50%` |
 | GMGN BSC 默认 BNB 池 7777/8888 | `🪙BNB \| …` |
@@ -271,7 +276,7 @@ if lpBps > 0:              💧
 
 可选「复制即搜」（默认关，完整包独立区块，**仅 GMGN**）：与跳转 K 线**共用一条剪切板通道**（页内 copy/cut + `clipboardchange` + 前台轮询；**offscreen 同样分流**）。读到内容后三分流：文中第一个 EVM/Sol 地址且 search_v3 确认为代币 → 跳 K 线（若已开）；整段短文本且字数在设定范围内 → 切到已开的 GMGN 标签并打开搜索、填入 `input[name=new-search-input]`；钱包地址 / 超范围 / 含空格 / 网址 → **不跳不搜**。不必先点 GMGN。两个开关独立，但只挂一套监听。同一段只处理一次，再复制才再动。默认 2–8 字，上下限可单独改（1–32）。字数按 Unicode 字形计：**中文一字 = 英文一字母 = 1**（`生米`=2，`PEPE`=4）。剥前缀 `$`/`@`/包裹引号。开启同样要确认 + `clipboardRead`；与跳转共用权限、offscreen 与 `clipJump.seen.v1` 去重，两个都关才撤回权限 / 关掉 offscreen。
 
-可选「文章重点样式」（默认关，完整包独立区块）：源自微博监控 `formatAiText` 的阅读强调（引号 / `$ticker` / 大写缩写 / 百分比 / 中英实体）。圆角胶囊；引号后固定跟「复制」。中文实体三通道（`0.7.54`）：词典整词（≥3 字）、Segmenter 单字碎片合并（重建未登录词：美联储/鲍威尔/比特币/降息）、音译字连串（卡尔达舍夫/泽连斯基）；内置词表 + 自定义词为最高优先兜底。英文：驼峰/全大写/句中首字母大写专名；**句首大写不算信号**（短推文或紧跟第二个大写词的全名除外），全名跨空格合并（Bill Gates）。`@handle` 与金额不标；孤词抑制只作用于大写/百分比/$ 等形态类命中。只对已填域名注入。
+可选「文章重点样式」（默认关，完整包独立区块）：源自微博监控 `formatAiText` 的阅读强调（引号 / `$ticker` / 大写缩写 / 百分比 / 中英实体）。圆角胶囊；引号后固定跟「复制」。中文实体三通道（`0.7.54`）：词典整词（≥3 字）、Segmenter 单字碎片合并（重建未登录词：美联储/鲍威尔/比特币/降息）、音译字连串（卡尔达舍夫/泽连斯基）；内置词表 + 自定义词为最高优先兜底。英文：驼峰/全大写/句中首字母大写专名；**句首大写不算信号**（短推文或紧跟第二个大写词的全名除外），全名跨空格合并（Bill Gates）。`@handle` 与金额不标；孤词抑制只作用于大写/百分比/$ 等形态类命中。只对已填站点注入：主机名覆盖全站，带路径（如 `debot.ai/popout/xTracker`）只作用于该路径前缀。
 
 ---
 
@@ -416,7 +421,7 @@ python tools/ctl.py watchdog-run
 | 抽样 feeMatch:false（行 CA≠徽章） | 虚拟列表复用短窗 | **0.7.4+** 无身份不 stable + scrub 后 cache 重画 |
 | 剪切板跳转不生效 | 未授权 / iOS 禁后台读 / 文本过长或不像地址 | 弹窗里确认开启；Windows 允许读取剪切板；iOS 用「立即检测」或粘贴框 |
 | 复制短名没有弹出 GMGN 搜索 | 未开「复制即搜」/ 未授权 / 不在 GMGN 前台 / 字数超出或含空格 / 已搜过这段 | 完整包弹窗开启并刷新 GMGN；再复制一次才再搜 |
-| 文章重点样式没出现 | 未开开关 / 域名未加入 / 未授权该站 | 完整包弹窗「文章重点样式」添加域名并允许访问；刷新目标页 |
+| 文章重点样式没出现 | 未开开关 / 站点未加入 / 未授权 / 只加了路径但当前不在该路径 | 完整包弹窗添加主机名或 `debot.ai/popout/xTracker` 并允许访问；刷新目标页 |
 
 ---
 
@@ -564,9 +569,21 @@ python tools/ctl.py watchdog-run
  - `0.8.13`：K 线内嵌战壕新卡走首页同一快路径；host-fee/modes/guardian 视口快补侧栏
  - `0.8.14`：K 线刷新后按 TokenItem 列轮询补画新创建（不再被顶栏 href / 8ms 预算饿死）
  - `0.8.15`：顶栏 settled 后侧栏仍有未画卡则禁止 light-scan，继续扫 PumpSub 新创建
-- 插件当前版本：见 `extension/manifest.json`（**0.8.15**，公开无剪切板）
+ - `0.8.16`：非 vault 底池认 Tax 外芯片 / API quote（SPCX/QQQ 等），不再误判股票后回退 BNB；vault 仍 BNB
+ - `0.8.17`：GMGN 底池/税收图按 `TaxDividendTokenIcon` vs Tax 外 `/static/quotes` 角色解析；启动拉 `quotes.json` 预留新 quote；分红可读 `tokenInfo`（含 external-res 新代币）
+ - `0.8.18`：tooltip 篮子 name/底池/买卖税改 textContent；`basket_assets.name` 剥 `<>`（issue #1）
+ - `0.8.19`：Debot 战壕按 666×129 行卡局部扫 + Tax 旁挂载；pending 快重试/热通道/新卡 mutation（对齐 GMGN）
+ - `0.8.20`：Debot 徽章改挂 overflow:hidden 名称列外侧，长标题/待加仓不再裁掉
+ - `0.8.21`：host-fee 分红仍是 BNB 时 `__needsChain` 保持并继续 `/modes`，新创建不再卡 ⏳
+ - `0.8.22`：金库 preview 空篮子先 ⏳；后续 WS/Tax 图标篮子可覆盖链上空 🎁
+ - `0.8.23`：Debot 停滚对当前列 cache-first 补画 + href scrub（对齐 GMGN PumpSub settle）；K→战壕 soft 窗不再进入滚动冷却
+ - `0.8.24`：文章样式域名可带路径（`debot.ai/popout/xTracker`）；注入/权限/运行时按路径前缀匹配，不再剥成整站
+ - `0.8.25`：GMGN `mutil_window_token_info` 的 `pool.quote_symbol`（NVDAB）补丁升级默认 BNB；单枚 dividend_tokens 不再当币股 vault（避免把 NVDA 池打成 BNB）；Tax 外池芯片与徽章不一致则重挂
+ - `0.8.26`：许可证新设备换绑 — 验证 `device_mismatch` 时先保存密钥并显示「换绑到此设备」（不再要求 storage 里已有 key）
+ - `0.8.27`：底池符号稳妥回退 — Tax 外 quotes 文件名 → quote_address 目录 → 非 BNB 的 WSS/HTTP 符号 → 确认空地址才默认 BNB；Tax 内多枚图不当单一分红
+- 插件当前版本：见 `extension/manifest.json`（**0.8.27**，公开无剪切板）
+- page-hook：`HOOK_VER` **86**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
-- page-hook：`HOOK_VER` **80**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  
@@ -574,7 +591,7 @@ python tools/ctl.py watchdog-run
 - 剪切板跳转：`flapFeeInfo.clipJump.v1` = `{ enabled:false, target:"gmgn"|"debot", sites:"both"|"gmgn"|"debot", activeTabOnly:true, reuseSiteTab:false, pageMarkCa:false, overrideHostCa:false }`（默认关；开启需确认 + `clipboardRead` 可选权限）
 - 许可证（可选，默认免费）：`flapFeeInfo.license.v1` = `{ key:"" }`；有 key 时 content 带 `Authorization: Bearer`；Worker `REQUIRE_LICENSE` 默认 `0`（不强制）；开启付费时设 `1` 并写入 KV `license:<key>` → `{ exp, plan:"flap", flap_perm?:1 }`；**发卡**：TG Bot `flap_fee` **0.01 BNB/月**（动态尾数 0.009501~0.010100）；详见 `ENABLE_FLAP_MONETIZATION.md`
 - 复制即搜（仅完整包 / 仅 GMGN）：`flapFeeInfo.clipSearch.v1` = `{ enabled:false, minChars:2, maxChars:8 }`（默认关；开启需确认 + `clipboardRead`；与跳转共用 `clipJump.seen.v1` 去重）
-- 文章重点样式（仅完整包）：`flapFeeInfo.articleStyle.v1` = `{ enabled:false, domains:[{id,host,enabled}], nouns:[{id,word,enabled}], skips:[{id,word,enabled}] }`（默认关；只改已填域名；`skips` 为屏蔽词，双击胶囊或弹窗添加，最多 48 条）
+- 文章重点样式（仅完整包）：`flapFeeInfo.articleStyle.v1` = `{ enabled:false, domains:[{id,host,path?,enabled}], nouns:[{id,word,enabled}], skips:[{id,word,enabled}] }`（默认关；`host` 可带可选 `path` 前缀，如 `/popout/xTracker`；只改已填站点；`skips` 为屏蔽词，双击胶囊或弹窗添加，最多 48 条）
 
 ---
 

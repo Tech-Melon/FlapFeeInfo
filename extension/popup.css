@@ -199,6 +199,10 @@ body {
   margin-top: 8px;
 }
 
+.license-extra-actions[hidden] {
+  display: none;
+}
+
 .license-rebind-btn {
   width: 100%;
   border-color: color-mix(in srgb, var(--license-glow) 55%, var(--border));
