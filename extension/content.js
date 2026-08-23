@@ -17,6 +17,7 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.30: Worker 强制鉴权（REQUIRE_LICENSE=1）；弹窗提示先填 TG Bot 密钥。
   // 0.8.29: 0.8.27 底池回退热路径降载 — 稳定卡不每轮扫 quotes；站点分离 + WeakMap 短缓存。
   // 0.8.28: 资金接收方白名单 — GMGN market_address/creator、Debot fee_receiver 命中则不屏蔽。
   // 0.8.27: 底池/分红符号：Tax 外/内 quotes 文件名最稳；BNB 视为未齐，回退地址目录/HTTP。

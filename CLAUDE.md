@@ -582,8 +582,9 @@ python tools/ctl.py watchdog-run
  - `0.8.26`：许可证新设备换绑 — 验证 `device_mismatch` 时先保存密钥并显示「换绑到此设备」（不再要求 storage 里已有 key）
  - `0.8.27`：底池符号稳妥回退 — Tax 外 quotes 文件名 → quote_address 目录 → 非 BNB 的 WSS/HTTP 符号 → 确认空地址才默认 BNB；Tax 内多枚图不当单一分红
  - `0.8.28`：资金接收方白名单 — GMGN `market_address`/`creator`、Debot `fee_receiver`/`founder_address` 命中则不屏蔽
+ - `0.8.30`：Worker 强制鉴权（`REQUIRE_LICENSE=1`）；弹窗提示「即将收费，请先填密钥」
  - `0.8.29`：0.8.27 底池回退热路径降载 — 稳定卡跳过 quotes DOM；站点分离 + WeakMap 短缓存
-- 插件当前版本：见 `extension/manifest.json`（**0.8.29**，公开无剪切板）
+- 插件当前版本：见 `extension/manifest.json`（**0.8.30**，公开无剪切板）
 - page-hook：`HOOK_VER` **87**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  

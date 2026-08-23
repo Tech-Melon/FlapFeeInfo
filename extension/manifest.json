@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.29",
-  "description": "FlapFeeInfo 0.8.29: 底池回退热路径降载，稳定卡不再每轮扫 quotes DOM。",
+  "version": "0.8.30",
+  "description": "FlapFeeInfo 0.8.30: 已开启付费鉴权，请先在弹窗填写 TG Bot 密钥。",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",
