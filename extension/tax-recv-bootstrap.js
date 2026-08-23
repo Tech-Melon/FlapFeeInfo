@@ -1,15 +1,18 @@
 /**
  * document_start (isolated): push list-filter prefs into PAGE before first list XHR.
- * MAIN page-hook reads data-flap-tax-recv / data-flap-suffix-hide + postMessage.
+ * MAIN page-hook reads data-flap-tax-recv / data-flap-suffix-hide / data-flap-vault-hide + postMessage.
  */
 (() => {
   const TAX_KEY = "flapFeeInfo.taxRecvHide.v1";
   const TAX_ATTR = "data-flap-tax-recv";
   const SUFFIX_KEY = "flapFeeInfo.suffixHide.v1";
   const SUFFIX_ATTR = "data-flap-suffix-hide";
+  const VAULT_KEY = "flapFeeInfo.vaultHide.v1";
+  const VAULT_ATTR = "data-flap-vault-hide";
   const OWN_KEY = "flapFeeInfo.ownedDisableShareWorker";
   const DEFAULT_TAX = { enabled: false, thresholdPct: 100 };
   const DEFAULT_SUFFIX = { enabled: false, rules: [] };
+  const DEFAULT_VAULT = { enabled: false, hideTaxVault: false, hideStockVault: false };
   const SUFFIX_MAX = 24;
 
   function normalizeTax(raw) {
@@ -46,6 +49,15 @@
     return out;
   }
 
+  function normalizeVault(raw) {
+    const out = { ...DEFAULT_VAULT };
+    if (!raw || typeof raw !== "object") return out;
+    out.enabled = raw.enabled === true;
+    out.hideTaxVault = raw.hideTaxVault === true;
+    out.hideStockVault = raw.hideStockVault === true;
+    return out;
+  }
+
   function isBscPage() {
     try {
       const u = new URL(location.href);
@@ -63,9 +75,9 @@
     }
   }
 
-  function syncShareWorker(taxOn, suffixOn) {
+  function syncShareWorker(taxOn, suffixOn, vaultOn) {
     try {
-      const filterOn = (taxOn || suffixOn) && isBscPage();
+      const filterOn = (taxOn || suffixOn || vaultOn) && isBscPage();
       if (filterOn) {
         localStorage.setItem("disableShareWorker", "true");
         localStorage.setItem(OWN_KEY, "1");
@@ -150,19 +162,59 @@
     return p;
   }
 
-  function publishAll(taxRaw, suffixRaw) {
+  function publishVault(prefs) {
+    const p = normalizeVault(prefs);
+    const payload = JSON.stringify({
+      enabled: p.enabled === true,
+      hideTaxVault: p.hideTaxVault === true,
+      hideStockVault: p.hideStockVault === true
+    });
+    try {
+      if (document.documentElement) {
+        document.documentElement.setAttribute(VAULT_ATTR, payload);
+      }
+    } catch (_e1) {
+      // ignore
+    }
+    try {
+      localStorage.setItem(VAULT_KEY, payload);
+    } catch (_ls) {
+      // ignore
+    }
+    try {
+      window.postMessage(
+        {
+          source: "flap-fee-info",
+          type: "vault-hide-prefs",
+          prefs: {
+            enabled: p.enabled === true,
+            hideTaxVault: p.hideTaxVault === true,
+            hideStockVault: p.hideStockVault === true
+          }
+        },
+        "*"
+      );
+    } catch (_e2) {
+      // ignore
+    }
+    return p;
+  }
+
+  function publishAll(taxRaw, suffixRaw, vaultRaw) {
     const tax = publishTax(taxRaw);
     const suffix = publishSuffix(suffixRaw);
+    const vault = publishVault(vaultRaw);
     const suffixActive =
       suffix.enabled === true &&
       (suffix.rules || []).some((r) => r && r.enabled !== false && r.suffix);
-    syncShareWorker(tax.enabled === true, suffixActive);
+    syncShareWorker(tax.enabled === true, suffixActive, vault.enabled === true);
   }
 
   // 启动时若 localStorage 已有，先同步 attr（storage 回调前的窗口）
   try {
     let taxCached = null;
     let suffixCached = null;
+    let vaultCached = null;
     try {
       const t = localStorage.getItem(TAX_KEY);
       if (t) taxCached = JSON.parse(t);
@@ -175,8 +227,14 @@
     } catch (_c2) {
       // ignore
     }
-    if (taxCached || suffixCached) {
-      publishAll(taxCached, suffixCached);
+    try {
+      const v = localStorage.getItem(VAULT_KEY);
+      if (v) vaultCached = JSON.parse(v);
+    } catch (_c3) {
+      // ignore
+    }
+    if (taxCached || suffixCached || vaultCached) {
+      publishAll(taxCached, suffixCached, vaultCached);
     }
   } catch (_ls0) {
     // ignore
@@ -185,22 +243,22 @@
   function load() {
     try {
       if (!chrome?.storage?.local) {
-        publishAll(DEFAULT_TAX, DEFAULT_SUFFIX);
+        publishAll(DEFAULT_TAX, DEFAULT_SUFFIX, DEFAULT_VAULT);
         return;
       }
-      chrome.storage.local.get([TAX_KEY, SUFFIX_KEY], (items) => {
+      chrome.storage.local.get([TAX_KEY, SUFFIX_KEY, VAULT_KEY], (items) => {
         try {
           if (chrome.runtime?.lastError) {
-            publishAll(DEFAULT_TAX, DEFAULT_SUFFIX);
+            publishAll(DEFAULT_TAX, DEFAULT_SUFFIX, DEFAULT_VAULT);
             return;
           }
-          publishAll(items?.[TAX_KEY], items?.[SUFFIX_KEY]);
+          publishAll(items?.[TAX_KEY], items?.[SUFFIX_KEY], items?.[VAULT_KEY]);
         } catch (_err) {
-          publishAll(DEFAULT_TAX, DEFAULT_SUFFIX);
+          publishAll(DEFAULT_TAX, DEFAULT_SUFFIX, DEFAULT_VAULT);
         }
       });
     } catch (_err2) {
-      publishAll(DEFAULT_TAX, DEFAULT_SUFFIX);
+      publishAll(DEFAULT_TAX, DEFAULT_SUFFIX, DEFAULT_VAULT);
     }
   }
 
@@ -217,12 +275,11 @@
     if (chrome?.storage?.onChanged) {
       chrome.storage.onChanged.addListener((changes, area) => {
         if (area !== "local") return;
-        if (!changes[TAX_KEY] && !changes[SUFFIX_KEY]) return;
-        // 重读两边，避免一侧变更时清掉另一侧 ShareWorker 状态
+        if (!changes[TAX_KEY] && !changes[SUFFIX_KEY] && !changes[VAULT_KEY]) return;
         try {
-          chrome.storage.local.get([TAX_KEY, SUFFIX_KEY], (items) => {
+          chrome.storage.local.get([TAX_KEY, SUFFIX_KEY, VAULT_KEY], (items) => {
             if (chrome.runtime?.lastError) return;
-            publishAll(items?.[TAX_KEY], items?.[SUFFIX_KEY]);
+            publishAll(items?.[TAX_KEY], items?.[SUFFIX_KEY], items?.[VAULT_KEY]);
           });
         } catch (_e) {
           // ignore
@@ -232,4 +289,117 @@
   } catch (_l) {
     // ignore
   }
+
+  /** MAIN world page-hook：manifest 为主；仅缺失时单次 script 兜底（禁止并发重试风暴） */
+  const PAGE_HOOK_FILE = "page-hook.js";
+  const PAGE_HOOK_VER = "69";
+  const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
+
+  function pageHookHostFeeReady() {
+    try {
+      return (
+        document.documentElement?.getAttribute?.("data-flap-host-fee-ver") ===
+        PAGE_HOOK_VER
+      );
+    } catch (_ph) {
+      return false;
+    }
+  }
+
+  function pageHookScriptPresent() {
+    try {
+      return (
+        document.documentElement?.getAttribute?.("data-flap-page-hook-ver") ===
+        PAGE_HOOK_VER
+      );
+    } catch (_ps) {
+      return false;
+    }
+  }
+
+  let pageHookInjectTimer = 0;
+  let pageHookInjectAttempts = 0;
+  const PAGE_HOOK_MAX_INJECT = 2;
+
+  function schedulePageHookInjectCheck(delayMs) {
+    if (pageHookHostFeeReady()) return;
+    if (pageHookInjectTimer) return;
+    pageHookInjectTimer = window.setTimeout(() => {
+      pageHookInjectTimer = 0;
+      tryInjectPageHookMain();
+    }, Math.max(0, Number(delayMs) || 0));
+  }
+
+  function tryInjectPageHookMain() {
+    if (pageHookHostFeeReady()) return;
+    if (!chrome?.runtime?.getURL) return;
+    // manifest / 已有 script 在执行：只等 host-fee 落盘，勿再插 script
+    if (pageHookScriptPresent()) {
+      schedulePageHookInjectCheck(500);
+      return;
+    }
+    try {
+      const lockAt = Number(
+        document.documentElement?.getAttribute?.(PAGE_HOOK_INJECT_LOCK_ATTR) || 0
+      );
+      if (lockAt && Date.now() - lockAt < 3000) {
+        schedulePageHookInjectCheck(600);
+        return;
+      }
+    } catch (_lk) {
+      // ignore
+    }
+    if (pageHookInjectAttempts >= PAGE_HOOK_MAX_INJECT) return;
+    pageHookInjectAttempts += 1;
+    let src = "";
+    try {
+      src = chrome.runtime.getURL(PAGE_HOOK_FILE);
+    } catch (_url) {
+      return;
+    }
+    try {
+      document.documentElement?.setAttribute(
+        PAGE_HOOK_INJECT_LOCK_ATTR,
+        String(Date.now())
+      );
+    } catch (_mark) {
+      // ignore
+    }
+    try {
+      const s = document.createElement("script");
+      s.src = src;
+      s.async = false;
+      s.onload = () => {
+        try {
+          s.remove();
+        } catch (_rm) {
+          // ignore
+        }
+        schedulePageHookInjectCheck(600);
+      };
+      s.onerror = () => {
+        try {
+          s.remove();
+        } catch (_rm2) {
+          // ignore
+        }
+        try {
+          document.documentElement?.removeAttribute(PAGE_HOOK_INJECT_LOCK_ATTR);
+        } catch (_clr) {
+          // ignore
+        }
+        if (pageHookInjectAttempts < PAGE_HOOK_MAX_INJECT) {
+          schedulePageHookInjectCheck(1200);
+        }
+      };
+      (document.documentElement || document.head || document.body).appendChild(s);
+    } catch (_inj) {
+      if (pageHookInjectAttempts < PAGE_HOOK_MAX_INJECT) {
+        schedulePageHookInjectCheck(1000);
+      }
+    }
+  }
+
+  schedulePageHookInjectCheck(0);
+  schedulePageHookInjectCheck(400);
 })();

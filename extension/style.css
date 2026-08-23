@@ -112,6 +112,13 @@
   margin-right: 0;
 }
 
+.gmgn-fee-mode-icon--gmgn[data-fee-mount-side="tax-after"] {
+  display: inline-flex !important;
+  margin-left: 4px;
+  margin-right: 0;
+  vertical-align: middle;
+}
+
 /* Token detail: sit after 总税率 cell in header metrics strip */
 .gmgn-fee-mode-icon--gmgn[data-fee-token] {
   margin-left: 8px;

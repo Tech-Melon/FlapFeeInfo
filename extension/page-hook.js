@@ -9,13 +9,25 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 56;
+  const HOOK_VER = 76;
+  try {
+    if (window.__flapFeeInfoPageHook !== HOOK_VER) {
+      window.__flapFeeInfoPageHook = HOOK_VER;
+      if (document.documentElement) {
+        document.documentElement.setAttribute("data-flap-page-hook-ver", String(HOOK_VER));
+      }
+    }
+  } catch (_bootMark) {
+    // ignore — 继续安装钩子（重复注入时仍要补齐 host-fee）
+  }
   /** 仅当列表过滤开启时，由插件临时写入，关闭时清理 */
   const OWNED_DISABLE_SW = "flapFeeInfo.ownedDisableShareWorker";
   const PREFS_ATTR = "data-flap-tax-recv";
   const LS_KEY = "flapFeeInfo.taxRecvHide.v1";
   const SUFFIX_ATTR = "data-flap-suffix-hide";
   const SUFFIX_LS_KEY = "flapFeeInfo.suffixHide.v1";
+  const VAULT_HIDE_ATTR = "data-flap-vault-hide";
+  const VAULT_HIDE_LS_KEY = "flapFeeInfo.vaultHide.v1";
   const SUFFIX_MAX_RULES = 24;
   /** 与 content.js 一致：Flap 8888/7777 + Four.meme ffff */
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
@@ -28,9 +40,8 @@
    */
   const NC_KEEP_MAX_AGE_MS = 10 * 60 * 1000;
   const NC_KEEP_MAX_CARDS = 40;
-  const prev = Number(window.__flapFeeInfoPageHook) || 0;
-  if (prev >= HOOK_VER) return;
-  window.__flapFeeInfoPageHook = HOOK_VER;
+  /** GMGN 战壕「新创建」时间筛选（毫秒）；0 = 未检测到，用默认 10min */
+  let gmgnNewCreationMaxAgeMs = 0;
 
   /**
    * @type {Map<string, { item: object, firstSeen: number, lastSeen: number, kind: string }>}
@@ -39,17 +50,153 @@
 
   const NativeWebSocket = window.WebSocket;
   const NativeSharedWorker = window.SharedWorker;
+  const NativeMessagePortOnmessage = Object.getOwnPropertyDescriptor(
+    MessagePort.prototype,
+    "onmessage"
+  );
+  const NativeMessagePortAdd = MessagePort.prototype.addEventListener;
+  const NativeMessagePortRm = MessagePort.prototype.removeEventListener;
+  const NativeMessagePortStart = MessagePort.prototype.start;
+  const NativeWebSocketOnmessage = Object.getOwnPropertyDescriptor(
+    NativeWebSocket.prototype,
+    "onmessage"
+  );
+  const NativeWebSocketAdd = NativeWebSocket.prototype.addEventListener;
+  const NativeWebSocketRm = NativeWebSocket.prototype.removeEventListener;
 
-  /** @type {{ enabled: boolean, thresholdPct: number }} */
+  function shouldHookWsUrl(url) {
+    const u = String(url || "");
+    if (!u) return false;
+    if (/latency|rtt|health|speed-test|sub-tx-hash|helius|rpc/i.test(u)) return false;
+    if (/portal-ws/i.test(u) && /debot\.ai|gungnir/i.test(u)) return true;
+    if (/sgws\.debot\.ai/i.test(u)) return true;
+    if (/wss?:\/\//i.test(u) && (/ws\.gmgn\.ai/i.test(u) || /ws\.wenmoon\.cc/i.test(u))) {
+      return true;
+    }
+    if (/wss?:\/\//i.test(u) && /gmgn\.ai/i.test(u)) return true;
+    return false;
+  }
   let taxRecvPrefs = { enabled: false, thresholdPct: 100 };
   let taxRecvEnabled = false;
   /** @type {{ enabled: boolean, rules: Array<{suffix:string, enabled:boolean}> }} */
   let suffixHidePrefs = { enabled: false, rules: [] };
   let suffixHideEnabled = false;
+  /** @type {{ enabled: boolean, hideTaxVault: boolean, hideStockVault: boolean }} */
+  let vaultHidePrefs = { enabled: false, hideTaxVault: false, hideStockVault: false };
+  let vaultHideEnabled = false;
 
   let lastGmgnTrench = null;
   /** @type {string[]} */
   let lastDebotRanksUrls = [];
+
+  function gmgnItemAgeMs(item) {
+    if (!item || typeof item !== "object") return null;
+    const raw =
+      item.open_timestamp ??
+      item.create_time ??
+      item.created_at ??
+      item.t ??
+      item.f?.t ??
+      item.f?.open_timestamp;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    const ms = n < 1e12 ? n * 1000 : n;
+    return Math.max(0, Date.now() - ms);
+  }
+
+  /**
+   * 从 GMGN trenches_rank POST body 推断「新创建」最大币龄（与用户 UI 1m/3m 对齐）。
+   * @returns {number|null} ms
+   */
+  function parseGmgnNewCreationMaxAgeMs(bodyRaw) {
+    if (!bodyRaw) return null;
+    try {
+      const body = typeof bodyRaw === "string" ? JSON.parse(bodyRaw) : bodyRaw;
+      if (!body || typeof body !== "object") return null;
+      const directMin = Number(
+        body.max_create_age_minutes ??
+          body.create_age_minutes ??
+          body.nc_age_minutes ??
+          body.new_creation_age_minutes
+      );
+      if (Number.isFinite(directMin) && directMin > 0) {
+        return Math.round(directMin * 60 * 1000);
+      }
+      const directSec = Number(
+        body.max_create_age_sec ??
+          body.max_age_sec ??
+          body.age_sec ??
+          body.max_open_age ??
+          body.open_age
+      );
+      if (Number.isFinite(directSec) && directSec > 0) {
+        return Math.round(directSec * 1000);
+      }
+      const minTs = Number(
+        body.open_timestamp_from ??
+          body.min_open_timestamp ??
+          body.open_timestamp_gte ??
+          body.from_open_timestamp
+      );
+      if (Number.isFinite(minTs) && minTs > 0) {
+        const ms = minTs < 1e12 ? minTs * 1000 : minTs;
+        return Math.max(60 * 1000, Date.now() - ms);
+      }
+      const filters = []
+        .concat(body.filters, body.filter, body.new_creation_filters)
+        .flat()
+        .filter(Boolean);
+      for (let i = 0; i < filters.length; i++) {
+        const s = String(filters[i]).toLowerCase();
+        let m = s.match(/(\d+)\s*m(?:in(?:ute)?s?)?/);
+        if (m) return Number(m[1]) * 60 * 1000;
+        m = s.match(/(\d+)\s*s(?:ec(?:onds?)?)?/);
+        if (m) return Number(m[1]) * 1000;
+        if (s === "1m" || s.includes("created_1m") || s.includes("1_min")) {
+          return 60 * 1000;
+        }
+        if (s.includes("3m") || s.includes("3_min")) return 3 * 60 * 1000;
+        if (s.includes("5m") || s.includes("5_min")) return 5 * 60 * 1000;
+      }
+      const dur = body.duration || body.new_creation_duration || body.age_filter;
+      if (dur && typeof dur === "object") {
+        const mins = Number(dur.minutes ?? dur.min ?? dur.m);
+        if (Number.isFinite(mins) && mins > 0) return mins * 60 * 1000;
+        const sec = Number(dur.seconds ?? dur.sec ?? dur.s);
+        if (Number.isFinite(sec) && sec > 0) return sec * 1000;
+      }
+    } catch (_e) {
+      return null;
+    }
+    return null;
+  }
+
+  function rememberGmgnTrenchRequest(bodyRaw) {
+    const cap = parseGmgnNewCreationMaxAgeMs(bodyRaw);
+    if (cap != null && cap > 0) {
+      gmgnNewCreationMaxAgeMs = cap;
+      try {
+        window.__flapFeeGmgnNcAgeMs = cap;
+      } catch (_w) {
+        // ignore
+      }
+    }
+  }
+
+  /** 保留池有效时长：min(插件 10min, GMGN 用户时间筛选) */
+  function getNcKeepMaxAgeMs() {
+    if (gmgnNewCreationMaxAgeMs > 0) {
+      return Math.min(NC_KEEP_MAX_AGE_MS, gmgnNewCreationMaxAgeMs);
+    }
+    return NC_KEEP_MAX_AGE_MS;
+  }
+
+  function itemWithinNcKeepAge(item) {
+    const maxAge = getNcKeepMaxAgeMs();
+    const age = gmgnItemAgeMs(item);
+    if (age == null) return true;
+    return age <= maxAge;
+  }
 
   // ---------- prefs ----------
   function clampTaxRecvThreshold(raw) {
@@ -137,6 +284,21 @@
     } catch (_e2) {
       // ignore
     }
+    try {
+      let vraw =
+        (document.documentElement && document.documentElement.getAttribute(VAULT_HIDE_ATTR)) ||
+        "";
+      if (!vraw) {
+        try {
+          vraw = localStorage.getItem(VAULT_HIDE_LS_KEY) || "";
+        } catch (_ls3) {
+          vraw = "";
+        }
+      }
+      if (vraw) applyVaultHideObject(JSON.parse(vraw));
+    } catch (_e3) {
+      // ignore
+    }
   }
 
   let lastAttrSyncAt = 0;
@@ -162,16 +324,33 @@
       if (/\/token\/[a-z0-9_-]+(?:\/|$)/i.test(path) && !/\/token\/bsc(?:\/|$)/i.test(path)) {
         return false;
       }
-      // /meme 无 chain 时不主动滤（content 管徽章）；避免他链误伤
+      const host = String(u.hostname || "").toLowerCase();
+      // GMGN 战壕首页无 ?chain= 时默认 BSC（与 content 扫卡一致；显式他链已由 q 拦截）
+      if (host === "gmgn.ai" || host.endsWith(".gmgn.ai")) {
+        if (path === "/" || path === "" || /^\/meme/i.test(path)) return true;
+      }
+      // Debot/Gungnir 战壕 /meme 无 chain 时默认 BSC
+      if (host.endsWith("debot.ai") || host.endsWith("gungnir.bot")) {
+        if (path === "/" || path === "" || /^\/meme/i.test(path)) return true;
+      }
       return false;
     } catch (_e) {
       return false;
     }
   }
 
-  /** 任一侧列表过滤开启（资金接收 or 自定义尾号） */
+  function applyVaultHideObject(p) {
+    vaultHidePrefs = {
+      enabled: p?.enabled === true,
+      hideTaxVault: p?.hideTaxVault === true,
+      hideStockVault: p?.hideStockVault === true
+    };
+    vaultHideEnabled = vaultHidePrefs.enabled === true;
+  }
+
+  /** 任一侧列表过滤开启（资金接收 / 金库 / 自定义尾号） */
   function anyFilterEnabled() {
-    return taxRecvEnabled || suffixHideEnabled;
+    return taxRecvEnabled || vaultHideEnabled || suffixHideEnabled;
   }
 
   function prefsOn() {
@@ -337,6 +516,1471 @@
     return false;
   }
 
+  function gmgnHasBasketTokens(tal) {
+    return coerceDividendTokenList(tal?.dividend_tokens).length > 0;
+  }
+
+  function gmgnLaunchpadFamily(item) {
+    const raw =
+      item?.launchpad ||
+      item?.launchpad_platform ||
+      item?.f?.launchpad ||
+      item?.f?.launchpad_platform ||
+      "";
+    return String(raw || "").toLowerCase();
+  }
+
+  /**
+   * GMGN s_tal 金库分型：stock=币股篮子金库；tax=税收金库（纯 🎁 vault）。
+   * Four ffff 的 marketing+market_address 是「税收钱包」，不是 is_vault 金库 → 返回 null。
+   */
+  function gmgnVaultKind(tal, item) {
+    if (!tal || typeof tal !== "object") return null;
+    if (gmgnHasBasketTokens(tal) || tal.is_stocks_vault === true) return "stock";
+    if (isGmgnVaultTal(tal)) return "tax";
+    const lp = gmgnLaunchpadFamily(item);
+    if (!lp.includes("flap")) return null;
+    const mkt = mktToPct(tal.marketing);
+    const div = mktToPct(tal.dividend);
+    if (
+      mkt != null &&
+      mkt > 0 &&
+      (div == null || div <= 0) &&
+      tal.market_address &&
+      !gmgnHasBasketTokens(tal)
+    ) {
+      return "tax";
+    }
+    return null;
+  }
+
+  function debotVaultKind(extra) {
+    if (!extra || typeof extra !== "object") return null;
+    if (extra.is_stocks_vault === true) return "stock";
+    const basket = extra.basket_assets || extra.rwa_assets || extra.stock_assets;
+    if (Array.isArray(basket) && basket.length > 0) return "stock";
+    if (extra.is_vault === true) return "tax";
+    const founder = extra.founder_address || extra.fee_receiver;
+    const vault = extra.vault_address;
+    if (founder && vault && sameAddr(founder, vault)) return "tax";
+    return null;
+  }
+
+  function shouldHideVaultKind(kind) {
+    if (!vaultHideEnabled || !kind) return false;
+    if (kind === "stock") return vaultHidePrefs.hideStockVault === true;
+    if (kind === "tax") return vaultHidePrefs.hideTaxVault === true;
+    return false;
+  }
+
+  // ---------- host fee fast-path (GMGN s_tal / Debot launchpad_extra) ----------
+  /** @type {Map<string, object>} */
+  const hostFeeDedupe = new Map();
+  /** @type {object[]} */
+  let hostFeePending = [];
+  let hostFeeFlushTimer = 0;
+  const HOST_FEE_DEDUPE_MS = 8000;
+
+  function ratioToBps(v) {
+    if (v == null || v === "") return 0;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    const pct = n > 1.0001 ? n : n * 100;
+    return Math.round(Math.min(100, pct) * 100);
+  }
+
+  function pickTalField(tal, keys) {
+    if (!tal || typeof tal !== "object") return null;
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      if (tal[k] != null && tal[k] !== "") return tal[k];
+    }
+    return null;
+  }
+
+  /** WBNB / 零地址等常见分红代币 → 展示符号 */
+  function symbolFromKnownTokenAddress(addr) {
+    const a = String(addr || "")
+      .trim()
+      .toLowerCase();
+    if (!a) return "";
+    if (
+      a === "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c" ||
+      a === "0x0000000000000000000000000000000000000000"
+    ) {
+      return "BNB";
+    }
+    return "";
+  }
+
+  /** Flap 币股 vault 常见篮子成分（GMGN/Debot 列表常只给 address） */
+  const KNOWN_VAULT_STOCK_SYMBOL_BY_ADDR = {
+    "0x02fca66c1d1afb4e2a7884261eb00f63598a7436": "FXION",
+    "0x9b8e987e6fec8cf1380c4dca7071e2c7853aeea1": "NVDAB"
+  };
+
+  function symbolFromKnownStockAddress(addr) {
+    const a = String(addr || "")
+      .trim()
+      .toLowerCase();
+    return KNOWN_VAULT_STOCK_SYMBOL_BY_ADDR[a] || "";
+  }
+
+  /** GMGN dividend_tokens 可能是数组，也可能是 { address: token } 映射 */
+  function coerceDividendTokenList(raw) {
+    if (!raw) return [];
+    if (Array.isArray(raw)) return raw;
+    if (typeof raw === "object") {
+      const vals = Object.values(raw);
+      if (vals.length && typeof vals[0] === "object") return vals;
+    }
+    return [];
+  }
+
+  function gmgnResolveQuoteSymbol(item, tal) {
+    const candidates = [
+      item?.quote_symbol,
+      item?.quote,
+      item?.q,
+      item?.f?.quote_symbol,
+      item?.f?.quote,
+      item?.f?.q,
+      tal?.quote_symbol,
+      tal?.quote
+    ];
+    for (let i = 0; i < candidates.length; i++) {
+      const s = String(candidates[i] || "").trim();
+      if (s) return s;
+    }
+    return "";
+  }
+
+  function gmgnResolveDividendSymbol(item, tal, basket_assets) {
+    if (basket_assets && basket_assets.length >= 2) return "";
+    if (basket_assets && basket_assets[0]?.symbol) return basket_assets[0].symbol;
+    const fromTal = String(
+      tal?.dividend_symbol || tal?.dividend_token_symbol || tal?.ds || ""
+    ).trim();
+    if (fromTal) return fromTal;
+    const dt = tal?.dividend_token;
+    if (dt && typeof dt === "object") {
+      const sym = String(dt.symbol || dt.name || dt.ticker || "").trim();
+      if (sym) return sym;
+    }
+    const f = item?.f;
+    if (f && typeof f === "object") {
+      const fs = String(
+        f.dividend_symbol || f.dividend_token_symbol || f.ds || ""
+      ).trim();
+      if (fs) return fs;
+      const fdt = f.dividend_token;
+      if (fdt && typeof fdt === "object") {
+        const sym = String(fdt.symbol || fdt.name || fdt.ticker || "").trim();
+        if (sym) return sym;
+      }
+    }
+    const dts = coerceDividendTokenList(tal?.dividend_tokens);
+    if (dts.length) {
+      for (let i = 0; i < dts.length; i++) {
+        const sym = symbolFromKnownTokenAddress(dts[i]?.address || dts[i]?.token);
+        if (sym) return sym;
+      }
+    }
+    const dtAddr =
+      typeof tal?.dividend_token === "string"
+        ? tal.dividend_token
+        : tal?.dividend_token?.address;
+    const known = symbolFromKnownTokenAddress(dtAddr);
+    if (known) return known;
+    return "";
+  }
+
+  function hostFeeUrlLooksUseful(url) {
+    const u = String(url || "");
+    if (!u) return false;
+    return (
+      u.includes("trenches_rank") ||
+      /meme\/v\d+\/ranks/i.test(u) ||
+      u.includes("mutil_window_token_security_launchpad") ||
+      u.includes("token_info_brief")
+    );
+  }
+
+  function gmgnIsFourmeme(item, tal) {
+    const lp = gmgnLaunchpadFamily(item);
+    if (lp.includes("fourmeme") || lp.includes("four_meme") || lp === "four") return true;
+    const addr = gmgnAddr(item);
+    return /ffff$/i.test(addr);
+  }
+
+  /** Four ffff：marketing+market_address 是税收钱包，不是 👨‍🍳 创作者 */
+  function gmgnIsFourTaxWallet(tal, item) {
+    if (!tal || typeof tal !== "object") return false;
+    if (!gmgnIsFourmeme(item, tal)) return false;
+    const mkt = mktToPct(tal.marketing);
+    return mkt != null && mkt > 0;
+  }
+
+  function normalizeGmgnBasket(tokens) {
+    const list = coerceDividendTokenList(tokens);
+    const out = [];
+    for (let i = 0; i < list.length && out.length < 8; i++) {
+      const t = list[i];
+      if (!t || typeof t !== "object") continue;
+      const address = String(t.address || t.token || "").toLowerCase();
+      let sym = String(t.symbol || t.name || t.ticker || "").trim();
+      if (!sym && address) sym = symbolFromKnownStockAddress(address);
+      if (!sym && !address) continue;
+      out.push({
+        address,
+        symbol: sym.slice(0, 16),
+        name: String(t.name || sym).trim().slice(0, 32)
+      });
+    }
+    return out;
+  }
+
+  function normalizeDebotBasket(extra) {
+    if (!extra || typeof extra !== "object") return [];
+    let raw =
+      extra.basket_assets || extra.rwa_assets || extra.stock_assets || extra.basket || [];
+    if ((!Array.isArray(raw) || raw.length === 0) && Array.isArray(extra.vault_tokens)) {
+      raw = extra.vault_tokens.map((addr, idx) => ({
+        address: addr,
+        share: Array.isArray(extra.vault_shares) ? extra.vault_shares[idx] : undefined
+      }));
+    }
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    for (let i = 0; i < raw.length && out.length < 8; i++) {
+      const t = raw[i];
+      if (!t || typeof t !== "object") continue;
+      const address = String(t.address || t.token || "").toLowerCase();
+      let sym = String(t.symbol || t.name || t.ticker || "").trim();
+      if (!sym && address) sym = symbolFromKnownStockAddress(address);
+      if (!sym && !address) continue;
+      out.push({
+        address,
+        symbol: sym.slice(0, 16),
+        name: String(t.name || sym).trim().slice(0, 32)
+      });
+    }
+    return out;
+  }
+
+  function stockSymbolsFromTaxDom(el, source) {
+    if (!(el instanceof HTMLElement)) return [];
+    const syms = [];
+    const seen = new Set();
+    const pushSym = (raw) => {
+      const sym = String(raw || "")
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "");
+      if (!sym || sym === "BNB" || sym === "WBNB" || seen.has(sym)) return;
+      seen.add(sym);
+      syms.push(sym);
+    };
+    if (source === "debot") {
+      el.querySelectorAll(
+        'img[src*="/images/share/bstocks/"], img[src*="/images/chain/designer-icons/coin/"]'
+      ).forEach((img) => {
+        const src = img.currentSrc || img.getAttribute("src") || "";
+        const fromPath = src.match(/\/(?:bstocks|coin)\/([^./?#]+)/i);
+        if (fromPath) pushSym(fromPath[1]);
+        else pushSym(img.getAttribute("alt") || "");
+      });
+      return syms;
+    }
+    const tax = el.querySelector(".trenches-tax");
+    if (!tax) return syms;
+    tax.querySelectorAll('img[src*="/quotes/"], img[src*="/static/quotes/"]').forEach((img) => {
+      const src = img.currentSrc || img.getAttribute("src") || "";
+      const m = src.match(/\/quotes\/([^./?#]+)/i);
+      if (m) pushSym(m[1]);
+    });
+    return syms;
+  }
+
+  function hydrateHostFeeBasket(entry, scopeEl, source) {
+    if (!entry || !Array.isArray(entry.basket_assets) || !entry.basket_assets.length) return entry;
+    const domSyms = stockSymbolsFromTaxDom(scopeEl, source);
+    let changed = false;
+    const next = entry.basket_assets.map((row, idx) => {
+      if (!row || typeof row !== "object") return row;
+      if (row.symbol) return row;
+      const fromDom = domSyms[idx] || "";
+      const fromAddr = symbolFromKnownStockAddress(row.address);
+      const sym = fromDom || fromAddr;
+      if (!sym) return row;
+      changed = true;
+      return { ...row, symbol: sym.slice(0, 16), name: row.name || sym };
+    });
+    if (!changed) return entry;
+    return { ...entry, basket_assets: next };
+  }
+
+  function gmgnSecurityTaxBps(item) {
+    const sec =
+      (item && item.security) ||
+      (item && item.s) ||
+      (item && item.f && item.f.security) ||
+      (item && item.f && item.f.s) ||
+      null;
+    if (!sec || typeof sec !== "object") return { buy: 0, sell: 0 };
+    return {
+      buy: ratioToBps(sec.buy_tax ?? sec.buy_tax_rate ?? sec.buyTax),
+      sell: ratioToBps(sec.sell_tax ?? sec.sell_tax_rate ?? sec.sellTax)
+    };
+  }
+
+  function hostFeeSig(entry) {
+    if (!entry) return "";
+    return [
+      entry.dividend_bps || 0,
+      entry.market_bps || 0,
+      entry.deflation_bps || 0,
+      entry.lp_bps || 0,
+      entry.giggle_charity_bps || 0,
+      entry.binance_charity_bps || 0,
+      entry.is_vault ? 1 : 0,
+      entry.buy_tax_bps || 0,
+      entry.sell_tax_bps || 0,
+      (entry.basket_assets || []).map((b) => b.symbol).join("+")
+    ].join("|");
+  }
+
+  function flushHostFeePendingNow() {
+    if (hostFeeFlushTimer) {
+      window.clearTimeout(hostFeeFlushTimer);
+      hostFeeFlushTimer = 0;
+    }
+    while (hostFeePending.length > 0) {
+      const batch = hostFeePending.splice(0, 48);
+      if (!batch.length) break;
+      try {
+        window.postMessage(
+          { source: "flap-fee-info", type: "host-fee-map", entries: batch },
+          "*"
+        );
+      } catch (_pm) {
+        // ignore
+      }
+    }
+  }
+
+  function queueHostFeeEntry(entry) {
+    if (!entry || !entry.address || !TARGET_TOKEN_RE.test(entry.address)) return;
+    const addr = String(entry.address).toLowerCase();
+    const sig = hostFeeSig(entry);
+    const prev = hostFeeDedupe.get(addr);
+    const now = Date.now();
+    if (prev && prev.sig === sig && now - prev.at < HOST_FEE_DEDUPE_MS) return;
+    hostFeeDedupe.set(addr, { sig, at: now });
+    hostFeePending.push(entry);
+    if (hostFeeFlushTimer) return;
+    hostFeeFlushTimer = window.setTimeout(() => {
+      hostFeeFlushTimer = 0;
+      flushHostFeePendingNow();
+    }, 0);
+  }
+
+  function gmgnHostFeeFromItem(item) {
+    const addr = gmgnAddr(item);
+    if (!TARGET_TOKEN_RE.test(addr)) return null;
+    const tal = gmgnTal(item);
+    if (!tal || typeof tal !== "object") return null;
+    const dividend_bps = ratioToBps(
+      pickTalField(tal, [
+        "dividend",
+        "dvtx",
+        "dividend_tax",
+        "holder_tax",
+        "holder",
+        "dividend_pct",
+        "dividend_rate"
+      ])
+    );
+    const market_bps = ratioToBps(
+      pickTalField(tal, [
+        "marketing",
+        "marketing_tax",
+        "mktx",
+        "dev_tax",
+        "dev",
+        "market",
+        "founder"
+      ])
+    );
+    const deflation_bps = ratioToBps(
+      pickTalField(tal, ["burn", "burn_rate", "brtx", "deflation"])
+    );
+    const lp_bps = ratioToBps(
+      pickTalField(tal, ["liquidity", "lp", "lp_tax", "lqtx", "liquidity_tax"])
+    );
+    const giggle_charity_bps = ratioToBps(
+      pickTalField(tal, ["giggle_charity_tax", "giggle_charity", "giggle"])
+    );
+    const binance_charity_bps = ratioToBps(
+      pickTalField(tal, ["binance_charity_tax", "binance_charity", "binance"])
+    );
+    const is_vault = isGmgnVaultTal(tal);
+    const basket_assets = normalizeGmgnBasket(tal.dividend_tokens);
+    const is_stocks_vault =
+      tal.is_stocks_vault === true ||
+      tal.is_stocks_vault === 1 ||
+      tal.is_stocks_vault === "true" ||
+      basket_assets.length >= 2;
+    const tax = gmgnSecurityTaxBps(item);
+    const quote_symbol = gmgnResolveQuoteSymbol(item, tal);
+    const dividend_symbol = gmgnResolveDividendSymbol(item, tal, basket_assets);
+    const totalBps =
+      dividend_bps +
+      market_bps +
+      deflation_bps +
+      lp_bps +
+      giggle_charity_bps +
+      binance_charity_bps;
+    const isStockVault = is_stocks_vault || basket_assets.length > 0;
+    const needsChain =
+      totalBps <= 0 ||
+      (isStockVault && basket_assets.length < 2);
+    return {
+      address: addr,
+      source: "gmgn",
+      dividend_bps,
+      market_bps,
+      deflation_bps,
+      lp_bps,
+      giggle_charity_bps,
+      binance_charity_bps,
+      is_vault,
+      is_stocks_vault,
+      buy_tax_bps: tax.buy,
+      sell_tax_bps: tax.sell,
+      basket_assets,
+      vault_address: String(tal.market_address || tal.vault_address || "")
+        .trim()
+        .toLowerCase(),
+      quote_symbol,
+      dividend_symbol,
+      top_payout_symbol: dividend_symbol || quote_symbol,
+      __needsChain: needsChain
+    };
+  }
+
+  function debotHostFeeFromRow(row) {
+    if (!row || typeof row !== "object") return null;
+    const addr = String(row.contract || "")
+      .trim()
+      .toLowerCase();
+    if (!TARGET_TOKEN_RE.test(addr)) return null;
+    const meta = row.meta && typeof row.meta === "object" ? row.meta : null;
+    const extra = (meta && meta.launchpad_extra) || row.launchpad_extra;
+    if (!extra || typeof extra !== "object") return null;
+    const dividend_bps = ratioToBps(extra.dividend_pct ?? extra.holder_pct);
+    const market_bps = ratioToBps(
+      extra.founder_pct_vault ?? extra.founder_pct ?? extra.marketing_pct_vault ?? extra.marketing_pct
+    );
+    const deflation_bps = ratioToBps(extra.burn_pct);
+    const lp_bps = ratioToBps(extra.liquidity_pct ?? extra.lp_pct);
+    const giggle_charity_bps = ratioToBps(
+      extra.giggle_charity_pct ?? extra.giggle_pct ?? extra.rate_giggle_charity
+    );
+    const binance_charity_bps = ratioToBps(
+      extra.binance_charity_pct ?? extra.binance_pct ?? extra.rate_binance_charity
+    );
+    const is_vault =
+      extra.is_vault === true ||
+      extra.is_stocks_vault === true ||
+      debotVaultKind(extra) === "tax" ||
+      debotVaultKind(extra) === "stock";
+    const basket_assets = normalizeDebotBasket(extra);
+    const is_stocks_vault = extra.is_stocks_vault === true || basket_assets.length >= 2;
+    const buy_tax_bps = ratioToBps(
+      row.buy_tax ?? row.buy_tax_rate ?? extra.buy_tax ?? extra.buy_tax_rate
+    );
+    const sell_tax_bps = ratioToBps(
+      row.sell_tax ?? row.sell_tax_rate ?? extra.sell_tax ?? extra.sell_tax_rate
+    );
+    const quote_symbol = String(row.quote_symbol || extra.quote_symbol || "").trim();
+    let dividend_symbol = basket_assets[0]?.symbol || quote_symbol;
+    if (is_stocks_vault && basket_assets.length >= 2) dividend_symbol = "";
+    const divAddr = String(
+      extra.dividend_token || extra.base_token || ""
+    ).toLowerCase();
+    const divFromAddr = symbolFromKnownTokenAddress(divAddr);
+    if (divFromAddr) dividend_symbol = divFromAddr;
+    const totalBps =
+      dividend_bps +
+      market_bps +
+      deflation_bps +
+      lp_bps +
+      giggle_charity_bps +
+      binance_charity_bps;
+    const isStockVault = is_stocks_vault || basket_assets.length > 0;
+    const needsChain =
+      totalBps <= 0 ||
+      (isStockVault && basket_assets.length < 2);
+    return {
+      address: addr,
+      source: "debot",
+      dividend_bps,
+      market_bps,
+      deflation_bps,
+      lp_bps,
+      giggle_charity_bps,
+      binance_charity_bps,
+      is_vault,
+      is_stocks_vault,
+      buy_tax_bps,
+      sell_tax_bps,
+      basket_assets,
+      vault_address: String(extra.vault_address || extra.fee_receiver || "")
+        .trim()
+        .toLowerCase(),
+      quote_symbol,
+      dividend_symbol,
+      top_payout_symbol: dividend_symbol || quote_symbol,
+      __needsChain: needsChain
+    };
+  }
+
+  function collectHostFeesFromGmgnItem(item) {
+    try {
+      const entry = gmgnHostFeeFromItem(item);
+      if (entry) queueHostFeeEntry(entry);
+    } catch (_e) {
+      // ignore
+    }
+  }
+
+  function collectHostFeesFromDebotRow(row) {
+    try {
+      const entry = debotHostFeeFromRow(row);
+      if (entry) queueHostFeeEntry(entry);
+    } catch (_e) {
+      // ignore
+    }
+  }
+
+  function collectHostFeesFromGmgnTokens(arr) {
+    if (!Array.isArray(arr)) return;
+    for (let i = 0; i < arr.length; i++) collectHostFeesFromGmgnItem(arr[i]);
+  }
+
+  /** 只扫已知宿主路径，避免全树 walk（HTTP/WS 热路径降载）。 */
+  function collectHostFeesFromJson(json, depth) {
+    const d = depth || 0;
+    if (!isBscPageContext() || !json || typeof json !== "object") return;
+    if (d > 4) return;
+    let handled = false;
+    try {
+      // GMGN WS delta / update
+      if (
+        json.channel === "trenches_delta" ||
+        json.channel === "trenches_update"
+      ) {
+        const data = json.data;
+        if (data && Array.isArray(data.t)) collectHostFeesFromGmgnTokens(data.t);
+        handled = true;
+      }
+      if (Array.isArray(json.t)) {
+        collectHostFeesFromGmgnTokens(json.t);
+        handled = true;
+      }
+
+      // Debot Socket.IO: ["meme:new", { token }]
+      if (
+        Array.isArray(json) &&
+        json.length >= 2 &&
+        typeof json[0] === "string" &&
+        /meme:/i.test(json[0])
+      ) {
+        const payload = json[1];
+        const tok =
+          payload && typeof payload === "object"
+            ? payload.token || payload
+            : null;
+        if (tok) collectHostFeesFromDebotRow(tok);
+        handled = true;
+      }
+
+      const tryGmgnNcBlock = (block) => {
+        if (block && Array.isArray(block.tokens)) {
+          collectHostFeesFromGmgnTokens(block.tokens);
+          handled = true;
+        }
+      };
+
+      tryGmgnNcBlock(json.new_creation);
+      const data = json.data;
+      if (data && typeof data === "object") {
+        tryGmgnNcBlock(data.new_creation);
+        if (Array.isArray(data.new_creations)) {
+          for (let i = 0; i < data.new_creations.length; i++) {
+            collectHostFeesFromDebotRow(data.new_creations[i]);
+          }
+          handled = true;
+        }
+        for (const debotCol of ["completing", "completed"]) {
+          const col = data[debotCol];
+          if (!Array.isArray(col)) continue;
+          for (let i = 0; i < col.length; i++) {
+            collectHostFeesFromDebotRow(col[i]);
+          }
+          handled = true;
+        }
+        if (data.channel === "trenches_delta" || data.channel === "trenches_update") {
+          if (Array.isArray(data.t)) collectHostFeesFromGmgnTokens(data.t);
+          if (data.data && Array.isArray(data.data.t)) {
+            collectHostFeesFromGmgnTokens(data.data.t);
+          }
+          handled = true;
+        }
+        for (const k of Object.keys(data)) {
+          if (isGmgnNewCreationColumnKey(k)) tryGmgnNcBlock(data[k]);
+        }
+      }
+      for (const k of Object.keys(json)) {
+        if (k === "data" || k === "new_creation") continue;
+        if (isGmgnNewCreationColumnKey(k)) tryGmgnNcBlock(json[k]);
+      }
+
+      // SharedWorker 外壳：{ type, payload/data/message/body: { channel, data } }
+      if (!handled && d < 3) {
+        for (const k of ["payload", "data", "body", "message"]) {
+          const inner = json[k];
+          if (inner && typeof inner === "object" && inner !== json) {
+            collectHostFeesFromJson(inner, d + 1);
+          }
+        }
+      }
+    } catch (_e) {
+      // ignore
+    }
+  }
+
+  function collectHostFeesFromHttp(url, text) {
+    const u = String(url || "");
+    if (!hostFeeUrlLooksUseful(u)) {
+      return;
+    }
+    if (!text || text.length < 40) return;
+    try {
+      const json = JSON.parse(text);
+      collectHostFeesFromJson(json);
+      if (/meme\/v\d+\/ranks/i.test(u)) {
+        flushHostFeePendingNow();
+        try {
+          window.postMessage(
+            { source: "flap-fee-info", type: "host-fee-ranks-done", site: "debot" },
+            "*"
+          );
+        } catch (_rd) {
+          // ignore
+        }
+      }
+      if (u.includes("mutil_window_token_security_launchpad")) {
+        const sec = json?.data?.security || json?.data?.token?.security;
+        const tal = sec?.tax_allocation || sec?.s_tal;
+        const ca = String(json?.data?.address || "").toLowerCase();
+        if (tal && TARGET_TOKEN_RE.test(ca)) {
+          collectHostFeesFromGmgnItem({ a: ca, s_tal: tal, security: sec });
+        }
+      }
+    } catch (_e) {
+      // ignore
+    }
+  }
+
+  function textMightBeHostFeeFeed(text) {
+    if (typeof text !== "string" || text.length < 40) return false;
+    return (
+      text.indexOf("s_tal") !== -1 ||
+      text.indexOf("tax_allocation") !== -1 ||
+      text.indexOf("launchpad_extra") !== -1 ||
+      text.indexOf("trenches_delta") !== -1 ||
+      text.indexOf("trenches_update") !== -1 ||
+      text.indexOf("trenches_rank") !== -1 ||
+      text.indexOf("new_creations") !== -1
+    );
+  }
+
+  /** GMGN SharedWorker / MessagePort 帧：与 HTTP 一样提取 s_tal（过滤关时也要跑） */
+  function unwrapSocketIoText(text) {
+    if (typeof text !== "string") return text;
+    const t = text.trim();
+    if (!t) return t;
+    const m = t.match(/^\d+(\[.*\])$/s);
+    if (m) return m[1];
+    return t;
+  }
+
+  function tapHostFeePortData(data) {
+    if (!isBscPageContext() || data == null) return;
+    try {
+      const NativeJSONParse =
+        (JSON.parse && JSON.parse.__flapFeeNative) || JSON.parse.bind(JSON);
+      if (typeof data === "string") {
+        if (!textMightBeHostFeeFeed(data)) return;
+        const payload = unwrapSocketIoText(data);
+        const c0 = payload.charAt(0);
+        if (c0 !== "{" && c0 !== "[") return;
+        collectHostFeesFromJson(NativeJSONParse(payload));
+      } else if (typeof data === "object") {
+        collectHostFeesFromJson(data);
+      }
+    } catch (_tap) {
+      // ignore
+    }
+  }
+
+  function gmgnSymbolFromTaxDom(el) {
+    if (!(el instanceof HTMLElement)) return "";
+    const tax = el.querySelector(".trenches-tax");
+    if (!tax) return "";
+    const img = tax.querySelector('img[src*="/static/quotes/"]');
+    if (img) {
+      const src = img.currentSrc || img.getAttribute("src") || "";
+      const m = src.match(/\/quotes\/([^./?#]+)/i);
+      if (m) return String(m[1]).trim().toUpperCase();
+    }
+    // BNB/WBNB 分红：GMGN 用 external-res 或 BNB 图标，无 /static/quotes/
+    const hasReferral = tax.querySelector(
+      'svg[data-icon="IconReferral16pxRegular"]'
+    );
+    if (hasReferral) {
+      const tal = scrapeGmgnTaxAllocationFromFiber(el);
+      const dts = coerceDividendTokenList(tal?.dividend_tokens);
+      if (dts.length) {
+        for (let i = 0; i < dts.length; i++) {
+          const sym = symbolFromKnownTokenAddress(dts[i]?.address || dts[i]?.token);
+          if (sym) return sym;
+        }
+      }
+      return "BNB";
+    }
+    return "";
+  }
+
+  function debotSymbolFromPoolDom(el) {
+    if (!(el instanceof HTMLElement)) return "";
+    const pool = el.querySelector(
+      '[aria-label$="流动池"], [aria-label*=" 流动池"], [aria-label*="池子"]'
+    );
+    if (!pool) return "";
+    const img = pool.querySelector("img[alt]");
+    if (img) {
+      const alt = String(img.getAttribute("alt") || "").trim();
+      const name = alt.replace(/\s*(流动池|池子)\s*$/u, "").trim();
+      if (name && /^[A-Za-z0-9]{1,12}$/.test(name)) return name.toUpperCase();
+    }
+    const aria = pool.getAttribute("aria-label") || "";
+    const part = aria
+      .replace(/\s*(流动池|池子)\s*$/u, "")
+      .trim();
+    if (part && /^[A-Za-z0-9]{1,12}$/.test(part)) return part.toUpperCase();
+    return "";
+  }
+
+  function applyDomSymbolsToHostFee(entry, scopeEl, source) {
+    if (!entry || !(scopeEl instanceof HTMLElement)) return entry;
+    const domSym =
+      source === "debot"
+        ? debotSymbolFromPoolDom(scopeEl)
+        : gmgnSymbolFromTaxDom(scopeEl);
+    if (domSym) {
+      if (!entry.dividend_symbol && entry.dividend_bps > 0) {
+        entry.dividend_symbol = domSym;
+      }
+      if (!entry.quote_symbol) entry.quote_symbol = domSym;
+      entry.top_payout_symbol =
+        entry.dividend_symbol || entry.quote_symbol || domSym;
+    }
+    return entry;
+  }
+
+  function scrapeGmgnTaxAllocationFromFiber(root) {
+    const fiberKey = Object.keys(root).find((k) => k.startsWith("__reactFiber"));
+    if (!fiberKey) return null;
+    let found = null;
+    const pickTal = (p) => {
+      if (!p || typeof p !== "object") return null;
+      const tal =
+        p.tax_allocation ||
+        p.taxAllocation ||
+        p.fallbackToken?.tax_allocation ||
+        p.fallbackToken?.taxAllocation ||
+        p.token?.tax_allocation ||
+        p.token?.taxAllocation;
+      return tal && typeof tal === "object" ? tal : null;
+    };
+    const walk = (node, depth) => {
+      if (!node || depth > 55 || found) return;
+      const tal = pickTal(node.memoizedProps);
+      if (tal) {
+        found = tal;
+        return;
+      }
+      walk(node.child, depth + 1);
+      walk(node.sibling, depth + 1);
+    };
+    walk(root[fiberKey], 0);
+    return found;
+  }
+
+  function scrapeDebotLaunchpadFromFiber(root) {
+    const fiberKey = Object.keys(root).find((k) => k.startsWith("__reactFiber"));
+    if (!fiberKey) return null;
+    let found = null;
+    const walk = (node, depth) => {
+      if (!node || depth > 55 || found) return;
+      const p = node.memoizedProps;
+      if (p && typeof p === "object") {
+        if (p.launchpad_extra && typeof p.launchpad_extra === "object") {
+          found = { contract: p.contract, meta: { launchpad_extra: p.launchpad_extra } };
+          return;
+        }
+        if (p.meta?.launchpad_extra) {
+          found = { contract: p.contract, meta: p.meta };
+          return;
+        }
+        if (p.token?.meta?.launchpad_extra) {
+          found = { contract: p.token.contract, meta: p.token.meta };
+          return;
+        }
+        if (p.row?.meta?.launchpad_extra) {
+          found = { contract: p.row.contract, meta: p.row.meta };
+          return;
+        }
+      }
+      walk(node.child, depth + 1);
+      walk(node.sibling, depth + 1);
+    };
+    walk(root[fiberKey], 0);
+    return found;
+  }
+
+  function resolveGmgnCardElement(node) {
+    if (!(node instanceof HTMLElement)) return null;
+    if (node.matches?.('[data-sentry-source-file="TokenItem.tsx"]')) return node;
+    return (
+      node.closest?.('[data-sentry-source-file="TokenItem.tsx"]') ||
+      node.closest?.('[href*="/bsc/token/0x"]') ||
+      null
+    );
+  }
+
+  function gmgnAddrFromCard(card) {
+    if (!(card instanceof HTMLElement)) return "";
+    const href =
+      card.getAttribute("href") ||
+      card.querySelector?.("[href*='/bsc/token/0x']")?.getAttribute("href") ||
+      "";
+    const m = href.match(/0x[a-fA-F0-9]{40}/);
+    return m ? m[0].toLowerCase() : "";
+  }
+
+  function resolveDebotCardElement(node) {
+    if (!(node instanceof HTMLElement)) return null;
+    let cur = node;
+    for (let depth = 0; cur && depth < 14; depth += 1) {
+      if (
+        cur.querySelector?.('[aria-label*="流动池"]') &&
+        /0x[a-fA-F0-9]{4,}/.test(cur.textContent || "")
+      ) {
+        return cur;
+      }
+      cur = cur.parentElement;
+    }
+    return node.closest?.("div") || node;
+  }
+
+  function debotAddrFromCard(card) {
+    if (!(card instanceof HTMLElement)) return "";
+    const fromAttr =
+      card.getAttribute("data-contract") ||
+      card.getAttribute("data-address") ||
+      card.dataset?.contract ||
+      card.dataset?.address ||
+      "";
+    if (TARGET_TOKEN_RE.test(fromAttr)) return String(fromAttr).toLowerCase();
+    const href =
+      card.querySelector?.("a[href*='0x']")?.getAttribute("href") ||
+      card.getAttribute("href") ||
+      "";
+    const m = href.match(/0x[a-fA-F0-9]{40}/i);
+    if (m) return m[0].toLowerCase();
+    const clip = card.querySelector?.("[data-clipboard-text], [data-address]");
+    const clipVal =
+      clip?.getAttribute?.("data-clipboard-text") ||
+      clip?.getAttribute?.("data-address") ||
+      "";
+    const cm = String(clipVal).match(/0x[a-fA-F0-9]{40}/i);
+    if (cm) return cm[0].toLowerCase();
+    return "";
+  }
+
+  function processGmgnReactTaxCard(card) {
+    if (!(card instanceof HTMLElement)) return;
+    const addr = gmgnAddrFromCard(card);
+    if (!TARGET_TOKEN_RE.test(addr)) return;
+    const tal = scrapeGmgnTaxAllocationFromFiber(card);
+    if (!tal) return;
+    let entry = gmgnHostFeeFromItem({ a: addr, tax_allocation: tal });
+    if (!entry) return;
+    entry = applyDomSymbolsToHostFee(entry, card, "gmgn");
+    entry = hydrateHostFeeBasket(entry, card, "gmgn");
+    queueHostFeeEntry(entry);
+  }
+
+  function processDebotReactTaxCard(card) {
+    if (!(card instanceof HTMLElement)) return;
+    const scope = resolveDebotCardElement(card);
+    const scraped = scrapeDebotLaunchpadFromFiber(scope);
+    const addr = debotAddrFromCard(scope) || String(scraped?.contract || "").toLowerCase();
+    if (!TARGET_TOKEN_RE.test(addr)) return;
+    const row =
+      scraped && scraped.meta
+        ? { contract: addr, meta: scraped.meta }
+        : null;
+    if (!row) return;
+    let entry = debotHostFeeFromRow(row);
+    if (!entry) return;
+    entry = applyDomSymbolsToHostFee(entry, scope, "debot");
+    entry = hydrateHostFeeBasket(entry, scope, "debot");
+    queueHostFeeEntry(entry);
+  }
+
+  const GMGN_HOST_FEE_ROOT_SEL =
+    '[data-sentry-source-file="PumpSubX.tsx"], [data-sentry-source-file="PumpSubAX.tsx"], div.flex.flex-col.flex-1.overflow-hidden';
+  const DEBOT_HOST_FEE_ROOT_SEL =
+    '.MuiStack-root, [class*="MuiGrid"], div[class*="overflow-y"], div[class*="overflow-auto"]';
+  const HOST_FEE_OBSERVE_MAX_ROOTS = 8;
+  const HOST_FEE_SCAN_MAX_NODES = 24;
+
+  function collectHostFeeObserveRoots() {
+    const host = location.hostname || "";
+    const path = location.pathname || "";
+    const roots = [];
+    const seen = new Set();
+    const push = (el) => {
+      if (!(el instanceof HTMLElement) || !el.isConnected || seen.has(el)) return;
+      seen.add(el);
+      roots.push(el);
+    };
+    if (/debot\.ai|gungnir\.bot/i.test(host)) {
+      if (/\/token\//i.test(path)) {
+        const header = document.querySelector(
+          "[title^='0x'], [data-clipboard-text^='0x'], .ca-text"
+        );
+        if (header instanceof HTMLElement) {
+          const box =
+            header.closest?.(".MuiBox-root, .MuiCard-root, .MuiStack-root") ||
+            header.parentElement;
+          if (box instanceof HTMLElement) push(box);
+        }
+      } else if (/\/meme/i.test(path) || path === "/" || path === "") {
+        document.querySelectorAll(DEBOT_HOST_FEE_ROOT_SEL).forEach((el) => {
+          if (!(el instanceof HTMLElement)) return;
+          const r = el.getBoundingClientRect();
+          if (r.width >= 200 && r.height >= 280 && r.top < window.innerHeight + 200) {
+            push(el);
+          }
+        });
+        const sample = document.querySelector("[data-contract]");
+        const col = sample?.closest?.(".MuiStack-root, [class*='overflow']");
+        if (col instanceof HTMLElement) push(col);
+      }
+    } else if (/gmgn\.ai/i.test(host)) {
+      document.querySelectorAll(GMGN_HOST_FEE_ROOT_SEL).forEach((el) => push(el));
+      if (!roots.length) {
+        const sample = document.querySelector('[href*="/bsc/token/0x"]');
+        const col = sample?.closest?.("div.flex.flex-col");
+        if (col instanceof HTMLElement) push(col);
+      }
+    }
+    return roots.slice(0, HOST_FEE_OBSERVE_MAX_ROOTS);
+  }
+
+  function installDomHostFeeReactTap() {
+    if (window.__flapFeeDomReactTap === HOOK_VER) return;
+    if (!isBscPageContext()) return;
+    window.__flapFeeDomReactTap = HOOK_VER;
+    const scheduled = new WeakSet();
+    const schedule = (card, kind) => {
+      if (!(card instanceof HTMLElement) || scheduled.has(card)) return;
+      scheduled.add(card);
+      window.setTimeout(() => {
+        scheduled.delete(card);
+        try {
+          if (kind === "debot") processDebotReactTaxCard(card);
+          else processGmgnReactTaxCard(card);
+        } catch (_pr) {
+          // ignore
+        }
+      }, 0);
+    };
+    const hostIsDebot = () => /debot\.ai|gungnir\.bot/i.test(location.hostname || "");
+    const scanRoot = (root) => {
+      if (!(root instanceof HTMLElement)) return;
+      const debot = hostIsDebot();
+      let budget = HOST_FEE_SCAN_MAX_NODES;
+      if (debot) {
+        const cards = root.matches?.("[data-contract], [href*='0x']")
+          ? [root]
+          : root.querySelectorAll?.("[data-contract], a[href*='0x']");
+        cards?.forEach?.((el) => {
+          if (budget <= 0) return;
+          budget -= 1;
+          const card = resolveDebotCardElement(el);
+          if (card instanceof HTMLElement) schedule(card, "debot");
+        });
+        return;
+      }
+      const card = resolveGmgnCardElement(root);
+      if (card) schedule(card, "gmgn");
+      root
+        .querySelectorAll?.(
+          '[data-sentry-source-file="TokenItem.tsx"], [href*="/bsc/token/0x"]'
+        )
+        .forEach((el) => {
+          if (budget <= 0) return;
+          budget -= 1;
+          const c = resolveGmgnCardElement(el);
+          if (c) schedule(c, "gmgn");
+        });
+    };
+    const onScanToken = (ev) => {
+      try {
+        const token = String(ev?.detail?.token || "")
+          .trim()
+          .toLowerCase();
+        if (!TARGET_TOKEN_RE.test(token)) return;
+        const short = token.slice(-8);
+        const roots = collectHostFeeObserveRoots();
+        const scope = roots.length ? roots : [document.documentElement];
+        let hits = 0;
+        for (let ri = 0; ri < scope.length && hits < 6; ri += 1) {
+          const root = scope[ri];
+          if (!root?.querySelectorAll) continue;
+          root
+            .querySelectorAll(`[href*="${short}"], [data-contract="${token}"]`)
+            .forEach((el) => {
+              if (hits >= 6) return;
+              if (!(el instanceof HTMLElement)) return;
+              hits += 1;
+              if (hostIsDebot()) {
+                schedule(resolveDebotCardElement(el) || el, "debot");
+              } else {
+                const c = resolveGmgnCardElement(el);
+                if (c) schedule(c, "gmgn");
+              }
+            });
+        }
+      } catch (_st) {
+        // ignore
+      }
+    };
+    try {
+      window.addEventListener("flap-fee-scan-card", onScanToken);
+    } catch (_ev) {
+      // ignore
+    }
+    const observedRoots = new WeakSet();
+    let rootMo = null;
+    const attachObservers = () => {
+      const roots = collectHostFeeObserveRoots();
+      if (!roots.length || !rootMo) return false;
+      for (let i = 0; i < roots.length; i += 1) {
+        const root = roots[i];
+        if (observedRoots.has(root)) continue;
+        observedRoots.add(root);
+        try {
+          rootMo.observe(root, { childList: true, subtree: true });
+        } catch (_ob) {
+          // ignore
+        }
+        scanRoot(root);
+      }
+      return roots.length > 0;
+    };
+    try {
+      rootMo = new MutationObserver((records) => {
+        for (let i = 0; i < records.length; i += 1) {
+          const rec = records[i];
+          rec.addedNodes.forEach((n) => {
+            if (n instanceof HTMLElement) scanRoot(n);
+          });
+          if (
+            rec.target instanceof HTMLElement &&
+            (rec.target.closest?.(".trenches-tax") ||
+              rec.target.matches?.('[aria-label*="流动池"]'))
+          ) {
+            scanRoot(rec.target);
+          }
+        }
+      });
+      if (!attachObservers()) {
+        window.setTimeout(() => attachObservers(), 400);
+      }
+      window.setTimeout(() => attachObservers(), 1200);
+    } catch (_mo) {
+      // ignore
+    }
+  }
+
+  function installHostFeePortTap() {
+    if (window.__flapFeeHostFeePortTap === HOOK_VER) return;
+    window.__flapFeeHostFeePortTap = HOOK_VER;
+    const hostPortWrapMap = new WeakMap();
+
+    function wrapHostPortFn(fn) {
+      if (typeof fn !== "function") return fn;
+      let wrapped = hostPortWrapMap.get(fn);
+      if (wrapped) return wrapped;
+      wrapped = function flapFeeHostPortTap(ev) {
+        try {
+          if (ev && ev.data != null) tapHostFeePortData(ev.data);
+        } catch (_e) {
+          // ignore
+        }
+        return fn.apply(this, arguments);
+      };
+      hostPortWrapMap.set(fn, wrapped);
+      return wrapped;
+    }
+
+    const nativePortOm = NativeMessagePortOnmessage;
+    try {
+      if (
+        nativePortOm &&
+        typeof nativePortOm.set === "function" &&
+        !MessagePort.prototype.__flapFeeHostFeePortOm
+      ) {
+        MessagePort.prototype.__flapFeeHostFeePortOm = HOOK_VER;
+        Object.defineProperty(MessagePort.prototype, "onmessage", {
+          configurable: true,
+          enumerable: true,
+          get: function () {
+            return this.__flapFeeHostPortOmUser || null;
+          },
+          set: function (fn) {
+            this.__flapFeeHostPortOmUser = fn;
+            if (typeof fn !== "function") {
+              try {
+                nativePortOm.set.call(this, fn);
+              } catch (_e) {
+                // ignore
+              }
+              return;
+            }
+            try {
+              nativePortOm.set.call(this, wrapHostPortFn(fn));
+            } catch (_e2) {
+              try {
+                nativePortOm.set.call(this, fn);
+              } catch (_e3) {
+                // ignore
+              }
+            }
+          }
+        });
+      }
+    } catch (_pom) {
+      // ignore
+    }
+
+    try {
+      if (
+        typeof NativeMessagePortAdd === "function" &&
+        !MessagePort.prototype.__flapFeeHostFeePortAdd
+      ) {
+        MessagePort.prototype.__flapFeeHostFeePortAdd = HOOK_VER;
+        MessagePort.prototype.addEventListener = function (type, listener, opt) {
+          if (type === "message" && typeof listener === "function") {
+            return NativeMessagePortAdd.call(
+              this,
+              type,
+              wrapHostPortFn(listener),
+              opt
+            );
+          }
+          return NativeMessagePortAdd.call(this, type, listener, opt);
+        };
+      }
+      if (
+        typeof NativeMessagePortRm === "function" &&
+        !MessagePort.prototype.__flapFeeHostFeePortRm
+      ) {
+        MessagePort.prototype.__flapFeeHostFeePortRm = HOOK_VER;
+        MessagePort.prototype.removeEventListener = function (type, listener, opt) {
+          if (type === "message" && typeof listener === "function") {
+            const w = hostPortWrapMap.get(listener);
+            if (w) return NativeMessagePortRm.call(this, type, w, opt);
+          }
+          return NativeMessagePortRm.call(this, type, listener, opt);
+        };
+      }
+    } catch (_padd) {
+      // ignore
+    }
+
+    try {
+      const nativePortStart = NativeMessagePortStart;
+      if (typeof nativePortStart === "function" && !MessagePort.prototype.__flapFeeHostFeeStart) {
+        MessagePort.prototype.__flapFeeHostFeeStart = HOOK_VER;
+        MessagePort.prototype.start = function flapFeeHostPortStart() {
+          try {
+            if (!this.__flapFeeHostFeeStartTap) {
+              this.__flapFeeHostFeeStartTap = HOOK_VER;
+              NativeMessagePortAdd.call(this, "message", (ev) => {
+                try {
+                  if (ev && ev.data != null) tapHostFeePortData(ev.data);
+                } catch (_st) {
+                  // ignore
+                }
+              });
+            }
+          } catch (_tap) {
+            // ignore
+          }
+          return nativePortStart.call(this);
+        };
+      }
+    } catch (_pst) {
+      // ignore
+    }
+
+    if (typeof NativeSharedWorker === "function" && !window.SharedWorker.__flapFeeHostFeeSw) {
+      function FlapHostFeeSharedWorker(scriptURL, options) {
+        const sw =
+          options !== undefined
+            ? new NativeSharedWorker(scriptURL, options)
+            : new NativeSharedWorker(scriptURL);
+        try {
+          const u = String(scriptURL || "");
+          if (/\/workers\/gmgn/i.test(u) || /\/_next\/static\/workers\/gmgn/i.test(u)) {
+            const list = (window.__flapFeeWorkersCreated =
+              window.__flapFeeWorkersCreated || []);
+            list.push({ u: u.slice(0, 120), kind: "shared", ver: HOOK_VER });
+            if (list.length > 20) list.shift();
+          }
+        } catch (_e) {
+          // ignore
+        }
+        try {
+          if (sw.port) {
+            try {
+              sw.port.start();
+            } catch (_ps) {
+              // ignore
+            }
+          }
+        } catch (_p) {
+          // ignore
+        }
+        return sw;
+      }
+      try {
+        FlapHostFeeSharedWorker.prototype = NativeSharedWorker.prototype;
+        Object.setPrototypeOf(FlapHostFeeSharedWorker, NativeSharedWorker);
+      } catch (_p) {
+        // ignore
+      }
+      FlapHostFeeSharedWorker.__flapFeeHostFeeSw = HOOK_VER;
+      try {
+        if (!window.SharedWorker.__flapFeeTaxRecv) {
+          window.SharedWorker = FlapHostFeeSharedWorker;
+        }
+      } catch (_e) {
+        // ignore
+      }
+    }
+  }
+
+  function installHostFeeWebSocketTap() {
+    if (window.__flapFeeHostFeeWsTap === HOOK_VER) return;
+    window.__flapFeeHostFeeWsTap = HOOK_VER;
+    const hostWsWrapMap = new WeakMap();
+
+    function wrapHostWsFn(fn) {
+      if (typeof fn !== "function") return fn;
+      let wrapped = hostWsWrapMap.get(fn);
+      if (wrapped) return wrapped;
+      wrapped = function flapFeeHostWsTap(ev) {
+        try {
+          if (ev && ev.data != null) tapHostFeePortData(ev.data);
+        } catch (_e) {
+          // ignore
+        }
+        return fn.apply(this, arguments);
+      };
+      hostWsWrapMap.set(fn, wrapped);
+      return wrapped;
+    }
+
+    const nativeWsOm = NativeWebSocketOnmessage;
+    try {
+      if (
+        nativeWsOm &&
+        typeof nativeWsOm.set === "function" &&
+        !NativeWebSocket.prototype.__flapFeeHostFeeWsOm
+      ) {
+        NativeWebSocket.prototype.__flapFeeHostFeeWsOm = HOOK_VER;
+        Object.defineProperty(NativeWebSocket.prototype, "onmessage", {
+          configurable: true,
+          enumerable: true,
+          get: function () {
+            return this.__flapFeeHostWsOmUser || null;
+          },
+          set: function (fn) {
+            this.__flapFeeHostWsOmUser = fn;
+            if (typeof fn !== "function") {
+              try {
+                nativeWsOm.set.call(this, fn);
+              } catch (_e) {
+                // ignore
+              }
+              return;
+            }
+            try {
+              nativeWsOm.set.call(this, wrapHostWsFn(fn));
+            } catch (_e2) {
+              try {
+                nativeWsOm.set.call(this, fn);
+              } catch (_e3) {
+                // ignore
+              }
+            }
+          }
+        });
+      }
+    } catch (_wom) {
+      // ignore
+    }
+
+    try {
+      if (
+        typeof NativeWebSocketAdd === "function" &&
+        !NativeWebSocket.prototype.__flapFeeHostFeeWsAdd
+      ) {
+        NativeWebSocket.prototype.__flapFeeHostFeeWsAdd = HOOK_VER;
+        NativeWebSocket.prototype.addEventListener = function (type, listener, opt) {
+          if (type === "message" && typeof listener === "function") {
+            return NativeWebSocketAdd.call(
+              this,
+              type,
+              wrapHostWsFn(listener),
+              opt
+            );
+          }
+          return NativeWebSocketAdd.call(this, type, listener, opt);
+        };
+      }
+      if (
+        typeof NativeWebSocketRm === "function" &&
+        !NativeWebSocket.prototype.__flapFeeHostFeeWsRm
+      ) {
+        NativeWebSocket.prototype.__flapFeeHostFeeWsRm = HOOK_VER;
+        NativeWebSocket.prototype.removeEventListener = function (type, listener, opt) {
+          if (type === "message" && typeof listener === "function") {
+            const w = hostWsWrapMap.get(listener);
+            if (w) return NativeWebSocketRm.call(this, type, w, opt);
+          }
+          return NativeWebSocketRm.call(this, type, listener, opt);
+        };
+      }
+    } catch (_wadd) {
+      // ignore
+    }
+
+    const OrigWebSocket = window.WebSocket;
+    if (typeof OrigWebSocket === "function" && !OrigWebSocket.__flapFeeHostFeeWsCtor) {
+      function FlapHostFeeWebSocket(url, protocols) {
+        const ws =
+          protocols !== undefined
+            ? new OrigWebSocket(url, protocols)
+            : new OrigWebSocket(url);
+        try {
+          if (shouldHookWsUrl(url)) ws.__flapFeeHostFeeWs = HOOK_VER;
+        } catch (_e) {
+          // ignore
+        }
+        return ws;
+      }
+      try {
+        FlapHostFeeWebSocket.prototype = OrigWebSocket.prototype;
+        Object.setPrototypeOf(FlapHostFeeWebSocket, OrigWebSocket);
+        FlapHostFeeWebSocket.CONNECTING = OrigWebSocket.CONNECTING;
+        FlapHostFeeWebSocket.OPEN = OrigWebSocket.OPEN;
+        FlapHostFeeWebSocket.CLOSING = OrigWebSocket.CLOSING;
+        FlapHostFeeWebSocket.CLOSED = OrigWebSocket.CLOSED;
+      } catch (_p) {
+        // ignore
+      }
+      FlapHostFeeWebSocket.__flapFeeHostFeeWsCtor = HOOK_VER;
+      try {
+        if (!window.WebSocket.__flapFeeTaxRecv) {
+          window.WebSocket = FlapHostFeeWebSocket;
+        }
+      } catch (_e) {
+        // ignore
+      }
+    }
+  }
+
+  function installHostFeeXhrTap() {
+    if (window.__flapFeeHostFeeXhrTap === HOOK_VER) return;
+    const XO = XMLHttpRequest.prototype.open;
+    const XS = XMLHttpRequest.prototype.send;
+    if (!XO || !XS || XS.__flapFeeHostFeeXhr === HOOK_VER) return;
+    window.__flapFeeHostFeeXhrTap = HOOK_VER;
+
+    XMLHttpRequest.prototype.open = function (method, url) {
+      try {
+        this.__flapFeeHostFeeUrl = url != null ? String(url) : "";
+      } catch (_e) {
+        this.__flapFeeHostFeeUrl = "";
+      }
+      return XO.apply(this, arguments);
+    };
+
+    XMLHttpRequest.prototype.send = function (body) {
+      const xhr = this;
+      const url = xhr.__flapFeeHostFeeUrl || xhr.__flapFeeUrl || "";
+      if (hostFeeUrlLooksUseful(url)) {
+        xhr.addEventListener(
+          "loadend",
+          function flapFeeHostFeeXhrDone() {
+            try {
+              if (xhr.readyState < 4 || xhr.status < 200 || xhr.status >= 300) return;
+              let text = "";
+              try {
+                const rt = xhr.responseType || "";
+                if (!rt || rt === "text" || rt === "") {
+                  text = typeof xhr.responseText === "string" ? xhr.responseText : "";
+                } else if (rt === "json" && xhr.response && typeof xhr.response === "object") {
+                  collectHostFeesFromJson(xhr.response);
+                  return;
+                }
+              } catch (_rt) {
+                // ignore
+              }
+              if (text && text.length >= 40) collectHostFeesFromHttp(url, text);
+            } catch (_e) {
+              // ignore
+            }
+          },
+          { once: true }
+        );
+      }
+      return XS.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send.__flapFeeHostFeeXhr = HOOK_VER;
+  }
+
   /**
    * GMGN s_tal → 资金接收方（非 vault 的 marketing/创作者）占比 %。
    *
@@ -347,9 +1991,10 @@
    *    （旧逻辑「div≥mkt 且 div≥50 → 不屏蔽」会把 50/50 整段放行，已废止）
    * 4) 不做 market_address-only→100%（半包误杀纯 💎）
    */
-  function gmgnCreatorRecvPct(tal) {
+  function gmgnCreatorRecvPct(tal, item) {
     if (!tal || typeof tal !== "object") return null;
     if (isGmgnVaultTal(tal)) return null;
+    if (gmgnIsFourTaxWallet(tal, item)) return null;
 
     const mkt = mktToPct(tal.marketing);
     // 0 / "0" / 空 = 无营销份额
@@ -362,11 +2007,15 @@
     const addr = gmgnAddr(t);
     // 自定义尾号：任意 CA（不限 7777/8888/ffff）
     if (shouldHideByCustomSuffix(addr)) return true;
+    const tal = gmgnTal(t);
+    if (vaultHideEnabled) {
+      const vKind = gmgnVaultKind(tal, t);
+      if (shouldHideVaultKind(vKind)) return true;
+    }
     // 资金接收方：仅目标税币 + s_tal
     if (!taxRecvEnabled) return false;
     // 双保险：无尾号不屏蔽
     if (!isTargetTaxTokenAddr(addr)) return false;
-    const tal = gmgnTal(t);
     if (!tal || typeof tal !== "object") return false;
     if (isGmgnVaultTal(tal)) return false;
 
@@ -381,7 +2030,7 @@
       return false;
     }
 
-    const pct = gmgnCreatorRecvPct(tal);
+    const pct = gmgnCreatorRecvPct(tal, t);
     if (pct == null) return false;
     // marketing% 达阈值 → 屏蔽（含 hybrid；0 = 严格 >0%，不是 ≥0%）
     return exceedsTaxRecvThreshold(pct, taxRecvPrefs.thresholdPct);
@@ -405,10 +2054,14 @@
     const contract = String(row.contract || "").toLowerCase();
     // 自定义尾号：任意 CA
     if (shouldHideByCustomSuffix(contract)) return true;
-    if (!taxRecvEnabled) return false;
-    if (!isTargetTaxTokenAddr(contract)) return false;
     const meta = row.meta && typeof row.meta === "object" ? row.meta : null;
     const extra = (meta && meta.launchpad_extra) || row.launchpad_extra;
+    if (vaultHideEnabled && extra && typeof extra === "object") {
+      const vKind = debotVaultKind(extra);
+      if (shouldHideVaultKind(vKind)) return true;
+    }
+    if (!taxRecvEnabled) return false;
+    if (!isTargetTaxTokenAddr(contract)) return false;
     if (!extra || typeof extra !== "object") return false;
     const vaultAddr = extra.vault_address;
     const recvAddr = extra.fee_receiver || extra.founder_address;
@@ -727,8 +2380,13 @@
 
   function pruneNcKeepPool() {
     const now = Date.now();
+    const maxAge = getNcKeepMaxAgeMs();
     for (const [addr, ent] of [...ncKeepPool.entries()]) {
-      if (!ent || now - ent.firstSeen > NC_KEEP_MAX_AGE_MS) {
+      if (!ent || now - ent.firstSeen > maxAge) {
+        ncKeepPool.delete(addr);
+        continue;
+      }
+      if (ent.item && !itemWithinNcKeepAge(ent.item)) {
         ncKeepPool.delete(addr);
         continue;
       }
@@ -772,10 +2430,12 @@
     if (!Array.isArray(arr) || !prefsOn()) return;
     const now = Date.now();
     const k = kind === "debot" ? "debot" : "gmgn";
+    const maxAge = getNcKeepMaxAgeMs();
     for (let i = 0; i < arr.length; i++) {
       const item = arr[i];
       const addr = ncItemAddr(item, kind);
       if (!addr || !/^0x[a-f0-9]{40}$/.test(addr)) continue;
+      if (k === "gmgn" && !itemWithinNcKeepAge(item)) continue;
       const prevEnt = ncKeepPool.get(addr);
       const keys = item && typeof item === "object" ? Object.keys(item).length : 0;
       // HTTP 全量行通常字段多；delta 常只有 c/a/f 等
@@ -803,6 +2463,7 @@
     rememberNewCreationItems(arr, kind);
     pruneNcKeepPool();
     const now = Date.now();
+    const maxAge = getNcKeepMaxAgeMs();
     const have = new Set();
     for (let i = 0; i < arr.length; i++) {
       const a = ncItemAddr(arr[i], kind);
@@ -813,7 +2474,8 @@
     for (const [addr, ent] of ncKeepPool) {
       if (have.has(addr)) continue;
       if (ent.kind && ent.kind !== k) continue;
-      if (now - ent.firstSeen > NC_KEEP_MAX_AGE_MS) continue;
+      if (now - ent.firstSeen > maxAge) continue;
+      if (ent.item && !itemWithinNcKeepAge(ent.item)) continue;
       // 缺完整快照的不垫（delta 瘦行无法当卡片）
       if (!ent.item || Object.keys(ent.item).length < 4) continue;
       cands.push([addr, ent]);
@@ -832,7 +2494,8 @@
       window.__flapFeeNcKeep = {
         pool: ncKeepPool.size,
         padded,
-        maxAgeMs: NC_KEEP_MAX_AGE_MS,
+        maxAgeMs: getNcKeepMaxAgeMs(),
+        gmgnCapMs: gmgnNewCreationMaxAgeMs,
         maxCards: NC_KEEP_MAX_CARDS,
         t: now
       };
@@ -853,6 +2516,7 @@
     if (ncKeepPool.size === 0) return 0;
     pruneNcKeepPool();
     const now = Date.now();
+    const maxAge = getNcKeepMaxAgeMs();
     let kept = 0;
     let w = 0;
     for (let i = 0; i < data.r.length; i++) {
@@ -861,7 +2525,7 @@
         .toLowerCase();
       if (addr && ncKeepPool.has(addr)) {
         const ent = ncKeepPool.get(addr);
-        if (ent && now - ent.firstSeen <= NC_KEEP_MAX_AGE_MS) {
+        if (ent && now - ent.firstSeen <= maxAge && itemWithinNcKeepAge(ent.item)) {
           kept += 1;
           continue;
         }
@@ -1418,14 +3082,30 @@
   }
 
   /**
-   * 开启屏蔽时：不要用缓存的旧 body 重拉 trenches。
-   * 旧 body 往往不含用户刚改的 GMGN 原生筛选，会表现为「站内筛选失效」。
-   * 列表刷新改由 content 整页 reload / 用户自己的请求管道完成。
-   * Debot v4：softRefresh 必须带原 POST JSON（column 在 body）。
+   * 设置变更后局部重放最近一次 new_creation 请求（不重载整页）。
+   * GMGN：trenches_rank（body 含用户原生时间筛选）；Debot v4：meme/v{n}/ranks POST。
    */
+  function softRefreshGmgnNewCreation() {
+    try {
+      const req = lastGmgnTrench;
+      if (!req || !req.url) return;
+      const init = {
+        credentials: "include",
+        cache: "no-store",
+        method: req.method || "POST"
+      };
+      if (req.body) {
+        init.headers = { "content-type": "application/json" };
+        init.body = req.body;
+      }
+      window.fetch(req.url, init).catch(() => {});
+    } catch (_g) {
+      // ignore
+    }
+  }
+
   function softRefreshLists() {
-    // intentionally no-op for GMGN request replay
-    if (!prefsOn()) return;
+    softRefreshGmgnNewCreation();
     try {
       for (const req of lastDebotRanksReqs.slice(0, 4)) {
         if (!req || !req.url) continue;
@@ -1531,12 +3211,33 @@
           if (typeof ensureTaxRecvRuntime === "function") {
             ensureTaxRecvRuntime(anyFilterEnabled() ? "suffix-on" : "suffix-off");
           }
-          if (anyFilterEnabled() && !was) {
+          if (anyFilterEnabled()) {
             queueMicrotask(softRefreshLists);
           }
         }
-        if (data.type === "tax-recv-refresh") {
-          if (anyFilterEnabled()) queueMicrotask(softRefreshLists);
+        if (data.type === "vault-hide-prefs") {
+          const was = anyFilterEnabled();
+          applyVaultHideObject(data.prefs || {});
+          try {
+            const payload = JSON.stringify({
+              enabled: vaultHidePrefs.enabled === true,
+              hideTaxVault: vaultHidePrefs.hideTaxVault === true,
+              hideStockVault: vaultHidePrefs.hideStockVault === true
+            });
+            document.documentElement?.setAttribute(VAULT_HIDE_ATTR, payload);
+            localStorage.setItem(VAULT_HIDE_LS_KEY, payload);
+          } catch (_a3) {
+            // ignore
+          }
+          if (typeof ensureTaxRecvRuntime === "function") {
+            ensureTaxRecvRuntime(anyFilterEnabled() ? "vault-on" : "vault-off");
+          }
+          if (anyFilterEnabled() && (!was || data.refresh === true)) {
+            queueMicrotask(softRefreshLists);
+          }
+        }
+        if (data.type === "tax-recv-refresh" || data.type === "list-filter-refresh") {
+          queueMicrotask(softRefreshLists);
         }
       } catch (_e) {
         // ignore
@@ -1598,6 +3299,11 @@
       if (wrapped) return wrapped;
       wrapped = function flapFeePortOm(ev) {
         try {
+          if (ev && ev.data != null) tapHostFeePortData(ev.data);
+        } catch (_hft) {
+          // ignore
+        }
+        try {
           if (!prefsOn() || !ev || ev.data == null) {
             return fn.apply(this, arguments);
           }
@@ -1643,10 +3349,7 @@
      */
 
     try {
-      const nativePortOm = Object.getOwnPropertyDescriptor(
-        MessagePort.prototype,
-        "onmessage"
-      );
+      const nativePortOm = NativeMessagePortOnmessage;
       if (nativePortOm && typeof nativePortOm.set === "function") {
         Object.defineProperty(MessagePort.prototype, "onmessage", {
           configurable: true,
@@ -1681,28 +3384,26 @@
     }
 
     try {
-      const nativePortAdd = MessagePort.prototype.addEventListener;
-      const nativePortRm = MessagePort.prototype.removeEventListener;
-      if (typeof nativePortAdd === "function") {
+      if (typeof NativeMessagePortAdd === "function") {
         MessagePort.prototype.addEventListener = function (type, listener, opt) {
           if (type === "message" && typeof listener === "function") {
-            return nativePortAdd.call(
+            return NativeMessagePortAdd.call(
               this,
               type,
               wrapPortMessageFn(listener, "port-add"),
               opt
             );
           }
-          return nativePortAdd.call(this, type, listener, opt);
+          return NativeMessagePortAdd.call(this, type, listener, opt);
         };
       }
-      if (typeof nativePortRm === "function") {
+      if (typeof NativeMessagePortRm === "function") {
         MessagePort.prototype.removeEventListener = function (type, listener, opt) {
           if (type === "message" && typeof listener === "function") {
             const w = portFnWrapMap.get(listener);
-            if (w) return nativePortRm.call(this, type, w, opt);
+            if (w) return NativeMessagePortRm.call(this, type, w, opt);
           }
-          return nativePortRm.call(this, type, listener, opt);
+          return NativeMessagePortRm.call(this, type, listener, opt);
         };
       }
     } catch (_portAdd) {
@@ -1758,20 +3459,6 @@
     //   GMGN:  ws.gmgn.ai / ws.wenmoon.cc · 纯 JSON
     //          （localStorage.disableShareWorker=true 时走主线程，不 new SharedWorker）
     // ============================================================
-    function shouldHookWsUrl(url) {
-      const u = String(url || "");
-      if (!u) return false;
-      if (/latency|rtt|health|speed-test|sub-tx-hash|helius|rpc/i.test(u)) return false;
-      if (/portal-ws/i.test(u) && /debot\.ai|gungnir/i.test(u)) return true;
-      if (/sgws\.debot\.ai/i.test(u)) return true;
-      // GMGN 战壕实时（主线程 polyfill 或直连）
-      if (/wss?:\/\//i.test(u) && (/ws\.gmgn\.ai/i.test(u) || /ws\.wenmoon\.cc/i.test(u))) {
-        return true;
-      }
-      if (/wss?:\/\//i.test(u) && /gmgn\.ai/i.test(u)) return true;
-      return false;
-    }
-
     function textMightBeTaxFeed(text) {
       return (
         text.indexOf("founder_pct") !== -1 ||
@@ -1788,7 +3475,8 @@
       );
     }
 
-    const NativeJSONParse = JSON.parse.bind(JSON);
+    const NativeJSONParse =
+      (JSON.parse && JSON.parse.__flapFeeNative) || JSON.parse.bind(JSON);
 
     function filterParsedFeed(parsed, channel, prefix) {
       if (!parsed || typeof parsed !== "object") return null;
@@ -1891,50 +3579,54 @@
     try {
       if (JSON.parse.__flapFeeTaxRecv !== HOOK_VER) {
         const wrappedParse = function flapFeeJsonParse(text, reviver) {
-          if (
+          if (typeof text !== "string" || text.length < 40) {
+            return NativeJSONParse(text, reviver);
+          }
+          const mightFilter =
             prefsOn() &&
-            typeof text === "string" &&
-            text.length >= 40 &&
             (text.charAt(0) === "{" || text.charAt(0) === "[") &&
             (text.indexOf("trenches_delta") !== -1 ||
               text.indexOf("trenches_update") !== -1 ||
-              (text.indexOf("s_tal") !== -1 && text.indexOf("marketing") !== -1))
-          ) {
-            try {
-              const obj = NativeJSONParse(text);
-              if (obj && typeof obj === "object") {
-                let removed = filterGmgnTrenchesDeltaInPlace(obj);
-                let padded = 0;
-                if (removed <= 0) {
-                  removed = filterJsonInPlace(obj, "auto");
-                  padded =
-                    (window.__flapFeeNcKeep &&
-                      Number(window.__flapFeeNcKeep.padded)) ||
-                    0;
-                  if (removed > 0 || padded > 0) scrubGmgnDeltaAddList(obj);
-                }
-                if (removed > 0 || padded > 0) {
-                  noteFilter({
-                    channel: "json-parse",
-                    removed,
-                    padded,
-                    thr: taxRecvPrefs.thresholdPct,
-                    shape:
-                      obj.channel === "trenches_delta" || obj.channel === "trenches_update"
-                        ? "delta"
-                        : "feed"
-                  });
-                  const out = JSON.stringify(obj);
-                  return reviver !== undefined
-                    ? NativeJSONParse(out, reviver)
-                    : NativeJSONParse(out);
-                }
-              }
-            } catch (_fe) {
-              // fallthrough
-            }
+              (text.indexOf("s_tal") !== -1 && text.indexOf("marketing") !== -1));
+          if (!mightFilter) {
+            return NativeJSONParse(text, reviver);
           }
-          return NativeJSONParse(text, reviver);
+          try {
+            const obj = NativeJSONParse(text);
+            if (!obj || typeof obj !== "object") {
+              return NativeJSONParse(text, reviver);
+            }
+            let removed = filterGmgnTrenchesDeltaInPlace(obj);
+            let padded = 0;
+            if (removed <= 0) {
+              removed = filterJsonInPlace(obj, "auto");
+              padded =
+                (window.__flapFeeNcKeep && Number(window.__flapFeeNcKeep.padded)) ||
+                0;
+              if (removed > 0 || padded > 0) scrubGmgnDeltaAddList(obj);
+            }
+            if (removed > 0 || padded > 0) {
+              noteFilter({
+                channel: "json-parse",
+                removed,
+                padded,
+                thr: taxRecvPrefs.thresholdPct,
+                shape:
+                  obj.channel === "trenches_delta" || obj.channel === "trenches_update"
+                    ? "delta"
+                    : "feed"
+              });
+              const out = JSON.stringify(obj);
+              return reviver !== undefined
+                ? NativeJSONParse(out, reviver)
+                : NativeJSONParse(out);
+            }
+            return reviver !== undefined
+              ? NativeJSONParse(JSON.stringify(obj), reviver)
+              : obj;
+          } catch (_fe) {
+            return NativeJSONParse(text, reviver);
+          }
         };
         wrappedParse.__flapFeeTaxRecv = HOOK_VER;
         JSON.parse = wrappedParse;
@@ -1953,6 +3645,11 @@
         if (typeof fn !== "function") return fn;
         if (fn.__flapFeeWsWrap === HOOK_VER) return fn;
         const wrapped = function (ev) {
+          try {
+            if (ev && ev.data != null) tapHostFeePortData(ev.data);
+          } catch (_hft) {
+            // ignore
+          }
           try {
             if (prefsOn() && ev && typeof ev.data === "string") {
               const next = filterLiveText(ev.data, channel);
@@ -2084,6 +3781,7 @@
           if (kind === "debot") rememberDebotUrl(url, reqBody);
           // 不改写请求体（保留 GMGN 原生筛选/limit）
           if (kind === "gmgn") {
+            rememberGmgnTrenchRequest(reqBody);
             try {
               lastGmgnTrench = {
                 url,
@@ -2100,6 +3798,7 @@
             try {
               if (!res || !res.ok || typeof res.clone !== "function") return res;
               const text = await res.clone().text();
+              collectHostFeesFromHttp(url, text);
               const next = processBody(url, text, reqBody);
               if (next == null) return res;
               return new Response(next, {
@@ -2248,6 +3947,7 @@
             }
             const kind = urlLooksUseful(u);
             if (kind === "gmgn") {
+              rememberGmgnTrenchRequest(bodyStr);
               // 原样记录，不改 body
               lastGmgnTrench = {
                 url: u,
@@ -2259,7 +3959,17 @@
             const xhr = this;
             xhr.addEventListener("loadend", function () {
               try {
-                if (urlLooksUseful(xhr.__flapFeeUrl || "")) void xhr.responseText;
+                const u = xhr.__flapFeeUrl || "";
+                if (hostFeeUrlLooksUseful(u)) {
+                  let text = "";
+                  try {
+                    text = rawText(xhr);
+                  } catch (_rt) {
+                    text = "";
+                  }
+                  if (text && text.length >= 40) collectHostFeesFromHttp(u, text);
+                }
+                if (urlLooksUseful(u)) void xhr.responseText;
               } catch (_e) {
                 // ignore
               }
@@ -2295,8 +4005,118 @@
     }
   }
 
-  // ---------- boot：SPA 已装；仅 enabled 时装网络过滤 ----------
+  /**
+   * BSC 页始终安装：从 GMGN s_tal / Debot launchpad_extra 提取徽章快路径数据。
+   * 与列表过滤钩子独立；过滤关闭时仍可减少 /modes。
+   */
+  function installHostFeeNetworkHooks() {
+    if (window.__flapFeeHostFeeHooks === HOOK_VER) return;
+    if (!isBscPageContext()) return;
+    window.__flapFeeHostFeeHooks = HOOK_VER;
+    try {
+      document.documentElement?.setAttribute("data-flap-host-fee-ver", String(HOOK_VER));
+    } catch (_attr) {
+      // ignore
+    }
+    const NativeJSONParse =
+      (JSON.parse && JSON.parse.__flapFeeNative) || JSON.parse.bind(JSON);
+    try {
+      if (!JSON.parse.__flapFeeHostFee) {
+        const wrappedParse = function flapFeeHostJsonParse(text, reviver) {
+          if (typeof text === "string" && text.length >= 40 && textMightBeHostFeeFeed(text)) {
+            try {
+              const obj = NativeJSONParse(text);
+              collectHostFeesFromJson(obj);
+              return reviver !== undefined
+                ? NativeJSONParse(JSON.stringify(obj), reviver)
+                : obj;
+            } catch (_hf) {
+              // fallthrough
+            }
+          }
+          return NativeJSONParse(text, reviver);
+        };
+        wrappedParse.__flapFeeHostFee = HOOK_VER;
+        wrappedParse.__flapFeeNative = NativeJSONParse;
+        JSON.parse = wrappedParse;
+      }
+    } catch (_jp) {
+      // ignore
+    }
+    try {
+      const origFetch = window.fetch;
+      if (typeof origFetch === "function" && !origFetch.__flapFeeHostFee) {
+        const wrappedFetch = function flapFeeHostFetch() {
+          const args = arguments;
+          const input = args[0];
+          let url = "";
+          try {
+            if (typeof input === "string") url = input;
+            else if (input && typeof input.url === "string") url = input.url;
+          } catch (_u) {
+            url = "";
+          }
+          const p = origFetch.apply(this, args);
+          const u = String(url || "");
+          if (
+            !p ||
+            typeof p.then !== "function" ||
+            !hostFeeUrlLooksUseful(u)
+          ) {
+            return p;
+          }
+          return p.then(async (res) => {
+            try {
+              if (res && res.ok && typeof res.clone === "function") {
+                const text = await res.clone().text();
+                collectHostFeesFromHttp(url, text);
+              }
+            } catch (_e) {
+              // ignore
+            }
+            return res;
+          });
+        };
+        wrappedFetch.__flapFeeHostFee = HOOK_VER;
+        window.fetch = wrappedFetch;
+      }
+    } catch (_f) {
+      // ignore
+    }
+    try {
+      installHostFeeXhrTap();
+    } catch (_xt) {
+      // ignore
+    }
+    try {
+      installHostFeeWebSocketTap();
+    } catch (_wt) {
+      // ignore
+    }
+    try {
+      installHostFeePortTap();
+    } catch (_pt) {
+      // ignore
+    }
+  }
+
+  // ---------- boot：SPA 已装；host-fee 常开；过滤 enabled 时装网络过滤 ----------
   readPrefsSync();
+  try {
+    if (isBscPageContext()) {
+      installHostFeePortTap();
+      installHostFeeWebSocketTap();
+      installHostFeeXhrTap();
+    }
+  } catch (_earlyPt) {
+    // ignore
+  }
+  installHostFeeNetworkHooks();
+  try {
+    installDomHostFeeReactTap();
+  } catch (_rt) {
+    // ignore
+  }
   ensureTaxRecvRuntime("boot");
 
   try {
@@ -2313,10 +4133,18 @@
         }
       }).observe(document.documentElement, {
         attributes: true,
-        attributeFilter: [PREFS_ATTR, SUFFIX_ATTR]
+        attributeFilter: [PREFS_ATTR, SUFFIX_ATTR, VAULT_HIDE_ATTR]
       });
     }
   } catch (_mo) {
+    // ignore
+  }
+
+  try {
+    if (window.__flapFeeHostFeeHooks === HOOK_VER && document.documentElement) {
+      document.documentElement.setAttribute("data-flap-host-fee-ver", String(HOOK_VER));
+    }
+  } catch (_fin) {
     // ignore
   }
 })();

@@ -8,12 +8,18 @@
   const UI_LANG_KEY = "flapFeeInfo.uiLang.v1";
   const TAX_RECV_HIDE_KEY = "flapFeeInfo.taxRecvHide.v1";
   const SUFFIX_HIDE_KEY = "flapFeeInfo.suffixHide.v1";
+  const VAULT_HIDE_KEY = "flapFeeInfo.vaultHide.v1";
   const LICENSE_KEY = "flapFeeInfo.license.v1";
   const DEVICE_ID_KEY = "flapFeeInfo.deviceId.v1";
   const LICENSE_API_BASE = "https://flap-fee-info.tech-melon.workers.dev";
   const DEFAULT_THEME = "dark";
   const DEFAULT_TAX_RECV_HIDE = { enabled: false, thresholdPct: 100 };
   const DEFAULT_SUFFIX_HIDE = { enabled: false, rules: [] };
+  const DEFAULT_VAULT_HIDE = {
+    enabled: false,
+    hideTaxVault: false,
+    hideStockVault: false
+  };
   const DEFAULT_LICENSE = { key: "" };
   const SUFFIX_HIDE_MAX_RULES = 24;
   const DEFAULT_OFFSETS = {
@@ -93,13 +99,24 @@
       pref_unknown_desc: "链上无有效分配时",
       taxRecvSection: "资金接收方屏蔽",
       taxRecvHint:
-        "仅战壕/Meme「新创建」栏生效（即将打满/已开盘·已迁移不筛）。不含 K 线顶栏、搜索弹层。不额外请求；金库始终显示。默认关闭。",
+        "仅战壕/Meme「新创建」栏生效。不含 K 线顶栏、搜索弹层。不额外请求；默认关闭。金库类型见下方「金库屏蔽」。",
       taxRecvEnableTitle: "启用屏蔽",
       taxRecvEnableDesc: "开启后只过滤「新创建」列",
       taxRecvThresholdLabel: "阈值 ≥",
       taxRecvThresholdLabelGt: "阈值 >",
       taxRecvHint2:
-        "仅新创建：7777/8888 且 👨‍🍳 达阈值则屏蔽（含 hybrid）。0% = 严格大于 0%（只要有 dev 分配就挡，不会挡 0%）。纯 💎/🎁金库不挡。即将打满与已开盘原样显示。",
+        "仅新创建：7777/8888 且 👨‍🍳 达阈值则屏蔽（含 hybrid）。0% = 严格大于 0%（只要有 dev 分配就挡，不会挡 0%）。纯 💎 持有人分红不挡。",
+      vaultHideSection: "金库屏蔽",
+      vaultHideHint:
+        "仅 BSC「新创建」列。区分税收金库 🎁 与币股金库 📈。Four ffff 税收钱包不算金库。默认关闭。",
+      vaultHideEnableTitle: "启用金库屏蔽",
+      vaultHideEnableDesc: "开启后按下方选项过滤列表",
+      vaultHideTaxTitle: "屏蔽税收金库",
+      vaultHideTaxDesc: "Flap 纯 🎁 vault、GMGN is_vault（无篮子）",
+      vaultHideStockTitle: "屏蔽币股金库",
+      vaultHideStockDesc: "dividend_tokens / is_stocks_vault 篮子金库",
+      vaultHideHint2:
+        "例：只勾「税收金库」→ 隐藏税收钱包币，保留 NVDA/FXIO 币股。可与资金接收方屏蔽叠加。",
       suffixHideSection: "自定义尾号屏蔽",
       suffixHideHint:
         "仅 BSC 生效。隐藏 CA 以指定十六进制尾号结尾的代币（可多条）。战壕「新创建」列数据层过滤。默认关闭。",
@@ -212,13 +229,24 @@
       pref_unknown_desc: "no valid on-chain split",
       taxRecvSection: "Hide fund recipients",
       taxRecvHint:
-        "Only the New/Creation column on trench lists (not Almost full / Completed). No K-line header or search overlay. No extra requests; vaults always shown. Off by default.",
+        "New/Creation column on trench lists only. No K-line header or search overlay. No extra requests; off by default. See Vault hide below.",
       taxRecvEnableTitle: "Enable hide",
       taxRecvEnableDesc: "Only filter the New creation column",
       taxRecvThresholdLabel: "Threshold ≥",
       taxRecvThresholdLabelGt: "Threshold >",
       taxRecvHint2:
-        "New column only: hide 7777/8888 when marketing hits the threshold (incl. hybrid). 0% = strictly > 0% (any dev share hides it; a 0% split is kept). Pure 💎 / vault kept.",
+        "New column only: hide 7777/8888 when marketing hits threshold (incl. hybrid). 0% = strictly > 0%. Pure 💎 holder dividend kept.",
+      vaultHideSection: "Vault hide",
+      vaultHideHint:
+        "BSC New creation column only. Tax vault 🎁 vs equity basket vault 📈. Four ffff tax wallet is not a vault. Off by default.",
+      vaultHideEnableTitle: "Enable vault hide",
+      vaultHideEnableDesc: "Filter list by options below",
+      vaultHideTaxTitle: "Hide tax vaults",
+      vaultHideTaxDesc: "Flap pure 🎁 vault, GMGN is_vault (no basket)",
+      vaultHideStockTitle: "Hide equity vaults",
+      vaultHideStockDesc: "dividend_tokens / is_stocks_vault basket vaults",
+      vaultHideHint2:
+        "E.g. tax vault only → hide tax-wallet tokens, keep NVDA/FXIO baskets. Stacks with fund-recipient hide.",
       suffixHideSection: "Custom CA suffix hide",
       suffixHideHint:
         "BSC only. Hide tokens whose CA ends with a hex suffix (multi-rule). Filters New creation column at data layer. Off by default.",
@@ -323,6 +351,10 @@
   const suffixRulesList = document.getElementById("suffixRulesList");
   const suffixAddInput = document.getElementById("suffixAddInput");
   const suffixAddBtn = document.getElementById("suffixAddBtn");
+  const vaultHideEnabled = document.getElementById("vaultHideEnabled");
+  const vaultHideTax = document.getElementById("vaultHideTax");
+  const vaultHideStock = document.getElementById("vaultHideStock");
+  const vaultHideOptions = document.getElementById("vaultHideOptions");
 
   /** @type {{ gmgn: {enabled:boolean,x:number,y:number}, debot: {enabled:boolean,x:number,y:number} }} */
   let offsets = {
@@ -341,6 +373,8 @@
   /** @type {{ enabled: boolean, rules: Array<{id:string, suffix:string, enabled:boolean}> }} */
   let suffixHideState = { enabled: false, rules: [] };
   let suffixHideSaveTimer = null;
+  let vaultHideState = { ...DEFAULT_VAULT_HIDE };
+  let vaultHideSaveTimer = null;
 
   function t(key) {
     const pack = I18N[uiLang] || I18N.zh;
@@ -398,6 +432,15 @@
       suffix,
       enabled: raw?.enabled !== false
     };
+  }
+
+  function normalizeVaultHide(raw) {
+    const out = { ...DEFAULT_VAULT_HIDE };
+    if (!raw || typeof raw !== "object") return out;
+    out.enabled = raw.enabled === true;
+    out.hideTaxVault = raw.hideTaxVault === true;
+    out.hideStockVault = raw.hideStockVault === true;
+    return out;
   }
 
   function normalizeSuffixHide(raw) {
@@ -807,6 +850,7 @@
             UI_LANG_KEY,
             TAX_RECV_HIDE_KEY,
             SUFFIX_HIDE_KEY,
+            VAULT_HIDE_KEY,
             LICENSE_KEY,
           ],
           (items) => {
@@ -820,6 +864,7 @@
                 lang: "zh",
                 taxRecv: { ...DEFAULT_TAX_RECV_HIDE },
                 suffixHide: { ...DEFAULT_SUFFIX_HIDE },
+                vaultHide: { ...DEFAULT_VAULT_HIDE },
                 license: { ...DEFAULT_LICENSE },
               });
               return;
@@ -841,6 +886,7 @@
               lang: normalizeLang(items?.[UI_LANG_KEY]),
               taxRecv: normalizeTaxRecvHide(items?.[TAX_RECV_HIDE_KEY]),
               suffixHide: normalizeSuffixHide(items?.[SUFFIX_HIDE_KEY]),
+              vaultHide: normalizeVaultHide(items?.[VAULT_HIDE_KEY]),
               license: normalizeLicense(items?.[LICENSE_KEY]) || { ...DEFAULT_LICENSE },
             });
           }
@@ -855,6 +901,7 @@
           lang: "zh",
           taxRecv: { ...DEFAULT_TAX_RECV_HIDE },
           suffixHide: { ...DEFAULT_SUFFIX_HIDE },
+          vaultHide: { ...DEFAULT_VAULT_HIDE },
           license: { ...DEFAULT_LICENSE },
         });
       }
@@ -932,6 +979,47 @@
       suffixHideState = await saveSuffixHide(suffixHideState);
       renderSuffixHideUI(suffixHideState);
     }, 120);
+  }
+
+  function saveVaultHide(state) {
+    const normalized = normalizeVaultHide(state);
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.set({ [VAULT_HIDE_KEY]: normalized }, () => {
+          void chrome.runtime?.lastError;
+          resolve(normalized);
+        });
+      } catch {
+        resolve(normalized);
+      }
+    });
+  }
+
+  function scheduleSaveVaultHide() {
+    if (vaultHideSaveTimer) window.clearTimeout(vaultHideSaveTimer);
+    vaultHideSaveTimer = window.setTimeout(async () => {
+      vaultHideSaveTimer = null;
+      vaultHideState = await saveVaultHide(vaultHideState);
+      renderVaultHideUI(vaultHideState);
+    }, 120);
+  }
+
+  function renderVaultHideUI(state) {
+    vaultHideState = normalizeVaultHide(state);
+    if (vaultHideEnabled) vaultHideEnabled.checked = vaultHideState.enabled === true;
+    if (vaultHideTax) vaultHideTax.checked = vaultHideState.hideTaxVault === true;
+    if (vaultHideStock) vaultHideStock.checked = vaultHideState.hideStockVault === true;
+    if (vaultHideOptions) {
+      vaultHideOptions.classList.toggle("is-disabled", vaultHideState.enabled !== true);
+    }
+  }
+
+  function readVaultHideFromUI() {
+    return normalizeVaultHide({
+      enabled: vaultHideEnabled?.checked === true,
+      hideTaxVault: vaultHideState.hideTaxVault === true,
+      hideStockVault: vaultHideStock?.checked === true
+    });
   }
 
   function renderSuffixHideUI(state) {
@@ -1324,6 +1412,7 @@
     renderPrefs(prefsState);
     renderTaxRecvUI(taxRecvState);
     renderSuffixHideUI(suffixHideState);
+    renderVaultHideUI(vaultHideState);
   });
 
   taxRecvEnabled?.addEventListener("change", () => {
@@ -1355,6 +1444,21 @@
     renderSuffixHideUI(suffixHideState);
     scheduleSaveSuffixHide();
   });
+
+  vaultHideEnabled?.addEventListener("change", () => {
+    vaultHideState = readVaultHideFromUI();
+    renderVaultHideUI(vaultHideState);
+    scheduleSaveVaultHide();
+  });
+  vaultHideTax?.addEventListener("change", () => {
+    vaultHideState = readVaultHideFromUI();
+    scheduleSaveVaultHide();
+  });
+  vaultHideStock?.addEventListener("change", () => {
+    vaultHideState = readVaultHideFromUI();
+    scheduleSaveVaultHide();
+  });
+
   suffixAddBtn?.addEventListener("click", () => tryAddSuffixRule());
   suffixAddInput?.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") {
@@ -1447,6 +1551,7 @@
         renderPrefs(prefsState);
         renderTaxRecvUI(taxRecvState);
         renderSuffixHideUI(suffixHideState);
+        renderVaultHideUI(vaultHideState);
       }
       if (changes[TAX_RECV_HIDE_KEY]) {
         taxRecvState = normalizeTaxRecvHide(changes[TAX_RECV_HIDE_KEY].newValue);
@@ -1455,6 +1560,10 @@
       if (changes[SUFFIX_HIDE_KEY]) {
         suffixHideState = normalizeSuffixHide(changes[SUFFIX_HIDE_KEY].newValue);
         renderSuffixHideUI(suffixHideState);
+      }
+      if (changes[VAULT_HIDE_KEY]) {
+        vaultHideState = normalizeVaultHide(changes[VAULT_HIDE_KEY].newValue);
+        renderVaultHideUI(vaultHideState);
       }
       if (changes[PREFS_KEY]) {
         prefsState = normalizePrefs(changes[PREFS_KEY].newValue);
@@ -1475,6 +1584,7 @@
       lang,
       taxRecv: loadedTaxRecv,
       suffixHide: loadedSuffixHide,
+      vaultHide: loadedVaultHide,
       license: loadedLicense,
     }) => {
       uiLang = lang;
@@ -1486,16 +1596,19 @@
       prefsState = prefs;
       taxRecvState = normalizeTaxRecvHide(loadedTaxRecv);
       suffixHideState = normalizeSuffixHide(loadedSuffixHide);
+      vaultHideState = normalizeVaultHide(loadedVaultHide);
       applyStaticI18n();
       renderTheme(theme);
       renderPrefs(prefs);
       renderTaxRecvUI(taxRecvState);
       renderSuffixHideUI(suffixHideState);
+      renderVaultHideUI(vaultHideState);
       renderLicenseUI(loadedLicense);
       void refreshStoredLicense();
       bindCollapseHeads();
       setSectionExpanded("theme", false);
       setSectionExpanded("taxRecv", false);
+      setSectionExpanded("vaultHide", false);
       setSectionExpanded("suffixHide", false);
       setSectionExpanded("pref", false);
       setSectionExpanded("pos", false);

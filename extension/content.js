@@ -146,8 +146,10 @@
   // On tab resume, force-kill in-flight fetch if older than this (avoid Abort cascade on short blurs).
   const RESUME_FORCE_MIN_AGE_MS = 8000;
   // After long background ONLY: brief force remount window (short blur must NOT remount).
-  // Hidden longer than this → soft/hard pipeline revive + force remount.
-  const RESUME_LONG_HIDDEN_MS = 10000;
+  // Hidden longer than this → soft/hard pipeline revive (not every queue backlog).
+  const RESUME_LONG_HIDDEN_MS = 25000;
+  /** Long-hidden hard-reset debounce — avoid Chrome Errors spam on repeated tab switches. */
+  const HARD_RESET_RESUME_GAP_MS = 45000;
   // While tab is visible, periodic self-heal ONLY when unhealthy (never full remount).
   const PIPELINE_WATCHDOG_MS = 45000;
   // Cap *real work* per scan (stable badges do not count). Debot 3 cols ≈ 40+ cards.
@@ -159,6 +161,25 @@
   const BATCH_MIN_TOKENS = 3;
   // 热路径（视口/新创建未画）：0.7.56 单 token 也只等 120ms（后端空闲，缩窗提时效）。
   const HOT_BATCH_FLUSH_MS = 120;
+  /** page-hook host-fee 到达前给 WS/trenches 一帧窗口，减少新币抢先 /modes */
+  const HOST_FEE_GRACE_MS = 900;
+  /** js-mcp：GMGN tax-dom / Debot ranks+launchpad_extra 首包前有竞态；此前不 flush /modes */
+  const HOST_TAX_FEED_MAX_WAIT_MS = 2500;
+  const HOST_FEE_QUEUE_POLL_MS = 80;
+  const HOST_FEE_QUEUE_MAX_MS = 2200;
+  const HOST_TAX_FEED_RETRY_MS = 280;
+  const hostListBootAt = Date.now();
+  let gmgnHostFeeSeenAt = 0;
+  let debotHostFeeSeenAt = 0;
+  let debotRanksDoneAt = 0;
+  let hostTaxFeedRetryTimer = 0;
+  let hostFeeGraceTimer = 0;
+  /** 等 page-hook host-fee：共享单 poll，避免每 token 各挂 80ms timer */
+  const hostFeeDeferWaiters = new Map();
+  let hostFeeDeferPollTimer = 0;
+  let hostFeeDeferPollStartedAt = 0;
+  let gmgnTaxDomSeen = false;
+  let debotPoolDomSeen = false;
   const HOT_BATCH_MIN_TOKENS = 2;
   // 0.7.57 热通道：主批在途时热 token 并行发送的单次上限（对齐 Worker 直填能力）。
   const HOT_LANE_MAX_TOKENS = 12;
@@ -405,13 +426,25 @@
   };
   /** 自定义尾号屏蔽（仅 BSC）：rules[].suffix 为 1–12 位 hex */
   const SUFFIX_HIDE_KEY = "flapFeeInfo.suffixHide.v1";
+  /** 金库屏蔽：税收金库 🎁 vs 币股金库 📈 */
+  const VAULT_HIDE_KEY = "flapFeeInfo.vaultHide.v1";
   const LICENSE_KEY = "flapFeeInfo.license.v1";
   const DEVICE_ID_KEY = "flapFeeInfo.deviceId.v1";
   /** Optional paid key; empty = free mode. Sent as Authorization when set. */
   let licenseAccessKey = "";
   /** Per-install UUID; one license key binds to first device_id (Worker KV). */
   let licenseDeviceId = "";
+  /** Worker REQUIRE_LICENSE=1 (from POST /license/verify). */
+  let licenseEnforcedByServer = false;
+  /** False when enforced and key missing/invalid/device mismatch. */
+  let licenseAccessGranted = true;
+  let licenseGateProbePromise = null;
   const DEFAULT_SUFFIX_HIDE = { enabled: false, rules: [] };
+  const DEFAULT_VAULT_HIDE = {
+    enabled: false,
+    hideTaxVault: false,
+    hideStockVault: false
+  };
   const SUFFIX_HIDE_MAX_RULES = 24;
   const TAX_RECV_HIDE_CLASS = "flap-fee-tax-recv-hidden";
   const TAX_RECV_HIDE_ATTR = "data-flap-tax-recv-hidden";
@@ -647,9 +680,271 @@
     return { idCa, allowed: true, wiped };
   }
 
+  const WBNB_ADDRESS = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c";
+
+  function symbolFromKnownPayoutAddress(addr) {
+    const a = String(addr || "")
+      .trim()
+      .toLowerCase();
+    if (
+      a === WBNB_ADDRESS ||
+      a === "0x0000000000000000000000000000000000000000"
+    ) {
+      return "BNB";
+    }
+    return "";
+  }
+
+  function enrichBasketFromTaxDom(card, entry) {
+    if (!entry || !(card instanceof HTMLElement)) return { entry, changed: false };
+    const assets = normalizeBasketAssets(entry.basket_assets);
+    if (!entry.is_vault || assets.length < 2) return { entry, changed: false };
+    const domSyms = extractBasketSymbolsFromTaxDom(card);
+    if (!domSyms.length) return { entry, changed: false };
+    let changed = false;
+    const next = assets.map((row, idx) => {
+      if (!row || row.symbol) return row;
+      const sym = domSyms[idx] || domSyms.find((s) => !assets.some((a) => a.symbol === s));
+      if (!sym) return row;
+      changed = true;
+      return { ...row, symbol: sym };
+    });
+    if (!changed) return { entry, changed: false };
+    const out = { ...entry, basket_assets: next };
+    if (out.__needsChain && next.filter((a) => a.symbol).length >= 2) {
+      out.__needsChain = false;
+      changed = true;
+    }
+    return { entry: out, changed: true };
+  }
+
+  function enrichEntrySymbolsFromDom(card, entry) {
+    if (!entry || !(card instanceof HTMLElement)) return entry;
+    const domQuote = extractQuoteSymbolFromDom(card);
+    let changed = false;
+    const out = { ...entry };
+    const basketEnriched = enrichBasketFromTaxDom(card, out);
+    if (basketEnriched.changed) {
+      Object.assign(out, basketEnriched.entry);
+      changed = true;
+    }
+    if (!out.dividend_symbol && out.dividend_bps > 0) {
+      const fromTok = symbolFromKnownPayoutAddress(
+        out.dividend_token || out.top_payout_token
+      );
+      if (fromTok) {
+        out.dividend_symbol = fromTok;
+        changed = true;
+      }
+    }
+    if (!out.dividend_symbol && out.dividend_bps > 0 && domQuote) {
+      out.dividend_symbol = domQuote;
+      changed = true;
+    }
+    if (!out.quote_symbol && domQuote) {
+      out.quote_symbol = domQuote;
+      changed = true;
+    }
+    if (!out.top_payout_symbol) {
+      out.top_payout_symbol = out.dividend_symbol || out.quote_symbol || domQuote;
+      if (out.top_payout_symbol) changed = true;
+    }
+    if (out.__needsChain && (out.dividend_bps || 0) + (out.market_bps || 0) > 0) {
+      out.__needsChain = false;
+      changed = true;
+    }
+    return changed ? out : entry;
+  }
+
+  function trySeedHostFeeForCard(card, token) {
+    const tok = String(token || "").toLowerCase();
+    if (!TARGET_TOKEN_RE.test(tok) || !pageHookHostFeeReady()) return;
+    try {
+      window.dispatchEvent(
+        new CustomEvent("flap-fee-scan-card", { detail: { token: tok } })
+      );
+    } catch (_seed) {
+      // ignore
+    }
+  }
+
+  function getEntryForCard(card, token) {
+    const tok = String(token || "").toLowerCase();
+    let entry = resolveEntry(tok);
+    if (!entry && card instanceof HTMLElement) {
+      trySeedHostFeeForCard(card, tok);
+      entry = resolveEntry(tok);
+    }
+    if (entry && card instanceof HTMLElement) {
+      const enriched = enrichEntrySymbolsFromDom(card, entry);
+      if (enriched !== entry) {
+        modeCache.set(tok, enriched);
+        entry = enriched;
+      }
+    }
+    return entry;
+  }
+
+  function paintHostFeeDeferHit(card, tok) {
+    const hit = getEntryForCard(card, tok);
+    if (hit && card instanceof HTMLElement) {
+      paintListCardFromCacheFast(card, tok, hit) || renderMode(card, tok, hit);
+    }
+  }
+
+  function finishHostFeeDeferWaiter(tok, waiter) {
+    hostFeeDeferWaiters.delete(tok);
+    if (!waiter) return;
+    const { card, options } = waiter;
+    if (resolveEntry(tok)) {
+      paintHostFeeDeferHit(card, tok);
+      return;
+    }
+    queueToken(tok, {
+      ...options,
+      deferFlush: options.deferFlush === true || pageHookHostFeeReady()
+    });
+  }
+
+  function ensureHostFeeDeferPoll() {
+    if (hostFeeDeferPollTimer || hostFeeDeferWaiters.size === 0) return;
+    if (!hostFeeDeferPollStartedAt) hostFeeDeferPollStartedAt = Date.now();
+    const poll = () => {
+      hostFeeDeferPollTimer = 0;
+      if (hostFeeDeferWaiters.size === 0) {
+        hostFeeDeferPollStartedAt = 0;
+        return;
+      }
+      const feedReady = hostTaxFeedReady();
+      const expired =
+        Date.now() - hostFeeDeferPollStartedAt >= HOST_FEE_QUEUE_MAX_MS;
+      const toFinish = [];
+      for (const [tok, waiter] of hostFeeDeferWaiters) {
+        if (resolveEntry(tok)) {
+          paintHostFeeDeferHit(waiter.card, tok);
+          hostFeeDeferWaiters.delete(tok);
+          continue;
+        }
+        const minWait = needsHostTaxFeedPoll() ? 0 : pageHookHostFeeReady() ? 200 : 0;
+        const readyByTime = Date.now() - (waiter.addedAt || 0) >= minWait;
+        if ((feedReady && readyByTime) || expired) {
+          toFinish.push(tok);
+        }
+      }
+      for (let i = 0; i < toFinish.length; i += 1) {
+        finishHostFeeDeferWaiter(toFinish[i], hostFeeDeferWaiters.get(toFinish[i]));
+      }
+      if (hostFeeDeferWaiters.size > 0 && !feedReady && !expired) {
+        hostFeeDeferPollTimer = window.setTimeout(poll, HOST_FEE_QUEUE_POLL_MS);
+      } else {
+        hostFeeDeferPollStartedAt = 0;
+      }
+    };
+    hostFeeDeferPollTimer = window.setTimeout(poll, HOST_FEE_QUEUE_POLL_MS);
+  }
+
+  function isBadgeAccessAllowed() {
+    return !licenseEnforcedByServer || licenseAccessGranted;
+  }
+
+  function clearBadgeAccessForLicense(reason) {
+    requestQueue.clear();
+    missingRetryState.clear();
+    gmgnNewCardPendingTokens.clear();
+    modeCache.clear();
+    abortActiveRequest(reason || "license");
+    if (batchTimer) {
+      window.clearTimeout(batchTimer);
+      batchTimer = null;
+    }
+    batchActive = false;
+    batchStartedAt = 0;
+    try {
+      document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => {
+        const card = icon.closest(`[${CARD_DATA}]`) || icon.parentElement;
+        if (card) removeAllBadgesForCard(card, icon.dataset.feeToken || "");
+      });
+    } catch (_clr) {
+      // ignore
+    }
+    debugInfo("license:cleared", { reason });
+  }
+
+  function noteLicenseDeniedFromApi(errorCode) {
+    const wasAllowed = isBadgeAccessAllowed();
+    licenseEnforcedByServer = true;
+    licenseAccessGranted = false;
+    if (wasAllowed) clearBadgeAccessForLicense(`api:${errorCode || "license"}`);
+  }
+
+  async function refreshLicenseAccessState(reason) {
+    if (!isExtensionContextValid()) return;
+    if (licenseGateProbePromise) return licenseGateProbePromise;
+    licenseGateProbePromise = (async () => {
+      try {
+        const wasAllowed = isBadgeAccessAllowed();
+        const headers = { "Content-Type": "application/json" };
+        if (licenseAccessKey) {
+          headers.Authorization = `Bearer ${licenseAccessKey}`;
+          if (licenseDeviceId) headers["X-Flap-Device-Id"] = licenseDeviceId;
+        }
+        const res = await fetch(`${DEFAULT_API_BASE}/license/verify`, {
+          method: "POST",
+          headers,
+          body: "{}",
+          cache: "no-store"
+        });
+        const data = await res.json().catch(() => null);
+        if (!licenseAccessKey) {
+          licenseEnforcedByServer = data?.enforced === true;
+          licenseAccessGranted = !licenseEnforcedByServer;
+        } else if (res.ok && data?.ok && data?.valid && data.device_match !== false) {
+          licenseEnforcedByServer = data?.enforced === true;
+          licenseAccessGranted = true;
+        } else {
+          if (data?.enforced === true) licenseEnforcedByServer = true;
+          licenseAccessGranted = false;
+        }
+        const nowAllowed = isBadgeAccessAllowed();
+        if (wasAllowed && !nowAllowed) {
+          clearBadgeAccessForLicense(reason || "gate");
+        } else if (!wasAllowed && nowAllowed) {
+          if (requestQueue.size > 0) scheduleBatchFlush({ immediate: true });
+          scheduleScan(200, { force: false, immediate: false });
+        }
+        debugInfo("license:gate", {
+          reason,
+          enforced: licenseEnforcedByServer,
+          granted: licenseAccessGranted,
+          hasKey: Boolean(licenseAccessKey)
+        });
+      } catch (_probe) {
+        debugInfo("license:gate-probe-failed", { reason });
+      } finally {
+        licenseGateProbePromise = null;
+      }
+    })();
+    return licenseGateProbePromise;
+  }
+
+  function scheduleHostFeeAwareQueue(card, token, options = {}) {
+    const tok = String(token || "").toLowerCase();
+    if (!TARGET_TOKEN_RE.test(tok)) return;
+    if (!isBadgeAccessAllowed()) return;
+    if (resolveEntry(tok)) return;
+    if (hostFeeDeferWaiters.has(tok)) {
+      const prev = hostFeeDeferWaiters.get(tok);
+      if (card instanceof HTMLElement) prev.card = card;
+      return;
+    }
+    hostFeeDeferWaiters.set(tok, { card, options, addedAt: Date.now() });
+    ensureHostFeeDeferPoll();
+  }
+
   function paintLoadingBadgeAndQueue(card, token, options = {}) {
     const tok = String(token || "").toLowerCase();
     if (!(card instanceof HTMLElement) || !TARGET_TOKEN_RE.test(tok)) return false;
+    if (!isBadgeAccessAllowed()) return false;
     if (shouldDeferGmgnTrenchResizeWork()) return false;
     // 钱包追踪 / 顶 ticker / 搜索「钱包」区：禁止任何徽章
     if (isBadgeMountForbidden(card)) {
@@ -667,14 +962,15 @@
       const short = findCardShortAddress(card);
       if (!short || !tokenMatchesShort(tok, short)) {
         if (isGmgnHost()) {
-          // 仍入队，下一帧有 href 再画
-          queueToken(tok, options);
+          scheduleHostFeeAwareQueue(card, tok, options);
+        } else {
+          scheduleHostFeeAwareQueue(card, tok, options);
         }
         return false;
       }
     }
     // 有正式缓存时绝不画 ⏳（调用方应走真徽章路径）
-    if (resolveEntry(tok)) return false;
+    if (getEntryForCard(card, tok)) return false;
     // 先拆光错徽章，再挂 ⏳
     enforceIdentityOnCard(card);
     try {
@@ -683,7 +979,7 @@
     } catch (_err) {
       // ignore
     }
-    queueToken(tok, options);
+    scheduleHostFeeAwareQueue(card, tok, options);
     try {
       const existing = card.querySelector(`[${ICON_DATA}="1"]`);
       if (
@@ -825,9 +1121,13 @@
           if (
             good instanceof HTMLElement &&
             document.contains(good) &&
-            good.dataset.feeToken === ca
+            good.dataset.feeToken === ca &&
+            !isGmgnTrenchMisplacedBadge(card, good)
           ) {
             continue;
+          }
+          if (good instanceof HTMLElement && isGmgnTrenchMisplacedBadge(card, good)) {
+            removeAllBadgesForCard(card, ca);
           }
         } catch (_q) {
           // ignore
@@ -845,7 +1145,7 @@
         } catch (_b) {
           // ignore
         }
-        const entry = resolveEntry(ca);
+        const entry = getEntryForCard(card, ca);
         if (entry && !isFeeLoadingEntry(entry)) {
           try {
             card.dataset[CARD_MARK] = ca;
@@ -925,6 +1225,8 @@
   let taxRecvHideApplyTimer = 0;
   /** @type {{ enabled: boolean, rules: { id: string, suffix: string, enabled: boolean }[] }} */
   let suffixHidePrefs = { enabled: false, rules: [] };
+  /** @type {{ enabled: boolean, hideTaxVault: boolean, hideStockVault: boolean }} */
+  let vaultHidePrefs = { ...DEFAULT_VAULT_HIDE };
   const requestQueue = new Set();
   let batchTimer = null;
   /** Delay of the pending batchTimer (ms); prefer shorter reschedules (hot tokens). */
@@ -959,6 +1261,7 @@
   let persistentCacheReady = false;
   let persistentCacheReadyWaiters = [];
   let lastResumeAt = 0;
+  let lastHardResetAt = 0;
   /** performance.now() / Date when tab became hidden (0 if visible). */
   let hiddenSinceMs = 0;
   /** Until this timestamp, always remount badges (skip idempotent short-circuit). */
@@ -1128,12 +1431,14 @@
   hydrateTaxRecvHidePrefs();
   watchDisplayPrefs();
   installTaxRecvHideBridge();
+  installHostFeeBridge();
   startPipelineWatchdog();
   installHistoryHooks();
   // Main-world history notification fires only after the host commits push/replaceState.
   // This avoids GMGN's random 0-500ms route-poller delay without touching click events.
   // Also injects listen-only fetch/XHR hooks for tax-recv map (page-hook.js).
   installPageWorldSpaHook();
+  startPageHookGuardian();
   // Route hooks + the 500ms poller observe navigation after the host commits it. Do not
   // run extension work in the capture phase of the site's token-link click handlers.
   installOverlayOpenArm();
@@ -1216,6 +1521,8 @@
           }
           return taxMount;
         }
+        // 主战壕列：Tax 未就绪时不挂短地址行（会掉到头像/合约下方）。
+        if (isGmgnFixedTrenchCard(card)) return null;
         // Token-page side cards must never fall back to the short-address row:
         // overflow wrappers can make that path climb into avatar/trade columns.
         if (isGmgnTokenPage()) return null;
@@ -1472,7 +1779,7 @@
         }
         if (isGmgnHost()) card.dataset.flapOverlayCard = "1";
         seen.add(card);
-        const entry = resolveEntry(token);
+        const entry = getEntryForCard(card, token);
         if (!entry) {
           if (paintLoadingBadgeAndQueue(card, token)) painted += 1;
           queued += 1;
@@ -1501,7 +1808,7 @@
             ? normalizeToken(card.getAttribute("href") || "")
             : siteStrategy.extractToken(card);
           if (!token) continue;
-          const entry = resolveEntry(token);
+          const entry = getEntryForCard(card, token);
           if (!entry) {
             if (paintLoadingBadgeAndQueue(card, token)) painted += 1;
             queued += 1;
@@ -3062,9 +3369,7 @@
   function placeGmgnTokenIcon(target, icon) {
     const kind = target?.dataset?.flapMount || "";
     if (kind === "gmgn-trench-tax") {
-      // Stay in the Tax metadata row. Never climb through overflow wrappers into
-      // the avatar column or the buy/sell grid.
-      target.insertAdjacentElement("beforebegin", icon);
+      placeGmgnListTaxBadge(target, icon);
       return;
     }
     // 0.4.50: address leaf/row only. Metrics/tax mounts should not be used for header.
@@ -3701,6 +4006,7 @@
   }
 
   function resolveEntry(token) {
+    if (!isBadgeAccessAllowed()) return null;
     if (modeCache.has(token)) return modeCache.get(token);
     if (isPersistentCacheHit(token)) {
       const entry = persistentCache.get(token);
@@ -4206,7 +4512,7 @@
           continue;
         }
         card.dataset[CARD_MARK] = token;
-        const entry = resolveEntry(token);
+        const entry = getEntryForCard(card, token);
         if (entry) {
           if (paintListCardFromCacheFast(card, token, entry)) painted += 1;
         } else {
@@ -4273,7 +4579,7 @@
         seen.add(card);
         discovered += 1;
         card.dataset[CARD_MARK] = token;
-        const entry = resolveEntry(token);
+        const entry = getEntryForCard(card, token);
         if (entry) {
           paintListCardFromCacheFast(card, token, entry);
         } else {
@@ -4983,7 +5289,7 @@
         if (!token || !(card instanceof HTMLElement) || seen.has(card)) continue;
         seen.add(card);
         if (!isVisible(card)) continue;
-        const entry = resolveEntry(token);
+        const entry = getEntryForCard(card, token);
         if (!entry) {
           if (paintLoadingBadgeAndQueue(card, token)) painted += 1;
           queued += 1;
@@ -5096,11 +5402,16 @@
         icon = null;
       }
       if (icon && icon.dataset.feeToken === token) {
-        // 仍是 ⏳ 且已有正式 entry → 允许换成真徽章
-        const er = icon.getBoundingClientRect();
-        if (er.width >= 2 && er.height >= 2) {
-          applyBadgeUi(icon, presentation, token);
-          return true;
+        if (isGmgnTrenchMisplacedBadge(card, icon)) {
+          removeAllBadgesForCard(card, token);
+          icon = null;
+        } else {
+          // 仍是 ⏳ 且已有正式 entry → 允许换成真徽章
+          const er = icon.getBoundingClientRect();
+          if (er.width >= 2 && er.height >= 2) {
+            applyBadgeUi(icon, presentation, token);
+            return true;
+          }
         }
       }
 
@@ -5109,34 +5420,50 @@
       const ok = renderMode(card, token, entry, { forceRemount: true });
       if (ok) return true;
 
-      // 0.4.44 GMGN: Tax chip often missing on first SPA frame — mount on compact row
-      // so cache badges appear immediately; later full scan re-places beside Tax.
+      // GMGN: 仅 Tax 芯片就绪时快绘；主战壕禁止 findCompactRowMount（会掉到头像下）。
       if (isGmgnHost()) {
-        const fallback =
-          findCompactRowMount(card) ||
-          card.querySelector?.("a[href*='0x']")?.parentElement ||
-          card.querySelector?.("a[href*='0x']");
-        if (fallback instanceof HTMLElement) {
+        const taxMount = findTaxTag(card);
+        if (taxMount instanceof HTMLElement) {
           removeAllBadgesForCard(card, token);
           icon = document.createElement("span");
           icon.dataset[ICON_MARK] = "1";
           icon.dataset.feePosMode = "default";
           applyBadgeUi(icon, presentation, token);
           try {
-            if (typeof placeBesideTaxChip === "function") {
-              placeBesideTaxChip(fallback, icon);
-            } else {
-              fallback.insertAdjacentElement("afterend", icon);
-            }
+            placeGmgnListTaxBadge(taxMount, icon);
           } catch (_err2) {
             try {
-              fallback.appendChild(icon);
+              taxMount.appendChild(icon);
             } catch (_err3) {
               return false;
             }
           }
           const er = icon.getBoundingClientRect();
           return er.width >= 2 && er.height >= 2;
+        }
+        if (!isGmgnFixedTrenchCard(card)) {
+          const fallback =
+            findCompactRowMount(card) ||
+            card.querySelector?.("a[href*='0x']")?.parentElement ||
+            card.querySelector?.("a[href*='0x']");
+          if (fallback instanceof HTMLElement) {
+            removeAllBadgesForCard(card, token);
+            icon = document.createElement("span");
+            icon.dataset[ICON_MARK] = "1";
+            icon.dataset.feePosMode = "default";
+            applyBadgeUi(icon, presentation, token);
+            try {
+              placeBesideTaxChip(fallback, icon);
+            } catch (_err4) {
+              try {
+                fallback.appendChild(icon);
+              } catch (_err5) {
+                return false;
+              }
+            }
+            const er = icon.getBoundingClientRect();
+            return er.width >= 2 && er.height >= 2;
+          }
         }
       }
 
@@ -5333,47 +5660,209 @@
     });
   }
 
-  /**
-   * Inject page-hook.js into PAGE main world so pushState from Debot React is visible.
-   * Content-script-only history wrap fails in some Chromium builds / load orders.
-   */
-  function installPageWorldSpaHook() {
+  const PAGE_HOOK_VER = "76";
+  const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
+  let pageHookBgInjectSent = false;
+
+  function pageHookHostFeeReady() {
     try {
-      if (!isExtensionContextValid() || !chrome.runtime?.getURL) return;
-      if (document.documentElement?.dataset?.flapFeePageHook === "1") return;
-      const src = chrome.runtime.getURL("page-hook.js");
-      const inject = () => {
+      return (
+        document.documentElement?.getAttribute?.("data-flap-host-fee-ver") ===
+        PAGE_HOOK_VER
+      );
+    } catch (_ph) {
+      return false;
+    }
+  }
+
+  function pageHookScriptPresent() {
+    try {
+      return (
+        document.documentElement?.getAttribute?.("data-flap-page-hook-ver") ===
+        PAGE_HOOK_VER
+      );
+    } catch (_ps) {
+      return false;
+    }
+  }
+
+  function pageHookMainReady() {
+    return pageHookHostFeeReady();
+  }
+
+  function noteGmgnHostFeeSeen() {
+    if (!gmgnHostFeeSeenAt) gmgnHostFeeSeenAt = Date.now();
+  }
+
+  function noteDebotHostFeeSeen() {
+    if (!debotHostFeeSeenAt) debotHostFeeSeenAt = Date.now();
+  }
+
+  /** GMGN 战壕 / Debot /meme：host-fee 就绪前不 flush /modes */
+  function needsHostTaxFeedPoll() {
+    if (!isAllowedScanChain()) return false;
+    if (isGmgnHost() && !isTokenDetailRoute()) return true;
+    if (isDebotHost() && isTrenchListPage()) return true;
+    return false;
+  }
+
+  function gmgnHostTaxFeedReady() {
+    if (!isGmgnHost() || isTokenDetailRoute()) return true;
+    if (!isAllowedScanChain()) return true;
+    if (gmgnHostFeeSeenAt > 0) return true;
+    if (gmgnTaxDomSeen) return true;
+    try {
+      if (document.querySelector(".trenches-tax")) {
+        gmgnTaxDomSeen = true;
+        return true;
+      }
+    } catch (_tax) {
+      // ignore
+    }
+    if (Date.now() - hostListBootAt >= HOST_TAX_FEED_MAX_WAIT_MS) return true;
+    return false;
+  }
+
+  function debotHostTaxFeedReady() {
+    if (!isDebotHost() || !isTrenchListPage()) return true;
+    if (!isAllowedScanChain()) return true;
+    if (debotHostFeeSeenAt > 0) return true;
+    if (debotRanksDoneAt > 0) return true;
+    if (debotPoolDomSeen) return true;
+    try {
+      if (document.querySelector('[aria-label*="流动池"]')) {
+        debotPoolDomSeen = true;
+        return true;
+      }
+    } catch (_pool) {
+      // ignore
+    }
+    if (Date.now() - hostListBootAt >= HOST_TAX_FEED_MAX_WAIT_MS) return true;
+    return false;
+  }
+
+  function hostTaxFeedReady() {
+    if (isGmgnHost() && !isTokenDetailRoute()) return gmgnHostTaxFeedReady();
+    if (isDebotHost() && isTrenchListPage()) return debotHostTaxFeedReady();
+    return true;
+  }
+
+  function scheduleHostTaxFeedRetry(reason) {
+    if (!needsHostTaxFeedPoll()) return;
+    if (hostTaxFeedReady()) {
+      if (requestQueue.size > 0) maybeFlushRequestQueue(reason || "host-tax-feed");
+      return;
+    }
+    if (hostTaxFeedRetryTimer) return;
+    hostTaxFeedRetryTimer = window.setTimeout(() => {
+      hostTaxFeedRetryTimer = 0;
+      if (requestQueue.size === 0) return;
+      if (!hostTaxFeedReady()) {
+        scheduleHostTaxFeedRetry(reason);
+        return;
+      }
+      maybeFlushRequestQueue(reason || "host-tax-feed");
+    }, HOST_TAX_FEED_RETRY_MS);
+  }
+
+  function cancelHostFeeGraceFlush() {
+    if (hostFeeGraceTimer) {
+      window.clearTimeout(hostFeeGraceTimer);
+      hostFeeGraceTimer = 0;
+    }
+  }
+
+  function scheduleHostFeeGraceFlush(reason) {
+    if (!pageHookHostFeeReady()) {
+      maybeFlushRequestQueue(reason || "queue");
+      return;
+    }
+    if (needsHostTaxFeedPoll() && !hostTaxFeedReady()) {
+      scheduleHostTaxFeedRetry(reason || "grace");
+      return;
+    }
+    if (hostFeeGraceTimer) return;
+    hostFeeGraceTimer = window.setTimeout(() => {
+      hostFeeGraceTimer = 0;
+      maybeFlushRequestQueue(reason || "host-fee-grace");
+    }, HOST_FEE_GRACE_MS);
+  }
+
+  function requestBackgroundPageHookInject() {
+    if (pageHookBgInjectSent) return;
+    if (!isExtensionContextValid() || !chrome.runtime?.sendMessage) return;
+    pageHookBgInjectSent = true;
+    try {
+      chrome.runtime.sendMessage({ type: "flap-inject-page-hook" }, () => {
+        void chrome.runtime?.lastError;
+      });
+    } catch (_msg) {
+      // ignore
+    }
+  }
+
+  /** 仅当 manifest/bootstrap 都失败时由 content 单次兜底；禁止与 bootstrap 并发插 script */
+  function installPageWorldSpaHook() {
+    if (pageHookHostFeeReady()) return;
+    if (pageHookScriptPresent()) return;
+    try {
+      const lockAt = Number(
+        document.documentElement?.getAttribute?.(PAGE_HOOK_INJECT_LOCK_ATTR) || 0
+      );
+      if (lockAt && Date.now() - lockAt < 3000) return;
+    } catch (_lk) {
+      // ignore
+    }
+    if (!isExtensionContextValid() || !chrome.runtime?.getURL) return;
+    try {
+      document.documentElement?.setAttribute(
+        PAGE_HOOK_INJECT_LOCK_ATTR,
+        String(Date.now())
+      );
+    } catch (_m) {
+      // ignore
+    }
+    const src = chrome.runtime.getURL("page-hook.js");
+    try {
+      const s = document.createElement("script");
+      s.src = src;
+      s.async = false;
+      s.onload = () => {
         try {
-          if (document.documentElement?.dataset?.flapFeePageHook === "1") return;
-          const s = document.createElement("script");
-          s.src = src;
-          s.async = false;
-          s.dataset.flapFeeHook = "1";
-          s.onload = () => {
-            try {
-              s.remove();
-            } catch (_err) {
-              // ignore
-            }
-          };
-          s.onerror = () => {
-            try {
-              s.remove();
-            } catch (_err) {
-              // ignore
-            }
-          };
-          (document.documentElement || document.head || document.body).appendChild(s);
-          if (document.documentElement) document.documentElement.dataset.flapFeePageHook = "1";
-        } catch (_err) {
+          s.remove();
+        } catch (_e) {
           // ignore
         }
       };
-      if (document.documentElement) inject();
-      else document.addEventListener("DOMContentLoaded", inject, { once: true });
+      s.onerror = () => {
+        try {
+          s.remove();
+        } catch (_e2) {
+          // ignore
+        }
+        try {
+          document.documentElement?.removeAttribute(PAGE_HOOK_INJECT_LOCK_ATTR);
+        } catch (_c) {
+          // ignore
+        }
+      };
+      (document.documentElement || document.head || document.body).appendChild(s);
     } catch (_err) {
       // ignore
     }
+  }
+
+  function startPageHookGuardian() {
+    window.setTimeout(() => {
+      if (!isExtensionContextValid()) return;
+      if (pageHookHostFeeReady()) return;
+      if (!pageHookScriptPresent()) installPageWorldSpaHook();
+    }, 1500);
+    window.setTimeout(() => {
+      if (!isExtensionContextValid()) return;
+      if (pageHookHostFeeReady()) return;
+      requestBackgroundPageHookInject();
+    }, 4500);
   }
 
   /** Independent of history hooks / mutation observer (survives detached roots). */
@@ -7272,6 +7761,7 @@
         return false;
       }
       if (existing.dataset.feeLoading === "1") return false;
+      if (isGmgnTrenchMisplacedBadge(card, existing)) return false;
       // Text may lag dataset for a frame; prefer sig, fall back to text once.
       if (existing.textContent && existing.textContent !== existing.dataset.feeSig) {
         return false;
@@ -7514,7 +8004,7 @@
         // 0.4.10: stale feeSig may keep wrong 🪙BNB after API has 币安人生 — cheap recheck.
         const marked = card.dataset[CARD_MARK];
         const existing = marked ? card.querySelector(`[${ICON_DATA}="1"]`) : null;
-        const entry = marked ? resolveEntry(marked) : null;
+        const entry = marked ? getEntryForCard(card, marked) : null;
         // 占位 + 已有正式 entry → 必须进 needWork 换真徽章
         if (existing && existing.dataset.feeLoading === "1" && entry) {
           needWork.push(card);
@@ -7801,7 +8291,8 @@
             rendered += 1;
           }
         } else {
-          queueToken(token);
+          queueToken(token, { deferFlush: pageHookHostFeeReady() });
+          scheduleHostFeeGraceFlush("list-return-cache");
         }
       }
     }
@@ -8054,10 +8545,53 @@
     }
   }
 
+  function isPipelineStuck(now, ageMs) {
+    if (
+      batchActive &&
+      (ageMs >= RESUME_FORCE_MIN_AGE_MS || ageMs >= BATCH_STUCK_MS || !batchStartedAt)
+    ) {
+      return true;
+    }
+    if (
+      hotLaneActive &&
+      hotLaneStartedAt &&
+      now - hotLaneStartedAt >= RESUME_FORCE_MIN_AGE_MS
+    ) {
+      return true;
+    }
+    if (scanScheduled && scanTimerIds.length === 0) return true;
+    if (consecutiveFails > 0 && (batchActive || activeBatchTokens.length > 0)) {
+      return true;
+    }
+    return false;
+  }
+
+  function softResumeLongHidden(now, ageMs) {
+    if (
+      batchActive &&
+      (ageMs >= RESUME_FORCE_MIN_AGE_MS || ageMs >= BATCH_STUCK_MS || !batchStartedAt)
+    ) {
+      recoverStuckBatch(true, "resume-long-hidden-soft");
+    }
+    if (
+      hotLaneActive &&
+      hotLaneStartedAt &&
+      now - hotLaneStartedAt >= RESUME_FORCE_MIN_AGE_MS
+    ) {
+      resetHotLane("resume-long-hidden-soft", true);
+    }
+    if (scanScheduled && scanTimerIds.length === 0) scanScheduled = false;
+    debugInfo("tab:resume-soft", {
+      queueSize: requestQueue.size,
+      batchActive,
+      batchAgeMs: ageMs || null
+    });
+  }
+
   /**
    * Full pipeline revive after long tab freeze.
    * batchActive zombies prevent scheduleBatchFlush → new tokens never show (user: must refresh).
-   * Idle resets log as info (not warn) to avoid Chrome "Errors" spam.
+   * Idle / queue-only resumes log as info (not warn) to avoid Chrome "Errors" spam.
    */
   function hardResetPipeline(reason, options = {}) {
     const noisy = options.noisy === true;
@@ -8070,10 +8604,11 @@
       requeue: requeue.length,
       consecutiveFails
     };
-    if (noisy || batchActive || requeue.length > 0 || requestQueue.size > 0) {
+    const stuck = batchActive || requeue.length > 0 || consecutiveFails > 0;
+    if (noisy && stuck) {
       debugWarn("pipeline:hard-reset", payload);
     } else {
-      debugInfo("pipeline:soft-reset", payload);
+      debugInfo("pipeline:hard-reset", payload);
     }
 
     batchGeneration += 1;
@@ -8173,13 +8708,7 @@
     hiddenSinceMs = 0;
     const ageMs = batchStartedAt ? now - batchStartedAt : 0;
     const longHidden = inferredHidden >= RESUME_LONG_HIDDEN_MS;
-    const pipelineDirty =
-      batchActive ||
-      requestQueue.size > 0 ||
-      activeBatchTokens.length > 0 ||
-      (consecutiveFails > 0 &&
-        (requestQueue.size > 0 || activeBatchTokens.length > 0)) ||
-      (scanScheduled && scanTimerIds.length === 0);
+    const pipelineStuck = isPipelineStuck(now, ageMs);
 
     debugInfo("tab:resume", {
       reason,
@@ -8188,7 +8717,7 @@
       batchAgeMs: ageMs || null,
       hiddenMs: inferredHidden || null,
       longHidden,
-      pipelineDirty
+      pipelineStuck
     });
 
     startPipelineWatchdog();
@@ -8218,13 +8747,17 @@
       return;
     }
 
-    // Long freeze: revive only dirty queue state. Stable DOM is left untouched.
-    if (pipelineDirty) {
+    // Long freeze: hard-reset only when batch/scan truly stuck; queue backlog → soft path.
+    if (pipelineStuck && now - lastHardResetAt >= HARD_RESET_RESUME_GAP_MS) {
       hardResetPipeline("resume-long-hidden", { noisy: true });
+      lastHardResetAt = now;
+    } else {
+      softResumeLongHidden(now, ageMs);
     }
     if (requestQueue.size > 0) scheduleBatchFlush({ immediate: true });
-    // One idle, idempotent visible-card pass is enough. Mutations repair later rows.
-    scheduleScan(80, { force: false, immediate: false });
+    if (reason !== "focus") {
+      scheduleScan(120, { force: false, immediate: false });
+    }
   }
 
   function abortActiveRequest(reason) {
@@ -9845,6 +10378,10 @@
    */
   function maybeFlushRequestQueue(_reason) {
     if (requestQueue.size === 0) return;
+    if (needsHostTaxFeedPoll() && !hostTaxFeedReady()) {
+      scheduleHostTaxFeedRetry(_reason);
+      return;
+    }
     let hot = false;
     if (isGmgnHost() && !isTokenDetailRoute()) {
       try {
@@ -9892,16 +10429,20 @@
     if (!TARGET_TOKEN_RE.test(tok)) return;
     // 非 BSC 页禁止入队（双保险）
     if (!isAllowedScanChain()) return;
+    if (!isBadgeAccessAllowed()) return;
     // 自定义尾号屏蔽：不入队、不打 /modes（省 RPC）
     if (shouldHideByCustomSuffix(tok)) return;
-    if (modeCache.has(tok) || isPersistentCacheHit(tok) || requestQueue.has(tok)) return;
+    const cachedHit = modeCache.get(tok);
+    if (cachedHit && cachedHit.__needsChain !== true) return;
+    if (!cachedHit && isPersistentCacheHit(tok)) return;
+    if (requestQueue.has(tok)) return;
     const missingState = missingRetryState.get(tok);
     if (missingState && Date.now() < missingState.retryAt) return;
     requestQueue.add(tok);
     if (isGmgnHotUnpaintedToken(tok)) noteGmgnHotWork();
     debugInfo("queue", { token: tok, queueSize: requestQueue.size });
     if (options.deferFlush === true) return;
-    maybeFlushRequestQueue("queue");
+    scheduleHostFeeGraceFlush("queue");
   }
 
   function scheduleGmgnNewCardBatchFlush() {
@@ -9959,6 +10500,68 @@
   }
 
   /**
+   * Debot/Gungnir: host-fee 落盘后快补视口未画卡（与 GMGN paintGmgnCachedViewportCards 对齐）。
+   */
+  function paintDebotHostFeeViewport(reason) {
+    if (!isDebotHost() || isDebotTokenPage()) return 0;
+    if (!isExtensionContextValid() || !isTabVisible()) return 0;
+    const t0 = performance.now();
+    let painted = 0;
+    const cap = 12;
+    const seen = new Set();
+    try {
+      const seeds = [];
+      document.querySelectorAll(`[${CARD_DATA}]`).forEach((el) => {
+        if (seeds.length >= cap + 6) return;
+        if (el instanceof HTMLElement) seeds.push(el);
+      });
+      if (seeds.length < cap + 2) {
+        const nodes = getDebotCandidateNodes().slice(0, 28);
+        for (let i = 0; i < nodes.length; i += 1) {
+          const card = siteStrategy?.findCard?.(nodes[i]);
+          if (card instanceof HTMLElement) seeds.push(card);
+        }
+      }
+      for (let i = 0; i < seeds.length; i += 1) {
+        if (painted >= cap) break;
+        if (performance.now() - t0 > 14) break;
+        const card = seeds[i];
+        if (!(card instanceof HTMLElement) || seen.has(card)) continue;
+        seen.add(card);
+        if (!isVisible(card) || isBadgeMountForbidden(card)) continue;
+        const token =
+          card.dataset[CARD_MARK] ||
+          extractCardHrefToken(card) ||
+          siteStrategy?.extractToken?.(card) ||
+          "";
+        const tok = String(token || "").toLowerCase();
+        if (!TARGET_TOKEN_RE.test(tok)) continue;
+        const existing = findLocalBadgeForCard(card, tok);
+        if (
+          existing instanceof HTMLElement &&
+          existing.dataset.feeToken === tok &&
+          existing.dataset.feeLoading !== "1" &&
+          isStablePaintedCard(card, false)
+        ) {
+          continue;
+        }
+        const entry = resolveEntry(tok);
+        if (!entry || isFeeLoadingEntry(entry)) continue;
+        card.dataset[CARD_MARK] = tok;
+        if (paintListCardFromCacheFast(card, tok, entry) || renderMode(card, tok, entry)) {
+          painted += 1;
+        }
+      }
+    } catch (_err) {
+      // ignore
+    }
+    if (painted) {
+      debugInfo("debot:host-fee-paint", { reason: reason || "", painted });
+    }
+    return painted;
+  }
+
+  /**
    * GMGN list only: after /modes returns, paint viewport cards that already have
    * modeCache (bounded time/cards). No network, no force scan — avoids waiting a
    * full scan interval for brand-new rows that just got fee data.
@@ -9968,7 +10571,7 @@
     if (!isExtensionContextValid() || !isTabVisible()) return 0;
     if (isTokenEnterTransitionActive()) return 0;
     if (!tryFinishListReturnTransition(`post-api:${reason || "paint"}`)) return 0;
-    if (isGmgnScrollCooling()) return 0;
+    if (isGmgnScrollCooling() && reason !== "host-fee") return 0;
     const t0 = performance.now();
     let painted = 0;
     let queued = 0;
@@ -9994,11 +10597,11 @@
         seen.add(card);
         if (!isVisible(card)) continue;
         if (isStablePaintedCard(card, false)) continue;
-        const entry = resolveEntry(token);
+        const entry = getEntryForCard(card, token);
         if (!entry) {
-          // Do not spam queue here — scan path owns discovery; only light nudge if marked.
+          // host-fee 快路径：有 page-hook 时先等 grace，勿立刻 /modes
           if (card.dataset[CARD_MARK] === token) {
-            queueToken(token);
+            queueToken(token, { deferFlush: pageHookHostFeeReady() });
             queued += 1;
           }
           continue;
@@ -10069,6 +10672,7 @@
    * cache + paint confirmed results, then schedule pending/missing retries.
    */
   function processModesResponse(tokens, data, lane) {
+    if (!isBadgeAccessAllowed()) return;
     debugInfo("request:ok", {
       lane,
       requested: tokens.length,
@@ -10183,6 +10787,10 @@
   async function flushHotLane() {
     if (!isGmgnHost() || isTokenDetailRoute()) return;
     if (!isExtensionContextValid() || !isTabVisible()) return;
+    if (!hostTaxFeedReady()) {
+      scheduleHostTaxFeedRetry("hot-lane");
+      return;
+    }
     if (hotLaneActive) {
       const ageMs = hotLaneStartedAt ? Date.now() - hotLaneStartedAt : BATCH_STUCK_MS + 1;
       if (ageMs < BATCH_STUCK_MS) return;
@@ -10259,6 +10867,11 @@
       if (!TARGET_TOKEN_RE.test(String(t))) requestQueue.delete(t);
     }
     if (requestQueue.size === 0) return;
+
+    if (needsHostTaxFeedPoll() && !hostTaxFeedReady()) {
+      scheduleHostTaxFeedRetry("batch-wait");
+      return;
+    }
 
     // Old content script after extension reload: stop all network work silently.
     if (!isExtensionContextValid()) {
@@ -10397,6 +11010,13 @@
           status: res.status,
           body: data
         });
+        if (
+          res.status === 401 &&
+          data?.error &&
+          String(data.error).startsWith("license_")
+        ) {
+          noteLicenseDeniedFromApi(data.error);
+        }
         const err = new Error(`batch query failed status=${res.status}`);
         if (res.status === 429) {
           err.name = "RateLimitError";
@@ -10478,6 +11098,7 @@
       giggle_charity_bps: Number(result.giggle_charity_bps) || 0,
       binance_charity_bps: Number(result.binance_charity_bps) || 0,
       is_vault: Boolean(result.is_vault),
+      is_stocks_vault: Boolean(result.is_stocks_vault),
       buy_tax_bps: Number(result.buy_tax_bps) || 0,
       sell_tax_bps: Number(result.sell_tax_bps) || 0,
       top_segment: topSegment,
@@ -10488,6 +11109,8 @@
       vault_address:
         typeof result.vault_address === "string" ? result.vault_address.toLowerCase() : "",
       basket_assets: normalizeBasketAssets(result.basket_assets),
+      source_host: typeof result.source_host === "string" ? result.source_host : "",
+      __needsChain: result.__needsChain === true,
       fetched_at: typeof result.fetched_at === "number" ? result.fetched_at : null
     };
   }
@@ -10940,6 +11563,40 @@
     return "";
   }
 
+  /** 币股 vault：Tax 芯片内多枚 /quotes 图标 → 篮子 symbol（与 GMGN tooltip 同源 DOM） */
+  function extractBasketSymbolsFromTaxDom(card) {
+    if (!card || !card.querySelector) return [];
+    const syms = [];
+    const seen = new Set();
+    const pushSym = (raw) => {
+      const sym = compactDisplaySymbol(raw);
+      if (!sym || sym === "BNB" || seen.has(sym)) return;
+      seen.add(sym);
+      syms.push(sym);
+    };
+    if (isDebotHost()) {
+      card
+        .querySelectorAll(
+          'img[src*="/images/share/bstocks/"], img[src*="/images/chain/designer-icons/coin/"]'
+        )
+        .forEach((img) => {
+          const src = img.currentSrc || img.getAttribute("src") || "";
+          const fromPath = src.match(/\/(?:bstocks|coin)\/([^./?#]+)/i);
+          if (fromPath) pushSym(fromPath[1]);
+          else pushSym(img.getAttribute("alt") || "");
+        });
+      return syms;
+    }
+    const tax = card.querySelector(".trenches-tax");
+    if (!tax) return syms;
+    tax.querySelectorAll('img[src*="/quotes/"], img[src*="/static/quotes/"]').forEach((img) => {
+      const src = img.currentSrc || img.getAttribute("src") || "";
+      const m = src.match(/\/quotes\/([^./?#]+)/i);
+      if (m) pushSym(m[1]);
+    });
+    return syms;
+  }
+
   /** @deprecated use resolveQuoteSymbol — kept name for any leftover refs */
   function extractQuoteSymbol(card, entry) {
     return resolveQuoteSymbol(card, entry || null);
@@ -10999,14 +11656,15 @@
     return out;
   }
 
-  /** 列表过滤是否开启（资金接收 or 自定义尾号），仅 BSC 写 disableShareWorker */
+  /** 列表过滤是否开启（资金接收 / 自定义尾号 / 金库），仅 BSC 写 disableShareWorker */
   function isListFilterActive() {
     const recvOn = taxRecvHidePrefs && taxRecvHidePrefs.enabled === true;
     const suffixOn =
       suffixHidePrefs &&
       suffixHidePrefs.enabled === true &&
       (suffixHidePrefs.rules || []).some((r) => r && r.enabled !== false && r.suffix);
-    return Boolean(recvOn || suffixOn);
+    const vaultOn = vaultHidePrefs && vaultHidePrefs.enabled === true;
+    return Boolean(recvOn || suffixOn || vaultOn);
   }
 
   function syncGmgnShareWorkerForFilters() {
@@ -11058,9 +11716,8 @@
   }
 
   /**
-   * List pages use virtual lists / rank tables. DOM display:none leaves holes on
-   * GMGN (absolute rows). Prefer MAIN-world JSON filter + one reload so React
-   * re-hydrates from filtered trenches_rank / ranks responses.
+   * List pages use virtual lists / rank tables. Prefer MAIN-world JSON filter +
+   * partial new_creation replay so React re-hydrates without full reload.
    */
   function isTaxRecvListReflowPage() {
     try {
@@ -11093,39 +11750,70 @@
     }
   }
 
+  function buildListFilterSig(reason) {
+    const tr = taxRecvHidePrefs || {};
+    const suf = suffixHidePrefs || {};
+    const vault = vaultHidePrefs || {};
+    const rules = (suf.rules || [])
+      .map((r) => `${r.suffix || ""}:${r.enabled !== false ? 1 : 0}`)
+      .join(",");
+    return [
+      tr.enabled ? 1 : 0,
+      tr.thresholdPct ?? 0,
+      suf.enabled ? 1 : 0,
+      rules,
+      vault.enabled ? 1 : 0,
+      vault.hideTaxVault ? 1 : 0,
+      vault.hideStockVault ? 1 : 0,
+      reason || ""
+    ].join("|");
+  }
+
   /**
-   * After enable/threshold change: reload list once so filtered API data reflows.
-   * Guard with session key to avoid loops.
+   * 推送 prefs 并请求 page-hook 重放 new_creation HTTP（GMGN trenches_rank / Debot ranks）。
    */
-  function scheduleTaxRecvListReflow(reason) {
+  function scheduleListFilterPartialRefresh(reason) {
     if (!isTaxRecvListReflowPage()) return;
-    // 开启/关阈值：reload 让 React 用过滤后的 ranks/trenches 重铺
-    // 关闭：调用方也会 reload；此处仅 enabled 时写 session 防抖
-    const enabled = taxRecvHidePrefs && taxRecvHidePrefs.enabled === true;
-    if (!enabled && reason !== "force" && reason !== "prefs-off") return;
     try {
-      const sig = `${enabled ? 1 : 0}:${taxRecvHidePrefs?.thresholdPct ?? 0}:${reason || ""}`;
-      const key = "flapFeeInfo.taxRecvReflow.v1";
+      const sig = buildListFilterSig(reason);
+      const key = "flapFeeInfo.listFilterRefresh.v1";
       const prev = sessionStorage.getItem(key) || "";
-      // Same sig already reloaded this tab session after last toggle — skip
       if (prev === sig && reason !== "force") return;
       sessionStorage.setItem(key, sig);
     } catch (_ss) {
-      // ignore storage — still reload once
+      // ignore storage — still refresh once
     }
     try {
-      // 先把 prefs 再推一次，保证 document_start 下一跳能读到
-      pushTaxRecvPrefsToPage({ refresh: enabled });
-      window.setTimeout(() => {
-        try {
-          location.reload();
-        } catch (_r) {
-          // ignore
-        }
-      }, 100);
+      pushTaxRecvPrefsToPage({ refresh: true });
+      pushSuffixHidePrefsToPage();
+      pushVaultHidePrefsToPage();
+      window.postMessage(
+        {
+          source: "flap-fee-info",
+          type: "list-filter-refresh",
+          reason: reason || ""
+        },
+        "*"
+      );
     } catch (_err) {
       // ignore
     }
+    scheduleTaxRecvHideApply(80);
+  }
+
+  /**
+   * After enable/threshold/suffix/vault change: partial list refresh (no full reload).
+   */
+  function scheduleTaxRecvListReflow(reason) {
+    if (!isTaxRecvListReflowPage()) return;
+    const knownReason =
+      reason === "force" ||
+      reason === "prefs-off" ||
+      reason === "prefs-change" ||
+      reason === "suffix-hide-change" ||
+      reason === "vault-hide-change";
+    if (!knownReason) return;
+    scheduleListFilterPartialRefresh(reason);
   }
 
   function normalizeLicenseDeviceId(stored) {
@@ -11143,10 +11831,11 @@
   function hydrateTaxRecvHidePrefs() {
     if (!isExtensionContextValid() || !chrome.storage?.local) return;
     try {
-      chrome.storage.local.get([TAX_RECV_HIDE_KEY, SUFFIX_HIDE_KEY, LICENSE_KEY, DEVICE_ID_KEY], (items) => {
+      chrome.storage.local.get([TAX_RECV_HIDE_KEY, SUFFIX_HIDE_KEY, VAULT_HIDE_KEY, LICENSE_KEY, DEVICE_ID_KEY], (items) => {
         if (!isExtensionContextValid() || chrome.runtime.lastError) return;
         taxRecvHidePrefs = normalizeTaxRecvHidePrefs(items?.[TAX_RECV_HIDE_KEY]);
         suffixHidePrefs = normalizeSuffixHidePrefs(items?.[SUFFIX_HIDE_KEY]);
+        vaultHidePrefs = normalizeVaultHidePrefs(items?.[VAULT_HIDE_KEY]);
         const lic = items?.[LICENSE_KEY];
         licenseAccessKey = String(lic?.key || "").trim();
         let devId = normalizeLicenseDeviceId(items?.[DEVICE_ID_KEY]);
@@ -11155,16 +11844,20 @@
           chrome.storage.local.set({ [DEVICE_ID_KEY]: { id: devId } });
         }
         licenseDeviceId = devId;
+        void refreshLicenseAccessState("hydrate");
         pushTaxRecvPrefsToPage();
         pushSuffixHidePrefsToPage();
+        pushVaultHidePrefsToPage();
         // Re-push after page-hook may finish loading
         window.setTimeout(() => {
           pushTaxRecvPrefsToPage();
           pushSuffixHidePrefsToPage();
+          pushVaultHidePrefsToPage();
         }, 200);
         window.setTimeout(() => {
           pushTaxRecvPrefsToPage();
           pushSuffixHidePrefsToPage();
+          pushVaultHidePrefsToPage();
         }, 1000);
         scheduleTaxRecvHideApply(0);
       });
@@ -11389,6 +12082,9 @@
     if (!token || !entry) return false;
     const addr = String(token).toLowerCase();
     if (!TARGET_TOKEN_RE.test(addr)) return false;
+    if (entry.is_vault) return false;
+    // Four ffff 宿主 marketing = 税收钱包，不是 👨‍🍳 资金接收方
+    if (isFourTaxToken(addr) && entry.source_host) return false;
     const marketBps = Number(entry.market_bps) || 0;
     if (marketBps <= 0 && !entry.is_vault) {
       // no marketing share — do not invent hide signal
@@ -11596,8 +12292,9 @@
       suffixHidePrefs.enabled === true &&
       isAllowedScanChain() &&
       (suffixHidePrefs.rules || []).some((r) => r && r.enabled !== false && r.suffix);
-    // Always clear when both disabled
-    if (!recvOn && !suffixOn) {
+    const vaultOn = vaultHidePrefs && vaultHidePrefs.enabled === true;
+    // Always clear when all disabled
+    if (!recvOn && !suffixOn && !vaultOn) {
       clearAllTaxRecvDomHide();
       return;
     }
@@ -11699,6 +12396,161 @@
         // ignore
       }
     }, d);
+  }
+
+  function deriveHostFeeMode(raw) {
+    const dividend_bps = Number(raw.dividend_bps) || 0;
+    const market_bps = Number(raw.market_bps) || 0;
+    const deflation_bps = Number(raw.deflation_bps) || 0;
+    const lp_bps = Number(raw.lp_bps) || 0;
+    const giggle_charity_bps = Number(raw.giggle_charity_bps) || 0;
+    const binance_charity_bps = Number(raw.binance_charity_bps) || 0;
+    const is_vault = Boolean(raw.is_vault);
+    const segments = [];
+    if (dividend_bps > 0) segments.push({ kind: "holder", bps: dividend_bps, pri: 0 });
+    if (market_bps > 0) {
+      segments.push({
+        kind: is_vault ? "gift" : "creator",
+        bps: market_bps,
+        pri: is_vault ? 1 : 4
+      });
+    }
+    if (giggle_charity_bps > 0) segments.push({ kind: "giggle", bps: giggle_charity_bps, pri: 2 });
+    if (binance_charity_bps > 0) {
+      segments.push({ kind: "binance", bps: binance_charity_bps, pri: 3 });
+    }
+    if (deflation_bps > 0) segments.push({ kind: "burn", bps: deflation_bps, pri: 5 });
+    if (lp_bps > 0) segments.push({ kind: "lp", bps: lp_bps, pri: 6 });
+    if (!segments.length) return { mode: "unknown", top_segment: "unknown" };
+    segments.sort((a, b) => b.bps - a.bps || a.pri - b.pri);
+    const top_segment = segments[0].kind;
+    let mode = top_segment;
+    if (segments.length > 1) mode = "hybrid";
+    return { mode, top_segment };
+  }
+
+  function applyHostFeeEntries(entries) {
+    if (!isBadgeAccessAllowed()) return;
+    if (!Array.isArray(entries) || !entries.length) return;
+    const confirmed = [];
+    for (const raw of entries) {
+      if (!raw || typeof raw !== "object") continue;
+      const token = String(raw.address || "")
+        .trim()
+        .toLowerCase();
+      if (!TARGET_TOKEN_RE.test(token)) continue;
+      const derived = deriveHostFeeMode(raw);
+      const top_payout_symbol = String(
+        raw.top_payout_symbol || raw.dividend_symbol || raw.quote_symbol || ""
+      ).trim();
+      const payload = {
+        mode: derived.mode,
+        label: "",
+        title: "",
+        top_segment: derived.top_segment,
+        top_payout_symbol,
+        dividend_bps: Number(raw.dividend_bps) || 0,
+        market_bps: Number(raw.market_bps) || 0,
+        deflation_bps: Number(raw.deflation_bps) || 0,
+        lp_bps: Number(raw.lp_bps) || 0,
+        giggle_charity_bps: Number(raw.giggle_charity_bps) || 0,
+        binance_charity_bps: Number(raw.binance_charity_bps) || 0,
+        is_vault: Boolean(raw.is_vault),
+        is_stocks_vault: Boolean(raw.is_stocks_vault),
+        buy_tax_bps: Number(raw.buy_tax_bps) || 0,
+        sell_tax_bps: Number(raw.sell_tax_bps) || 0,
+        dividend_symbol: String(raw.dividend_symbol || "").trim(),
+        quote_symbol: String(raw.quote_symbol || "").trim(),
+        vault_address: String(raw.vault_address || "").toLowerCase(),
+        basket_assets: normalizeBasketAssets(raw.basket_assets),
+        fetched_at: Date.now()
+      };
+      const entry = normalizeResult(payload);
+      if (!entry) continue;
+      entry.source_host = raw.source === "debot" ? "debot" : "gmgn";
+      entry.__needsChain = raw.__needsChain === true;
+      const prev = modeCache.get(token);
+      if (prev && !prev.source_host && prev.__needsChain !== true) continue;
+      modeCache.set(token, entry);
+      if (!entry.__needsChain) {
+        missingRetryState.delete(token);
+        requestQueue.delete(token);
+      }
+      confirmed.push([token, entry]);
+      try {
+        ingestFeeEntryForTaxRecv(token, entry);
+      } catch (_ing) {
+        // ignore
+      }
+    }
+    if (!confirmed.length) return;
+    if (confirmed.some(([, e]) => e.source_host === "gmgn")) {
+      noteGmgnHostFeeSeen();
+    }
+    if (confirmed.some(([, e]) => e.source_host === "debot")) {
+      noteDebotHostFeeSeen();
+    }
+    confirmed.forEach(([token, entry]) => {
+      let eff = entry;
+      const cards = findCardsByCa(token);
+      for (let ci = 0; ci < cards.length; ci += 1) {
+        const enriched = enrichEntrySymbolsFromDom(cards[ci], eff);
+        if (enriched !== eff) {
+          eff = enriched;
+          modeCache.set(token, eff);
+          break;
+        }
+      }
+      applyModeToKnownCards(token, eff, cards);
+    });
+    if (isGmgnHost() && !isTokenDetailRoute()) {
+      try {
+        paintUnpaintedTargetViewportQuick("host-fee", null, true);
+        paintGmgnCachedViewportCards("host-fee");
+      } catch (_p) {
+        // ignore
+      }
+    } else if (isDebotHost()) {
+      try {
+        paintDebotHostFeeViewport("host-fee");
+      } catch (_dp) {
+        // ignore
+      }
+    }
+    scheduleTaxRecvHideApply(30);
+    if (confirmed.some(([, e]) => e.__needsChain !== true)) {
+      cancelHostFeeGraceFlush();
+    }
+    confirmed.forEach(([token, entry]) => {
+      if (entry.__needsChain === true) queueToken(token, { deferFlush: true });
+    });
+    if (confirmed.some(([, e]) => e.__needsChain === true)) {
+      maybeFlushRequestQueue("host-fee-upgrade");
+    } else if (requestQueue.size === 0) {
+      cancelHostFeeGraceFlush();
+    }
+    if (needsHostTaxFeedPoll() && requestQueue.size > 0) {
+      scheduleHostTaxFeedRetry("host-fee-done");
+    }
+  }
+
+  function installHostFeeBridge() {
+    window.addEventListener("message", (event) => {
+      try {
+        if (event.source && event.source !== window) return;
+        const data = event.data;
+        if (!data || data.source !== "flap-fee-info") return;
+        if (data.type === "host-fee-ranks-done" && data.site === "debot") {
+          if (!debotRanksDoneAt) debotRanksDoneAt = Date.now();
+          if (requestQueue.size > 0) scheduleHostTaxFeedRetry("ranks-done");
+          return;
+        }
+        if (data.type !== "host-fee-map") return;
+        applyHostFeeEntries(data.entries);
+      } catch (_err) {
+        // ignore
+      }
+    });
   }
 
   function installTaxRecvHideBridge() {
@@ -12411,7 +13263,7 @@
             // 关闭：清 DOM 标记 + 整页 reload（去掉 JSON 过滤后的残缺列表）
             clearAllTaxRecvDomHide();
             try {
-              sessionStorage.removeItem("flapFeeInfo.taxRecvReflow.v1");
+              sessionStorage.removeItem("flapFeeInfo.listFilterRefresh.v1");
             } catch (_ss) {
               // ignore
             }
@@ -12426,7 +13278,7 @@
           clearAllTaxRecvDomHide();
           if (!enabledWas || thrChanged) {
             try {
-              sessionStorage.removeItem("flapFeeInfo.taxRecvReflow.v1");
+              sessionStorage.removeItem("flapFeeInfo.listFilterRefresh.v1");
             } catch (_ss2) {
               // ignore
             }
@@ -12442,7 +13294,7 @@
           // 规则变化：GMGN 需 reload 让 page-hook 用新规则滤首包/WS
           if (wasOn !== nowOn || nowOn) {
             try {
-              sessionStorage.removeItem("flapFeeInfo.taxRecvReflow.v1");
+              sessionStorage.removeItem("flapFeeInfo.listFilterRefresh.v1");
             } catch (_ss3) {
               // ignore
             }
@@ -12456,11 +13308,34 @@
             scheduleTaxRecvHideApply(0);
           }
         }
+        if (changes[VAULT_HIDE_KEY]) {
+          const wasOn = vaultHidePrefs.enabled === true;
+          vaultHidePrefs = normalizeVaultHidePrefs(changes[VAULT_HIDE_KEY].newValue);
+          pushVaultHidePrefsToPage();
+          const nowOn = vaultHidePrefs.enabled === true;
+          if (wasOn !== nowOn || nowOn) {
+            try {
+              sessionStorage.removeItem("flapFeeInfo.listFilterRefresh.v1");
+            } catch (_ss4) {
+              // ignore
+            }
+            if (isTaxRecvListReflowPage()) {
+              scheduleTaxRecvListReflow("vault-hide-change");
+            } else {
+              scheduleTaxRecvHideApply(0);
+            }
+          } else {
+            clearAllTaxRecvDomHide();
+            scheduleTaxRecvHideApply(0);
+          }
+        }
         if (changes[LICENSE_KEY]) {
           licenseAccessKey = String(changes[LICENSE_KEY].newValue?.key || "").trim();
+          void refreshLicenseAccessState("storage");
         }
         if (changes[DEVICE_ID_KEY]) {
           licenseDeviceId = normalizeLicenseDeviceId(changes[DEVICE_ID_KEY].newValue);
+          if (licenseAccessKey) void refreshLicenseAccessState("device-id");
         }
         if (dirty) rerenderAllBadges();
       });
@@ -12506,11 +13381,14 @@
    * (never omit when equals pool quote — user wants explicit payout).
    * Index vault gift: 📈 + first two basket symbols (not →IB-xxx).
    */
-  function buildFeeLabel(entry) {
+  function buildFeeLabel(entry, domQuoteSymbol) {
     const prefs = displayPrefs || DEFAULT_DISPLAY_PREFS;
+    const domQuote = compactDisplaySymbol(domQuoteSymbol || "");
     const basketAssets = getBasketAssetsForDisplay(entry);
     const basketPair = basketPairText(basketAssets);
-    const useStockGift = Boolean(entry.is_vault && basketPair);
+    const useStockGift = Boolean(
+      entry.is_vault && basketPair && (entry.is_stocks_vault || basketAssets.length >= 2)
+    );
     const candidates = [];
     if ((entry.dividend_bps || 0) > 0 && prefs.holder !== false) {
       candidates.push({ kind: "holder", emoji: "💎", bps: entry.dividend_bps, pri: 0 });
@@ -12561,14 +13439,24 @@
     if (prefs.payoutArrow !== false && top) {
       if (top === "gift" && useStockGift) {
         topSym = ""; // basket pair appended without arrow / IB-xxx
-      } else if (top === entry.top_segment) {
-        topSym = compactDisplaySymbol(entry.top_payout_symbol || "");
       } else if (top === "holder") {
         topSym = compactDisplaySymbol(
-          entry.dividend_symbol || entry.top_payout_symbol || ""
+          entry.dividend_symbol ||
+            entry.top_payout_symbol ||
+            entry.quote_symbol ||
+            domQuote ||
+            ""
         );
-      } else if (top === "creator" || top === "gift" || top === "lp" || top === "giggle" || top === "binance") {
-        topSym = compactDisplaySymbol(entry.quote_symbol || "");
+      } else if (
+        top === "creator" ||
+        top === "gift" ||
+        top === "lp" ||
+        top === "giggle" ||
+        top === "binance"
+      ) {
+        topSym = compactDisplaySymbol(entry.quote_symbol || domQuote || "");
+      } else if (top === entry.top_segment) {
+        topSym = compactDisplaySymbol(entry.top_payout_symbol || domQuote || "");
       }
       // burn: tax symbol not always cached client-side — omit arrow if unknown
     }
@@ -12594,7 +13482,7 @@
    */
   function buildDisplayLabel(entry, quoteSymbol, token) {
     const prefs = displayPrefs || DEFAULT_DISPLAY_PREFS;
-    const fee = buildFeeLabel(entry);
+    const fee = buildFeeLabel(entry, quoteSymbol);
     const showPool = prefs.pool !== false && Boolean(quoteSymbol);
     const prefix = poolPrefixForToken(token || "");
     if (showPool && fee) return `${prefix}${quoteSymbol} | ${fee}`;
@@ -12943,6 +13831,47 @@
     return false;
   }
 
+  function normalizeVaultHidePrefs(raw) {
+    const out = { ...DEFAULT_VAULT_HIDE };
+    if (!raw || typeof raw !== "object") return out;
+    out.enabled = raw.enabled === true;
+    out.hideTaxVault = raw.hideTaxVault === true;
+    out.hideStockVault = raw.hideStockVault === true;
+    return out;
+  }
+
+  function pushVaultHidePrefsToPage() {
+    const prefs = {
+      enabled: vaultHidePrefs.enabled === true,
+      hideTaxVault: vaultHidePrefs.hideTaxVault === true,
+      hideStockVault: vaultHidePrefs.hideStockVault === true
+    };
+    const payload = JSON.stringify(prefs);
+    try {
+      document.documentElement?.setAttribute("data-flap-vault-hide", payload);
+    } catch (_e) {
+      // ignore
+    }
+    try {
+      localStorage.setItem(VAULT_HIDE_KEY, payload);
+    } catch (_ls) {
+      // ignore
+    }
+    syncGmgnShareWorkerForFilters();
+    try {
+      window.postMessage(
+        {
+          source: "flap-fee-info",
+          type: "vault-hide-prefs",
+          prefs
+        },
+        "*"
+      );
+    } catch (_e2) {
+      // ignore
+    }
+  }
+
   function pushSuffixHidePrefsToPage() {
     const prefs = {
       enabled: suffixHidePrefs.enabled === true,
@@ -13195,6 +14124,14 @@
       wipeForbiddenMountBadges(card, true);
       return false;
     }
+    if (!isBadgeAccessAllowed()) {
+      try {
+        removeAllBadgesForCard(card, tok);
+      } catch (_lic) {
+        // ignore
+      }
+      return false;
+    }
     // 虚拟列表复用 / 错挂：行身份 CA 必须 === tok，且必须是目标尾号
     try {
       const idCa = extractCardHrefToken(card);
@@ -13355,7 +14292,19 @@
     });
   }
 
+  /** GMGN 战壕列表：徽章紧贴 Tax 芯片右侧，避免 beforebegin 换行掉到下一行。 */
+  function placeGmgnListTaxBadge(taxEl, icon) {
+    if (!(taxEl instanceof HTMLElement) || !(icon instanceof HTMLElement)) return;
+    icon.dataset.feeMountSide = "tax-after";
+    taxEl.insertAdjacentElement("afterend", icon);
+  }
+
   function placeBesideTaxChip(target, icon) {
+    if (!(target instanceof HTMLElement) || !(icon instanceof HTMLElement)) return;
+    if (isGmgnHost() && !isGmgnTokenPage()) {
+      placeGmgnListTaxBadge(target, icon);
+      return;
+    }
     let anchor = target;
     let parent = target.parentElement;
     for (let depth = 0; parent && depth < 4; depth += 1) {
@@ -13374,6 +14323,38 @@
       break;
     }
     anchor.insertAdjacentElement("beforebegin", icon);
+  }
+
+  /** GMGN 主战壕三列（非搜索弹层 / 非 K 线顶栏）。 */
+  function isGmgnFixedTrenchCard(card) {
+    return (
+      isGmgnHost() &&
+      card instanceof HTMLElement &&
+      card.dataset.flapOverlayCard !== "1" &&
+      !isInsideOverlayDialog(card) &&
+      !isGmgnTokenPage() &&
+      !!card.closest?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR)
+    );
+  }
+
+  /** 战壕徽章误挂到头像/短地址行（Tax 右侧才是正确位置）。 */
+  function isGmgnTrenchMisplacedBadge(card, icon) {
+    if (!isGmgnFixedTrenchCard(card)) return false;
+    if (!(icon instanceof HTMLElement)) return false;
+    if (icon.dataset.feeLoading === "1") return false;
+    if (icon.dataset.feeMountSide !== "tax-after") return true;
+    const tax = findTaxTag(card);
+    if (!(tax instanceof HTMLElement)) return false;
+    try {
+      const tr = tax.getBoundingClientRect();
+      const ir = icon.getBoundingClientRect();
+      if (tr.width <= 0 || ir.width <= 0) return false;
+      if (Math.abs(ir.top - tr.top) > 18) return true;
+      if (ir.left + 4 < tr.left) return true;
+    } catch (_geo) {
+      return false;
+    }
+    return false;
   }
 
   function findTaxTag(card) {
@@ -13420,10 +14401,13 @@
       return null;
     }
 
-    // Smallest chip first (most specific Tax badge).
+    // Smallest chip first (most specific Tax badge), but prefer the **top** metadata row.
+    const cardRect = card.getBoundingClientRect();
     candidates.sort((a, b) => {
       const ar = a.getBoundingClientRect();
       const br = b.getBoundingClientRect();
+      const topDiff = ar.top - br.top;
+      if (Math.abs(topDiff) > 6) return topDiff;
       const areaDiff = ar.width * ar.height - br.width * br.height;
       if (areaDiff !== 0) return areaDiff;
       return (a.textContent || "").length - (b.textContent || "").length;

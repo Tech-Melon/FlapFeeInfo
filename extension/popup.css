@@ -348,6 +348,11 @@ body {
   opacity: 0.72;
 }
 
+.vault-hide-options.is-disabled {
+  opacity: 0.72;
+  pointer-events: none;
+}
+
 .suffix-rules {
   display: flex;
   flex-direction: column;

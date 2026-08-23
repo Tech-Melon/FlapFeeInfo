@@ -170,7 +170,7 @@
           <div class="collapse-body" id="taxRecvCollapseBody" hidden>
             <div class="tax-recv-section" id="taxRecvSection">
               <p class="theme-hint" data-i18n="taxRecvHint">
-                仅战壕/Meme 列表生效。监听列表接口过滤（GMGN 自动补位），不额外请求；金库始终显示。默认关闭。
+                仅战壕/Meme「新创建」栏生效。不含 K 线顶栏、搜索弹层。不额外请求；默认关闭。金库类型见下方「金库屏蔽」。
               </p>
               <label class="row drag-row" for="taxRecvEnabled">
                 <input type="checkbox" id="taxRecvEnabled" />
@@ -205,7 +205,53 @@
                 />
               </div>
               <p class="theme-hint" data-i18n="taxRecvHint2" id="taxRecvHint2">
-                例：0% = 严格大于 0%（有 dev 分配就藏，0% 不藏）；50% = 接收方占比 ≥50% 也藏；100% = 仅藏税收钱包 100%。
+                例：0% = 严格大于 0%（有 dev 分配就藏，0% 不藏）；50% = 接收方占比 ≥50% 也藏；100% = 仅藏税收钱包 100%。纯 💎 持有人分红不挡。
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section class="section">
+          <button type="button" class="collapse-head" data-collapse="vaultHide" aria-expanded="false">
+            <span class="collapse-head-left">
+              <span class="collapse-icon" aria-hidden="true">🎁</span>
+              <span class="collapse-title" data-i18n="vaultHideSection">金库屏蔽</span>
+            </span>
+            <span class="collapse-chevron">▸</span>
+          </button>
+          <div class="collapse-body" id="vaultHideCollapseBody" hidden>
+            <div class="tax-recv-section" id="vaultHideSection">
+              <p class="theme-hint" data-i18n="vaultHideHint">
+                仅 BSC「新创建」列。区分税收金库 🎁（纯 vault / 税收钱包）与币股金库 📈（dividend_tokens 篮子）。Four ffff 的税收钱包不算金库。默认关闭。
+              </p>
+              <label class="row drag-row" for="vaultHideEnabled">
+                <input type="checkbox" id="vaultHideEnabled" />
+                <span class="emoji">🎁</span>
+                <div class="label">
+                  <strong data-i18n="vaultHideEnableTitle">启用金库屏蔽</strong>
+                  <span data-i18n="vaultHideEnableDesc">开启后按下方选项过滤列表</span>
+                </div>
+              </label>
+              <div class="vault-hide-options" id="vaultHideOptions">
+                <label class="row drag-row" for="vaultHideTax">
+                  <input type="checkbox" id="vaultHideTax" />
+                  <span class="emoji">🎁</span>
+                  <div class="label">
+                    <strong data-i18n="vaultHideTaxTitle">屏蔽税收金库</strong>
+                    <span data-i18n="vaultHideTaxDesc">Flap 纯 🎁 vault、GMGN is_vault（无篮子）</span>
+                  </div>
+                </label>
+                <label class="row drag-row" for="vaultHideStock">
+                  <input type="checkbox" id="vaultHideStock" />
+                  <span class="emoji">📈</span>
+                  <div class="label">
+                    <strong data-i18n="vaultHideStockTitle">屏蔽币股金库</strong>
+                    <span data-i18n="vaultHideStockDesc">dividend_tokens / is_stocks_vault 篮子金库</span>
+                  </div>
+                </label>
+              </div>
+              <p class="theme-hint" data-i18n="vaultHideHint2" id="vaultHideHint2">
+                例：只勾「税收金库」→ 隐藏 BAOS 类税收钱包币，保留 NVDA/FXIO 币股。与资金接收方屏蔽可叠加。
               </p>
             </div>
           </div>
