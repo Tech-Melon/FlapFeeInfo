@@ -581,13 +581,16 @@ python tools/ctl.py watchdog-run
  - `0.8.25`：GMGN `mutil_window_token_info` 的 `pool.quote_symbol`（NVDAB）补丁升级默认 BNB；单枚 dividend_tokens 不再当币股 vault（避免把 NVDA 池打成 BNB）；Tax 外池芯片与徽章不一致则重挂
  - `0.8.26`：许可证新设备换绑 — 验证 `device_mismatch` 时先保存密钥并显示「换绑到此设备」（不再要求 storage 里已有 key）
  - `0.8.27`：底池符号稳妥回退 — Tax 外 quotes 文件名 → quote_address 目录 → 非 BNB 的 WSS/HTTP 符号 → 确认空地址才默认 BNB；Tax 内多枚图不当单一分红
-- 插件当前版本：见 `extension/manifest.json`（**0.8.27**，公开无剪切板）
-- page-hook：`HOOK_VER` **86**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.28`：资金接收方白名单 — GMGN `market_address`/`creator`、Debot `fee_receiver`/`founder_address` 命中则不屏蔽
+ - `0.8.29`：0.8.27 底池回退热路径降载 — 稳定卡跳过 quotes DOM；站点分离 + WeakMap 短缓存
+- 插件当前版本：见 `extension/manifest.json`（**0.8.29**，公开无剪切板）
+- page-hook：`HOOK_VER` **87**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  
 - 尾号屏蔽：`flapFeeInfo.suffixHide.v1` = `{ enabled, rules:[{id,suffix,enabled}] }`（最多 24 条 hex 1–12 位）
+- 资金接收：`flapFeeInfo.taxRecvHide.v1` = `{ enabled, thresholdPct, allow:[{id,address,enabled}] }`（白名单最多 24 个 0x 地址）
 - 剪切板跳转：`flapFeeInfo.clipJump.v1` = `{ enabled:false, target:"gmgn"|"debot", sites:"both"|"gmgn"|"debot", activeTabOnly:true, reuseSiteTab:false, pageMarkCa:false, overrideHostCa:false }`（默认关；开启需确认 + `clipboardRead` 可选权限）
 - 许可证（可选，默认免费）：`flapFeeInfo.license.v1` = `{ key:"" }`；有 key 时 content 带 `Authorization: Bearer`；Worker `REQUIRE_LICENSE` 默认 `0`（不强制）；开启付费时设 `1` 并写入 KV `license:<key>` → `{ exp, plan:"flap", flap_perm?:1 }`；**发卡**：TG Bot `flap_fee` **0.01 BNB/月**（动态尾数 0.009501~0.010100）；详见 `ENABLE_FLAP_MONETIZATION.md`
 - 复制即搜（仅完整包 / 仅 GMGN）：`flapFeeInfo.clipSearch.v1` = `{ enabled:false, minChars:2, maxChars:8 }`（默认关；开启需确认 + `clipboardRead`；与跳转共用 `clipJump.seen.v1` 去重）

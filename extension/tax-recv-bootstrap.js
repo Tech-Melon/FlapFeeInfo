@@ -10,18 +10,40 @@
   const VAULT_KEY = "flapFeeInfo.vaultHide.v1";
   const VAULT_ATTR = "data-flap-vault-hide";
   const OWN_KEY = "flapFeeInfo.ownedDisableShareWorker";
-  const DEFAULT_TAX = { enabled: false, thresholdPct: 100 };
+  const DEFAULT_TAX = { enabled: false, thresholdPct: 100, allow: [] };
+  const TAX_ALLOW_MAX = 24;
   const DEFAULT_SUFFIX = { enabled: false, rules: [] };
   const DEFAULT_VAULT = { enabled: false, hideTaxVault: false, hideStockVault: false };
   const SUFFIX_MAX = 24;
 
+  function normalizeEvmAddress(raw) {
+    const s = String(raw || "").trim().toLowerCase();
+    const m = s.match(/0x[a-f0-9]{40}/);
+    if (m) return m[0];
+    const hex = s.replace(/^0x/, "").replace(/[^a-f0-9]/g, "");
+    if (hex.length === 40) return `0x${hex}`;
+    return "";
+  }
+
   function normalizeTax(raw) {
-    const out = { ...DEFAULT_TAX };
+    const out = { enabled: false, thresholdPct: 100, allow: [] };
     if (!raw || typeof raw !== "object") return out;
     out.enabled = raw.enabled === true;
     const thr = Number(raw.thresholdPct);
     if (Number.isFinite(thr)) {
       out.thresholdPct = Math.max(0, Math.min(100, Math.round(thr)));
+    }
+    const list = Array.isArray(raw.allow) ? raw.allow : [];
+    const seen = new Set();
+    for (let i = 0; i < list.length && out.allow.length < TAX_ALLOW_MAX; i += 1) {
+      const row = list[i];
+      const address = normalizeEvmAddress(row && (row.address || row.addr || row));
+      if (!address || seen.has(address)) continue;
+      seen.add(address);
+      out.allow.push({
+        address,
+        enabled: !row || row.enabled !== false
+      });
     }
     return out;
   }
@@ -94,7 +116,8 @@
     const p = normalizeTax(prefs);
     const payload = JSON.stringify({
       enabled: p.enabled === true,
-      thresholdPct: p.thresholdPct
+      thresholdPct: p.thresholdPct,
+      allow: p.allow || []
     });
     try {
       if (document.documentElement) {
@@ -115,7 +138,8 @@
           type: "tax-recv-prefs",
           prefs: {
             enabled: p.enabled === true,
-            thresholdPct: p.thresholdPct
+            thresholdPct: p.thresholdPct,
+            allow: p.allow || []
           }
         },
         "*"
@@ -292,7 +316,7 @@
 
   /** MAIN world page-hook：manifest 为主；仅缺失时单次 script 兜底（禁止并发重试风暴） */
   const PAGE_HOOK_FILE = "page-hook.js";
-  const PAGE_HOOK_VER = "69";
+  const PAGE_HOOK_VER = "87";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
 
   function pageHookHostFeeReady() {

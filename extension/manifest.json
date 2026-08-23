@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.27",
-  "description": "FlapFeeInfo 0.8.27: 底池优先 Tax 外 quotes 文件名，BNB 当未齐回退。",
+  "version": "0.8.29",
+  "description": "FlapFeeInfo 0.8.29: 底池回退热路径降载，稳定卡不再每轮扫 quotes DOM。",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

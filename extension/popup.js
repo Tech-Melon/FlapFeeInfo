@@ -13,7 +13,8 @@
   const DEVICE_ID_KEY = "flapFeeInfo.deviceId.v1";
   const LICENSE_API_BASE = "https://flap-fee-info.tech-melon.workers.dev";
   const DEFAULT_THEME = "dark";
-  const DEFAULT_TAX_RECV_HIDE = { enabled: false, thresholdPct: 100 };
+  const DEFAULT_TAX_RECV_HIDE = { enabled: false, thresholdPct: 100, allow: [] };
+  const TAX_RECV_ALLOW_MAX = 24;
   const DEFAULT_SUFFIX_HIDE = { enabled: false, rules: [] };
   const DEFAULT_VAULT_HIDE = {
     enabled: false,
@@ -106,6 +107,13 @@
       taxRecvThresholdLabelGt: "阈值 >",
       taxRecvHint2:
         "仅新创建：7777/8888 且 👨‍🍳 达阈值则屏蔽（含 hybrid）。0% = 严格大于 0%（只要有 dev 分配就挡，不会挡 0%）。纯 💎 持有人分红不挡。",
+      taxRecvAllowLabel: "接收地址白名单",
+      taxRecvAllowPh: "0x… 接收地址",
+      taxRecvAllowHint:
+        "资金打到这些地址的代币不屏蔽（GMGN：market_address / creator；Debot：fee_receiver）。最多 24 条。",
+      taxRecvAllowEmpty: "还没有白名单地址。",
+      taxRecvAllowInvalid: "请粘贴完整 0x 地址（40 位 hex）",
+      taxRecvAllowDup: "已添加过",
       vaultHideSection: "金库屏蔽",
       vaultHideHint:
         "仅 BSC「新创建」列。区分税收金库 🎁 与币股金库 📈。Four ffff 税收钱包不算金库。默认关闭。",
@@ -236,6 +244,13 @@
       taxRecvThresholdLabelGt: "Threshold >",
       taxRecvHint2:
         "New column only: hide 7777/8888 when marketing hits threshold (incl. hybrid). 0% = strictly > 0%. Pure 💎 holder dividend kept.",
+      taxRecvAllowLabel: "Recipient allowlist",
+      taxRecvAllowPh: "0x… recipient",
+      taxRecvAllowHint:
+        "Tokens paying these wallets are not hidden (GMGN: market_address / creator; Debot: fee_receiver). Max 24.",
+      taxRecvAllowEmpty: "No allowlist addresses yet.",
+      taxRecvAllowInvalid: "Paste a full 0x address (40 hex chars)",
+      taxRecvAllowDup: "Already added",
       vaultHideSection: "Vault hide",
       vaultHideHint:
         "BSC New creation column only. Tax vault 🎁 vs equity basket vault 📈. Four ffff tax wallet is not a vault. Off by default.",
@@ -346,6 +361,10 @@
   const taxRecvThreshold = document.getElementById("taxRecvThreshold");
   const taxRecvThresholdRange = document.getElementById("taxRecvThresholdRange");
   const taxRecvThresholdRow = document.getElementById("taxRecvThresholdRow");
+  const taxRecvAllowWrap = document.getElementById("taxRecvAllowWrap");
+  const taxRecvAllowList = document.getElementById("taxRecvAllowList");
+  const taxRecvAllowInput = document.getElementById("taxRecvAllowInput");
+  const taxRecvAllowAdd = document.getElementById("taxRecvAllowAdd");
   const suffixHideEnabled = document.getElementById("suffixHideEnabled");
   const suffixRulesWrap = document.getElementById("suffixRulesWrap");
   const suffixRulesList = document.getElementById("suffixRulesList");
@@ -405,13 +424,41 @@
     return raw === "en" ? "en" : "zh";
   }
 
+  function normalizeEvmAllowAddress(raw) {
+    const s = String(raw || "").trim().toLowerCase();
+    const m = s.match(/0x[a-f0-9]{40}/);
+    if (m) return m[0];
+    const hex = s.replace(/^0x/, "").replace(/[^a-f0-9]/g, "");
+    if (hex.length === 40) return `0x${hex}`;
+    return "";
+  }
+
+  function shortAllowAddress(addr) {
+    const a = String(addr || "");
+    if (a.length < 12) return a;
+    return `${a.slice(0, 6)}…${a.slice(-4)}`;
+  }
+
   function normalizeTaxRecvHide(raw) {
-    const out = { ...DEFAULT_TAX_RECV_HIDE };
+    const out = { enabled: false, thresholdPct: 100, allow: [] };
     if (!raw || typeof raw !== "object") return out;
     out.enabled = raw.enabled === true;
     const thr = Number(raw.thresholdPct);
     if (Number.isFinite(thr)) {
       out.thresholdPct = Math.max(0, Math.min(100, Math.round(thr)));
+    }
+    const list = Array.isArray(raw.allow) ? raw.allow : [];
+    const seen = new Set();
+    for (let i = 0; i < list.length && out.allow.length < TAX_RECV_ALLOW_MAX; i += 1) {
+      const row = list[i];
+      const address = normalizeEvmAllowAddress(row && (row.address || row.addr || row));
+      if (!address || seen.has(address)) continue;
+      seen.add(address);
+      out.allow.push({
+        id: row && row.id ? String(row.id) : `a${out.allow.length}`,
+        address,
+        enabled: !row || row.enabled !== false
+      });
     }
     return out;
   }
@@ -968,14 +1015,77 @@
       taxRecvThresholdRow.classList.toggle("is-disabled", taxRecvState.enabled !== true);
     }
     syncTaxRecvThresholdLabel();
+    if (!taxRecvAllowList) return;
+    taxRecvAllowList.innerHTML = "";
+    const allow = taxRecvState.allow || [];
+    if (!allow.length) {
+      const empty = document.createElement("div");
+      empty.className = "suffix-empty";
+      empty.textContent = t("taxRecvAllowEmpty");
+      taxRecvAllowList.appendChild(empty);
+      return;
+    }
+    for (const rule of allow) {
+      const row = document.createElement("div");
+      row.className = "suffix-rule-row";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = rule.enabled !== false;
+      cb.title = rule.address;
+      cb.addEventListener("change", () => {
+        const r = taxRecvState.allow.find((x) => x.id === rule.id);
+        if (!r) return;
+        r.enabled = cb.checked === true;
+        scheduleSaveTaxRecv();
+      });
+      const text = document.createElement("span");
+      text.className = "suffix-rule-text" + (rule.enabled === false ? " is-off" : "");
+      text.textContent = shortAllowAddress(rule.address);
+      text.title = rule.address;
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "suffix-rule-del";
+      del.textContent = t("suffixRuleDel");
+      del.addEventListener("click", () => {
+        taxRecvState.allow = taxRecvState.allow.filter((x) => x.id !== rule.id);
+        scheduleSaveTaxRecv();
+      });
+      row.append(cb, text, del);
+      taxRecvAllowList.appendChild(row);
+    }
   }
 
   function readTaxRecvFromUI() {
     const thrRaw = Number(taxRecvThreshold?.value ?? taxRecvThresholdRange?.value ?? 100);
     return normalizeTaxRecvHide({
       enabled: taxRecvEnabled?.checked === true,
-      thresholdPct: thrRaw
+      thresholdPct: thrRaw,
+      allow: taxRecvState.allow
     });
+  }
+
+  function tryAddTaxRecvAllow() {
+    if (!taxRecvAllowInput) return;
+    const address = normalizeEvmAllowAddress(taxRecvAllowInput.value);
+    if (!address) {
+      taxRecvAllowInput.placeholder = t("taxRecvAllowInvalid");
+      taxRecvAllowInput.value = "";
+      return;
+    }
+    const exists = (taxRecvState.allow || []).some((r) => r.address === address);
+    if (exists) {
+      taxRecvAllowInput.placeholder = t("taxRecvAllowDup");
+      taxRecvAllowInput.value = "";
+      return;
+    }
+    if ((taxRecvState.allow || []).length >= TAX_RECV_ALLOW_MAX) return;
+    taxRecvState.allow = [
+      ...(taxRecvState.allow || []),
+      { id: `a${Date.now().toString(36)}`, address, enabled: true }
+    ];
+    taxRecvAllowInput.value = "";
+    taxRecvAllowInput.placeholder = t("taxRecvAllowPh");
+    scheduleSaveTaxRecv();
   }
 
   function saveSuffixHide(state) {
@@ -1455,6 +1565,13 @@
   taxRecvThreshold?.addEventListener("input", () => syncTaxRecvThreshold(false));
   taxRecvThresholdRange?.addEventListener("input", () => syncTaxRecvThreshold(true));
   taxRecvThresholdRange?.addEventListener("change", () => syncTaxRecvThreshold(true));
+  taxRecvAllowAdd?.addEventListener("click", () => tryAddTaxRecvAllow());
+  taxRecvAllowInput?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      tryAddTaxRecvAllow();
+    }
+  });
 
   suffixHideEnabled?.addEventListener("change", () => {
     suffixHideState = normalizeSuffixHide({

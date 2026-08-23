@@ -207,6 +207,30 @@
               <p class="theme-hint" data-i18n="taxRecvHint2" id="taxRecvHint2">
                 例：0% = 严格大于 0%（有 dev 分配就藏，0% 不藏）；50% = 接收方占比 ≥50% 也藏；100% = 仅藏税收钱包 100%。纯 💎 持有人分红不挡。
               </p>
+              <p class="theme-hint" data-i18n="taxRecvAllowLabel" style="margin-top:10px;font-weight:600">
+                接收地址白名单
+              </p>
+              <div class="suffix-rules-wrap" id="taxRecvAllowWrap">
+                <div class="suffix-rules" id="taxRecvAllowList"></div>
+                <div class="suffix-add-row">
+                  <input
+                    type="text"
+                    id="taxRecvAllowInput"
+                    class="suffix-add-input"
+                    maxlength="64"
+                    spellcheck="false"
+                    autocomplete="off"
+                    data-i18n-placeholder="taxRecvAllowPh"
+                    placeholder="0x… 接收地址"
+                  />
+                  <button type="button" class="btn btn-sm" id="taxRecvAllowAdd" data-i18n="suffixAddBtn">
+                    添加
+                  </button>
+                </div>
+                <p class="theme-hint" data-i18n="taxRecvAllowHint">
+                  资金打到这些地址的代币不屏蔽（GMGN：market_address / creator；Debot：fee_receiver）。最多 24 条。
+                </p>
+              </div>
             </div>
           </div>
         </section>

@@ -138,10 +138,12 @@ FlapFeeInfo\extension
 3. 点当前插件的 `重新加载`（或重新「加载已解压」指向 `extension/`）。
 4. **硬刷新** GMGN / Debot 目标页（否则可能仍是旧 content script）。
 
-当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.27**）。
+当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.29**）。
 
 ### 0.8.x 要点（近期）
 
+- **0.8.29**：0.8.27 底池回退不再每轮扫 quotes 图；稳定卡走短缓存，滚动更轻
+- **0.8.28**：资金接收方可添加白名单地址，打到这些钱包的代币不屏蔽
 - **0.8.27**：底池/分红按稳妥回退链 — Tax 外/内 quotes 文件名优先，空/`BNB` 不压过 `quote_address` 目录
 - **0.8.26**：同一密钥在新设备验证冲突时显示「换绑到此设备」，不必先在旧设备保存过
 - **0.8.25**：GMGN 后补 `pool.quote`（NVDAB 等）会升级默认 🦋BNB；Tax 外池芯片与徽章不一致时重挂

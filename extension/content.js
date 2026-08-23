@@ -17,6 +17,8 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.29: 0.8.27 底池回退热路径降载 — 稳定卡不每轮扫 quotes；站点分离 + WeakMap 短缓存。
+  // 0.8.28: 资金接收方白名单 — GMGN market_address/creator、Debot fee_receiver 命中则不屏蔽。
   // 0.8.27: 底池/分红符号：Tax 外/内 quotes 文件名最稳；BNB 视为未齐，回退地址目录/HTTP。
   // 0.8.26: 许可证换绑 — 新设备验证冲突时保留密钥并显示「换绑到此设备」。
   // 0.8.25: GMGN HTTP/WSS 后补 pool.quote（NVDAB）升级 🦋BNB，不再停在默认底池。
@@ -225,6 +227,9 @@
   const DEBOT_MOUNT_CACHE_MS = 4000;
   // GMGN list Tax chip mount cache (findTaxTag is expensive under virtual-list thrash).
   const GMGN_TAX_MOUNT_CACHE_MS = 2500;
+  // 0.8.29: pool/Tax quotes DOM 短缓存。有符号跟扫间隔；空结果更短以免挡住后到的芯片。
+  const POOL_QUOTE_DOM_CACHE_MS = 900;
+  const POOL_QUOTE_DOM_EMPTY_CACHE_MS = 800;
   // GMGN: while user scrolls columns, suppress mutation-driven full scans (resume after settle).
   const GMGN_SCROLL_COOLDOWN_MS = 400;
   const GMGN_SCROLL_RESUME_SCAN_MS = 480;
@@ -447,8 +452,10 @@
   const TAX_RECV_HIDE_KEY = "flapFeeInfo.taxRecvHide.v1";
   const DEFAULT_TAX_RECV_HIDE = {
     enabled: false,
-    thresholdPct: 100
+    thresholdPct: 100,
+    allow: []
   };
+  const TAX_RECV_ALLOW_MAX = 24;
   /** 自定义尾号屏蔽（仅 BSC）：rules[].suffix 为 1–12 位 hex */
   const SUFFIX_HIDE_KEY = "flapFeeInfo.suffixHide.v1";
   /** 金库屏蔽：税收金库 🎁 vs 币股金库 📈 */
@@ -890,11 +897,6 @@
   /** /static/quotes/{stem}.png → 展示符号；社交/发射台 logo 返回空 */
   function gmgnQuotesStemFromImg(img) {
     if (!(img instanceof Element)) return "";
-    try {
-      if (img.closest('[data-sentry-component="SecureLink"]')) return "";
-    } catch (_err) {
-      // ignore
-    }
     const src = img.currentSrc || img.getAttribute("src") || "";
     if (!src || isGmgnLaunchpadLogoSrc(src)) return "";
     if (/\/static\/icons\//i.test(src) && !/icon_usd|icon_usdt|icon_usdc|icon_weth/i.test(src)) {
@@ -921,23 +923,36 @@
   /** GMGN Tax 芯片内图标 → 分红代币（TaxDividendTokenIcon；非底池）。多枚=篮子，不当单一分红。 */
   function extractDividendSymbolFromTaxDom(card) {
     if (!card?.querySelector || !isGmgnHost()) return "";
+    const now = Date.now();
+    const tok = card.dataset[CARD_MARK] || "";
+    const hit = taxDivDomCache.get(card);
+    if (
+      hit &&
+      hit.tok === tok &&
+      now - hit.at < (hit.quote ? POOL_QUOTE_DOM_CACHE_MS : POOL_QUOTE_DOM_EMPTY_CACHE_MS)
+    ) {
+      return hit.quote;
+    }
     const scope =
       card.querySelector('[data-sentry-component="TaxDividendTokenIcons"]') ||
       card.querySelector(".trenches-tax");
-    if (!scope) return "";
-    const stems = [];
-    const seen = new Set();
-    const imgs = scope.querySelectorAll(
-      '[data-sentry-component="TaxDividendTokenIcon"] img, img[src*="/quotes/"], img[src*="/static/quotes/"]'
-    );
-    for (let i = 0; i < imgs.length; i += 1) {
-      const stem = compactBasketSymbol(gmgnQuotesStemFromImg(imgs[i]));
-      if (!stem || stem === "BNB" || seen.has(stem)) continue;
-      seen.add(stem);
-      stems.push(stem);
+    let quote = "";
+    if (scope) {
+      const stems = [];
+      const seen = new Set();
+      const imgs = scope.querySelectorAll(
+        '[data-sentry-component="TaxDividendTokenIcon"] img, img[src*="/quotes/"], img[src*="/static/quotes/"]'
+      );
+      for (let i = 0; i < imgs.length; i += 1) {
+        const stem = compactBasketSymbol(gmgnQuotesStemFromImg(imgs[i]));
+        if (!stem || stem === "BNB" || seen.has(stem)) continue;
+        seen.add(stem);
+        stems.push(stem);
+      }
+      if (stems.length === 1) quote = stems[0];
     }
-    if (stems.length === 1) return stems[0];
-    return "";
+    taxDivDomCache.set(card, { tok, at: now, quote });
+    return quote;
   }
 
   function paintedPoolDisagrees(icon, want) {
@@ -954,9 +969,26 @@
     return !poolPart.includes(want);
   }
 
+  /** 徽章已画出非 BNB 底池（🦋SPCX 等）— 稳定卡不必再扫 quotes 图 */
+  function paintedPoolLooksNonNative(icon) {
+    if (!(icon instanceof HTMLElement)) return false;
+    const text = icon.textContent || "";
+    const pipe = text.indexOf(" | ");
+    const poolPart =
+      pipe >= 0
+        ? text.slice(0, pipe)
+        : /^(🪙|🦋|🖐️)/.test(text)
+          ? text
+          : "";
+    if (!poolPart) return false;
+    const body = poolPart.replace(/^[🪙🦋🖐️]\s*/u, "").trim();
+    return Boolean(body) && !quoteSymbolLooksNative(body);
+  }
+
   /** 普通税币：Tax 外文件名 / quote_address 已指向 NVDAB，徽章还停在默认 BNB → 必须重挂 */
   function isGmgnPoolDomMismatch(card, icon, entry) {
     if (!isGmgnHost() || !entry || isVaultPoolToken(entry)) return false;
+    if (paintedPoolLooksNonNative(icon)) return false;
     const want = pickStablePoolQuote(entry, card);
     if (want && !quoteSymbolLooksNative(want)) {
       return paintedPoolDisagrees(icon, want);
@@ -971,6 +1003,8 @@
   function isGmgnHostFeeDomMismatch(card, entry) {
     if (!isGmgnHost() || !entry || !entry.source_host) return false;
     if ((Number(entry.dividend_bps) || 0) <= 0) return false;
+    const curReady = compactBasketSymbol(entry.dividend_symbol || "");
+    if (curReady && curReady !== "BNB" && !dividendPayoutLooksNative(entry)) return false;
     const taxDiv = extractDividendSymbolFromTaxDom(card);
     if (!taxDiv || taxDiv === "BNB") return false;
     const cur = compactBasketSymbol(entry.dividend_symbol || "");
@@ -1674,6 +1708,12 @@
   let cardTokenCache = new WeakMap();
   /** @type {WeakMap<Element, { token: string|null, at: number }>} */
   let hrefTokenCache = new WeakMap();
+  /** card → { tok, at, quote } Tax-outer pool symbol. Replaced on SPA. */
+  let poolQuoteDomCache = new WeakMap();
+  /** card → { tok, at, quote } Tax-inner single dividend stem. */
+  let taxDivDomCache = new WeakMap();
+  /** card → { tok, at, syms } Tax-inner basket stems. */
+  let taxBasketDomCache = new WeakMap();
   let lastScrubIdentityAt = 0;
   let lastScrubHrefAt = 0;
   let lastViewportQuickAt = 0;
@@ -7573,6 +7613,9 @@
     gmgnTaxMountCache = new WeakMap();
     cardTokenCache = new WeakMap();
     hrefTokenCache = new WeakMap();
+    poolQuoteDomCache = new WeakMap();
+    taxDivDomCache = new WeakMap();
+    taxBasketDomCache = new WeakMap();
     scanRootsCache = { at: 0, roots: [] };
     gmgnSteadyRoundRobinRow = 0;
     gmgnTrenchProbeCache = { at: 0, roots: [], ready: false };
@@ -8415,6 +8458,9 @@
     // Drop GMGN Tax mount cache with marks (nodes are gone / recycled).
     gmgnTaxMountCache = new WeakMap();
     badgeForbiddenCache = new WeakMap();
+    poolQuoteDomCache = new WeakMap();
+    taxDivDomCache = new WeakMap();
+    taxBasketDomCache = new WeakMap();
     try {
       document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => {
         try {
@@ -8813,7 +8859,12 @@
         // 占位 + 已有正式 entry → 必须进 needWork 换真徽章
         if (existing && existing.dataset.feeLoading === "1" && entry) {
           needWork.push(card);
-        } else if (existing && entry && poolBadgeNeedsQuoteRefresh(existing, entry, card)) {
+        } else if (
+          existing &&
+          entry &&
+          !isGmgnHost() &&
+          poolBadgeNeedsQuoteRefresh(existing, entry, card)
+        ) {
           needWork.push(card);
         } else {
           skippedCached += 1;
@@ -12478,15 +12529,6 @@
     return quoteSymbolFromQuotesFilename(stem);
   }
 
-  function isGmgnTaxDividendImg(img) {
-    if (!(img instanceof Element)) return false;
-    try {
-      return Boolean(img.closest(GMGN_TAX_DIVIDEND_SCOPE));
-    } catch (_err) {
-      return false;
-    }
-  }
-
   function isGmgnLaunchpadLogoSrc(src) {
     const s = String(src || "");
     return /\/static\/lpp\//i.test(s) || /\/static\/img\/dex\/logo\//i.test(s);
@@ -12543,7 +12585,6 @@
    * 金库：Tax 内图是篮子，不当底池。
    */
   function pickStablePoolQuote(entry, card) {
-    const fromDom = card ? extractQuoteSymbolFromDom(card) : "";
     const apiRaw =
       entry && typeof entry.quote_symbol === "string" ? entry.quote_symbol.trim() : "";
     const fromApi = apiRaw ? normalizeQuoteSymbol(apiRaw, { allowCjk: true }) : "";
@@ -12553,10 +12594,10 @@
     if (isVaultPoolToken(entry)) {
       if (fromApi && isRealPoolQuoteSymbol(fromApi)) return formatPoolQuoteSymbol(fromApi);
       if (fromAddr && isRealPoolQuoteSymbol(fromAddr)) return formatPoolQuoteSymbol(fromAddr);
-      if (fromDom && isRealPoolQuoteSymbol(fromDom)) return formatPoolQuoteSymbol(fromDom);
       return vaultDefaultPoolQuote();
     }
 
+    const fromDom = card ? extractQuoteSymbolFromDom(card) : "";
     if (fromDom && !quoteSymbolLooksNative(fromDom)) return formatPoolQuoteSymbol(fromDom);
     if (fromDom && isRealPoolQuoteSymbol(fromDom)) return formatPoolQuoteSymbol(fromDom);
     if (fromAddr && !quoteSymbolLooksNative(fromAddr)) return formatPoolQuoteSymbol(fromAddr);
@@ -12583,6 +12624,7 @@
   function poolBadgeNeedsQuoteRefresh(icon, entry, card) {
     if (!(icon instanceof HTMLElement) || !entry) return false;
     if (displayPrefs && displayPrefs.pool === false) return false;
+    if (paintedPoolLooksNonNative(icon)) return false;
     const want = pickStablePoolQuote(entry, card);
     if (want) return paintedPoolDisagrees(icon, want);
     if (
@@ -12609,8 +12651,63 @@
    */
   function extractQuoteSymbolFromDom(card) {
     if (!card || !card.querySelector) return "";
+    const now = Date.now();
+    const tok = card.dataset[CARD_MARK] || "";
+    const hit = poolQuoteDomCache.get(card);
+    if (
+      hit &&
+      hit.tok === tok &&
+      now - hit.at < (hit.quote ? POOL_QUOTE_DOM_CACHE_MS : POOL_QUOTE_DOM_EMPTY_CACHE_MS)
+    ) {
+      return hit.quote;
+    }
+    const quote = isGmgnHost()
+      ? extractGmgnPoolQuoteFromDom(card)
+      : extractDebotPoolQuoteFromDom(card);
+    poolQuoteDomCache.set(card, { tok, at: now, quote });
+    return quote;
+  }
 
-    // Debot / Gungnir pool chip
+  function extractGmgnPoolQuoteFromDom(card) {
+    const gmgnBar = card.closest
+      ? card.closest('[data-sentry-component="BaseInfoBar"]')
+      : null;
+    const quoteRoot = gmgnBar || card;
+    if (!quoteRoot.querySelectorAll) return "";
+    const tax = quoteRoot.querySelector(GMGN_TAX_DIVIDEND_SCOPE) || null;
+
+    const specialImgs = quoteRoot.querySelectorAll(
+      'img[data-icon], img[src*="/static/icons/icon_usd"], img[src*="/static/icons/icon_usdt"], img[src*="/static/icons/icon_usdc"], img[src*="/static/icons/icon_weth"]'
+    );
+    for (let i = 0; i < specialImgs.length; i += 1) {
+      const img = specialImgs[i];
+      if (tax && tax.contains(img)) continue;
+      const src = img.currentSrc || img.getAttribute("src") || "";
+      if (isGmgnLaunchpadLogoSrc(src)) continue;
+      const special = matchGmgnSpecialQuoteIcon(img);
+      if (special) return special;
+    }
+
+    const quoteImgs = quoteRoot.querySelectorAll(
+      'img[alt$=" quote icon"], img[alt*=" quote icon"], img[src*="/static/quotes/"], img[src*="/quotes/"]'
+    );
+    for (let i = 0; i < quoteImgs.length; i += 1) {
+      const quoteImg = quoteImgs[i];
+      if (tax && tax.contains(quoteImg)) continue;
+      const src = quoteImg.currentSrc || quoteImg.getAttribute("src") || "";
+      if (isGmgnLaunchpadLogoSrc(src)) continue;
+      const fromFile = gmgnQuotesStemFromImg(quoteImg);
+      const alt = quoteImg.getAttribute("alt") || "";
+      const fromAlt = /quote icon/i.test(alt)
+        ? normalizeQuoteSymbol(alt.replace(/\s*quote\s*icon\s*$/i, ""), { allowCjk: true })
+        : "";
+      const sym = fromFile || fromAlt;
+      if (sym) return sym;
+    }
+    return "";
+  }
+
+  function extractDebotPoolQuoteFromDom(card) {
     const poolEl = card.querySelector(
       '[aria-label$="流动池"], [aria-label*=" 流动池"], [aria-label*="池子"]'
     );
@@ -12637,45 +12734,6 @@
       }
     }
 
-    const gmgnBar =
-      isGmgnHost() && card.closest
-        ? card.closest('[data-sentry-component="BaseInfoBar"]')
-        : null;
-    const quoteRoot = gmgnBar || card;
-
-    // GMGN special base quotes: USD1 / USDT / WETH（Tax 内图标是分红，不当 LP）
-    const specialImgs = quoteRoot.querySelectorAll(
-      'img[data-icon], img[src*="/static/icons/icon_usd"], img[src*="/static/icons/icon_usdt"], img[src*="/static/icons/icon_usdc"], img[src*="/static/icons/icon_weth"]'
-    );
-    for (let i = 0; i < specialImgs.length; i += 1) {
-      const img = specialImgs[i];
-      if (isGmgnTaxDividendImg(img)) continue;
-      const src = img.currentSrc || img.getAttribute("src") || "";
-      if (isGmgnLaunchpadLogoSrc(src)) continue;
-      const special = matchGmgnSpecialQuoteIcon(img);
-      if (special) return special;
-    }
-
-    // GMGN /static/quotes：Tax 内是分红/篮子，跳过。Tax 外 LaunchpadImageIcon 文件名 = 底池。
-    const quoteImgs = quoteRoot.querySelectorAll(
-      'img[alt$=" quote icon"], img[alt*=" quote icon"], img[src*="/static/quotes/"], img[src*="/quotes/"]'
-    );
-    for (let i = 0; i < quoteImgs.length; i += 1) {
-      const quoteImg = quoteImgs[i];
-      if (isGmgnTaxDividendImg(quoteImg)) continue;
-      const src = quoteImg.currentSrc || quoteImg.getAttribute("src") || "";
-      if (isGmgnLaunchpadLogoSrc(src)) continue;
-      const fromFile = gmgnQuotesStemFromImg(quoteImg);
-      const alt = quoteImg.getAttribute("alt") || "";
-      const fromAlt = /quote icon/i.test(alt)
-        ? normalizeQuoteSymbol(alt.replace(/\s*quote\s*icon\s*$/i, ""), { allowCjk: true })
-        : "";
-      const sym = fromFile || fromAlt;
-      if (!sym) continue;
-      return sym;
-    }
-
-    // Debot coin / bstocks images (fallback when aria missing)
     const coinImgs = card.querySelectorAll(
       'img[src*="/images/chain/designer-icons/coin/"], img[src*="/images/share/bstocks/"], img[src*="/images/share/usdt"]'
     );
@@ -12697,6 +12755,17 @@
   /** 币股 vault：Tax 芯片内多枚 /quotes 图标 → 篮子 symbol（与 GMGN tooltip 同源 DOM） */
   function extractBasketSymbolsFromTaxDom(card) {
     if (!card || !card.querySelector) return [];
+    const now = Date.now();
+    const tok = card.dataset[CARD_MARK] || "";
+    const hit = taxBasketDomCache.get(card);
+    if (
+      hit &&
+      hit.tok === tok &&
+      now - hit.at <
+        (hit.syms && hit.syms.length ? POOL_QUOTE_DOM_CACHE_MS : POOL_QUOTE_DOM_EMPTY_CACHE_MS)
+    ) {
+      return hit.syms;
+    }
     const syms = [];
     const seen = new Set();
     const pushSym = (raw) => {
@@ -12716,12 +12785,16 @@
           if (fromPath) pushSym(fromPath[1]);
           else pushSym(img.getAttribute("alt") || "");
         });
+      taxBasketDomCache.set(card, { tok, at: now, syms });
       return syms;
     }
     const tax =
       card.querySelector('[data-sentry-component="TaxDividendTokenIcons"]') ||
       card.querySelector(".trenches-tax");
-    if (!tax) return syms;
+    if (!tax) {
+      taxBasketDomCache.set(card, { tok, at: now, syms });
+      return syms;
+    }
     tax
       .querySelectorAll(
         '[data-sentry-component="TaxDividendTokenIcon"] img, img[src*="/quotes/"], img[src*="/static/quotes/"]'
@@ -12732,6 +12805,7 @@
         const m = src.match(/\/quotes\/([^./?#]+)/i);
         if (m) pushSym(symbolFromGmgnQuotesStem(m[1]));
       });
+    taxBasketDomCache.set(card, { tok, at: now, syms });
     return syms;
   }
 
@@ -12783,13 +12857,44 @@
     }
   }
 
+  function normalizeEvmAllowAddress(raw) {
+    const s = String(raw || "").trim().toLowerCase();
+    const m = s.match(/0x[a-f0-9]{40}/);
+    if (m) return m[0];
+    const hex = s.replace(/^0x/, "").replace(/[^a-f0-9]/g, "");
+    if (hex.length === 40) return `0x${hex}`;
+    return "";
+  }
+
+  function taxRecvAllowSig(prefs) {
+    const list = (prefs && prefs.allow) || [];
+    return list
+      .filter((r) => r && r.enabled !== false && r.address)
+      .map((r) => r.address)
+      .sort()
+      .join(",");
+  }
+
   function normalizeTaxRecvHidePrefs(raw) {
-    const out = { ...DEFAULT_TAX_RECV_HIDE };
+    const out = { enabled: false, thresholdPct: 100, allow: [] };
     if (!raw || typeof raw !== "object") return out;
     out.enabled = raw.enabled === true;
     const thr = Number(raw.thresholdPct);
     if (Number.isFinite(thr)) {
       out.thresholdPct = Math.max(0, Math.min(100, Math.round(thr)));
+    }
+    const list = Array.isArray(raw.allow) ? raw.allow : [];
+    const seen = new Set();
+    for (let i = 0; i < list.length && out.allow.length < TAX_RECV_ALLOW_MAX; i += 1) {
+      const row = list[i];
+      const address = normalizeEvmAllowAddress(row && (row.address || row.addr || row));
+      if (!address || seen.has(address)) continue;
+      seen.add(address);
+      out.allow.push({
+        id: row && row.id ? String(row.id) : `a${out.allow.length}`,
+        address,
+        enabled: !row || row.enabled !== false
+      });
     }
     return out;
   }
@@ -12823,7 +12928,8 @@
   function pushTaxRecvPrefsToPage(extra) {
     const prefs = {
       enabled: taxRecvHidePrefs.enabled === true,
-      thresholdPct: taxRecvHidePrefs.thresholdPct
+      thresholdPct: taxRecvHidePrefs.thresholdPct,
+      allow: taxRecvHidePrefs.allow || []
     };
     const payload = JSON.stringify(prefs);
     try {
@@ -14567,6 +14673,7 @@
           const enabledWas = prevPrefs.enabled === true;
           const thrChanged =
             Number(prevPrefs.thresholdPct) !== Number(taxRecvHidePrefs.thresholdPct);
+          const allowChanged = taxRecvAllowSig(prevPrefs) !== taxRecvAllowSig(taxRecvHidePrefs);
           pushTaxRecvPrefsToPage({ refresh: enabledNow });
           if (!enabledNow) {
             // 关闭：清 DOM 标记 + 整页 reload（去掉 JSON 过滤后的残缺列表）
@@ -14585,7 +14692,7 @@
           }
           // 开启或改阈值：清标记 + reload，document_start 即带 prefs 过滤首包
           clearAllTaxRecvDomHide();
-          if (!enabledWas || thrChanged) {
+          if (!enabledWas || thrChanged || allowChanged) {
             try {
               sessionStorage.removeItem("flapFeeInfo.listFilterRefresh.v1");
             } catch (_ss2) {

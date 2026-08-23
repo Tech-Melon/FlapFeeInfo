@@ -9,7 +9,7 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 86;
+  const HOOK_VER = 87;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -76,8 +76,10 @@
     if (/wss?:\/\//i.test(u) && /gmgn\.ai/i.test(u)) return true;
     return false;
   }
-  let taxRecvPrefs = { enabled: false, thresholdPct: 100 };
+  const TAX_RECV_ALLOW_MAX = 24;
+  let taxRecvPrefs = { enabled: false, thresholdPct: 100, allow: [] };
   let taxRecvEnabled = false;
+  let taxRecvAllow = new Set();
   /** @type {{ enabled: boolean, rules: Array<{suffix:string, enabled:boolean}> }} */
   let suffixHidePrefs = { enabled: false, rules: [] };
   let suffixHideEnabled = false;
@@ -214,13 +216,74 @@
     return pct + 1e-9 >= threshold;
   }
 
+  function normalizeEvmAddress(raw) {
+    const s = String(raw || "").trim().toLowerCase();
+    const m = s.match(/0x[a-f0-9]{40}/);
+    if (m) return m[0];
+    const hex = s.replace(/^0x/, "").replace(/[^a-f0-9]/g, "");
+    if (hex.length === 40) return `0x${hex}`;
+    return "";
+  }
+
+  function normalizeTaxRecvAllow(list) {
+    const out = [];
+    const seen = new Set();
+    const arr = Array.isArray(list) ? list : [];
+    for (let i = 0; i < arr.length && out.length < TAX_RECV_ALLOW_MAX; i += 1) {
+      const raw = arr[i];
+      const address = normalizeEvmAddress(raw && (raw.address || raw.addr || raw));
+      if (!address || seen.has(address)) continue;
+      seen.add(address);
+      out.push({
+        address,
+        enabled: !raw || raw.enabled !== false
+      });
+    }
+    return out;
+  }
+
+  function rebuildTaxRecvAllowSet() {
+    taxRecvAllow = new Set();
+    const list = taxRecvPrefs.allow || [];
+    for (let i = 0; i < list.length; i += 1) {
+      const r = list[i];
+      if (r && r.enabled !== false && r.address) taxRecvAllow.add(r.address);
+    }
+  }
+
+  function isTaxRecvAllowlisted(addrs) {
+    if (!taxRecvAllow.size || !addrs || !addrs.length) return false;
+    for (let i = 0; i < addrs.length; i += 1) {
+      const a = normalizeEvmAddress(addrs[i]);
+      if (a && taxRecvAllow.has(a)) return true;
+    }
+    return false;
+  }
+
+  function gmgnRecvAddresses(item, tal) {
+    const out = [];
+    if (tal && typeof tal === "object") {
+      out.push(tal.market_address, tal.fee_receiver);
+    }
+    if (item && typeof item === "object") {
+      out.push(item.creator, item.creator_address);
+      const f = item.f;
+      if (f && typeof f === "object") {
+        out.push(f.creator, f.creator_address);
+      }
+    }
+    return out;
+  }
+
   function applyPrefsObject(p) {
     if (!p || typeof p !== "object") return;
     taxRecvPrefs = {
       enabled: p.enabled === true,
-      thresholdPct: clampTaxRecvThreshold(p.thresholdPct)
+      thresholdPct: clampTaxRecvThreshold(p.thresholdPct),
+      allow: normalizeTaxRecvAllow(p.allow)
     };
     taxRecvEnabled = taxRecvPrefs.enabled === true;
+    rebuildTaxRecvAllowSet();
   }
 
   function applySuffixHideObject(p) {
@@ -2764,6 +2827,7 @@
 
     const pct = gmgnCreatorRecvPct(tal, t);
     if (pct == null) return false;
+    if (isTaxRecvAllowlisted(gmgnRecvAddresses(t, tal))) return false;
     // marketing% 达阈值 → 屏蔽（含 hybrid；0 = 严格 >0%，不是 ≥0%）
     return exceedsTaxRecvThreshold(pct, taxRecvPrefs.thresholdPct);
   }
@@ -2805,7 +2869,9 @@
     const fp = Number(extra.founder_pct);
     if (!Number.isFinite(fp)) return false;
     const pct = fp >= 99.9 && fp <= 100.0001 ? 100 : fp;
-    return exceedsTaxRecvThreshold(pct, taxRecvPrefs.thresholdPct);
+    if (!exceedsTaxRecvThreshold(pct, taxRecvPrefs.thresholdPct)) return false;
+    if (isTaxRecvAllowlisted([extra.fee_receiver, extra.founder_address])) return false;
+    return true;
   }
 
   function tokenShouldHide(item) {
@@ -3913,7 +3979,8 @@
           try {
             const payload = JSON.stringify({
               enabled: taxRecvPrefs.enabled,
-              thresholdPct: taxRecvPrefs.thresholdPct
+              thresholdPct: taxRecvPrefs.thresholdPct,
+              allow: taxRecvPrefs.allow || []
             });
             document.documentElement?.setAttribute(PREFS_ATTR, payload);
             localStorage.setItem(LS_KEY, payload);
@@ -4579,7 +4646,11 @@
             .filter((r) => r && r.enabled !== false && r.suffix)
             .map((r) => r.suffix)
             .join(",");
-          return `${taxRecvEnabled ? 1 : 0}:${taxRecvPrefs.thresholdPct}|s${
+          const allow = (taxRecvPrefs.allow || [])
+            .filter((r) => r && r.enabled !== false && r.address)
+            .map((r) => r.address)
+            .join(",");
+          return `${taxRecvEnabled ? 1 : 0}:${taxRecvPrefs.thresholdPct}:a${allow}|s${
             suffixHideEnabled ? 1 : 0
           }:${suf}`;
         };
