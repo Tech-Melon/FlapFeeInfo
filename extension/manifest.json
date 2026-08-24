@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.35",
-  "description": "FlapFeeInfo 0.8.35: GMGN 文章监控弹窗不再本窗跳 K 线或搜索。",
+  "version": "0.8.36",
+  "description": "FlapFeeInfo 0.8.36: Debot/GMGN 文章监控弹窗均不在本窗跳 K 线或搜索。",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

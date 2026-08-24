@@ -589,7 +589,8 @@ python tools/ctl.py watchdog-run
  - `0.8.33`：徽章悬停详情浮窗（`displayPrefs.hoverTip`，默认关）；浮窗不接收指针，滚动/SPA/锚点丢失必关
  - `0.8.34`：文章重点样式独立暗色/浅色两套主题（暗色页实心荧光笔，浅色页淡底深字）
  - `0.8.35`：GMGN `/follow?popout=true&target=xTracker` 不在本窗跳 K 线/搜索，改去其它 GMGN 标签
-- 插件当前版本：见 `extension/manifest.json`（**0.8.35**，公开无剪切板）
+ - `0.8.36`：Debot/Gungnir `/popout/xTracker` 同样不在本窗跳 K 线/搜索
+- 插件当前版本：见 `extension/manifest.json`（**0.8.36**，公开无剪切板）
 - page-hook：`HOOK_VER` **87**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
