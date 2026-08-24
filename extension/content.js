@@ -17,6 +17,22 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.52: 三次 15min — 金库 WBNB 分红不当 📈 篮子；BNB-only 篮子不升币股。
+  // 0.8.51: 刷新降载 — host-fee DOM 合并扫描、JSON.parse 不再二次序列化、首扫不 force。
+  // 0.8.50: 二次 15min 采样 — fiber 创作者覆盖 leftover 💎QQQB。
+  // 0.8.49: ⏳ 满 1s 仍无真徽章则立刻 flush /modes；host-fee 短窗也收到 1s。
+  // 0.8.48: 15min 采样 — 勿把 marketing+market_address 当成 🎁；fiber 金库覆盖 leftover 💎QQQB。
+  // 0.8.47: 空篮子币股不再永远 ⏳；fiber 空金库覆盖 leftover 📈；BNB 池不信残留股票图。
+  // 0.8.46: Flap Stocks 单成分金库（FXION 100%）画 📈FXIO，不再当成 💎 或 📈→BNB。
+  // 0.8.45: href 复用后 Tax 内图未换则视为残留（💎/📈 都不信）；禁止 DOM 发明篮子；Debot 底池不用 bstocks。
+  // 0.8.44: 纯税收金库勿用虚拟列表残留 Tax 内股票图升成 📈；空篮子 🎁 立即画，不再等 leftover。
+  // 0.8.43: 宿主分红是中文名（牛来）时徽章显示 →牛来；Tax 拉丁图（AAPLB）仍优先于中文发射名。
+  // 0.8.42: 双通道兼容 — SharedWorker Port + 页面 WSS + HTTP 快照 + 卡片 fiber，按浏览器自动走通。
+  // 0.8.41: 监听 SharedWorker pumpRank-bsc 外壳（res.data.newCreations）；WSS 推送进徽章，漏推走 HTTP/fiber。
+  // 0.8.40: 虚拟列表复用勿把上一张卡 Tax 内图当分红；href 切换先拆徽章；host-fee 纠正错误 ticker。
+  // 0.8.39: 新卡徽章改走 React fiber tax_allocation（不依赖页面 WSS；SharedWorker 通道对插件不可见）。
+  // 0.8.38: 新卡 host-fee 有分配后不再因 __needsChain 卡 ⏳ 到 /modes（约 30s）；短窗后仍画。
+  // 0.8.37: 新卡 Tax 内图不当底池；中文 name 不当分红 ticker；⏳ 分红未齐短窗后仍画；WeakMap 绑 href。
   // 0.8.36: Debot/Gungnir `/popout/xTracker` 与 GMGN 文章弹窗一样，不在本窗跳 K 线/搜索。
   // 0.8.35: GMGN xTracker popout 不在本窗跳 K 线/搜索，改去其它 GMGN 标签（完整包）。
   // 0.8.34: 文章重点样式独立暗色/浅色主题（完整包）。
@@ -192,11 +208,15 @@
   // 热路径（视口/新创建未画）：0.7.56 单 token 也只等 120ms（后端空闲，缩窗提时效）。
   const HOT_BATCH_FLUSH_MS = 120;
   /** page-hook host-fee 到达前给 WS/trenches 一帧窗口，减少新币抢先 /modes */
-  const HOST_FEE_GRACE_MS = 900;
+  const HOST_FEE_GRACE_MS = 1000;
   /** js-mcp：GMGN tax-dom / Debot ranks+launchpad_extra 首包前有竞态；此前不 flush /modes */
   const HOST_TAX_FEED_MAX_WAIT_MS = 2500;
   const HOST_FEE_QUEUE_POLL_MS = 80;
-  const HOST_FEE_QUEUE_MAX_MS = 2200;
+  const HOST_FEE_QUEUE_MAX_MS = 1000;
+  /** host-fee 分红仍是 BNB/中文名：最多 ⏳ 这么久，超时仍画（避免永远待加载） */
+  const HOST_FEE_SYMBOL_GRACE_MS = 1000;
+  /** ⏳ 满此时长仍无真徽章：立刻打 /modes，不再等组批/feed */
+  const LOADING_MODES_KICK_MS = 1000;
   const HOST_TAX_FEED_RETRY_MS = 280;
   const hostListBootAt = Date.now();
   let gmgnHostFeeSeenAt = 0;
@@ -208,6 +228,10 @@
   const hostFeeDeferWaiters = new Map();
   let hostFeeDeferPollTimer = 0;
   let hostFeeDeferPollStartedAt = 0;
+  /** token → timeout：host-fee 短窗 ⏳ 到期后立刻换真徽章，不等下一轮扫卡 */
+  const hostFeePendingPaintTimers = new Map();
+  /** token → timeout：1s 仍 ⏳ 则强制 flush /modes */
+  const loadingModesKickTimers = new Map();
   let gmgnTaxDomSeen = false;
   let debotPoolDomSeen = false;
   const HOT_BATCH_MIN_TOKENS = 2;
@@ -260,7 +284,7 @@
   const GMGN_LIST_SCAN_MIN_GAP_MS = 560;
   const HOT_GMGN_LIST_SCAN_MIN_GAP_MS = 500;
   // GMGN cold first scan delay (host hydration first).
-  const GMGN_FIRST_SCAN_DELAY_MS = 500;
+  const GMGN_FIRST_SCAN_DELAY_MS = 800;
   // GMGN per-scan card budget while scroll-cooling (smaller slices).
   const GMGN_SCROLL_CARDS_BUDGET = 12;
   // After /modes hits on GMGN list: cache-first viewport paint (cards, ms) — no network.
@@ -532,8 +556,11 @@
     [/wbnb|bnbball|\bbnb\b/i, "BNB"]
   ];
   // js-mcp: Tax 分红图 = TaxDividendTokenIcon；底池图 = Tax 外 /static/quotes（LaunchpadImageIcon）。
+  // wrap 必须是整卡 Tax 容器。单个 TaxDividendTokenIcon 不能当 wrap（querySelector 只包第一张图）。
   // /static/lpp/ 是 Flap/Four 发射台 logo，不是 LP。目录：/static/config/quotes.json
-  const GMGN_TAX_DIVIDEND_SCOPE =
+  const GMGN_TAX_DIVIDEND_WRAP =
+    '.trenches-tax, [data-sentry-component="TaxDividendTokenIcons"], [data-sentry-component="ListTaxInfo"], [data-sentry-component="TaxAllocationIcon"]';
+  const GMGN_TAX_DIVIDEND_INNER =
     '.trenches-tax, [data-sentry-component="TaxDividendTokenIcon"], [data-sentry-component="TaxDividendTokenIcons"], [data-sentry-component="ListTaxInfo"]';
   const GMGN_QUOTES_JSON_PATH = "/static/config/quotes.json";
   const GMGN_QUOTES_TTL_MS = 6 * 60 * 60 * 1000;
@@ -748,10 +775,27 @@
 
   function isSingleAssetStockVault(entry) {
     if (!entry || !entry.is_vault) return false;
+    if (entry.is_stocks_vault !== true) return false;
     const assets = normalizeBasketAssets(entry.basket_assets);
-    const stockish = entry.is_stocks_vault || assets.length >= 1;
-    if (!stockish) return false;
+    if (assets.length !== 1) return false;
     return (Number(entry.market_bps) || 0) >= 10000 && (Number(entry.dividend_bps) || 0) === 0;
+  }
+
+  /** 币股金库：fiber/API 的 is_stocks_vault，或篮子至少 2 成分。单枚 leftover Tax 图不算。 */
+  function basketLooksLikeNativeOnly(assets) {
+    const rows = normalizeBasketAssets(assets);
+    if (!rows.length) return false;
+    return rows.every((a) => {
+      const s = compactBasketSymbol(a.symbol);
+      return s === "BNB" || s === "WBNB" || quoteTokenLooksNative(a.address);
+    });
+  }
+
+  function isTrustedStockVault(entry) {
+    if (!entry || !entry.is_vault) return false;
+    if (basketLooksLikeNativeOnly(entry.basket_assets)) return false;
+    if (entry.is_stocks_vault === true) return true;
+    return normalizeBasketAssets(entry.basket_assets).length >= 2;
   }
 
   function basketSymbolMatchesDom(domSym, rowSym) {
@@ -824,7 +868,10 @@
         });
         continue;
       }
-      next.push({ address: "", symbol: sym, name: sym });
+      // 禁止用 Tax 残留图发明新成分（地推币纯金库 leftover FXIO → 📈）
+      if (entry && entry.is_stocks_vault === true && rows.length === 0) {
+        next.push({ address: "", symbol: sym, name: sym });
+      }
     }
     for (const row of rows) {
       if (isSingleAssetStockVault(entry) && domSyms.length === 1) break;
@@ -846,6 +893,10 @@
     if (isSingleAssetStockVault(entry) && assets.length === 1) {
       return { entry, changed: false };
     }
+    // 空篮子一律不从 Tax DOM 发明成分
+    if (assets.length === 0) {
+      return { entry, changed: false };
+    }
     const domSyms = extractBasketSymbolsFromTaxDom(card)
       .map((s) => compactBasketSymbol(s))
       .filter(Boolean);
@@ -858,7 +909,7 @@
     const out = {
       ...entry,
       basket_assets: next,
-      is_stocks_vault: entry.is_stocks_vault || next.length >= 1
+      is_stocks_vault: entry.is_stocks_vault === true || next.length >= 2
     };
     if (out.__needsChain && basketSymbolsReady(next) && !basketLikelyTruncated(next, out)) {
       out.__needsChain = false;
@@ -916,8 +967,20 @@
     return symbolFromGmgnQuotesStem(m[1]);
   }
 
+  function dividendSymbolLooksUnresolved(sym) {
+    const s = compactDisplaySymbol(sym || "");
+    if (!s || s === "BNB" || s === "WBNB") return true;
+    return false;
+  }
+
+  function tickerSymbolForArrow(symbol) {
+    return compactDisplaySymbol(symbol);
+  }
+
   function dividendPayoutLooksNative(entry) {
-    const sym = compactDisplaySymbol(entry?.dividend_symbol || "");
+    const raw = entry?.dividend_symbol || "";
+    const sym = compactDisplaySymbol(raw);
+    if (sym && /[\u4e00-\u9fff]/.test(sym)) return false;
     if (sym && sym !== "BNB" && sym !== "WBNB") return false;
     const addr = String(entry?.dividend_token || entry?.top_payout_token || "")
       .trim()
@@ -929,11 +992,89 @@
     );
   }
 
+  function isGmgnTaxInnerQuoteImg(img) {
+    if (!(img instanceof Element)) return false;
+    try {
+      return Boolean(img.closest(GMGN_TAX_DIVIDEND_INNER));
+    } catch (_inner) {
+      return false;
+    }
+  }
+
+  function cardDomCacheTok(card) {
+    const mark = String(card?.dataset?.[CARD_MARK] || "").toLowerCase();
+    let href = "";
+    try {
+      href = String(card?.getAttribute?.("href") || "");
+    } catch (_href) {
+      href = "";
+    }
+    return `${mark}|${href}`;
+  }
+
+  const gmgnTaxInnerReuseState = new WeakMap();
+
+  function gmgnTaxInnerStemSig(card) {
+    if (!(card instanceof HTMLElement) || !card.querySelector) return "";
+    const tax =
+      card.querySelector('[data-sentry-component="TaxDividendTokenIcons"]') ||
+      card.querySelector(".trenches-tax");
+    if (!tax) return "";
+    const stems = [];
+    const imgs = tax.querySelectorAll('img[src*="/quotes/"], img[src*="/static/quotes/"]');
+    for (let i = 0; i < imgs.length; i += 1) {
+      const src = imgs[i].currentSrc || imgs[i].getAttribute("src") || "";
+      const m = src.match(/\/quotes\/([^./?#]+)/i);
+      if (m) stems.push(String(m[1] || "").toLowerCase());
+    }
+    return stems.join(",");
+  }
+
+  /** 虚拟列表换 CA 后 Tax 内图签名没变 → 残留，分红/篮子都不能信。 */
+  function gmgnTaxInnerStaleAfterReuse(card) {
+    if (!(card instanceof HTMLElement) || !isGmgnHost()) return false;
+    const href =
+      extractCardHrefToken(card) ||
+      String(card.getAttribute("href") || card.dataset[CARD_MARK] || "").toLowerCase();
+    const sig = gmgnTaxInnerStemSig(card);
+    const prev = gmgnTaxInnerReuseState.get(card);
+    if (prev && prev.href && href && prev.href !== href) {
+      const stale = Boolean(sig) && sig === prev.sig;
+      gmgnTaxInnerReuseState.set(card, { href, sig: stale ? prev.sig : sig, frozen: stale });
+      return stale;
+    }
+    if (prev && prev.frozen && prev.href === href) {
+      if (sig === prev.sig) return true;
+      gmgnTaxInnerReuseState.set(card, { href, sig, frozen: false });
+      return false;
+    }
+    gmgnTaxInnerReuseState.set(card, { href, sig, frozen: false });
+    return false;
+  }
+
+  function taxInnerUntrustedAsDividend(inner, outer, entry) {
+    if (!inner) return true;
+    if (isTrustedStockVault(entry)) return false;
+    const cur = compactBasketSymbol(entry?.dividend_symbol || "");
+    if (cur && cur !== "BNB" && inner !== cur && !basketSymbolMatchesDom(inner, cur)) {
+      return true;
+    }
+    if (outer && outer !== "BNB" && inner !== outer && inner !== "BNB") return true;
+    if (
+      looksLikeStockQuoteChip(inner, entry) &&
+      dividendPayoutLooksNative(entry)
+    ) {
+      return true;
+    }
+    return false;
+  }
+
   /** GMGN Tax 芯片内图标 → 分红代币（TaxDividendTokenIcon；非底池）。多枚=篮子，不当单一分红。 */
   function extractDividendSymbolFromTaxDom(card) {
     if (!card?.querySelector || !isGmgnHost()) return "";
+    if (gmgnTaxInnerStaleAfterReuse(card)) return "";
     const now = Date.now();
-    const tok = card.dataset[CARD_MARK] || "";
+    const tok = cardDomCacheTok(card);
     const hit = taxDivDomCache.get(card);
     if (
       hit &&
@@ -997,8 +1138,13 @@
   /** 普通税币：Tax 外文件名 / quote_address 已指向 NVDAB，徽章还停在默认 BNB → 必须重挂 */
   function isGmgnPoolDomMismatch(card, icon, entry) {
     if (!isGmgnHost() || !entry || isVaultPoolToken(entry)) return false;
-    if (paintedPoolLooksNonNative(icon)) return false;
     const want = pickStablePoolQuote(entry, card);
+    if (paintedPoolLooksNonNative(icon)) {
+      // 错把 Tax 内 AAPLB 当底池后不能锁死：应对回 BNB / 正确外图
+      if (want && quoteSymbolLooksNative(want)) return paintedPoolDisagrees(icon, want);
+      if (want && !paintedPoolDisagrees(icon, want)) return false;
+      return Boolean(want && paintedPoolDisagrees(icon, want));
+    }
     if (want && !quoteSymbolLooksNative(want)) {
       return paintedPoolDisagrees(icon, want);
     }
@@ -1012,16 +1158,26 @@
   function isGmgnHostFeeDomMismatch(card, entry) {
     if (!isGmgnHost() || !entry || !entry.source_host) return false;
     if ((Number(entry.dividend_bps) || 0) <= 0) return false;
-    const curReady = compactBasketSymbol(entry.dividend_symbol || "");
-    if (curReady && curReady !== "BNB" && !dividendPayoutLooksNative(entry)) return false;
     const taxDiv = extractDividendSymbolFromTaxDom(card);
     if (!taxDiv || taxDiv === "BNB") return false;
     const cur = compactBasketSymbol(entry.dividend_symbol || "");
-    return !cur || cur === "BNB" || dividendPayoutLooksNative(entry);
+    const outer = compactBasketSymbol(extractQuoteSymbolFromDom(card) || "");
+    if (taxInnerUntrustedAsDividend(taxDiv, outer, entry)) return false;
+    const taxLatin = Boolean(taxDiv && !/[\u4e00-\u9fff]/.test(taxDiv));
+    const curCjk = Boolean(cur && /[\u4e00-\u9fff]/.test(cur));
+    // Tax 已画出拉丁分红图时，中文发射名必须让路（宿主 tooltip 是 AAPLB 却显示 牛来）
+    if (taxLatin && (curCjk || !cur || cur === "BNB" || dividendPayoutLooksNative(entry))) {
+      return true;
+    }
+    if (!cur || cur === "BNB" || dividendPayoutLooksNative(entry)) return true;
+    return cur !== taxDiv;
   }
 
-  function enrichEntrySymbolsFromDom(card, entry) {
+  function enrichEntrySymbolsFromDom(card, entry, expectedTok) {
     if (!entry || !(card instanceof HTMLElement)) return entry;
+    const want = String(expectedTok || card.dataset[CARD_MARK] || "").toLowerCase();
+    const hrefTok = extractCardHrefToken(card);
+    if (hrefTok && want && hrefTok !== want) return entry;
     const domQuote = extractQuoteSymbolFromDom(card);
     let changed = false;
     const out = { ...entry };
@@ -1042,8 +1198,18 @@
     const divFromTax = extractDividendSymbolFromTaxDom(card);
     if (divFromTax && out.dividend_bps > 0) {
       const cur = compactBasketSymbol(out.dividend_symbol || "");
-      // Tax 芯片图标后到：host-fee 常先写成 BNB，必须升级成 QQQB/GMEB
-      if (!cur || (dividendPayoutLooksNative(out) && divFromTax !== "BNB" && divFromTax !== cur)) {
+      const outer = compactBasketSymbol(domQuote || "");
+      const leftoverInner = taxInnerUntrustedAsDividend(divFromTax, outer, out);
+      const curCjk = /[\u4e00-\u9fff]/.test(cur);
+      const taxLatin = Boolean(divFromTax && !/[\u4e00-\u9fff]/.test(divFromTax));
+      // Tax 芯片图标后到：host-fee 常先写成 BNB，必须升级成 QQQB/GMEB；中文名让路给拉丁图
+      if (
+        !leftoverInner &&
+        (!cur ||
+          (dividendPayoutLooksNative(out) && divFromTax !== "BNB" && divFromTax !== cur) ||
+          (curCjk && taxLatin && divFromTax !== "BNB") ||
+          (cur && cur !== "BNB" && divFromTax !== cur && (!outer || divFromTax === outer)))
+      ) {
         out.dividend_symbol = divFromTax;
         if (out.top_payout_symbol) {
           const topCur = compactBasketSymbol(out.top_payout_symbol);
@@ -1115,7 +1281,7 @@
     }
     if (entry && card instanceof HTMLElement) {
       const before = entry;
-      const enriched = enrichEntrySymbolsFromDom(card, entry);
+      const enriched = enrichEntrySymbolsFromDom(card, entry, tok);
       if (enriched !== entry) {
         modeCache.set(tok, enriched);
         maybeRepaintAfterEntryEnrich(tok, card, before, enriched);
@@ -1274,6 +1440,53 @@
     return licenseGateProbePromise;
   }
 
+  function cardStillWaitingBadge(tok) {
+    const token = String(tok || "").toLowerCase();
+    const entry = modeCache.get(token) || resolveEntry(token);
+    if (!entry || isFeeLoadingEntry(entry)) return true;
+    return isHostFeeEntryPending(entry);
+  }
+
+  function forceModesForWaitingToken(tok) {
+    const token = String(tok || "").toLowerCase();
+    if (!TARGET_TOKEN_RE.test(token) || !isExtensionContextValid()) return;
+    if (!isBadgeAccessAllowed() || !isAllowedScanChain()) return;
+    if (!cardStillWaitingBadge(token)) return;
+    if (!requestQueue.has(token)) {
+      queueToken(token, { deferFlush: true });
+    }
+    if (isGmgnHost()) gmgnNewCardPendingTokens.add(token);
+    if (batchActive && !hotLaneActive) {
+      try {
+        void flushHotLane();
+      } catch (_hot) {
+        // ignore
+      }
+    }
+    scheduleBatchFlush({ immediate: true, delayMs: 0 });
+  }
+
+  function scheduleLoadingModesKick(tok) {
+    const token = String(tok || "").toLowerCase();
+    if (!TARGET_TOKEN_RE.test(token) || loadingModesKickTimers.has(token)) return;
+    if (loadingModesKickTimers.size >= 48) {
+      const oldest = loadingModesKickTimers.keys().next().value;
+      if (oldest) {
+        try {
+          window.clearTimeout(loadingModesKickTimers.get(oldest));
+        } catch (_old) {
+          // ignore
+        }
+        loadingModesKickTimers.delete(oldest);
+      }
+    }
+    const timerId = window.setTimeout(() => {
+      loadingModesKickTimers.delete(token);
+      forceModesForWaitingToken(token);
+    }, LOADING_MODES_KICK_MS);
+    loadingModesKickTimers.set(token, timerId);
+  }
+
   function scheduleHostFeeAwareQueue(card, token, options = {}) {
     const tok = String(token || "").toLowerCase();
     if (!TARGET_TOKEN_RE.test(tok)) return;
@@ -1283,9 +1496,11 @@
     if (hostFeeDeferWaiters.has(tok)) {
       const prev = hostFeeDeferWaiters.get(tok);
       if (card instanceof HTMLElement) prev.card = card;
+      scheduleLoadingModesKick(tok);
       return;
     }
     hostFeeDeferWaiters.set(tok, { card, options, addedAt: Date.now() });
+    scheduleLoadingModesKick(tok);
     ensureHostFeeDeferPoll();
   }
 
@@ -1328,6 +1543,7 @@
       // ignore
     }
     scheduleHostFeeAwareQueue(card, tok, options);
+    scheduleLoadingModesKick(tok);
     try {
       const existing = card.querySelector(`[${ICON_DATA}="1"]`);
       if (
@@ -5279,9 +5495,21 @@
         if (!TARGET_TOKEN_RE.test(token || "")) continue;
         seen.add(card);
         discovered += 1;
+        const prevMark = (card.dataset[CARD_MARK] || "").toLowerCase();
+        if (prevMark && prevMark !== token) {
+          try {
+            removeAllBadgesForCard(card, prevMark);
+          } catch (_swap) {
+            // ignore
+          }
+        }
         card.dataset[CARD_MARK] = token;
-        const entry = getEntryForCard(card, token);
-        if (entry) {
+        trySeedHostFeeForCard(card, token);
+        const entry =
+          prevMark && prevMark !== token
+            ? resolveEntry(token)
+            : getEntryForCard(card, token);
+        if (entry && !isHostFeeEntryPending(entry)) {
           paintListCardFromCacheFast(card, token, entry);
         } else {
           paintLoadingBadgeAndQueue(card, token, { deferFlush: true });
@@ -8592,7 +8820,7 @@
       if (stableEntry && isHostFeeEntryPending(stableEntry)) return false;
       if (stableEntry && isGmgnHostFeeDomMismatch(card, stableEntry)) return false;
       if (stableEntry && isGmgnPoolDomMismatch(card, existing, stableEntry)) return false;
-      if (stableEntry && stableEntry.is_vault) {
+      if (stableEntry && isTrustedStockVault(stableEntry)) {
         const domN = extractBasketSymbolsFromTaxDom(card).length;
         const bagN = normalizeBasketAssets(stableEntry.basket_assets).length;
         if (domN > bagN) return false;
@@ -9497,6 +9725,22 @@
       window.clearTimeout(batchTimer);
       batchTimer = null;
     }
+    hostFeePendingPaintTimers.forEach((id) => {
+      try {
+        window.clearTimeout(id);
+      } catch (_tm) {
+        // ignore
+      }
+    });
+    hostFeePendingPaintTimers.clear();
+    loadingModesKickTimers.forEach((id) => {
+      try {
+        window.clearTimeout(id);
+      } catch (_kick) {
+        // ignore
+      }
+    });
+    loadingModesKickTimers.clear();
     scanTimerIds.forEach((id) => window.clearTimeout(id));
     scanTimerIds = [];
     scanScheduled = false;
@@ -11158,11 +11402,16 @@
     const timerId = window.setTimeout(() => {
       gmgnMissingRequeueTimers.delete(token);
       if (!isExtensionContextValid() || !isTabVisible()) return;
+      if (!(isGmgnHost() || isDebotHost())) return;
+      const cached = modeCache.get(token);
       if (
-        !(isGmgnHost() || isDebotHost()) ||
-        modeCache.has(token) ||
-        isPersistentCacheHit(token)
+        cached &&
+        cached.__needsChain !== true &&
+        !isHostFeeEntryPending(cached)
       ) {
+        return;
+      }
+      if (!cached && isPersistentCacheHit(token)) {
         return;
       }
       const state = missingRetryState.get(token);
@@ -12063,7 +12312,9 @@
 
   function basketLikelyTruncated(assets, entry) {
     if (!entry || !entry.is_vault) return false;
-    const stockish = entry.is_stocks_vault || (Array.isArray(assets) && assets.length >= 1);
+    const stockish =
+      entry.is_stocks_vault === true ||
+      (Array.isArray(assets) && assets.length >= 2);
     if (!stockish) return false;
     const n = normalizeBasketAssets(assets).length;
     if (n < 3 || n > 4) return false;
@@ -12082,34 +12333,64 @@
   }
 
   function isStockVaultEntry(entry) {
-    if (!entry || !entry.is_vault) return false;
-    const assets = normalizeBasketAssets(entry.basket_assets);
-    return Boolean(entry.is_stocks_vault || assets.length >= 1);
+    return isTrustedStockVault(entry);
+  }
+
+  function hostFeeAllocationBps(entry) {
+    if (!entry) return 0;
+    return (
+      (Number(entry.dividend_bps) || 0) +
+      (Number(entry.market_bps) || 0) +
+      (Number(entry.deflation_bps) || 0) +
+      (Number(entry.lp_bps) || 0) +
+      (Number(entry.giggle_charity_bps) || 0) +
+      (Number(entry.binance_charity_bps) || 0)
+    );
   }
 
   /** host-fee / DOM 未齐：继续 ⏳，避免 NVDA&NVDA 或错分红先闪出来 */
   function isHostFeeEntryPending(entry) {
     if (!entry || isFeeLoadingEntry(entry)) return false;
-    if (entry.__needsChain === true) return true;
-    if (basketSecurityPending(entry)) return true;
-    if (isStockVaultEntry(entry) && !basketSymbolsReady(entry.basket_assets)) return true;
-    // 金库 WS preview 常先到 is_vault、篮子后到；空篮子先 ⏳，避免 🎁→BNB 钉死
-    if (
-      entry.source_host &&
-      entry.is_vault &&
-      !basketSymbolsReady(entry.basket_assets)
-    ) {
-      return true;
+    const age = Date.now() - (Number(entry.fetched_at) || 0);
+    const bps = hostFeeAllocationBps(entry);
+    if (basketSecurityPending(entry)) {
+      return age < HOST_FEE_SYMBOL_GRACE_MS;
     }
-    // 新创建 WS preview：分红常先落成 BNB，Tax 图标 / /modes 未到之前不画真徽章
-    if (
-      entry.source_host &&
-      (Number(entry.dividend_bps) || 0) > 0 &&
-      dividendPayoutLooksNative(entry)
-    ) {
-      return true;
+    if (isStockVaultEntry(entry) && !basketSymbolsReady(entry.basket_assets)) {
+      // 币股篮子未齐只短窗 ⏳；超时按已有 bps 画 🎁，避免永远待加载
+      return age < HOST_FEE_SYMBOL_GRACE_MS;
+    }
+    const symbolWait =
+      (Number(entry.dividend_bps) || 0) > 0 && dividendPayoutLooksNative(entry);
+    if (entry.__needsChain === true || (entry.source_host && symbolWait)) {
+      if (bps <= 0) return age < HOST_FEE_SYMBOL_GRACE_MS;
+      return age < HOST_FEE_SYMBOL_GRACE_MS;
     }
     return false;
+  }
+
+  function schedulePendingHostFeePaint(token) {
+    const tok = String(token || "").toLowerCase();
+    if (!TARGET_TOKEN_RE.test(tok) || hostFeePendingPaintTimers.has(tok)) return;
+    if (hostFeePendingPaintTimers.size >= 32) {
+      const oldest = hostFeePendingPaintTimers.keys().next().value;
+      if (oldest) {
+        try {
+          window.clearTimeout(hostFeePendingPaintTimers.get(oldest));
+        } catch (_old) {
+          // ignore
+        }
+        hostFeePendingPaintTimers.delete(oldest);
+      }
+    }
+    const timerId = window.setTimeout(() => {
+      hostFeePendingPaintTimers.delete(tok);
+      if (!isExtensionContextValid()) return;
+      const entry = modeCache.get(tok);
+      if (!entry || isHostFeeEntryPending(entry) || isFeeLoadingEntry(entry)) return;
+      applyModeToKnownCards(tok, entry);
+    }, HOST_FEE_SYMBOL_GRACE_MS + 50);
+    hostFeePendingPaintTimers.set(tok, timerId);
   }
 
   function normalizeBasketAssets(raw) {
@@ -12609,7 +12890,11 @@
     }
 
     const fromDom = card ? extractQuoteSymbolFromDom(card) : "";
-    if (fromDom && !quoteSymbolLooksNative(fromDom)) return formatPoolQuoteSymbol(fromDom);
+    if (fromDom && !quoteSymbolLooksNative(fromDom)) {
+      const leftoverStockPool =
+        quoteTokenLooksNative(qTok) && looksLikeStockQuoteChip(fromDom, entry);
+      if (!leftoverStockPool) return formatPoolQuoteSymbol(fromDom);
+    }
     if (fromDom && isRealPoolQuoteSymbol(fromDom)) return formatPoolQuoteSymbol(fromDom);
     if (fromAddr && !quoteSymbolLooksNative(fromAddr)) return formatPoolQuoteSymbol(fromAddr);
     if (fromApi && !quoteSymbolLooksNative(fromApi)) return formatPoolQuoteSymbol(fromApi);
@@ -12635,8 +12920,12 @@
   function poolBadgeNeedsQuoteRefresh(icon, entry, card) {
     if (!(icon instanceof HTMLElement) || !entry) return false;
     if (displayPrefs && displayPrefs.pool === false) return false;
-    if (paintedPoolLooksNonNative(icon)) return false;
     const want = pickStablePoolQuote(entry, card);
+    if (paintedPoolLooksNonNative(icon)) {
+      if (want && quoteSymbolLooksNative(want)) return paintedPoolDisagrees(icon, want);
+      if (want) return paintedPoolDisagrees(icon, want);
+      return false;
+    }
     if (want) return paintedPoolDisagrees(icon, want);
     if (
       !isVaultPoolToken(entry) &&
@@ -12663,7 +12952,7 @@
   function extractQuoteSymbolFromDom(card) {
     if (!card || !card.querySelector) return "";
     const now = Date.now();
-    const tok = card.dataset[CARD_MARK] || "";
+    const tok = cardDomCacheTok(card);
     const hit = poolQuoteDomCache.get(card);
     if (
       hit &&
@@ -12685,14 +12974,17 @@
       : null;
     const quoteRoot = gmgnBar || card;
     if (!quoteRoot.querySelectorAll) return "";
-    const tax = quoteRoot.querySelector(GMGN_TAX_DIVIDEND_SCOPE) || null;
+    const taxWrap = quoteRoot.querySelector(GMGN_TAX_DIVIDEND_WRAP) || null;
+    const hasTaxSentry = Boolean(
+      taxWrap || quoteRoot.querySelector('[data-sentry-component="TaxDividendTokenIcon"]')
+    );
 
     const specialImgs = quoteRoot.querySelectorAll(
       'img[data-icon], img[src*="/static/icons/icon_usd"], img[src*="/static/icons/icon_usdt"], img[src*="/static/icons/icon_usdc"], img[src*="/static/icons/icon_weth"]'
     );
     for (let i = 0; i < specialImgs.length; i += 1) {
       const img = specialImgs[i];
-      if (tax && tax.contains(img)) continue;
+      if (isGmgnTaxInnerQuoteImg(img)) continue;
       const src = img.currentSrc || img.getAttribute("src") || "";
       if (isGmgnLaunchpadLogoSrc(src)) continue;
       const special = matchGmgnSpecialQuoteIcon(img);
@@ -12704,7 +12996,9 @@
     );
     for (let i = 0; i < quoteImgs.length; i += 1) {
       const quoteImg = quoteImgs[i];
-      if (tax && tax.contains(quoteImg)) continue;
+      if (isGmgnTaxInnerQuoteImg(quoteImg)) continue;
+      // Tax 哨兵未齐时第一张 quotes 几乎总是分红内图，宁可不写底池也不要 🦋AAPL
+      if (!hasTaxSentry) continue;
       const src = quoteImg.currentSrc || quoteImg.getAttribute("src") || "";
       if (isGmgnLaunchpadLogoSrc(src)) continue;
       const fromFile = gmgnQuotesStemFromImg(quoteImg);
@@ -12746,7 +13040,7 @@
     }
 
     const coinImgs = card.querySelectorAll(
-      'img[src*="/images/chain/designer-icons/coin/"], img[src*="/images/share/bstocks/"], img[src*="/images/share/usdt"]'
+      'img[src*="/images/chain/designer-icons/coin/"], img[src*="/images/share/usdt"]'
     );
     for (let i = 0; i < coinImgs.length; i += 1) {
       const img = coinImgs[i];
@@ -12766,8 +13060,9 @@
   /** 币股 vault：Tax 芯片内多枚 /quotes 图标 → 篮子 symbol（与 GMGN tooltip 同源 DOM） */
   function extractBasketSymbolsFromTaxDom(card) {
     if (!card || !card.querySelector) return [];
+    if (isGmgnHost() && gmgnTaxInnerStaleAfterReuse(card)) return [];
     const now = Date.now();
-    const tok = card.dataset[CARD_MARK] || "";
+    const tok = cardDomCacheTok(card);
     const hit = taxBasketDomCache.get(card);
     if (
       hit &&
@@ -13740,19 +14035,69 @@
     return false;
   }
 
+  function hostFeeDividendBecameReal(prev, entry) {
+    if (!prev || !entry) return false;
+    const prevUnresolved = dividendSymbolLooksUnresolved(prev.dividend_symbol || "");
+    const nextUnresolved = dividendSymbolLooksUnresolved(entry.dividend_symbol || "");
+    return prevUnresolved && !nextUnresolved;
+  }
+
   function hostFeeEntryShouldApply(prev, entry) {
     if (!prev) return true;
     if (hostFeeQuoteBecameReal(prev, entry)) return true;
+    if (hostFeeDividendBecameReal(prev, entry)) return true;
+    const prevDiv = compactBasketSymbol(prev.dividend_symbol || "");
+    const nextDiv = compactBasketSymbol(entry.dividend_symbol || "");
+    if (
+      prevDiv &&
+      nextDiv &&
+      prevDiv !== nextDiv &&
+      !dividendSymbolLooksUnresolved(entry.dividend_symbol)
+    ) {
+      return true;
+    }
     if (prev.is_stocks_vault && !entry.is_stocks_vault && !entry.is_vault) return true;
-    if (entry.is_stocks_vault && !prev.is_stocks_vault) return true;
+    if (entry.is_stocks_vault && !prev.is_stocks_vault) {
+      if (!basketLooksLikeNativeOnly(entry.basket_assets)) return true;
+    }
+    // leftover 💎/QQQB 写在纯金库卡上：fiber 金库必须覆盖（15min 采样 币安商城）
+    if (entry.is_vault && !prev.is_vault) return true;
+    if (
+      entry.is_vault &&
+      (Number(entry.dividend_bps) || 0) === 0 &&
+      (Number(prev.dividend_bps) || 0) > 0
+    ) {
+      return true;
+    }
+    // leftover 💎 写在创作者卡上（15min_r2 Cat of Gnosis）
+    if (
+      entry.source_host &&
+      !entry.is_vault &&
+      (Number(entry.dividend_bps) || 0) === 0 &&
+      (Number(entry.market_bps) || 0) > 0 &&
+      ((Number(prev.dividend_bps) || 0) > 0 || prev.is_stocks_vault)
+    ) {
+      return true;
+    }
     const pb = normalizeBasketAssets(prev.basket_assets).length;
     const nb = normalizeBasketAssets(entry.basket_assets).length;
     if (nb > pb) return true;
+    if (
+      dividendPayoutLooksNative(entry) &&
+      !dividendPayoutLooksNative(prev) &&
+      (Number(entry.dividend_bps) || 0) > 0 &&
+      entry.source_host
+    ) {
+      return true;
+    }
     if (
       nb < pb &&
       entry.source_host &&
       (prev.is_stocks_vault || prev.is_vault)
     ) {
+      const nextIsTaxVault =
+        entry.is_vault && !entry.is_stocks_vault && nb === 0;
+      if (nextIsTaxVault) return true;
       return false;
     }
     if (
@@ -13868,7 +14213,6 @@
       if (!entry) continue;
       entry.source_host = raw.source === "debot" ? "debot" : "gmgn";
       entry.__needsChain = raw.__needsChain === true;
-      if (isHostFeeEntryPending(entry)) entry.__needsChain = true;
       entry.__awaitSecurity = raw.__awaitSecurity === true;
       entry.__basketPendingUntil =
         typeof raw.__basketPendingUntil === "number" ? raw.__basketPendingUntil : 0;
@@ -13899,9 +14243,15 @@
         }
       }
       if (prev && !hostFeeEntryShouldApply(prev, entry)) continue;
+      if (prev && Number(prev.fetched_at) > 0) {
+        entry.fetched_at = prev.fetched_at;
+      }
       modeCache.set(token, entry);
       // WS/列表 preview 经常缺分红符号；不要因为 host-fee「看起来完整」就取消 /modes
       queueToken(token, { deferFlush: true });
+      if (isHostFeeEntryPending(entry) || entry.__needsChain === true) {
+        schedulePendingHostFeePaint(token);
+      }
       confirmed.push([token, entry]);
       try {
         ingestFeeEntryForTaxRecv(token, entry);
@@ -13922,7 +14272,7 @@
       const cards = findCardsByCa(token);
       for (let ci = 0; ci < cards.length; ci += 1) {
         const before = eff;
-        const enriched = enrichEntrySymbolsFromDom(cards[ci], eff);
+        const enriched = enrichEntrySymbolsFromDom(cards[ci], eff, token);
         if (enriched !== eff) {
           eff = enriched;
           modeCache.set(token, eff);
@@ -14817,7 +15167,8 @@
     const useStockGift = Boolean(
       entry.is_vault &&
         basketPair &&
-        (entry.is_stocks_vault || basketAssets.length >= 1)
+        !basketLooksLikeNativeOnly(basketAssets) &&
+        (entry.is_stocks_vault === true || basketAssets.length >= 2)
     );
     const candidates = [];
     if ((entry.dividend_bps || 0) > 0 && prefs.holder !== false) {
@@ -14870,7 +15221,7 @@
       if (top === "gift" && useStockGift) {
         topSym = ""; // basket pair appended without arrow / IB-xxx
       } else if (top === "holder") {
-        topSym = compactDisplaySymbol(
+        topSym = tickerSymbolForArrow(
           entry.dividend_symbol ||
             entry.top_payout_symbol ||
             entry.quote_symbol ||
@@ -17157,7 +17508,7 @@
         }, ms);
       });
     } else {
-      scheduleScan(GMGN_FIRST_SCAN_DELAY_MS, { force: true, immediate: false });
+      scheduleScan(GMGN_FIRST_SCAN_DELAY_MS, { force: false, immediate: false });
     }
   } else {
     scheduleScan(100, { force: true, immediate: true });

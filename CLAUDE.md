@@ -422,6 +422,7 @@ python tools/ctl.py watchdog-run
 | 剪切板跳转不生效 | 未授权 / iOS 禁后台读 / 文本过长或不像地址 | 弹窗里确认开启；Windows 允许读取剪切板；iOS 用「立即检测」或粘贴框 |
 | 复制短名没有弹出 GMGN 搜索 | 未开「复制即搜」/ 未授权 / 不在 GMGN 前台 / 字数超出或含空格 / 已搜过这段 | 完整包弹窗开启并刷新 GMGN；再复制一次才再搜 |
 | 文章重点样式没出现 | 未开开关 / 站点未加入 / 未授权 / 只加了路径但当前不在该路径 | 完整包弹窗添加主机名或 `debot.ai/popout/xTracker` 并允许访问；刷新目标页 |
+| 新创建一直 ⏳待加载 | GMGN 战壕走 SharedWorker，页面无 WSS；旧 fiber 读取用 Object.keys 拿不到 `__reactFiber` | **0.8.39+** 从卡片祖先 fiber `data.tax_allocation` 提取；重载插件并硬刷页 |
 
 ---
 
@@ -590,8 +591,24 @@ python tools/ctl.py watchdog-run
  - `0.8.34`：文章重点样式独立暗色/浅色两套主题（暗色页实心荧光笔，浅色页淡底深字）
  - `0.8.35`：GMGN `/follow?popout=true&target=xTracker` 不在本窗跳 K 线/搜索，改去其它 GMGN 标签
  - `0.8.36`：Debot/Gungnir `/popout/xTracker` 同样不在本窗跳 K 线/搜索
-- 插件当前版本：见 `extension/manifest.json`（**0.8.36**，公开无剪切板）
-- page-hook：`HOOK_VER` **87**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.37`：新卡 Tax 内 quotes 不当底池；中文 name 不当分红 ticker；host-fee 分红未齐短窗后仍画，避免永远 ⏳；WeakMap 绑 href
+ - `0.8.38`：host-fee 已有分配 bps 时不再因 `__needsChain` 把 ⏳ 拖到 `/modes`（约 30s）
+ - `0.8.39`：GMGN 新卡从 TokenItem 祖先 fiber `props.data.tax_allocation` 提取分配（修 Object.keys 读不到 __reactFiber）；不依赖页面 WSS/SharedWorker
+ - `0.8.40`：虚拟列表复用时 Tax 内图滞后会导致 💎→SPCX 锁在新卡上；href 切换先拆徽章，分红以 fiber 地址/底池外图为准
+ - `0.8.41`：解析 SharedWorker `pumpRank-bsc` 推送外壳（WSS PATCH / HTTP SNAP_SHOT）；页面无裸 WSS
+ - `0.8.42`：双通道 — SharedWorker Port + 页面 WSS（无 SW / disableShareWorker）+ HTTP 快照 + 卡片 fiber
+ - `0.8.43`：宿主 tooltip 分红是中文名时徽章出 →牛来；Tax 内拉丁图仍覆盖中文发射名
+ - `0.8.44`：纯税收金库（tooltip「税收钱包-金库」）禁止用虚拟列表残留 Tax 内股票图升成 📈；空篮子直接 🎁
+ - `0.8.45`：虚拟列表换卡后 Tax 内图未刷新视为残留（💎/📈 都不信）；禁止 DOM 发明篮子；flap_stocks 空篮子等 fiber；Debot 底池不用 bstocks
+ - `0.8.46`：Flap Stocks 单成分金库（宿主「税收钱包-金库 FXION 100%」）识别为 📈FXIO，不再画成 💎→XAUT / 📈→BNB
+ - `0.8.47`：快路径只信 fiber 分配；空篮子不再永远 ⏳；纯金库覆盖 leftover 📈；BNB 池不把残留 QQQB/FXIO 当底池/分红
+ - `0.8.48`：15min 新创建采样 — 去掉 marketing+market_address⇒🎁；fiber 金库覆盖 leftover 💎QQQB
+ - `0.8.49`：新卡 ⏳ 满 1s 仍无真徽章则立刻 flush `/modes`（host-fee 短窗同步收到 1s）
+ - `0.8.50`：二次 15min 采样 — fiber 创作者覆盖 leftover 💎QQQB
+ - `0.8.51`：刷新卡顿降载 — host-fee Mutation 合并扫描、JSON.parse 禁止 stringify 再解析、同对象只收集一次、GMGN 首扫不 force
+ - `0.8.52`：三次 15min 采样 — 金库 WBNB 分红篮子不当 📈；BNB-only 不升币股（雪球太空猫 🎁→📈）
+- 插件当前版本：见 `extension/manifest.json`（**0.8.52**，公开无剪切板）
+- page-hook：`HOOK_VER` **100**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  
