@@ -9,7 +9,7 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 100;
+  const HOOK_VER = 104;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -928,6 +928,41 @@
     return !basketSymbolsReady(basket_assets);
   }
 
+  function hostFeeBasketIsNativeOnly(basket_assets) {
+    const rows = Array.isArray(basket_assets) ? basket_assets : [];
+    if (!rows.length) return true;
+    return rows.every(
+      (a) =>
+        gmgnAddrIsNativeQuote(a && a.address) ||
+        /^(BNB|WBNB)$/i.test(String((a && a.symbol) || ""))
+    );
+  }
+
+  /**
+   * GMGN 能稳定给出的：普通 💎/👨‍🍳、已带非原生成分的币股 📈 → 快路径。
+   * 空金库 / 币股发射台无成分 / 无分配 → /modes（底池 QQQB/SPCX、📈 vs 🎁）。
+   */
+  function hostFeeShouldAskChain(entry, item) {
+    if (!entry) return true;
+    const n = Array.isArray(entry.basket_assets) ? entry.basket_assets.length : 0;
+    const nativeOnly = hostFeeBasketIsNativeOnly(entry.basket_assets);
+    const stocksLp = gmgnIsFlapStocksLaunchpad(item);
+    const total =
+      (Number(entry.dividend_bps) || 0) +
+      (Number(entry.market_bps) || 0) +
+      (Number(entry.deflation_bps) || 0) +
+      (Number(entry.lp_bps) || 0) +
+      (Number(entry.giggle_charity_bps) || 0) +
+      (Number(entry.binance_charity_bps) || 0);
+    if (total <= 0) return true;
+    if (entry.is_stocks_vault || stocksLp || n >= 2) {
+      if (n >= 1 && !nativeOnly) return false;
+      return true;
+    }
+    if (entry.is_vault) return true;
+    return false;
+  }
+
   function symbolFromKnownStockAddress(addr) {
     const a = String(addr || "")
       .trim()
@@ -1671,7 +1706,22 @@
       giggle_charity_bps +
       binance_charity_bps;
     const isStockVault = is_stocks_vault || basket_assets.length >= 2;
+    const ask = hostFeeShouldAskChain(
+      {
+        dividend_bps,
+        market_bps,
+        deflation_bps,
+        lp_bps,
+        giggle_charity_bps,
+        binance_charity_bps,
+        is_vault,
+        is_stocks_vault,
+        basket_assets
+      },
+      item
+    );
     const dividendNeedsChain =
+      ask &&
       dividend_bps > 0 &&
       (!symbolLooksLikeLatinTicker(dividend_symbol) ||
         /^(BNB|WBNB)$/i.test(String(dividend_symbol || "").trim()));
@@ -1680,6 +1730,7 @@
       totalBps <= 0 ||
       dividendNeedsChain ||
       vaultNeedsBasket ||
+      ask ||
       hostFeeBasketNeedsHydration(basket_assets, isStockVault, {
         is_vault,
         is_stocks_vault,
@@ -1765,7 +1816,22 @@
       giggle_charity_bps +
       binance_charity_bps;
     const isStockVault = is_stocks_vault || basket_assets.length >= 2;
+    const ask = hostFeeShouldAskChain(
+      {
+        dividend_bps,
+        market_bps,
+        deflation_bps,
+        lp_bps,
+        giggle_charity_bps,
+        binance_charity_bps,
+        is_vault,
+        is_stocks_vault,
+        basket_assets
+      },
+      null
+    );
     const dividendNeedsChain =
+      ask &&
       dividend_bps > 0 &&
       (!symbolLooksLikeLatinTicker(dividend_symbol) ||
         /^(BNB|WBNB)$/i.test(String(dividend_symbol || "").trim()));
@@ -1774,6 +1840,7 @@
       totalBps <= 0 ||
       dividendNeedsChain ||
       vaultNeedsBasket ||
+      ask ||
       hostFeeBasketNeedsHydration(basket_assets, isStockVault, {
         is_vault,
         is_stocks_vault,
@@ -2047,6 +2114,8 @@
 
   function textMightBeHostFeeFeed(text) {
     if (typeof text !== "string" || text.length < 40) return false;
+    const c0 = text.charCodeAt(0);
+    if (c0 !== 123 && c0 !== 91) return false;
     return (
       text.indexOf("s_tal") !== -1 ||
       text.indexOf("tax_allocation") !== -1 ||
@@ -2680,8 +2749,10 @@
     const pendingGmgn = new Set();
     const pendingDebot = new Set();
     let pendingFlushTimer = 0;
-    const PENDING_FLUSH_MS = 48;
-    const PENDING_PER_FLUSH = 8;
+    const PENDING_FLUSH_MS = 80;
+    const PENDING_PER_FLUSH = 6;
+    const DOM_BOOT_QUIET_MS = 1600;
+    const domTapBootAt = Date.now();
     const flushPendingCards = () => {
       pendingFlushTimer = 0;
       let n = 0;
@@ -2806,12 +2877,29 @@
         const nodes = [];
         dirtyAdded.forEach((n) => nodes.push(n));
         dirtyAdded.clear();
-        if (burst >= 12) {
+        const quiet = Date.now() - domTapBootAt < DOM_BOOT_QUIET_MS;
+        if (quiet) {
+          const cap = Math.min(nodes.length, 8);
+          for (let i = 0; i < cap; i += 1) {
+            const n = nodes[i];
+            if (
+              n instanceof HTMLElement &&
+              n.matches?.(
+                '[data-sentry-source-file="TokenItem.tsx"], [href*="/bsc/token/0x"], [data-contract]'
+              )
+            ) {
+              scanRoot(n);
+            }
+          }
+          return;
+        }
+        if (burst >= 24) {
           const roots = collectHostFeeObserveRoots();
           for (let i = 0; i < roots.length; i += 1) scanRoot(roots[i]);
           return;
         }
-        for (let i = 0; i < nodes.length; i += 1) scanRoot(nodes[i]);
+        const cap = Math.min(nodes.length, 16);
+        for (let i = 0; i < cap; i += 1) scanRoot(nodes[i]);
       };
       rootMo = new MutationObserver((records) => {
         let taxDirty = null;
@@ -2837,7 +2925,7 @@
           }
         }
         if (dirtyAdded.size && !mutFlushTimer) {
-          mutFlushTimer = window.setTimeout(flushDirtyAdded, 48);
+          mutFlushTimer = window.setTimeout(flushDirtyAdded, 80);
         }
       });
       if (!attachObservers()) {
@@ -5297,15 +5385,16 @@
     try {
       if (!JSON.parse.__flapFeeHostFee) {
         const wrappedParse = function flapFeeHostJsonParse(text, reviver) {
-          const obj = NativeJSONParse(text, reviver);
           if (
-            typeof text === "string" &&
-            text.length >= 40 &&
-            text.length < 800000 &&
-            obj &&
-            typeof obj === "object" &&
-            textMightBeHostFeeFeed(text)
+            typeof text !== "string" ||
+            text.length < 40 ||
+            text.length >= 800000 ||
+            !textMightBeHostFeeFeed(text)
           ) {
+            return NativeJSONParse(text, reviver);
+          }
+          const obj = NativeJSONParse(text, reviver);
+          if (obj && typeof obj === "object") {
             try {
               collectHostFeesFromJson(obj);
             } catch (_hf) {

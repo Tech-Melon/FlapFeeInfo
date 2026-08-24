@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.52",
-  "description": "FlapFeeInfo 0.8.52: 金库 WBNB 分红不再升成 📈BNB。",
+  "version": "0.8.58",
+  "description": "FlapFeeInfo 0.8.58: 刷新降载 — 首屏少扫 fiber，JSON.parse 先过滤。",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

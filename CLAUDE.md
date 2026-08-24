@@ -25,7 +25,7 @@
 | 🔥`N%` | 销毁 | `deflationBps` |
 | 💧`N%` | 回流 LP | `lpBps` |
 | ❓️未 | 无有效分配 | 全 0 |
-| 🦋/🖐️/🪙`QUOTE` | 底池报价（Flap=🦋、Four.meme ffff=🖐️、其它=🪙） | 普通税币：**页面 DOM**；**币股 vault：BNB**（GMGN 股票芯片不是 LP） |
+| 🦋/🖐️/🪙`QUOTE` | 底池报价（Flap=🦋、Four.meme ffff=🖐️、其它=🪙） | 普通税币 / **税收金库**：DOM 或 Helper quote；**币股篮子金库：BNB**（股票芯片不是 LP） |
 
 - **有值才出**；多项非零 → `mode=hybrid`，fee 段**按 bps 从高到低**（最高在左），如 `💎90%→SPCXB👨‍🍳10%`  
 - **合成徽章**（有报价时）：`{🦋|🖐️|🪙}QUOTE | fee`，如 `🦋BNB | 💎90%`、`🖐️USD1 | 💎100%`（`|` 两侧有空格）  
@@ -224,7 +224,8 @@ if lpBps > 0:              💧
 | GMGN 底池图 | Tax **外** `LaunchpadImageIcon` 的 `/static/quotes/`；**不是** `/static/lpp/` 发射台 logo |
 | GMGN 报价目录 | 同源 `/static/config/quotes.json`（`v`+`configs.{chain}[]`：`ca/title/iconSrcDark`）；新池子随 GMGN 更新，插件启动拉取 |
 | GMGN 非 vault 底池 | Tax 外 quotes 芯片 + `quote_address` 目录映射（`SPCXB`→`SPCX`、`QQQB`、`XAUT0`）；禁止当股票芯片回退 BNB |
-| **币股 vault** | 忽略 Tax 内 `TaxDividendTokenIcon` 篮子芯片；Helper `quote` 为空时底池固定 `BNB` |
+| **币股篮子金库** | 忽略 Tax 内篮子芯片；底池固定 `BNB`（Helper quote 空则 WBNB） |
+| **税收金库（无篮子）** | 跟 Pancake/Helper quote（如已迁池 `QQQB`），不要因为 `is_vault` 就画 BNB |
 
 - 扫卡间隔：`SCAN_INTERVAL_MS = 500`  
 - Tab 恢复：仅 in-flight ≥12s 才 force recover，避免 Abort 风暴（`0.2.7+`）  
@@ -239,6 +240,8 @@ if lpBps > 0:              💧
 | `0x7f048908f1fcc57d836c258143004c4597937777` | 币股 `🦋BNB \| 📈NVDA&FXIO`（底池是 BNB，不是 NVDAB） |
 | `0x78471d87a30d2b073d1a775eccee299393157777` | 非 vault SPCX 底池 `🦋SPCX \| 💎→SPCX`（`Glorb/SPCXB`，禁止回退 BNB） |
 | `0x28e9053bd9c4057da73e99282818cc5c4bc07777` | 币股 `🦋BNB \| 📈FXIO`（底池是 BNB，不是 FXION） |
+| `0x83f2a3e66396a5489ecc9c1cbc67aee524af7777` | 税收金库已迁 Pancake `🦋QQQB \| 🎁→QQQB`（不要画成 `🦋BNB`） |
+| `0xbd6bfe956474f156ad4545bbe83b33cf767c7777` | SPCXB 底池税收金库 `🦋SPCX \| 🎁70%→SPCX💎30%`（不要 `🦋BNB` / `📈SPCX`） |
 | `0x28b8aa38bbcb083a481383151c03074463ceffff` | Four v2 慈善 `🎓50%💛50%` hybrid；有报价时 `🖐️GMEB \| 🎓50%→GMEB💛50%` |
 | GMGN BSC 默认 BNB 池 7777/8888 | `🪙BNB \| …` |
 | GMGN USD1 池（`IconUsd116pxS`） | `🪙USD1 \| …` |
@@ -607,8 +610,14 @@ python tools/ctl.py watchdog-run
  - `0.8.50`：二次 15min 采样 — fiber 创作者覆盖 leftover 💎QQQB
  - `0.8.51`：刷新卡顿降载 — host-fee Mutation 合并扫描、JSON.parse 禁止 stringify 再解析、同对象只收集一次、GMGN 首扫不 force
  - `0.8.52`：三次 15min 采样 — 金库 WBNB 分红篮子不当 📈；BNB-only 不升币股（雪球太空猫 🎁→📈）
-- 插件当前版本：见 `extension/manifest.json`（**0.8.52**，公开无剪切板）
-- page-hook：`HOOK_VER` **100**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.53`：fiber 空篮子金库仍打 `/modes`；Helper 单成分 📈FXIO；宿主金库可覆盖旧 KV 🔥（张停/FXION）
+ - `0.8.54`：普通税收金库底池跟 Helper/Pancake quote（狗屎蛙 `🦋QQQB | 🎁→QQQB`）；仅币股篮子仍固定 BNB
+ - `0.8.55`：篮子若只是底池报价（SPCXB）仍画税收金库 `🦋SPCX | 🎁70%→SPCX`，不要 📈 也不要强制 BNB
+ - `0.8.56`：金库 / 股票名报价 / 单成分篮子 fiber 不定案，⏳ 等 `/modes`；链上结果不被 host-fee 覆盖
+ - `0.8.57`：15min 新创建 — 稳的 💎/👨‍🍳/已出成分 📈 快路径；空金库与无成分币股走 `/modes`；降扫卡 debounce
+ - `0.8.58`：刷新卡顿 — `JSON.parse` 先判 s_tal 再解析；hydration 1.6s 内不整列扫 fiber；K 线 boot 少两次视口扫
+- 插件当前版本：见 `extension/manifest.json`（**0.8.58**，公开无剪切板）
+- page-hook：`HOOK_VER` **104**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  

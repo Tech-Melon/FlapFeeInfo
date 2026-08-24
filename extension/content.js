@@ -17,6 +17,12 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.58: 刷新降载 — JSON.parse 先过滤再解析；hydration 1.6s 内不整列扫 fiber；少 boot 扫。
+  // 0.8.57: 稳的 💎/👨‍🍳/已出成分的📈 走快路径；空金库/无成分币股走 /modes。降 mutation 负载。
+  // 0.8.56: 金库/股票名报价/单成分篮子本地不定案，交给 /modes；链上结果不被 host-fee 覆盖。
+  // 0.8.55: 篮子若只是底池报价币（SPCXB）则仍是税收金库，不要 📈 也不要强制 BNB。
+  // 0.8.54: 普通税收金库底池跟 Helper/Pancake quote（QQQB），仅币股篮子仍固定 BNB。
+  // 0.8.53: 空篮子金库仍打 /modes；单成分 Helper 篮子画 📈FXIO；宿主金库可覆盖旧 KV 🔥。
   // 0.8.52: 三次 15min — 金库 WBNB 分红不当 📈 篮子；BNB-only 篮子不升币股。
   // 0.8.51: 刷新降载 — host-fee DOM 合并扫描、JSON.parse 不再二次序列化、首扫不 force。
   // 0.8.50: 二次 15min 采样 — fiber 创作者覆盖 leftover 💎QQQB。
@@ -211,10 +217,12 @@
   const HOST_FEE_GRACE_MS = 1000;
   /** js-mcp：GMGN tax-dom / Debot ranks+launchpad_extra 首包前有竞态；此前不 flush /modes */
   const HOST_TAX_FEED_MAX_WAIT_MS = 2500;
-  const HOST_FEE_QUEUE_POLL_MS = 80;
+  const HOST_FEE_QUEUE_POLL_MS = 120;
   const HOST_FEE_QUEUE_MAX_MS = 1000;
   /** host-fee 分红仍是 BNB/中文名：最多 ⏳ 这么久，超时仍画（避免永远待加载） */
   const HOST_FEE_SYMBOL_GRACE_MS = 1000;
+  /** 无法本地定案时 ⏳ 等 /modes 的上限；超时才用 host-fee 兜底 */
+  const HOST_FEE_DEFER_MODES_MS = 8000;
   /** ⏳ 满此时长仍无真徽章：立刻打 /modes，不再等组批/feed */
   const LOADING_MODES_KICK_MS = 1000;
   const HOST_TAX_FEED_RETRY_MS = 280;
@@ -278,11 +286,11 @@
   const DEBOT_TRENCH_ROW_MIN_H = 80;
   const DEBOT_TRENCH_ROW_MAX_H = 220;
   // GMGN 稳态 mutation / 扫间隔（流畅）；热路径见 HOT_*。
-  const MUTATION_SCAN_DEBOUNCE_GMGN_MS = 380;
-  const HOT_MUTATION_SCAN_DEBOUNCE_GMGN_MS = 340;
+  const MUTATION_SCAN_DEBOUNCE_GMGN_MS = 450;
+  const HOT_MUTATION_SCAN_DEBOUNCE_GMGN_MS = 400;
   // GMGN list non-force scan min gap (home/meme only). Token pages keep SCAN_INTERVAL_MS.
-  const GMGN_LIST_SCAN_MIN_GAP_MS = 560;
-  const HOT_GMGN_LIST_SCAN_MIN_GAP_MS = 500;
+  const GMGN_LIST_SCAN_MIN_GAP_MS = 640;
+  const HOT_GMGN_LIST_SCAN_MIN_GAP_MS = 560;
   // GMGN cold first scan delay (host hydration first).
   const GMGN_FIRST_SCAN_DELAY_MS = 800;
   // GMGN per-scan card budget while scroll-cooling (smaller slices).
@@ -794,8 +802,28 @@
   function isTrustedStockVault(entry) {
     if (!entry || !entry.is_vault) return false;
     if (basketLooksLikeNativeOnly(entry.basket_assets)) return false;
+    // 篮子只有 SPCXB/QQQB 且等于 LP quote → 税收金库，不是币股指数。
+    if (basketLooksLikePoolQuote(entry)) return false;
     if (entry.is_stocks_vault === true) return true;
-    return normalizeBasketAssets(entry.basket_assets).length >= 2;
+    const n = normalizeBasketAssets(entry.basket_assets).length;
+    if (n >= 2) return true;
+    // /modes 单成分篮子（FXIO 100% 金库）可信；host-fee 单枚 Tax 图仍当 leftover。
+    return n === 1 && !entry.source_host;
+  }
+
+  /** 单成分篮子地址/符号与底池报价相同（SPCX病毒/SPCXB）。 */
+  function basketLooksLikePoolQuote(entry) {
+    if (!entry) return false;
+    const assets = normalizeBasketAssets(entry.basket_assets);
+    if (assets.length !== 1) return false;
+    const row = assets[0];
+    const qTok = String(entry.quote_token || entry.quote_address || "").toLowerCase();
+    const addr = String(row.address || "").toLowerCase();
+    if (addr && qTok && addr === qTok && !quoteTokenLooksNative(qTok)) return true;
+    const aSym = compactBasketSymbol(row.symbol);
+    const qSym = compactBasketSymbol(entry.quote_symbol || "");
+    if (aSym && qSym && aSym === qSym && !quoteSymbolLooksNative(qSym)) return true;
+    return false;
   }
 
   function basketSymbolMatchesDom(domSym, rowSym) {
@@ -1137,7 +1165,7 @@
 
   /** 普通税币：Tax 外文件名 / quote_address 已指向 NVDAB，徽章还停在默认 BNB → 必须重挂 */
   function isGmgnPoolDomMismatch(card, icon, entry) {
-    if (!isGmgnHost() || !entry || isVaultPoolToken(entry)) return false;
+    if (!isGmgnHost() || !entry || forceVaultNativePoolQuote(entry)) return false;
     const want = pickStablePoolQuote(entry, card);
     if (paintedPoolLooksNonNative(icon)) {
       // 错把 Tax 内 AAPLB 当底池后不能锁死：应对回 BNB / 正确外图
@@ -6686,7 +6714,7 @@
     });
   }
 
-  const PAGE_HOOK_VER = "80";
+  const PAGE_HOOK_VER = "104";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -11621,7 +11649,7 @@
     const cachedHit = modeCache.get(tok);
     // host-fee preview 常 __needsChain=false，但分红仍是 BNB → 仍要打 /modes
     if (cachedHit && cachedHit.__needsChain !== true && !isHostFeeEntryPending(cachedHit)) {
-      return;
+      if (!hostFeeShouldDeferToModes(cachedHit)) return;
     }
     if (!cachedHit && isPersistentCacheHit(tok)) return;
     if (requestQueue.has(tok)) return;
@@ -11874,6 +11902,20 @@
       const token = String(rawToken).toLowerCase();
       const entry = normalizeResult(result);
       if (!entry) return;
+      const prev = modeCache.get(token);
+      if (prev && prev.source_host && prev.is_vault && !entry.is_vault) {
+        const nextBag = normalizeBasketAssets(entry.basket_assets).length;
+        // 宿主金库 vs 旧 KV 🔥：不要用销毁盖掉金库。
+        if (nextBag === 0) return;
+      }
+      if (
+        entry.is_vault &&
+        normalizeBasketAssets(entry.basket_assets).length >= 1 &&
+        !basketLooksLikeNativeOnly(entry.basket_assets) &&
+        !basketLooksLikePoolQuote(entry)
+      ) {
+        entry.is_stocks_vault = true;
+      }
       modeCache.set(token, entry);
       missingRetryState.delete(String(token).toLowerCase());
       const missTimer = gmgnMissingRequeueTimers.get(String(token).toLowerCase());
@@ -12348,23 +12390,42 @@
     );
   }
 
+  /** 空金库/无成分币股交给 /modes；普通 💎/👨‍🍳 与已出成分的 📈 走快路径。 */
+  function hostFeeShouldDeferToModes(entry) {
+    if (!entry || !entry.source_host) return false;
+    if (entry.__needsChain === true) return true;
+    const n = normalizeBasketAssets(entry.basket_assets).length;
+    const nativeOnly = basketLooksLikeNativeOnly(entry.basket_assets) || n === 0;
+    if (entry.is_stocks_vault || n >= 2) {
+      return n < 1 || nativeOnly;
+    }
+    if (entry.is_vault) return !isTrustedStockVault(entry);
+    return false;
+  }
+
   /** host-fee / DOM 未齐：继续 ⏳，避免 NVDA&NVDA 或错分红先闪出来 */
   function isHostFeeEntryPending(entry) {
     if (!entry || isFeeLoadingEntry(entry)) return false;
     const age = Date.now() - (Number(entry.fetched_at) || 0);
     const bps = hostFeeAllocationBps(entry);
+    const deferMs = hostFeeShouldDeferToModes(entry)
+      ? HOST_FEE_DEFER_MODES_MS
+      : HOST_FEE_SYMBOL_GRACE_MS;
     if (basketSecurityPending(entry)) {
-      return age < HOST_FEE_SYMBOL_GRACE_MS;
+      return age < deferMs;
     }
     if (isStockVaultEntry(entry) && !basketSymbolsReady(entry.basket_assets)) {
-      // 币股篮子未齐只短窗 ⏳；超时按已有 bps 画 🎁，避免永远待加载
-      return age < HOST_FEE_SYMBOL_GRACE_MS;
+      return age < deferMs;
     }
     const symbolWait =
       (Number(entry.dividend_bps) || 0) > 0 && dividendPayoutLooksNative(entry);
-    if (entry.__needsChain === true || (entry.source_host && symbolWait)) {
-      if (bps <= 0) return age < HOST_FEE_SYMBOL_GRACE_MS;
-      return age < HOST_FEE_SYMBOL_GRACE_MS;
+    if (
+      entry.__needsChain === true ||
+      hostFeeShouldDeferToModes(entry) ||
+      (entry.source_host && symbolWait)
+    ) {
+      if (bps <= 0) return age < deferMs;
+      return age < deferMs;
     }
     return false;
   }
@@ -12383,13 +12444,17 @@
         hostFeePendingPaintTimers.delete(oldest);
       }
     }
+    const entryNow = modeCache.get(tok);
+    const delayMs =
+      (hostFeeShouldDeferToModes(entryNow) ? HOST_FEE_DEFER_MODES_MS : HOST_FEE_SYMBOL_GRACE_MS) +
+      50;
     const timerId = window.setTimeout(() => {
       hostFeePendingPaintTimers.delete(tok);
       if (!isExtensionContextValid()) return;
       const entry = modeCache.get(tok);
       if (!entry || isHostFeeEntryPending(entry) || isFeeLoadingEntry(entry)) return;
       applyModeToKnownCards(tok, entry);
-    }, HOST_FEE_SYMBOL_GRACE_MS + 50);
+    }, delayMs);
     hostFeePendingPaintTimers.set(tok, timerId);
   }
 
@@ -12731,6 +12796,11 @@
     return Boolean(entry && (entry.is_vault || entry.is_stocks_vault));
   }
 
+  /** 币股篮子金库：GMGN 股票芯片不是 LP，底池固定 BNB。普通税收金库（QQQB 池）不要套这条。 */
+  function forceVaultNativePoolQuote(entry) {
+    return isTrustedStockVault(entry);
+  }
+
   /** 徽章底池文案：原生报价保持 BNB/USD1/BTCB；Flap 尾缀 B（SPCXB）剥成 SPCX。 */
   function formatPoolQuoteSymbol(sym) {
     const shown = displayPoolQuoteSymbol(sym);
@@ -12883,7 +12953,7 @@
     const qTok = (entry && (entry.quote_token || entry.quote_address)) || "";
     const fromAddr = catalogTitleForQuoteAddr(qTok);
 
-    if (isVaultPoolToken(entry)) {
+    if (forceVaultNativePoolQuote(entry)) {
       if (fromApi && isRealPoolQuoteSymbol(fromApi)) return formatPoolQuoteSymbol(fromApi);
       if (fromAddr && isRealPoolQuoteSymbol(fromAddr)) return formatPoolQuoteSymbol(fromAddr);
       return vaultDefaultPoolQuote();
@@ -12928,7 +12998,7 @@
     }
     if (want) return paintedPoolDisagrees(icon, want);
     if (
-      !isVaultPoolToken(entry) &&
+      !forceVaultNativePoolQuote(entry) &&
       !quoteTokenLooksNative(entry.quote_token || entry.quote_address)
     ) {
       return paintedPoolDisagrees(icon, "BNB") === false;
@@ -14014,7 +14084,7 @@
 
   function hostFeeQuoteBecameReal(prev, entry) {
     if (!prev || !entry) return false;
-    if (isVaultPoolToken(entry) && !isRealPoolQuoteSymbol(entry.quote_symbol || "")) {
+    if (forceVaultNativePoolQuote(entry) && !isRealPoolQuoteSymbol(entry.quote_symbol || "")) {
       return false;
     }
     const nextQ = formatPoolQuoteSymbol(entry.quote_symbol || "");
@@ -14151,7 +14221,7 @@
       if (!TARGET_TOKEN_RE.test(token)) continue;
       const prev = resolveEntry(token);
       if (!prev) continue;
-      if (prev.is_vault && !isRealPoolQuoteSymbol(raw.quote_symbol || "")) {
+      if (forceVaultNativePoolQuote(prev) && !isRealPoolQuoteSymbol(raw.quote_symbol || "")) {
         continue;
       }
       const fromAddr = catalogTitleForQuoteAddr(raw.quote_token || "");
@@ -14233,14 +14303,8 @@
       }
       const prev = modeCache.get(token);
       if (prev && !prev.source_host && prev.__needsChain !== true) {
-        // 链上已落盘：默认不让 preview 覆盖；但空篮子被后续 WS 补全时必须升级
-        const pb = normalizeBasketAssets(prev.basket_assets).length;
-        const nb = normalizeBasketAssets(entry.basket_assets).length;
-        if (
-          !(nb > pb || (entry.is_stocks_vault && !prev.is_stocks_vault))
-        ) {
-          continue;
-        }
+        // /modes 已定案：host-fee 不再用 fiber/DOM 猜篮子或底池。
+        continue;
       }
       if (prev && !hostFeeEntryShouldApply(prev, entry)) continue;
       if (prev && Number(prev.fetched_at) > 0) {
@@ -15168,7 +15232,7 @@
       entry.is_vault &&
         basketPair &&
         !basketLooksLikeNativeOnly(basketAssets) &&
-        (entry.is_stocks_vault === true || basketAssets.length >= 2)
+        isTrustedStockVault(entry)
     );
     const candidates = [];
     if ((entry.dividend_bps || 0) > 0 && prefs.holder !== false) {
@@ -15228,16 +15292,27 @@
             domQuote ||
             ""
         );
+      } else if (top === "gift") {
+        const srcGift =
+          entry.dividend_symbol ||
+          entry.top_payout_symbol ||
+          entry.quote_symbol ||
+          domQuote ||
+          "";
+        if (forceVaultNativePoolQuote(entry) && looksLikeStockQuoteChip(srcGift, entry)) {
+          topSym = compactDisplaySymbol(vaultDefaultPoolQuote());
+        } else {
+          topSym = tickerSymbolForArrow(srcGift);
+        }
       } else if (
         top === "creator" ||
-        top === "gift" ||
         top === "lp" ||
         top === "giggle" ||
         top === "binance"
       ) {
         const srcQ = entry.quote_symbol || domQuote || "";
         if (
-          isVaultPoolToken(entry) &&
+          forceVaultNativePoolQuote(entry) &&
           (looksLikeStockQuoteChip(srcQ, entry) ||
             looksLikeStockQuoteChip(compactBasketSymbol(srcQ), entry) ||
             looksLikeStockQuoteChip(compactDisplaySymbol(srcQ), entry))
@@ -16961,7 +17036,7 @@
           });
         }, 50);
       } else {
-        scheduleScan(80, { force: true, immediate: false });
+        scheduleScan(80, { force: false, immediate: false });
       }
     } catch (_err) {
       // ignore
@@ -17221,6 +17296,14 @@
     // During SPA rebuild: mark dirty only; progressive + quiet-end handle full paint.
     if (isSpaQuiet()) {
       spaDomDirty = true;
+      return;
+    }
+    // 刷新首屏让宿主先画；首扫已按 GMGN_FIRST_SCAN_DELAY_MS 排队。
+    if (
+      isGmgnHost() &&
+      !isTokenDetailRoute() &&
+      Date.now() - hostListBootAt < GMGN_FIRST_SCAN_DELAY_MS
+    ) {
       return;
     }
     // 0.4.12: non-8888/7777 token page — chart noise must not schedule scans.
@@ -17497,7 +17580,7 @@
           // ignore
         }
       }, 800);
-      [1400, 2400, 4000].forEach((ms) => {
+      [1400].forEach((ms) => {
         window.setTimeout(() => {
           if (!isExtensionContextValid() || !isTabVisible() || !isGmgnTokenPage()) return;
           try {
