@@ -30,16 +30,22 @@
             <span class="license-hero-icon" aria-hidden="true">🔑</span>
             <div>
               <div class="license-hero-title" id="licenseHeroTitle" data-i18n="licenseHeroTitle">访问许可证</div>
-              <div class="license-hero-sub" id="licenseHeroSub" data-i18n="licenseHeroSub">当前免费可用 · 付费后粘贴 TG Bot 密钥</div>
+              <div class="license-hero-sub" id="licenseHeroSub" data-i18n="licenseHeroSub">即将收费，请先填密钥</div>
             </div>
           </div>
           <span class="license-pill" id="licensePill" data-state="free">免费</span>
         </div>
         <span class="license-chevron" id="licenseChevron" aria-hidden="true">▾</span>
       </button>
+      <div class="license-cta-row">
+        <button type="button" class="license-get-key-btn" id="licenseGetKeyBtn">
+          <span class="license-get-key-icon" aria-hidden="true">✈</span>
+          <span data-i18n="licenseGetKeyBtn">去 TG Bot 获取密钥</span>
+        </button>
+      </div>
       <div class="license-hero-body" id="licenseBody">
         <p class="license-hero-hint" data-i18n="licenseHint">
-          当前版本免费可用，密钥可先留空。付费开启后，在此粘贴 TG 发卡机器人发来的密钥。
+          服务端已开启付费鉴权：未填密钥将无法显示徽章。在 TG Bot 购买后粘贴密钥；一钥绑定本 Chrome 配置。
         </p>
         <label class="license-label" for="licenseKeyInput">
           <span data-i18n="licenseKeyLabel">访问密钥</span>

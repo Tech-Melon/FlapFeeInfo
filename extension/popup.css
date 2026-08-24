@@ -183,6 +183,48 @@ body {
   padding: 0 12px 12px;
 }
 
+.license-cta-row {
+  padding: 0 12px 10px;
+}
+
+.license-get-key-btn {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, #2aabee 55%, var(--border));
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, #2aabee 88%, #000) 0%,
+    color-mix(in srgb, #229ed9 92%, #000) 100%
+  );
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  box-shadow: 0 4px 14px color-mix(in srgb, #2aabee 28%, transparent);
+  transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.12s ease;
+}
+
+.license-get-key-btn:hover {
+  filter: brightness(1.06);
+  box-shadow: 0 6px 18px color-mix(in srgb, #2aabee 34%, transparent);
+}
+
+.license-get-key-btn:active {
+  transform: translateY(1px);
+}
+
+.license-get-key-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
 .license-hero.is-collapsed .license-hero-body {
   display: none;
 }

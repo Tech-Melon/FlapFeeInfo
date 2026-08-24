@@ -583,7 +583,7 @@ body .gmgn-fee-mode-icon {
   max-width: min(280px, calc(100vw - 16px));
   min-width: 168px;
   padding: 10px 12px;
-  pointer-events: auto;
+  pointer-events: none;
   position: fixed;
   top: 0;
   z-index: 2147483000;

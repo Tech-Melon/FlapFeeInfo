@@ -582,13 +582,16 @@ python tools/ctl.py watchdog-run
  - `0.8.26`：许可证新设备换绑 — 验证 `device_mismatch` 时先保存密钥并显示「换绑到此设备」（不再要求 storage 里已有 key）
  - `0.8.27`：底池符号稳妥回退 — Tax 外 quotes 文件名 → quote_address 目录 → 非 BNB 的 WSS/HTTP 符号 → 确认空地址才默认 BNB；Tax 内多枚图不当单一分红
  - `0.8.28`：资金接收方白名单 — GMGN `market_address`/`creator`、Debot `fee_receiver`/`founder_address` 命中则不屏蔽
- - `0.8.30`：Worker 强制鉴权（`REQUIRE_LICENSE=1`）；弹窗提示「即将收费，请先填密钥」
  - `0.8.29`：0.8.27 底池回退热路径降载 — 稳定卡跳过 quotes DOM；站点分离 + WeakMap 短缓存
-- 插件当前版本：见 `extension/manifest.json`（**0.8.30**，公开无剪切板）
+ - `0.8.30`：Worker 强制鉴权（`REQUIRE_LICENSE=1`）；弹窗提示「即将收费，请先填密钥」
+ - `0.8.31`：GMGN hybrid 长徽章 — 绝对坐标/Tax 几何不再每轮当错位拆挂
+ - `0.8.32`：文章样式禁止改 `<title>`；Debot 交易页（dex-swap/K线/战壕）整站域名不扫；顶栏徽章不进名称行
+ - `0.8.33`：徽章悬停详情浮窗（`displayPrefs.hoverTip`，默认关）；浮窗不接收指针，滚动/SPA/锚点丢失必关
+- 插件当前版本：见 `extension/manifest.json`（**0.8.33**，公开无剪切板）
 - page-hook：`HOOK_VER` **87**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
-- 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享 storage）  
+- 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  
 - 尾号屏蔽：`flapFeeInfo.suffixHide.v1` = `{ enabled, rules:[{id,suffix,enabled}] }`（最多 24 条 hex 1–12 位）
 - 资金接收：`flapFeeInfo.taxRecvHide.v1` = `{ enabled, thresholdPct, allow:[{id,address,enabled}] }`（白名单最多 24 个 0x 地址）

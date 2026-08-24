@@ -12,6 +12,7 @@
   const LICENSE_KEY = "flapFeeInfo.license.v1";
   const DEVICE_ID_KEY = "flapFeeInfo.deviceId.v1";
   const LICENSE_API_BASE = "https://flap-fee-info.tech-melon.workers.dev";
+  const LICENSE_PURCHASE_URL = "https://t.me/TechMelon_Pay_bot?start=flap";
   const DEFAULT_THEME = "dark";
   const DEFAULT_TAX_RECV_HIDE = { enabled: false, thresholdPct: 100, allow: [] };
   const TAX_RECV_ALLOW_MAX = 24;
@@ -90,6 +91,8 @@
       pref_basket_desc: "📈 展示篮子成分（SPCX&TSLA…）",
       pref_openTaxinfo_title: "点击徽章打开详情",
       pref_openTaxinfo_desc: "Flap→flap.sh；Four ffff→four.meme 代币页",
+      pref_hoverTip_title: "悬停显示详细信息",
+      pref_hoverTip_desc: "默认关闭；勾选后鼠标停在徽章上弹出浮窗",
       pref_burn_title: "销毁",
       pref_burn_desc: "deflation",
       pref_lp_title: "回流 LP",
@@ -135,6 +138,7 @@
       suffixHideHint2: "例：添加 dead → 屏蔽所有以 dead 结尾的 0x 地址。最多 24 条；仅 hex 字符。",
       suffixRuleDel: "删除",
       suffixEmpty: "暂无规则，在下方输入尾号后添加",
+      licenseGetKeyBtn: "去 TG Bot 获取密钥",
       licenseSection: "访问许可证",
       licenseHeroTitle: "访问许可证",
       licenseHeroSub: "即将收费，请先填密钥",
@@ -227,6 +231,8 @@
       pref_basket_desc: "📈 show underlyings (SPCX&TSLA…)",
       pref_openTaxinfo_title: "Click badge to open",
       pref_openTaxinfo_desc: "Flap→flap.sh; Four ffff→four.meme token page",
+      pref_hoverTip_title: "Hover details",
+      pref_hoverTip_desc: "Off by default; show a popup when hovering a badge",
       pref_burn_title: "Burn",
       pref_burn_desc: "deflation",
       pref_lp_title: "LP recirculate",
@@ -273,6 +279,7 @@
         "E.g. add dead → hide all 0x addresses ending in dead. Max 24 rules; hex only.",
       suffixRuleDel: "Del",
       suffixEmpty: "No rules yet — type a suffix below and add",
+      licenseGetKeyBtn: "Get key from TG Bot",
       licenseSection: "License",
       licenseHeroTitle: "Access license",
       licenseHeroSub: "Paid mode — paste your TG bot key",
@@ -315,6 +322,7 @@
     "binance",
     "basket",
     "openTaxinfo",
+    "hoverTip",
     "burn",
     "lp",
     "payoutArrow",
@@ -329,13 +337,16 @@
     binance: "💛",
     basket: "📈",
     openTaxinfo: "🔗",
+    hoverTip: "💬",
     burn: "🔥",
     lp: "💧",
     payoutArrow: "→",
     unknown: "❓️"
   };
 
-  const DEFAULT_PREFS = Object.fromEntries(PREF_KEYS.map((k) => [k, true]));
+  const DEFAULT_PREFS = Object.fromEntries(
+    PREF_KEYS.map((k) => [k, k === "hoverTip" ? false : true])
+  );
 
   const listEl = document.getElementById("prefList");
   const btnAllOn = document.getElementById("btnAllOn");
@@ -566,6 +577,7 @@
   const licenseRebindBtn = document.getElementById("licenseRebindBtn");
   const licenseStatus = document.getElementById("licenseStatus");
   const licensePill = document.getElementById("licensePill");
+  const licenseGetKeyBtn = document.getElementById("licenseGetKeyBtn");
 
   function normalizeDeviceId(raw) {
     const id = String(raw?.id || raw || "")
@@ -703,6 +715,19 @@
     }
     licensePill.dataset.state = "active";
     licensePill.textContent = t("licensePillActive");
+  }
+
+  function openLicensePurchasePage() {
+    const url = LICENSE_PURCHASE_URL;
+    try {
+      if (chrome?.tabs?.create) {
+        chrome.tabs.create({ url, active: true });
+        return;
+      }
+    } catch (_tabs) {
+      // ignore
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
   }
 
   function setLicenseBusy(on) {
@@ -884,6 +909,13 @@
   }
 
   if (licenseToggle) licenseToggle.addEventListener("click", () => toggleLicenseCollapsed());
+  if (licenseGetKeyBtn) {
+    licenseGetKeyBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openLicensePurchasePage();
+    });
+  }
   if (licenseSaveBtn) licenseSaveBtn.addEventListener("click", () => void onLicenseSave());
   if (licenseClearBtn) licenseClearBtn.addEventListener("click", () => void onLicenseClear());
   if (licenseRebindBtn) licenseRebindBtn.addEventListener("click", () => void onLicenseRebind());

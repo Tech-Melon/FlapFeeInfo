@@ -17,6 +17,9 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.33: 徽章悬停详情浮窗默认关；修浮窗粘住（pointer-events + 锚点丢失必关）。
+  // 0.8.32: Debot/GMGN 禁止改 <title>；Debot 交易页不跑文章样式；顶栏徽章不进名称行。
+  // 0.8.31: hybrid 长徽章不再因 Tax 几何/绝对坐标被每轮拆挂（消失闪烁）。
   // 0.8.30: Worker 强制鉴权（REQUIRE_LICENSE=1）；弹窗提示先填 TG Bot 密钥。
   // 0.8.29: 0.8.27 底池回退热路径降载 — 稳定卡不每轮扫 quotes；站点分离 + WeakMap 短缓存。
   // 0.8.28: 资金接收方白名单 — GMGN market_address/creator、Debot fee_receiver 命中则不屏蔽。
@@ -438,7 +441,9 @@
     // 币股篮子：vault 底层 SPCX/TSLA…（独立开关）
     basket: true,
     // 点击徽章打开详情：Flap→flap.sh taxinfo；Four ffff→four.meme/token
-    openTaxinfo: true
+    openTaxinfo: true,
+    // 鼠标悬停徽章显示详细浮窗（默认关）
+    hoverTip: false
   };
   const FLAP_TAXINFO_BASE = "https://flap.sh/bnb";
   /** Four.meme tax token page (suffix ffff) */
@@ -1849,6 +1854,7 @@
   hydratePersistentCache();
   ensureGmgnQuotesCatalog();
   hydrateDisplayPrefs();
+  installFeeTooltipGuards();
   hydrateBadgeTheme();
   hydrateBadgeSolidDark();
   hydrateBadgeOffsets();
@@ -8452,6 +8458,7 @@
 
   /** Remove all our badge marks/icons from the document (SPA leave/enter). */
   function resetOurDomMarks() {
+    hideFeeTooltip();
     debotHeaderBadgeOkUntil = 0;
     debotHeaderBadgeOkEl = null;
     debotHeaderFindCache = { at: 0, key: "", el: null };
@@ -14646,6 +14653,7 @@
         let dirty = false;
         if (changes[DISPLAY_PREFS_KEY]) {
           displayPrefs = normalizeDisplayPrefs(changes[DISPLAY_PREFS_KEY].newValue);
+          if (!isHoverTipEnabled()) hideFeeTooltip();
           dirty = true;
         }
         if (changes[UI_LANG_KEY]) {
@@ -15071,24 +15079,36 @@
     }
   }
 
+  function isHoverTipEnabled() {
+    return Boolean(displayPrefs && displayPrefs.hoverTip === true);
+  }
+
   function ensureFeeTooltip() {
     if (feeTooltipEl && document.contains(feeTooltipEl)) return feeTooltipEl;
     const el = document.createElement("div");
     el.className = "gmgn-fee-mode-tooltip";
     el.setAttribute("role", "tooltip");
     el.hidden = true;
-    el.addEventListener("mouseenter", () => {
-      if (feeTooltipHideTimer) {
-        window.clearTimeout(feeTooltipHideTimer);
-        feeTooltipHideTimer = 0;
-      }
-    });
-    el.addEventListener("mouseleave", () => {
-      scheduleHideFeeTooltip(80);
-    });
     (document.documentElement || document.body).appendChild(el);
     feeTooltipEl = el;
+    installFeeTooltipGuards();
     return el;
+  }
+
+  function installFeeTooltipGuards() {
+    if (window.__flapFeeTipGuards === 1) return;
+    window.__flapFeeTipGuards = 1;
+    const hideNow = () => hideFeeTooltip();
+    try {
+      window.addEventListener("scroll", hideNow, true);
+      window.addEventListener("wheel", hideNow, { capture: true, passive: true });
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) hideNow();
+      });
+      window.addEventListener("blur", hideNow);
+    } catch (_err) {
+      // ignore
+    }
   }
 
   function scheduleHideFeeTooltip(ms) {
@@ -15100,10 +15120,16 @@
   }
 
   function hideFeeTooltip() {
+    if (feeTooltipHideTimer) {
+      window.clearTimeout(feeTooltipHideTimer);
+      feeTooltipHideTimer = 0;
+    }
     feeTooltipAnchor = null;
     if (!feeTooltipEl) return;
     feeTooltipEl.hidden = true;
     feeTooltipEl.innerHTML = "";
+    feeTooltipEl.style.left = "-9999px";
+    feeTooltipEl.style.top = "0px";
   }
 
   function appendTipKv(parent, keyText, valueText) {
@@ -15187,7 +15213,11 @@
   }
 
   function showFeeTooltip(anchor) {
-    if (!(anchor instanceof HTMLElement)) return;
+    if (!isHoverTipEnabled()) {
+      hideFeeTooltip();
+      return;
+    }
+    if (!(anchor instanceof HTMLElement) || !document.contains(anchor)) return;
     const data = badgeTipData.get(anchor);
     if (!data?.tipModel) return;
     if (feeTooltipHideTimer) {
@@ -15202,10 +15232,11 @@
   function bindBadgeTooltip(icon) {
     if (!(icon instanceof HTMLElement) || icon.dataset.feeTipBound === "1") return;
     icon.dataset.feeTipBound = "1";
-    icon.addEventListener("mouseenter", () => showFeeTooltip(icon));
-    icon.addEventListener("mouseleave", () => scheduleHideFeeTooltip(120));
-    icon.addEventListener("focus", () => showFeeTooltip(icon));
-    icon.addEventListener("blur", () => scheduleHideFeeTooltip(120));
+    icon.addEventListener("mouseenter", () => {
+      if (!isHoverTipEnabled()) return;
+      showFeeTooltip(icon);
+    });
+    icon.addEventListener("mouseleave", () => scheduleHideFeeTooltip(50));
   }
 
   function isFourTaxToken(token) {
@@ -15498,7 +15529,10 @@
     bindBadgeTooltip(icon);
     bindBadgeClick(icon);
     if (feeTooltipAnchor === icon) {
-      showFeeTooltip(icon);
+      if (isHoverTipEnabled()) showFeeTooltip(icon);
+      else hideFeeTooltip();
+    } else if (feeTooltipAnchor && !document.contains(feeTooltipAnchor)) {
+      hideFeeTooltip();
     }
   }
 
@@ -15946,20 +15980,14 @@
   function isGmgnTrenchMisplacedBadge(card, icon) {
     if (!isGmgnFixedTrenchCard(card)) return false;
     if (!(icon instanceof HTMLElement)) return false;
+    // 绝对坐标挂在卡片根上，对不齐 Tax 几何；每轮当错位会 560ms 拆挂闪烁。
+    if (icon.dataset.feePosMode === "absolute") return false;
     const taxHost = findGmgnTrenchTaxHost(card);
     if (taxHost) {
+      // 已贴在该 Tax 后面：hybrid 过长换行/裁切也不能重挂（重挂解不了，只会闪）。
+      if (icon.previousElementSibling === taxHost) return false;
       if (icon.dataset.feeMountSide !== "tax-after") return true;
-      if (icon.previousElementSibling !== taxHost) return true;
-      try {
-        const tr = taxHost.getBoundingClientRect();
-        const ir = icon.getBoundingClientRect();
-        if (tr.width <= 0 || ir.width <= 0) return true;
-        if (Math.abs(ir.top - tr.top) > 10) return true;
-        if (ir.left + 2 < tr.right - 6) return true;
-      } catch (_geo) {
-        return true;
-      }
-      return false;
+      return icon.previousElementSibling !== taxHost;
     }
     if (icon.dataset.feeLoading === "1") return false;
     if (!card.contains(icon)) {
@@ -16419,8 +16447,21 @@
       return;
     }
 
-    // Token header / stats / search title: append to the right of the row.
-    if (kind === "token-header" || kind === "token-stats" || kind === "overlay-title") {
+    // Token header: afterend of short CA，不要 append 进名称行（Debot 会把行 innerText/HTML 写进 document.title）。
+    if (kind === "token-header") {
+      icon.dataset.feeMountSide = "token-header";
+      const short = findDebotShortAddressNode(target);
+      const leaf =
+        short instanceof HTMLElement
+          ? short
+          : TARGET_SHORT_TOKEN_RE.test(String(target.textContent || "").trim()) &&
+              String(target.textContent || "").trim().length <= 24
+            ? target
+            : target;
+      leaf.insertAdjacentElement("afterend", icon);
+      return;
+    }
+    if (kind === "token-stats" || kind === "overlay-title") {
       if (kind === "overlay-title") icon.dataset.feeOverlayPos = "title";
       target.append(icon);
       return;
