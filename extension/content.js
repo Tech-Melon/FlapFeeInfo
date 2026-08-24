@@ -17,6 +17,7 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.34: 文章重点样式独立暗色/浅色主题（完整包）。
   // 0.8.33: 徽章悬停详情浮窗默认关；修浮窗粘住（pointer-events + 锚点丢失必关）。
   // 0.8.32: Debot/GMGN 禁止改 <title>；Debot 交易页不跑文章样式；顶栏徽章不进名称行。
   // 0.8.31: hybrid 长徽章不再因 Tax 几何/绝对坐标被每轮拆挂（消失闪烁）。

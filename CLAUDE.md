@@ -587,7 +587,8 @@ python tools/ctl.py watchdog-run
  - `0.8.31`：GMGN hybrid 长徽章 — 绝对坐标/Tax 几何不再每轮当错位拆挂
  - `0.8.32`：文章样式禁止改 `<title>`；Debot 交易页（dex-swap/K线/战壕）整站域名不扫；顶栏徽章不进名称行
  - `0.8.33`：徽章悬停详情浮窗（`displayPrefs.hoverTip`，默认关）；浮窗不接收指针，滚动/SPA/锚点丢失必关
-- 插件当前版本：见 `extension/manifest.json`（**0.8.33**，公开无剪切板）
+ - `0.8.34`：文章重点样式独立暗色/浅色两套主题（暗色页实心荧光笔，浅色页淡底深字）
+- 插件当前版本：见 `extension/manifest.json`（**0.8.34**，公开无剪切板）
 - page-hook：`HOOK_VER` **87**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
@@ -598,7 +599,7 @@ python tools/ctl.py watchdog-run
 - 剪切板跳转：`flapFeeInfo.clipJump.v1` = `{ enabled:false, target:"gmgn"|"debot", sites:"both"|"gmgn"|"debot", activeTabOnly:true, reuseSiteTab:false, pageMarkCa:false, overrideHostCa:false }`（默认关；开启需确认 + `clipboardRead` 可选权限）
 - 许可证（可选，默认免费）：`flapFeeInfo.license.v1` = `{ key:"" }`；有 key 时 content 带 `Authorization: Bearer`；Worker `REQUIRE_LICENSE` 默认 `0`（不强制）；开启付费时设 `1` 并写入 KV `license:<key>` → `{ exp, plan:"flap", flap_perm?:1 }`；**发卡**：TG Bot `flap_fee` **0.01 BNB/月**（动态尾数 0.009501~0.010100）；详见 `ENABLE_FLAP_MONETIZATION.md`
 - 复制即搜（仅完整包 / 仅 GMGN）：`flapFeeInfo.clipSearch.v1` = `{ enabled:false, minChars:2, maxChars:8 }`（默认关；开启需确认 + `clipboardRead`；与跳转共用 `clipJump.seen.v1` 去重）
-- 文章重点样式（仅完整包）：`flapFeeInfo.articleStyle.v1` = `{ enabled:false, domains:[{id,host,path?,enabled}], nouns:[{id,word,enabled}], skips:[{id,word,enabled}] }`（默认关；`host` 可带可选 `path` 前缀，如 `/popout/xTracker`；只改已填站点；`skips` 为屏蔽词，双击胶囊或弹窗添加，最多 48 条）
+- 文章重点样式（仅完整包）：`flapFeeInfo.articleStyle.v1` = `{ enabled:false, theme:"dark"|"light", domains:[{id,host,path?,enabled}], nouns:[{id,word,enabled}], skips:[{id,word,enabled}] }`（默认关；`theme` 默认 `dark` 实心荧光笔，独立于徽章主题；`host` 可带路径如 `/popout/xTracker`；`skips` 屏蔽词最多 48 条）
 
 ---
 
