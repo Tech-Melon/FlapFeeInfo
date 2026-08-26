@@ -86,12 +86,12 @@
   flex-shrink: 0 !important;
 }
 
-/* Trench row: sit beside the overflow-hidden name column, aligned with Tax. */
+/* Trench row: out of space-between flex so MC/买 keep their column. */
 .gmgn-fee-mode-icon--debot[data-fee-mount-side="tax-col"] {
-  align-self: flex-start;
-  margin-top: 12px;
-  margin-left: 4px;
-  margin-right: 6px;
+  position: absolute !important;
+  margin: 0 !important;
+  z-index: 4;
+  pointer-events: auto;
 }
 
 .gmgn-fee-mode-icon--gmgn {

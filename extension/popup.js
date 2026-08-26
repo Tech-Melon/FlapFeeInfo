@@ -107,9 +107,9 @@
       pref_unknown_desc: "链上无有效分配时",
       taxRecvSection: "资金接收方屏蔽",
       taxRecvHint:
-        "仅战壕/Meme「新创建」栏生效。不含 K 线顶栏。搜索弹层需另开上方「搜索框结果也屏蔽」。不额外请求；默认关闭。GMGN 开启或改条件后会刷新战壕页。金库类型见下方「金库屏蔽」。",
+        "仅战壕/Meme「新创建」栏生效。不含 K 线顶栏。搜索弹层需另开上方「搜索框结果也屏蔽」。不额外请求；默认关闭。GMGN / Debot 开启或改条件后会刷新战壕页。金库类型见下方「金库屏蔽」。",
       taxRecvEnableTitle: "启用屏蔽",
-      taxRecvEnableDesc: "开启后只过滤「新创建」列（GMGN 会刷新页面）",
+      taxRecvEnableDesc: "开启后只过滤「新创建」列（GMGN / Debot 会刷新页面）",
       taxRecvThresholdLabel: "阈值 ≥",
       taxRecvThresholdLabelGt: "阈值 >",
       taxRecvHint2:
@@ -125,7 +125,7 @@
       vaultHideHint:
         "仅 BSC「新创建」列。区分税收金库 🎁 与币股金库 📈。Four ffff 税收钱包不算金库。默认关闭。搜索弹层需另开「搜索框结果也屏蔽」。GMGN 开启或改条件后会刷新战壕页。",
       vaultHideEnableTitle: "启用金库屏蔽",
-      vaultHideEnableDesc: "开启后按下方选项过滤列表（GMGN 会刷新页面）",
+      vaultHideEnableDesc: "开启后按下方选项过滤列表（GMGN / Debot 会刷新页面）",
       vaultHideTaxTitle: "屏蔽税收金库",
       vaultHideTaxDesc: "Flap 纯 🎁 vault、GMGN is_vault（无篮子）",
       vaultHideStockTitle: "屏蔽币股金库",
@@ -249,9 +249,9 @@
       pref_unknown_desc: "no valid on-chain split",
       taxRecvSection: "Hide fund recipients",
       taxRecvHint:
-        "New/Creation column on trench lists only. No K-line header. Search overlay needs “Also hide in search” above. No extra requests; off by default. GMGN reloads the trench page when this changes. See Vault hide below.",
+        "New/Creation column on trench lists only. No K-line header. Search overlay needs “Also hide in search” above. No extra requests; off by default. GMGN / Debot reload the trench page when this changes. See Vault hide below.",
       taxRecvEnableTitle: "Enable hide",
-      taxRecvEnableDesc: "Only filter the New creation column (GMGN reloads)",
+      taxRecvEnableDesc: "Only filter the New creation column (GMGN / Debot reload)",
       taxRecvThresholdLabel: "Threshold ≥",
       taxRecvThresholdLabelGt: "Threshold >",
       taxRecvHint2:
@@ -265,9 +265,9 @@
       taxRecvAllowDup: "Already added",
       vaultHideSection: "Vault hide",
       vaultHideHint:
-        "BSC New creation column only. Tax vault 🎁 vs equity basket vault 📈. Four ffff tax wallet is not a vault. Off by default. Search overlay needs “Also hide in search”. GMGN reloads the trench page when this changes.",
+        "BSC New creation column only. Tax vault 🎁 vs equity basket vault 📈. Four ffff tax wallet is not a vault. Off by default. Search overlay needs “Also hide in search”. GMGN / Debot reload the trench page when this changes.",
       vaultHideEnableTitle: "Enable vault hide",
-      vaultHideEnableDesc: "Filter list by options below (GMGN reloads)",
+      vaultHideEnableDesc: "Filter list by options below (GMGN / Debot reload)",
       vaultHideTaxTitle: "Hide tax vaults",
       vaultHideTaxDesc: "Flap pure 🎁 vault, GMGN is_vault (no basket)",
       vaultHideStockTitle: "Hide equity vaults",
@@ -276,7 +276,7 @@
         "E.g. tax vault only → hide tax-wallet tokens, keep NVDA/FXIO baskets. Stacks with fund-recipient hide.",
       suffixHideSection: "Custom CA suffix hide",
       suffixHideHint:
-        "BSC only. Hide tokens whose CA ends with a hex suffix (multi-rule). Filters New creation column at data layer. Off by default. GMGN reloads the trench page when this changes.",
+        "BSC only. Hide tokens whose CA ends with a hex suffix (multi-rule). Filters New creation column at data layer. Off by default. GMGN / Debot reload the trench page when this changes.",
       suffixHideEnableTitle: "Enable suffix hide",
       suffixHideEnableDesc: "Filter list by rules below",
       suffixAddPlaceholder: "e.g. 0000 / dead",

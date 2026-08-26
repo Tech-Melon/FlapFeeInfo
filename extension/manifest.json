@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.60",
-  "description": "FlapFeeInfo 0.8.60: 可选把资金接收/金库屏蔽套到搜索框，默认关。",
+  "version": "0.8.71",
+  "description": "FlapFeeInfo 0.8.71: Debot 徽章贴 Tax 列、不挤买按钮；扫卡间隔对齐 GMGN。",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

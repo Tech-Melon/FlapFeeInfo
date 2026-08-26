@@ -138,10 +138,14 @@ FlapFeeInfo\extension
 3. 点当前插件的 `重新加载`（或重新「加载已解压」指向 `extension/`）。
 4. **硬刷新** GMGN / Debot 目标页（否则可能仍是旧 content script）。
 
-当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.60**）。
+当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.71**）。
 
 ### 0.8.x 要点（近期）
 
+- **0.8.71**：Debot 徽章贴 Tax 列外侧，不再挤掉 MC/买；战壕扫卡间隔对齐 GMGN
+- **0.8.70**：Debot 从 K 线回战壕首波铺满三列视口
+- **0.8.69**：Debot 只扫 BSC 卡；K→战壕走列根 cache-first
+- **0.8.68**：Debot 空金库组批打 `/modes`，稳的 💎/👨‍🍳 走 host-fee 快路径
 - **0.8.60**：可选把资金接收/金库屏蔽套到搜索框（默认关，保持现在不挡搜索）
 - **0.8.59**：GMGN 开启资金接收/金库屏蔽后会刷新战壕，新创建列才会真正滤掉
 - **0.8.58**：刷新网页少卡 — 首屏少扫 DOM/fiber，JSON 钩子先过滤再解析

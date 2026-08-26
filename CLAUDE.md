@@ -618,8 +618,18 @@ python tools/ctl.py watchdog-run
  - `0.8.58`：刷新卡顿 — `JSON.parse` 先判 s_tal 再解析；hydration 1.6s 内不整列扫 fiber；K 线 boot 少两次视口扫
  - `0.8.59`：GMGN 列表过滤（资金接收/金库/尾号）改条件后整页 reload，首包走已挂钩 HTTP；Debot 仍局部刷新
  - `0.8.60`：可选「搜索框结果也屏蔽」（默认关）；仅弹层打开时扫；search_v3 无 s_tal，按徽章/fee 缓存 DOM 隐藏
-- 插件当前版本：见 `extension/manifest.json`（**0.8.60**，公开无剪切板）
-- page-hook：`HOOK_VER` **104**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.62`：Debot 列表/搜索过滤对齐 GMGN — 改条件整页 reload；搜索弹层可屏蔽 👨‍🍳/🎁/📈；金库 DOM 兜底
+ - `0.8.63`：Debot 对齐 GMGN 扫描架构 — 砍 keep-alive force 扫、列根 scoped observer、K 线 settled 不 light 扫；新创建 👨‍🍳 HTTP 字段补齐 + 徽章兜底；隐藏行卡而非整列
+ - `0.8.64`：Debot 10min 实采 — `founder_pct_vault:0` 挡住 `founder_pct_dev`；稳的 💎/👨‍🍳 走快路径不打 /modes；HTTP/WS 过滤同一套 pct
+ - `0.8.65`：Debot 新卡走 SharedWorker `portal-ws-shared`（页面看不见 WSS）；过滤 Port `{type:socket-event,event:meme:new,args}`；`disableShareWorker` 仅 GMGN
+ - `0.8.66`：Debot /modes 降频 — 新卡 200ms/2 张组批（对齐 GMGN）；host-fee 就绪即出队；扫卡只取三列视口
+ - `0.8.67`：Debot Port 抽到 extra 后立刻 postMessage host-fee，避免 MO 入队后再打 /modes
+ - `0.8.68`：Debot `/modes` 每秒单打 — 空金库改 1.6s/2 张组批，禁热通道与 1s kick 立刻 flush；扫/更新限定三列 MuiPaper（对齐 GMGN 局部扫 + 按 CA 定向画）
+ - `0.8.69`：Debot 只扫 BSC 卡（href `/token/bsc` + ranks `chain:bsc`）；K→战壕改列根门禁 + cache-first burst/fill（修 first80 ticker 挡住 2.5s）
+ - `0.8.70`：Debot 回战壕首波快绘 16→28，避免三列 22 张目标漏 5；burst 更密
+ - `0.8.71`：Debot 徽章贴 Tax 列外侧绝对定位，不再进 space-between 挤掉 MC/买；列表扫间隔/mutation debounce 对齐 GMGN
+- 插件当前版本：见 `extension/manifest.json`（**0.8.71**，公开无剪切板）
+- page-hook：`HOOK_VER` **112**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  

@@ -9,7 +9,7 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 104;
+  const HOOK_VER = 112;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -73,6 +73,20 @@
       const set = new Set(prev.split(/[,\s]+/).filter(Boolean));
       set.add(k);
       el.setAttribute("data-flap-gmgn-transport", Array.from(set).sort().join(","));
+    } catch (_tr) {
+      // ignore
+    }
+  }
+
+  function noteDebotTransport(kind) {
+    const k = String(kind || "").trim();
+    if (!k) return;
+    try {
+      const el = document.documentElement;
+      const prev = String(el.getAttribute("data-flap-debot-transport") || "");
+      const set = new Set(prev.split(/[,\s]+/).filter(Boolean));
+      set.add(k);
+      el.setAttribute("data-flap-debot-transport", Array.from(set).sort().join(","));
     } catch (_tr) {
       // ignore
     }
@@ -392,7 +406,8 @@
       const q = String(u.searchParams.get("chain") || "").toLowerCase();
       // Debot 战壕主入口 /meme?chain=bsc（双站同 query）
       if (q === "bsc") return true;
-      if (q) return false;
+      // all/multi = 融合战壕：页级仍处理，行上 row.chain / /token/bsc 再筛
+      if (q && q !== "all" && q !== "multi") return false;
       const path = String(u.pathname || "");
       // GMGN K 线
       if (/^\/bsc(\/|$)/i.test(path) || /\/bsc\/token\//i.test(path)) return true;
@@ -558,18 +573,41 @@
     return Boolean(gmgnTal(item));
   }
 
+  function debotRowExtra(item) {
+    if (!item || typeof item !== "object") return null;
+    const meta = item.meta && typeof item.meta === "object" ? item.meta : null;
+    const extra = (meta && meta.launchpad_extra) || item.launchpad_extra;
+    return extra && typeof extra === "object" ? extra : null;
+  }
+
+  function debotFirstPositivePct(extra, keys) {
+    if (!extra || typeof extra !== "object" || !keys) return 0;
+    for (let i = 0; i < keys.length; i += 1) {
+      const n = Number(extra[keys[i]]);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+    return 0;
+  }
+
+  /** 资金接收 / 👨‍🍳：不能用 founder_pct_vault??founder_pct（vault 字段常是 0）。 */
+  function debotChefPct(extra) {
+    return debotFirstPositivePct(extra, [
+      "founder_pct_dev",
+      "founder_pct_other",
+      "founder_pct",
+      "marketing_pct"
+    ]);
+  }
+
+  function debotVaultMarketPct(extra) {
+    return debotFirstPositivePct(extra, ["founder_pct_vault", "marketing_pct_vault"]);
+  }
+
   function isDebotTokenItem(item) {
-    if (
-      !item ||
-      typeof item !== "object" ||
-      typeof item.contract !== "string" ||
-      !item.meta ||
-      typeof item.meta !== "object" ||
-      !item.meta.launchpad_extra ||
-      typeof item.meta.launchpad_extra !== "object"
-    ) {
+    if (!item || typeof item !== "object" || typeof item.contract !== "string") {
       return false;
     }
+    if (!debotRowExtra(item)) return false;
     return isTargetTaxTokenAddr(item.contract);
   }
 
@@ -692,7 +730,7 @@
     if (!extra || typeof extra !== "object") return null;
     if (extra.is_stocks_vault === true) return "stock";
     const basket = extra.basket_assets || extra.rwa_assets || extra.stock_assets;
-    if (Array.isArray(basket) && basket.length > 0) return "stock";
+    if (Array.isArray(basket) && basket.length >= 2) return "stock";
     if (extra.is_vault === true) return "tax";
     const founder = extra.founder_address || extra.fee_receiver;
     const vault = extra.vault_address;
@@ -1616,6 +1654,19 @@
     if (prev && prev.sig === sig && now - prev.at < HOST_FEE_DEDUPE_MS) return;
     hostFeeDedupe.set(addr, { sig, at: now });
     hostFeePending.push(entry);
+    try {
+      window.__flapFeeLastHostFeeQ = {
+        t: now,
+        addr,
+        div: Number(entry.dividend_bps) || 0,
+        mkt: Number(entry.market_bps) || 0,
+        vault: entry.is_vault === true,
+        needs: entry.__needsChain === true,
+        src: entry.source || ""
+      };
+    } catch (_q) {
+      // ignore
+    }
     maybeScheduleSecurityBasketFetch(entry);
     if (hostFeeFlushTimer) return;
     hostFeeFlushTimer = window.setTimeout(() => {
@@ -1766,8 +1817,23 @@
     });
   }
 
+  function debotRowChain(row) {
+    if (!row || typeof row !== "object") return "";
+    const direct = String(row.chain || "").trim().toLowerCase();
+    if (direct) return direct;
+    const meta = row.meta && typeof row.meta === "object" ? row.meta : null;
+    return String(meta?.chain || "").trim().toLowerCase();
+  }
+
+  function debotRowIsBsc(row) {
+    const chain = debotRowChain(row);
+    if (chain) return chain === "bsc";
+    return isBscPageContext();
+  }
+
   function debotHostFeeFromRow(row) {
     if (!row || typeof row !== "object") return null;
+    if (!debotRowIsBsc(row)) return null;
     const addr = String(row.contract || "")
       .trim()
       .toLowerCase();
@@ -1776,8 +1842,13 @@
     const extra = (meta && meta.launchpad_extra) || row.launchpad_extra;
     if (!extra || typeof extra !== "object") return null;
     const dividend_bps = ratioToBps(extra.dividend_pct ?? extra.holder_pct);
+    const is_vault_early =
+      extra.is_vault === true ||
+      extra.is_stocks_vault === true ||
+      debotVaultKind(extra) === "tax" ||
+      debotVaultKind(extra) === "stock";
     const market_bps = ratioToBps(
-      extra.founder_pct_vault ?? extra.founder_pct ?? extra.marketing_pct_vault ?? extra.marketing_pct
+      is_vault_early ? debotVaultMarketPct(extra) : debotChefPct(extra)
     );
     const deflation_bps = ratioToBps(extra.burn_pct);
     const lp_bps = ratioToBps(extra.liquidity_pct ?? extra.lp_pct);
@@ -1972,6 +2043,16 @@
     }
     let handled = false;
     try {
+      const portEv = unwrapDebotPortalPort(json);
+      if (portEv) {
+        noteDebotTransport("shared-worker");
+        if (/^meme:/i.test(portEv.event)) {
+          for (let i = 0; i < portEv.args.length; i += 1) {
+            collectHostFeesFromDebotArg(portEv.args[i]);
+          }
+        }
+        handled = true;
+      }
       collectPumpRankEnvelope(json);
       collectPumpRankData(json);
       if (json.data && json.data !== json) collectPumpRankData(json.data);
@@ -2123,7 +2204,9 @@
       text.indexOf("trenches_delta") !== -1 ||
       text.indexOf("trenches_update") !== -1 ||
       text.indexOf("trenches_rank") !== -1 ||
-      text.indexOf("new_creations") !== -1
+      text.indexOf("new_creations") !== -1 ||
+      text.indexOf("socket-event") !== -1 ||
+      text.indexOf("meme:new") !== -1
     );
   }
 
@@ -2143,7 +2226,12 @@
       const NativeJSONParse =
         (JSON.parse && JSON.parse.__flapFeeNative) || JSON.parse.bind(JSON);
       if (typeof data === "string") {
-        if (!textMightBeHostFeeFeed(data) && data.indexOf("pumpRank") === -1) {
+        if (
+          !textMightBeHostFeeFeed(data) &&
+          data.indexOf("pumpRank") === -1 &&
+          data.indexOf("socket-event") === -1 &&
+          data.indexOf("meme:new") === -1
+        ) {
           return;
         }
         const payload = unwrapSocketIoText(data);
@@ -3067,12 +3155,18 @@
             : new NativeSharedWorker(scriptURL);
         try {
           const u = String(scriptURL || "");
-          if (/\/workers\/gmgn/i.test(u) || /\/_next\/static\/workers\/gmgn/i.test(u)) {
+          if (
+            /\/workers\/gmgn/i.test(u) ||
+            /\/_next\/static\/workers\/gmgn/i.test(u) ||
+            /sharedSocketWorker/i.test(u) ||
+            /portal-ws/i.test(u)
+          ) {
             const list = (window.__flapFeeWorkersCreated =
               window.__flapFeeWorkersCreated || []);
-            list.push({ u: u.slice(0, 120), kind: "shared", ver: HOOK_VER });
+            list.push({ u: u.slice(0, 160), kind: "shared", ver: HOOK_VER });
             if (list.length > 20) list.shift();
-            noteGmgnTransport("shared-worker");
+            if (/gmgn/i.test(u)) noteGmgnTransport("shared-worker");
+            if (/sharedSocketWorker|portal-ws/i.test(u)) noteDebotTransport("shared-worker");
           }
         } catch (_e) {
           // ignore
@@ -3397,31 +3491,86 @@
 
   function debotRowHide(row) {
     if (!row || typeof row !== "object") return false;
+    if (!debotRowIsBsc(row)) return false;
     const contract = String(row.contract || "").toLowerCase();
     // 自定义尾号：任意 CA
     if (shouldHideByCustomSuffix(contract)) return true;
-    const meta = row.meta && typeof row.meta === "object" ? row.meta : null;
-    const extra = (meta && meta.launchpad_extra) || row.launchpad_extra;
-    if (vaultHideEnabled && extra && typeof extra === "object") {
+    const extra = debotRowExtra(row);
+    if (vaultHideEnabled && extra) {
       const vKind = debotVaultKind(extra);
       if (shouldHideVaultKind(vKind)) return true;
     }
     if (!taxRecvEnabled) return false;
     if (!isTargetTaxTokenAddr(contract)) return false;
-    if (!extra || typeof extra !== "object") return false;
+    if (!extra) return false;
     const vaultAddr = extra.vault_address;
     const recvAddr = extra.fee_receiver || extra.founder_address;
     const isVault =
       extra.is_vault === true ||
       extra.is_stocks_vault === true ||
+      debotVaultKind(extra) === "tax" ||
+      debotVaultKind(extra) === "stock" ||
       (vaultAddr && recvAddr && sameAddr(vaultAddr, recvAddr));
     if (isVault) return false;
-    const fp = Number(extra.founder_pct);
-    if (!Number.isFinite(fp)) return false;
+    const fp = debotChefPct(extra);
+    if (!(fp > 0)) return false;
     const pct = fp >= 99.9 && fp <= 100.0001 ? 100 : fp;
     if (!exceedsTaxRecvThreshold(pct, taxRecvPrefs.thresholdPct)) return false;
     if (isTaxRecvAllowlisted([extra.fee_receiver, extra.founder_address])) return false;
     return true;
+  }
+
+  /**
+   * Debot SharedWorker portal-ws-shared 端口帧（js-mcp 0.8.65）：
+   * { type:"socket-event", kind:"portal"|"main", event:"meme:new", args:[payload] }
+   * 真 WebSocket 在 Worker 里，页面只能看到 MessagePort。
+   */
+  function unwrapDebotPortalPort(data) {
+    if (!data || typeof data !== "object") return null;
+    if (String(data.type || "") !== "socket-event") return null;
+    const kind = String(data.kind || "");
+    if (kind !== "portal" && kind !== "main") return null;
+    return {
+      kind,
+      event: String(data.event || ""),
+      args: Array.isArray(data.args) ? data.args : []
+    };
+  }
+
+  function isDebotNewCreationSocketEvent(event) {
+    const e = String(event || "").toLowerCase();
+    return e === "meme:new" || e === "meme:new_creations";
+  }
+
+  function collectHostFeesFromDebotArg(arg) {
+    if (!arg || typeof arg !== "object") return;
+    collectHostFeesFromDebotRow(arg);
+    if (arg.token && typeof arg.token === "object") {
+      collectHostFeesFromDebotRow(arg.token);
+    }
+    if (arg.data && typeof arg.data === "object") {
+      collectHostFeesFromDebotArg(arg.data);
+    }
+    if (Array.isArray(arg.tokens)) {
+      for (let i = 0; i < arg.tokens.length; i += 1) {
+        collectHostFeesFromDebotRow(arg.tokens[i]);
+      }
+    }
+  }
+
+  function debotSocketArgShouldHide(arg) {
+    if (!arg || typeof arg !== "object") return false;
+    if (debotRowHide(arg)) return true;
+    if (arg.token && debotRowHide(arg.token)) return true;
+    if (arg.data && typeof arg.data === "object") {
+      if (debotSocketArgShouldHide(arg.data)) return true;
+    }
+    if (Array.isArray(arg.tokens) && arg.tokens.length) {
+      const before = arg.tokens.length;
+      filterTokenArrayInPlace(arg.tokens, "debot");
+      return arg.tokens.length === 0 && before > 0;
+    }
+    return false;
   }
 
   function tokenShouldHide(item) {
@@ -3671,7 +3820,7 @@
       if (kind === "debot") {
         const c = String(item?.contract || "").toLowerCase();
         if (c && shouldHideByCustomSuffix(c)) return true;
-        return isDebotTokenItem(item) && debotRowHide(item);
+        return debotRowHide(item);
       }
       return tokenShouldHide(item);
     };
@@ -4101,7 +4250,85 @@
    * 兼容：直接 delta、外层再包一层、Debot 风格 token 嵌套。
    */
   function filterLiveObject(data, channel) {
-    if (!prefsOn() || data == null || typeof data !== "object") {
+    if (data == null || typeof data !== "object") {
+      return { data, changed: false, drop: false };
+    }
+    const portEv = unwrapDebotPortalPort(data);
+    if (portEv) {
+      const isMemeEv = /^meme:/i.test(portEv.event);
+      if (!isMemeEv) {
+        return { data, changed: false, drop: false };
+      }
+      try {
+        noteDebotTransport("shared-worker");
+        const a0 = portEv.args[0];
+        window.__flapFeeLastDebotSock = {
+          t: Date.now(),
+          event: portEv.event,
+          kind: portEv.kind,
+          argN: portEv.args.length,
+          arg0Keys:
+            a0 && typeof a0 === "object" ? Object.keys(a0).slice(0, 24) : [],
+          contract: a0 && a0.contract,
+          action: a0 && a0.action,
+          hasMetaExtra: Boolean(a0 && a0.meta && a0.meta.launchpad_extra),
+          hasRowExtra: Boolean(a0 && a0.launchpad_extra),
+          hasToken: Boolean(a0 && a0.token && a0.token.contract),
+          tokenCa: a0 && a0.token && a0.token.contract,
+          tokenExtra: (function () {
+            const tok = a0 && a0.token;
+            const ex =
+              (tok && tok.meta && tok.meta.launchpad_extra) ||
+              (tok && tok.launchpad_extra) ||
+              null;
+            if (!ex || typeof ex !== "object") return null;
+            return {
+              div: ex.dividend_pct,
+              chef: ex.founder_pct_dev,
+              fp: ex.founder_pct,
+              vaultPct: ex.founder_pct_vault,
+              is_vault: ex.is_vault
+            };
+          })()
+        };
+        for (let i = 0; i < portEv.args.length; i += 1) {
+          collectHostFeesFromDebotArg(portEv.args[i]);
+        }
+        flushHostFeePendingNow();
+      } catch (_hf) {
+        // ignore
+      }
+      if (
+        prefsOn() &&
+        isDebotNewCreationSocketEvent(portEv.event)
+      ) {
+        let removed = 0;
+        const kept = [];
+        for (let i = 0; i < portEv.args.length; i += 1) {
+          const arg = portEv.args[i];
+          if (debotSocketArgShouldHide(arg)) {
+            removed += 1;
+            continue;
+          }
+          kept.push(arg);
+        }
+        if (removed > 0) {
+          data.args = kept;
+          noteFilter({
+            channel: channel || "port",
+            removed,
+            thr: taxRecvPrefs.thresholdPct,
+            shape: "debot-port"
+          });
+          if (kept.length === 0) {
+            return { data: null, changed: true, drop: true };
+          }
+          return { data, changed: true, drop: false };
+        }
+      }
+      return { data, changed: false, drop: false };
+    }
+    if (!prefsOn()) {
       return { data, changed: false, drop: false };
     }
     if (tokenShouldHide(data)) {
@@ -4204,7 +4431,7 @@
     const tryOne = (msg) => {
       if (!msg || typeof msg !== "object") return;
       const tok = msg.token;
-      if (tok && isDebotTokenItem(tok) && debotRowHide(tok)) {
+      if (tok && debotRowHide(tok)) {
         try {
           msg.action = "noop";
           delete msg.token;
@@ -4223,7 +4450,7 @@
         let w = 0;
         for (let i = 0; i < msg.tokens.length; i++) {
           const row = msg.tokens[i];
-          if (isDebotTokenItem(row) && debotRowHide(row)) {
+          if (debotRowHide(row)) {
             removed += 1;
             continue;
           }
@@ -4607,7 +4834,16 @@
 
   function syncGmgnShareWorkerMode(enabled) {
     try {
-      // 仅 BSC 写 disableShareWorker，避免 robinhood 等链被误伤
+      // 仅 GMGN：开过滤时改走页面 WSS。Debot 必须留着 portal-ws-shared。
+      const host = location.hostname || "";
+      if (host.endsWith("debot.ai") || host.endsWith("gungnir.bot")) {
+        if (localStorage.getItem(OWNED_DISABLE_SW) === "1") {
+          localStorage.removeItem("disableShareWorker");
+          localStorage.removeItem(OWNED_DISABLE_SW);
+        }
+        return;
+      }
+      if (!host.endsWith("gmgn.ai")) return;
       if (enabled && isBscPageContext()) {
         localStorage.setItem("disableShareWorker", "true");
         localStorage.setItem(OWNED_DISABLE_SW, "1");
@@ -4777,16 +5013,21 @@
             : new NativeSharedWorker(scriptURL);
         try {
           const u = String(scriptURL || "");
-          if (/\/workers\/gmgn/i.test(u) || /\/_next\/static\/workers\/gmgn/i.test(u)) {
+          if (
+            /\/workers\/gmgn/i.test(u) ||
+            /\/_next\/static\/workers\/gmgn/i.test(u) ||
+            /sharedSocketWorker/i.test(u) ||
+            /portal-ws/i.test(u)
+          ) {
             const list = (window.__flapFeeWorkersCreated =
               window.__flapFeeWorkersCreated || []);
-            list.push({ u: u.slice(0, 120), kind: "shared", ver: HOOK_VER });
+            list.push({ u: u.slice(0, 160), kind: "shared", ver: HOOK_VER });
             if (list.length > 20) list.shift();
+            if (/gmgn/i.test(u)) noteGmgnTransport("shared-worker");
+            if (/sharedSocketWorker|portal-ws/i.test(u)) noteDebotTransport("shared-worker");
             try {
               if (sw.port) {
                 sw.port.__flapFeeGmgnPort = HOOK_VER;
-                // 若业务先拿到 native port 再赋 onmessage，原型 hook 已覆盖；
-                // 这里再 start 不强制，避免双 start
               }
             } catch (_p) {
               // ignore
@@ -4829,7 +5070,8 @@
         text.indexOf("trenches_delta") !== -1 ||
         text.indexOf("trenches_update") !== -1 ||
         text.indexOf("meme:new") !== -1 ||
-        text.indexOf("meme:update") !== -1
+        text.indexOf("meme:update") !== -1 ||
+        text.indexOf("socket-event") !== -1
       );
     }
 
@@ -4838,6 +5080,12 @@
 
     function filterParsedFeed(parsed, channel, prefix) {
       if (!parsed || typeof parsed !== "object") return null;
+      if (unwrapDebotPortalPort(parsed)) {
+        const r = filterLiveObject(parsed, channel || "port");
+        if (r.drop) return (prefix || "") + JSON.stringify({ type: "socket-event", kind: parsed.kind, event: "noop", args: [] });
+        if (r.changed) return (prefix || "") + JSON.stringify(r.data || parsed);
+        return null;
+      }
       // delta 不依赖 quickMight — 直接专用过滤
       const isDelta =
         parsed.channel === "trenches_delta" ||
@@ -5207,7 +5455,9 @@
             .join(",");
           return `${taxRecvEnabled ? 1 : 0}:${taxRecvPrefs.thresholdPct}:a${allow}|s${
             suffixHideEnabled ? 1 : 0
-          }:${suf}`;
+          }:${suf}|v${vaultHideEnabled ? 1 : 0}:${
+            vaultHidePrefs.hideTaxVault ? 1 : 0
+          }:${vaultHidePrefs.hideStockVault ? 1 : 0}`;
         };
 
         const filteredText = (xhr) => {
