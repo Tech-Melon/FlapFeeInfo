@@ -616,7 +616,9 @@ python tools/ctl.py watchdog-run
  - `0.8.56`：金库 / 股票名报价 / 单成分篮子 fiber 不定案，⏳ 等 `/modes`；链上结果不被 host-fee 覆盖
  - `0.8.57`：15min 新创建 — 稳的 💎/👨‍🍳/已出成分 📈 快路径；空金库与无成分币股走 `/modes`；降扫卡 debounce
  - `0.8.58`：刷新卡顿 — `JSON.parse` 先判 s_tal 再解析；hydration 1.6s 内不整列扫 fiber；K 线 boot 少两次视口扫
-- 插件当前版本：见 `extension/manifest.json`（**0.8.58**，公开无剪切板）
+ - `0.8.59`：GMGN 列表过滤（资金接收/金库/尾号）改条件后整页 reload，首包走已挂钩 HTTP；Debot 仍局部刷新
+ - `0.8.60`：可选「搜索框结果也屏蔽」（默认关）；仅弹层打开时扫；search_v3 无 s_tal，按徽章/fee 缓存 DOM 隐藏
+- 插件当前版本：见 `extension/manifest.json`（**0.8.60**，公开无剪切板）
 - page-hook：`HOOK_VER` **104**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
@@ -624,6 +626,7 @@ python tools/ctl.py watchdog-run
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  
 - 尾号屏蔽：`flapFeeInfo.suffixHide.v1` = `{ enabled, rules:[{id,suffix,enabled}] }`（最多 24 条 hex 1–12 位）
 - 资金接收：`flapFeeInfo.taxRecvHide.v1` = `{ enabled, thresholdPct, allow:[{id,address,enabled}] }`（白名单最多 24 个 0x 地址）
+- 搜索框也屏蔽：`flapFeeInfo.searchHide.v1` = `{ enabled:false }`（默认关；开启后把已启用的资金接收/金库规则套到 GMGN 搜索弹层）
 - 剪切板跳转：`flapFeeInfo.clipJump.v1` = `{ enabled:false, target:"gmgn"|"debot", sites:"both"|"gmgn"|"debot", activeTabOnly:true, reuseSiteTab:false, pageMarkCa:false, overrideHostCa:false }`（默认关；开启需确认 + `clipboardRead` 可选权限）
 - 许可证（可选，默认免费）：`flapFeeInfo.license.v1` = `{ key:"" }`；有 key 时 content 带 `Authorization: Bearer`；Worker `REQUIRE_LICENSE` 默认 `0`（不强制）；开启付费时设 `1` 并写入 KV `license:<key>` → `{ exp, plan:"flap", flap_perm?:1 }`；**发卡**：TG Bot `flap_fee` **0.01 BNB/月**（动态尾数 0.009501~0.010100）；详见 `ENABLE_FLAP_MONETIZATION.md`
 - 复制即搜（仅完整包 / 仅 GMGN）：`flapFeeInfo.clipSearch.v1` = `{ enabled:false, minChars:2, maxChars:8 }`（默认关；开启需确认 + `clipboardRead`；与跳转共用 `clipJump.seen.v1` 去重）

@@ -165,6 +165,14 @@
         <span class="cat-desc" data-i18n="catFilterDesc">战壕新创建列</span>
       </div>
       <div class="cat-body">
+        <label class="row drag-row" for="searchHideEnabled">
+          <input type="checkbox" id="searchHideEnabled" />
+          <span class="emoji">🔎</span>
+          <div class="label">
+            <strong data-i18n="searchHideTitle">搜索框结果也屏蔽</strong>
+            <span data-i18n="searchHideDesc">默认关。开启后，已启用的资金接收/金库规则同样作用于搜索弹层</span>
+          </div>
+        </label>
         <section class="section">
           <button type="button" class="collapse-head" data-collapse="taxRecv" aria-expanded="false">
             <span class="collapse-head-left">
@@ -176,14 +184,14 @@
           <div class="collapse-body" id="taxRecvCollapseBody" hidden>
             <div class="tax-recv-section" id="taxRecvSection">
               <p class="theme-hint" data-i18n="taxRecvHint">
-                仅战壕/Meme「新创建」栏生效。不含 K 线顶栏、搜索弹层。不额外请求；默认关闭。金库类型见下方「金库屏蔽」。
+                仅战壕/Meme「新创建」栏生效。不含 K 线顶栏。搜索弹层需另开上方「搜索框结果也屏蔽」。不额外请求；默认关闭。GMGN 开启或改条件后会刷新战壕页。金库类型见下方「金库屏蔽」。
               </p>
               <label class="row drag-row" for="taxRecvEnabled">
                 <input type="checkbox" id="taxRecvEnabled" />
                 <span class="emoji">🚫</span>
                 <div class="label">
                   <strong data-i18n="taxRecvEnableTitle">启用屏蔽</strong>
-                  <span data-i18n="taxRecvEnableDesc">开启后按下方阈值隐藏列表卡</span>
+                  <span data-i18n="taxRecvEnableDesc">开启后只过滤「新创建」列（GMGN 会刷新页面）</span>
                 </div>
               </label>
               <div class="tax-recv-threshold-row" id="taxRecvThresholdRow">
@@ -252,14 +260,14 @@
           <div class="collapse-body" id="vaultHideCollapseBody" hidden>
             <div class="tax-recv-section" id="vaultHideSection">
               <p class="theme-hint" data-i18n="vaultHideHint">
-                仅 BSC「新创建」列。区分税收金库 🎁（纯 vault / 税收钱包）与币股金库 📈（dividend_tokens 篮子）。Four ffff 的税收钱包不算金库。默认关闭。
+                仅 BSC「新创建」列。区分税收金库 🎁（纯 vault / 税收钱包）与币股金库 📈（dividend_tokens 篮子）。Four ffff 的税收钱包不算金库。默认关闭。搜索弹层需另开「搜索框结果也屏蔽」。GMGN 开启或改条件后会刷新战壕页。
               </p>
               <label class="row drag-row" for="vaultHideEnabled">
                 <input type="checkbox" id="vaultHideEnabled" />
                 <span class="emoji">🎁</span>
                 <div class="label">
                   <strong data-i18n="vaultHideEnableTitle">启用金库屏蔽</strong>
-                  <span data-i18n="vaultHideEnableDesc">开启后按下方选项过滤列表</span>
+                  <span data-i18n="vaultHideEnableDesc">开启后按下方选项过滤列表（GMGN 会刷新页面）</span>
                 </div>
               </label>
               <div class="vault-hide-options" id="vaultHideOptions">
@@ -298,7 +306,7 @@
           <div class="collapse-body" id="suffixHideCollapseBody" hidden>
             <div class="tax-recv-section" id="suffixHideSection">
               <p class="theme-hint" data-i18n="suffixHideHint">
-                仅 BSC 生效。隐藏 CA 以指定十六进制尾号结尾的代币（可多条）。战壕「新创建」列数据层过滤。默认关闭。
+                仅 BSC 生效。隐藏 CA 以指定十六进制尾号结尾的代币（可多条）。战壕「新创建」列数据层过滤。默认关闭。GMGN 开启或改条件后会刷新战壕页。
               </p>
               <label class="row drag-row" for="suffixHideEnabled">
                 <input type="checkbox" id="suffixHideEnabled" />

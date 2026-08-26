@@ -17,6 +17,8 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.60: 搜索弹层可选套用资金接收/金库屏蔽（默认关；仅弹层打开时扫，search_v3 无 s_tal）。
+  // 0.8.59: GMGN 列表过滤（资金接收/金库/尾号）改条件后整页 reload，首包走已挂钩 HTTP。
   // 0.8.58: 刷新降载 — JSON.parse 先过滤再解析；hydration 1.6s 内不整列扫 fiber；少 boot 扫。
   // 0.8.57: 稳的 💎/👨‍🍳/已出成分的📈 走快路径；空金库/无成分币股走 /modes。降 mutation 负载。
   // 0.8.56: 金库/股票名报价/单成分篮子本地不定案，交给 /modes；链上结果不被 host-fee 覆盖。
@@ -501,6 +503,7 @@
   const SUFFIX_HIDE_KEY = "flapFeeInfo.suffixHide.v1";
   /** 金库屏蔽：税收金库 🎁 vs 币股金库 📈 */
   const VAULT_HIDE_KEY = "flapFeeInfo.vaultHide.v1";
+  const SEARCH_HIDE_KEY = "flapFeeInfo.searchHide.v1";
   const LICENSE_KEY = "flapFeeInfo.license.v1";
   const DEVICE_ID_KEY = "flapFeeInfo.deviceId.v1";
   /** Optional paid key; empty = free mode. Sent as Authorization when set. */
@@ -518,6 +521,8 @@
     hideTaxVault: false,
     hideStockVault: false
   };
+  const DEFAULT_SEARCH_HIDE = { enabled: false };
+  const SEARCH_HIDE_ATTR = "data-flap-search-hidden";
   const SUFFIX_HIDE_MAX_RULES = 24;
   const TAX_RECV_HIDE_CLASS = "flap-fee-tax-recv-hidden";
   const TAX_RECV_HIDE_ATTR = "data-flap-tax-recv-hidden";
@@ -1890,10 +1895,14 @@
   /** address(lower) -> { recvPct, isVault, source } from host list APIs (page-hook). */
   const taxRecvMap = new Map();
   let taxRecvHideApplyTimer = 0;
+  let gmgnFilterReloadTimer = 0;
   /** @type {{ enabled: boolean, rules: { id: string, suffix: string, enabled: boolean }[] }} */
   let suffixHidePrefs = { enabled: false, rules: [] };
   /** @type {{ enabled: boolean, hideTaxVault: boolean, hideStockVault: boolean }} */
   let vaultHidePrefs = { ...DEFAULT_VAULT_HIDE };
+  let searchHidePrefs = { ...DEFAULT_SEARCH_HIDE };
+  let searchOverlayDidHide = false;
+  let searchOverlayHideTimer = 0;
   const requestQueue = new Set();
   let batchTimer = null;
   /** Delay of the pending batchTimer (ms); prefer shorter reschedules (hot tokens). */
@@ -2522,6 +2531,11 @@
       ms: Math.round(performance.now() - t0)
     });
     lastOverlayFastStats = { painted, queued, seen: seen.size };
+    try {
+      scheduleSearchOverlayHideApply(60);
+    } catch (_hide) {
+      // ignore
+    }
     return painted;
   }
 
@@ -13336,8 +13350,9 @@
   }
 
   /**
-   * List pages use virtual lists / rank tables. Prefer MAIN-world JSON filter +
-   * partial new_creation replay so React re-hydrates without full reload.
+   * List pages use virtual lists / rank tables.
+   * GMGN：改过滤条件后整页 reload（SW 须在 document_start 看到 disableShareWorker）。
+   * Debot：MAIN-world JSON filter + 局部重放 ranks。
    */
   function isTaxRecvListReflowPage() {
     try {
@@ -13422,7 +13437,41 @@
   }
 
   /**
-   * After enable/threshold/suffix/vault change: partial list refresh (no full reload).
+   * GMGN 战壕：prefs 已写入 LS 后整页刷新。
+   * 懒挂载钩子拦不到已有 SharedWorker；softRefresh 在 lastGmgnTrench 为空时空转。
+   */
+  function scheduleGmgnListFilterReload(reason) {
+    if (!isGmgnHost() || !isTaxRecvListReflowPage()) return false;
+    try {
+      const sig = buildListFilterSig("gmgn-reload");
+      const key = "flapFeeInfo.listFilterReload.v1";
+      const prev = sessionStorage.getItem(key) || "";
+      if (prev === sig && reason !== "force") return true;
+      sessionStorage.setItem(key, sig);
+    } catch (_ss) {
+      // ignore — still reload once
+    }
+    if (gmgnFilterReloadTimer) {
+      window.clearTimeout(gmgnFilterReloadTimer);
+      gmgnFilterReloadTimer = 0;
+    }
+    gmgnFilterReloadTimer = window.setTimeout(() => {
+      gmgnFilterReloadTimer = 0;
+      try {
+        if (typeof isExtensionContextValid === "function" && !isExtensionContextValid()) {
+          return;
+        }
+        location.reload();
+      } catch (_e) {
+        // ignore
+      }
+    }, 150);
+    return true;
+  }
+
+  /**
+   * After enable/threshold/suffix/vault change.
+   * GMGN 战壕整页 reload；Debot 仍局部重放 ranks。
    */
   function scheduleTaxRecvListReflow(reason) {
     if (!isTaxRecvListReflowPage()) return;
@@ -13433,6 +13482,7 @@
       reason === "suffix-hide-change" ||
       reason === "vault-hide-change";
     if (!knownReason) return;
+    if (scheduleGmgnListFilterReload(reason)) return;
     scheduleListFilterPartialRefresh(reason);
   }
 
@@ -13451,11 +13501,14 @@
   function hydrateTaxRecvHidePrefs() {
     if (!isExtensionContextValid() || !chrome.storage?.local) return;
     try {
-      chrome.storage.local.get([TAX_RECV_HIDE_KEY, SUFFIX_HIDE_KEY, VAULT_HIDE_KEY, LICENSE_KEY, DEVICE_ID_KEY], (items) => {
+      chrome.storage.local.get(
+        [TAX_RECV_HIDE_KEY, SUFFIX_HIDE_KEY, VAULT_HIDE_KEY, SEARCH_HIDE_KEY, LICENSE_KEY, DEVICE_ID_KEY],
+        (items) => {
         if (!isExtensionContextValid() || chrome.runtime.lastError) return;
         taxRecvHidePrefs = normalizeTaxRecvHidePrefs(items?.[TAX_RECV_HIDE_KEY]);
         suffixHidePrefs = normalizeSuffixHidePrefs(items?.[SUFFIX_HIDE_KEY]);
         vaultHidePrefs = normalizeVaultHidePrefs(items?.[VAULT_HIDE_KEY]);
+        searchHidePrefs = normalizeSearchHidePrefs(items?.[SEARCH_HIDE_KEY]);
         const lic = items?.[LICENSE_KEY];
         licenseAccessKey = String(lic?.key || "").trim();
         let devId = normalizeLicenseDeviceId(items?.[DEVICE_ID_KEY]);
@@ -13637,6 +13690,225 @@
       // ignore
     }
     return false;
+  }
+
+  function normalizeSearchHidePrefs(raw) {
+    return { enabled: raw && raw.enabled === true };
+  }
+
+  function isSearchHideEnabled() {
+    return Boolean(searchHidePrefs && searchHidePrefs.enabled === true && isAllowedScanChain());
+  }
+
+  function vaultKindFromFeeOrBadge(token, card) {
+    const fee =
+      modeCache.get(token) ||
+      (typeof isPersistentCacheHit === "function" && isPersistentCacheHit(token)
+        ? persistentCache.get(token)
+        : null);
+    if (fee && typeof fee === "object") {
+      if (fee.is_stocks_vault === true) return "stock";
+      if (fee.is_vault === true) return "tax";
+    }
+    let text = "";
+    try {
+      const badge = card && card.querySelector?.(".gmgn-fee-mode-icon");
+      text = badge ? String(badge.textContent || "") : "";
+    } catch (_b) {
+      text = "";
+    }
+    if (text.includes("📈")) return "stock";
+    if (text.includes("🎁")) return "tax";
+    return null;
+  }
+
+  function chefPctFromBadge(card) {
+    let text = "";
+    try {
+      const badge = card && card.querySelector?.(".gmgn-fee-mode-icon");
+      text = badge ? String(badge.textContent || "") : "";
+    } catch (_b) {
+      text = "";
+    }
+    if (!text.includes("👨‍🍳")) return null;
+    const m = text.match(/👨‍🍳\s*(\d+)\s*%/);
+    if (m) return Number(m[1]);
+    return 100;
+  }
+
+  function shouldHideSearchOverlayToken(token, card) {
+    if (!isSearchHideEnabled()) return false;
+    const addr = String(token || "").toLowerCase();
+    if (!TARGET_TOKEN_RE.test(addr)) return false;
+    const vk = vaultKindFromFeeOrBadge(addr, card);
+    if (vaultHidePrefs && vaultHidePrefs.enabled === true && vk) {
+      if (vk === "stock" && vaultHidePrefs.hideStockVault === true) return true;
+      if (vk === "tax" && vaultHidePrefs.hideTaxVault === true) return true;
+    }
+    if (taxRecvHidePrefs && taxRecvHidePrefs.enabled === true) {
+      const info = resolveTaxRecvInfo(addr);
+      if (info && shouldHideTaxRecv(info)) return true;
+      if ((!info || !(Number(info.recvPct) > 0)) && vk == null) {
+        const pct = chefPctFromBadge(card);
+        if (pct != null) {
+          return shouldHideTaxRecv({ recvPct: pct, isVault: false, source: "badge" });
+        }
+      }
+    }
+    return false;
+  }
+
+  function setCardSearchHidden(card, hide) {
+    if (!(card instanceof HTMLElement)) return;
+    const on = hide === true;
+    const was = card.getAttribute(SEARCH_HIDE_ATTR) === "1";
+    if (on === was) {
+      if (on && card.style.display !== "none") card.style.display = "none";
+      return;
+    }
+    if (on) {
+      card.setAttribute(SEARCH_HIDE_ATTR, "1");
+      card.style.display = "none";
+      return;
+    }
+    card.removeAttribute(SEARCH_HIDE_ATTR);
+    if (card.style.display === "none") card.style.display = "";
+  }
+
+  function collectSearchOverlayCards() {
+    const out = [];
+    const seen = new Set();
+    const add = (card, token) => {
+      if (!(card instanceof HTMLElement) || seen.has(card)) return;
+      if (typeof isBadgeMountForbidden === "function" && isBadgeMountForbidden(card)) return;
+      const addr = String(token || "").toLowerCase();
+      seen.add(card);
+      out.push({ card, token: addr });
+    };
+    try {
+      document.querySelectorAll("[data-flap-overlay-card='1']").forEach((el) => {
+        if (!(el instanceof HTMLElement)) return;
+        const token =
+          el.dataset[CARD_MARK] ||
+          el.getAttribute(CARD_DATA) ||
+          (typeof normalizeToken === "function"
+            ? normalizeToken(el.getAttribute("href") || "")
+            : "");
+        add(el, token);
+      });
+    } catch (_ov) {
+      // ignore
+    }
+    try {
+      const list =
+        document.querySelector('[data-sentry-source-file="SearchCoinList.tsx"]') ||
+        document.querySelector('[data-sentry-source-file="SearchModalDetail.tsx"]');
+      if (list) {
+        list.querySelectorAll("[href*='/token/0x'], [href*='/bsc/token/0x']").forEach((el) => {
+          if (!(el instanceof HTMLElement)) return;
+          const card =
+            (typeof findGmgnOverlayCard === "function" && findGmgnOverlayCard(el)) || el;
+          const token =
+            typeof normalizeToken === "function"
+              ? normalizeToken(el.getAttribute("href") || "")
+              : "";
+          add(card, token);
+        });
+      }
+    } catch (_list) {
+      // ignore
+    }
+    try {
+      document.querySelectorAll(`[${SEARCH_HIDE_ATTR}="1"]`).forEach((el) => {
+        if (!(el instanceof HTMLElement) || seen.has(el)) return;
+        const token =
+          el.dataset[CARD_MARK] ||
+          (typeof normalizeToken === "function"
+            ? normalizeToken(el.getAttribute("href") || "")
+            : "");
+        add(el, token);
+      });
+    } catch (_hid) {
+      // ignore
+    }
+    return out;
+  }
+
+  function isSearchOverlayUiOpen() {
+    if (lastOverlayOpen) return true;
+    if (typeof isOverlayFast === "function" && isOverlayFast()) return true;
+    return false;
+  }
+
+  function clearSearchOverlayHidesIfAny() {
+    if (!searchOverlayDidHide) return;
+    try {
+      document.querySelectorAll(`[${SEARCH_HIDE_ATTR}="1"]`).forEach((el) => {
+        if (el instanceof HTMLElement) setCardSearchHidden(el, false);
+      });
+    } catch (_clr) {
+      // ignore
+    }
+    searchOverlayDidHide = false;
+  }
+
+  function applySearchOverlayHideNow() {
+    if (!isSearchOverlayUiOpen()) {
+      clearSearchOverlayHidesIfAny();
+      return;
+    }
+    const want =
+      isSearchHideEnabled() &&
+      Boolean(
+        (taxRecvHidePrefs && taxRecvHidePrefs.enabled === true) ||
+          (vaultHidePrefs && vaultHidePrefs.enabled === true)
+      );
+    if (!want) {
+      clearSearchOverlayHidesIfAny();
+      return;
+    }
+    const keep = new Set();
+    let hid = false;
+    for (const row of collectSearchOverlayCards()) {
+      keep.add(row.card);
+      const hide = TARGET_TOKEN_RE.test(row.token)
+        ? shouldHideSearchOverlayToken(row.token, row.card)
+        : false;
+      setCardSearchHidden(row.card, hide);
+      if (hide) hid = true;
+    }
+    try {
+      document.querySelectorAll(`[${SEARCH_HIDE_ATTR}="1"]`).forEach((el) => {
+        if (el instanceof HTMLElement && !keep.has(el)) setCardSearchHidden(el, false);
+      });
+    } catch (_stale) {
+      // ignore
+    }
+    if (hid) searchOverlayDidHide = true;
+  }
+
+  function scheduleSearchOverlayHideApply(delayMs) {
+    if (!isSearchOverlayUiOpen()) {
+      if (searchOverlayHideTimer) {
+        window.clearTimeout(searchOverlayHideTimer);
+        searchOverlayHideTimer = 0;
+      }
+      clearSearchOverlayHidesIfAny();
+      return;
+    }
+    const d = Math.max(0, Number(delayMs) || 0);
+    if (searchOverlayHideTimer) {
+      window.clearTimeout(searchOverlayHideTimer);
+      searchOverlayHideTimer = 0;
+    }
+    searchOverlayHideTimer = window.setTimeout(() => {
+      searchOverlayHideTimer = 0;
+      try {
+        applySearchOverlayHideNow();
+      } catch (_err) {
+        // ignore
+      }
+    }, d);
   }
 
   function shouldHideTaxRecv(entry) {
@@ -14014,6 +14286,13 @@
         applyTaxRecvHideNow();
       } catch (_err) {
         // ignore
+      }
+      if (lastOverlayOpen || (typeof isOverlayFast === "function" && isOverlayFast())) {
+        try {
+          applySearchOverlayHideNow();
+        } catch (_ov) {
+          // ignore
+        }
       }
     }, d);
   }
@@ -15170,6 +15449,10 @@
             clearAllTaxRecvDomHide();
             scheduleTaxRecvHideApply(0);
           }
+        }
+        if (changes[SEARCH_HIDE_KEY]) {
+          searchHidePrefs = normalizeSearchHidePrefs(changes[SEARCH_HIDE_KEY].newValue);
+          scheduleSearchOverlayHideApply(0);
         }
         if (changes[LICENSE_KEY]) {
           licenseAccessKey = String(changes[LICENSE_KEY].newValue?.key || "").trim();
@@ -17351,6 +17634,11 @@
     if (!overlayNow && lastOverlayOpen) {
       lastOverlayOpen = false;
       overlayFastUntil = 0;
+      try {
+        clearSearchOverlayHidesIfAny();
+      } catch (_clrOv) {
+        // ignore
+      }
       if (isGmgnHost()) {
         cancelGmgnOverlayPaint();
         if (gmgnEmbeddedDirtyCards.size > 0) scheduleGmgnEmbeddedDirtyPass();

@@ -9,6 +9,7 @@
   const TAX_RECV_HIDE_KEY = "flapFeeInfo.taxRecvHide.v1";
   const SUFFIX_HIDE_KEY = "flapFeeInfo.suffixHide.v1";
   const VAULT_HIDE_KEY = "flapFeeInfo.vaultHide.v1";
+  const SEARCH_HIDE_KEY = "flapFeeInfo.searchHide.v1";
   const LICENSE_KEY = "flapFeeInfo.license.v1";
   const DEVICE_ID_KEY = "flapFeeInfo.deviceId.v1";
   const LICENSE_API_BASE = "https://flap-fee-info.tech-melon.workers.dev";
@@ -22,6 +23,7 @@
     hideTaxVault: false,
     hideStockVault: false
   };
+  const DEFAULT_SEARCH_HIDE = { enabled: false };
   const DEFAULT_LICENSE = { key: "" };
   const SUFFIX_HIDE_MAX_RULES = 24;
   const DEFAULT_OFFSETS = {
@@ -41,6 +43,8 @@
       catBadgeDesc: "主题与显示项",
       catFilter: "列表过滤",
       catFilterDesc: "战壕新创建列",
+      searchHideTitle: "搜索框结果也屏蔽",
+      searchHideDesc: "默认关。开启后，已启用的资金接收/金库规则同样作用于搜索弹层",
       catPosition: "徽章位置",
       catPositionDesc: "坐标与拖拽",
       themeSection: "颜色主题",
@@ -103,9 +107,9 @@
       pref_unknown_desc: "链上无有效分配时",
       taxRecvSection: "资金接收方屏蔽",
       taxRecvHint:
-        "仅战壕/Meme「新创建」栏生效。不含 K 线顶栏、搜索弹层。不额外请求；默认关闭。金库类型见下方「金库屏蔽」。",
+        "仅战壕/Meme「新创建」栏生效。不含 K 线顶栏。搜索弹层需另开上方「搜索框结果也屏蔽」。不额外请求；默认关闭。GMGN 开启或改条件后会刷新战壕页。金库类型见下方「金库屏蔽」。",
       taxRecvEnableTitle: "启用屏蔽",
-      taxRecvEnableDesc: "开启后只过滤「新创建」列",
+      taxRecvEnableDesc: "开启后只过滤「新创建」列（GMGN 会刷新页面）",
       taxRecvThresholdLabel: "阈值 ≥",
       taxRecvThresholdLabelGt: "阈值 >",
       taxRecvHint2:
@@ -119,9 +123,9 @@
       taxRecvAllowDup: "已添加过",
       vaultHideSection: "金库屏蔽",
       vaultHideHint:
-        "仅 BSC「新创建」列。区分税收金库 🎁 与币股金库 📈。Four ffff 税收钱包不算金库。默认关闭。",
+        "仅 BSC「新创建」列。区分税收金库 🎁 与币股金库 📈。Four ffff 税收钱包不算金库。默认关闭。搜索弹层需另开「搜索框结果也屏蔽」。GMGN 开启或改条件后会刷新战壕页。",
       vaultHideEnableTitle: "启用金库屏蔽",
-      vaultHideEnableDesc: "开启后按下方选项过滤列表",
+      vaultHideEnableDesc: "开启后按下方选项过滤列表（GMGN 会刷新页面）",
       vaultHideTaxTitle: "屏蔽税收金库",
       vaultHideTaxDesc: "Flap 纯 🎁 vault、GMGN is_vault（无篮子）",
       vaultHideStockTitle: "屏蔽币股金库",
@@ -130,7 +134,7 @@
         "例：只勾「税收金库」→ 隐藏税收钱包币，保留 NVDA/FXIO 币股。可与资金接收方屏蔽叠加。",
       suffixHideSection: "自定义尾号屏蔽",
       suffixHideHint:
-        "仅 BSC 生效。隐藏 CA 以指定十六进制尾号结尾的代币（可多条）。战壕「新创建」列数据层过滤。默认关闭。",
+        "仅 BSC 生效。隐藏 CA 以指定十六进制尾号结尾的代币（可多条）。战壕「新创建」列数据层过滤。默认关闭。GMGN 开启或改条件后会刷新战壕页。",
       suffixHideEnableTitle: "启用尾号屏蔽",
       suffixHideEnableDesc: "开启后按下方规则过滤列表",
       suffixAddPlaceholder: "如 0000 / dead",
@@ -179,6 +183,8 @@
       catBadgeDesc: "Theme & display",
       catFilter: "List filters",
       catFilterDesc: "New column only",
+      searchHideTitle: "Also hide in search",
+      searchHideDesc: "Off by default. When on, enabled fund-recipient/vault rules also apply to the search overlay",
       catPosition: "Badge position",
       catPositionDesc: "Coords & drag",
       themeSection: "Color theme",
@@ -243,9 +249,9 @@
       pref_unknown_desc: "no valid on-chain split",
       taxRecvSection: "Hide fund recipients",
       taxRecvHint:
-        "New/Creation column on trench lists only. No K-line header or search overlay. No extra requests; off by default. See Vault hide below.",
+        "New/Creation column on trench lists only. No K-line header. Search overlay needs “Also hide in search” above. No extra requests; off by default. GMGN reloads the trench page when this changes. See Vault hide below.",
       taxRecvEnableTitle: "Enable hide",
-      taxRecvEnableDesc: "Only filter the New creation column",
+      taxRecvEnableDesc: "Only filter the New creation column (GMGN reloads)",
       taxRecvThresholdLabel: "Threshold ≥",
       taxRecvThresholdLabelGt: "Threshold >",
       taxRecvHint2:
@@ -259,9 +265,9 @@
       taxRecvAllowDup: "Already added",
       vaultHideSection: "Vault hide",
       vaultHideHint:
-        "BSC New creation column only. Tax vault 🎁 vs equity basket vault 📈. Four ffff tax wallet is not a vault. Off by default.",
+        "BSC New creation column only. Tax vault 🎁 vs equity basket vault 📈. Four ffff tax wallet is not a vault. Off by default. Search overlay needs “Also hide in search”. GMGN reloads the trench page when this changes.",
       vaultHideEnableTitle: "Enable vault hide",
-      vaultHideEnableDesc: "Filter list by options below",
+      vaultHideEnableDesc: "Filter list by options below (GMGN reloads)",
       vaultHideTaxTitle: "Hide tax vaults",
       vaultHideTaxDesc: "Flap pure 🎁 vault, GMGN is_vault (no basket)",
       vaultHideStockTitle: "Hide equity vaults",
@@ -270,7 +276,7 @@
         "E.g. tax vault only → hide tax-wallet tokens, keep NVDA/FXIO baskets. Stacks with fund-recipient hide.",
       suffixHideSection: "Custom CA suffix hide",
       suffixHideHint:
-        "BSC only. Hide tokens whose CA ends with a hex suffix (multi-rule). Filters New creation column at data layer. Off by default.",
+        "BSC only. Hide tokens whose CA ends with a hex suffix (multi-rule). Filters New creation column at data layer. Off by default. GMGN reloads the trench page when this changes.",
       suffixHideEnableTitle: "Enable suffix hide",
       suffixHideEnableDesc: "Filter list by rules below",
       suffixAddPlaceholder: "e.g. 0000 / dead",
@@ -381,6 +387,7 @@
   const suffixRulesList = document.getElementById("suffixRulesList");
   const suffixAddInput = document.getElementById("suffixAddInput");
   const suffixAddBtn = document.getElementById("suffixAddBtn");
+  const searchHideEnabled = document.getElementById("searchHideEnabled");
   const vaultHideEnabled = document.getElementById("vaultHideEnabled");
   const vaultHideTax = document.getElementById("vaultHideTax");
   const vaultHideStock = document.getElementById("vaultHideStock");
@@ -405,6 +412,8 @@
   let suffixHideSaveTimer = null;
   let vaultHideState = { ...DEFAULT_VAULT_HIDE };
   let vaultHideSaveTimer = null;
+  let searchHideState = { ...DEFAULT_SEARCH_HIDE };
+  let searchHideSaveTimer = null;
 
   function t(key) {
     const pack = I18N[uiLang] || I18N.zh;
@@ -499,6 +508,10 @@
     out.hideTaxVault = raw.hideTaxVault === true;
     out.hideStockVault = raw.hideStockVault === true;
     return out;
+  }
+
+  function normalizeSearchHide(raw) {
+    return { enabled: raw && raw.enabled === true };
   }
 
   function normalizeSuffixHide(raw) {
@@ -950,6 +963,7 @@
             TAX_RECV_HIDE_KEY,
             SUFFIX_HIDE_KEY,
             VAULT_HIDE_KEY,
+            SEARCH_HIDE_KEY,
             LICENSE_KEY,
           ],
           (items) => {
@@ -964,6 +978,7 @@
                 taxRecv: { ...DEFAULT_TAX_RECV_HIDE },
                 suffixHide: { ...DEFAULT_SUFFIX_HIDE },
                 vaultHide: { ...DEFAULT_VAULT_HIDE },
+                searchHide: { ...DEFAULT_SEARCH_HIDE },
                 license: { ...DEFAULT_LICENSE },
               });
               return;
@@ -986,6 +1001,7 @@
               taxRecv: normalizeTaxRecvHide(items?.[TAX_RECV_HIDE_KEY]),
               suffixHide: normalizeSuffixHide(items?.[SUFFIX_HIDE_KEY]),
               vaultHide: normalizeVaultHide(items?.[VAULT_HIDE_KEY]),
+              searchHide: normalizeSearchHide(items?.[SEARCH_HIDE_KEY]),
               license: normalizeLicense(items?.[LICENSE_KEY]) || { ...DEFAULT_LICENSE },
             });
           }
@@ -1001,6 +1017,7 @@
           taxRecv: { ...DEFAULT_TAX_RECV_HIDE },
           suffixHide: { ...DEFAULT_SUFFIX_HIDE },
           vaultHide: { ...DEFAULT_VAULT_HIDE },
+          searchHide: { ...DEFAULT_SEARCH_HIDE },
           license: { ...DEFAULT_LICENSE },
         });
       }
@@ -1164,6 +1181,34 @@
       vaultHideState = await saveVaultHide(vaultHideState);
       renderVaultHideUI(vaultHideState);
     }, 120);
+  }
+
+  function saveSearchHide(state) {
+    const normalized = normalizeSearchHide(state);
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.set({ [SEARCH_HIDE_KEY]: normalized }, () => {
+          void chrome.runtime?.lastError;
+          resolve(normalized);
+        });
+      } catch {
+        resolve(normalized);
+      }
+    });
+  }
+
+  function scheduleSaveSearchHide() {
+    if (searchHideSaveTimer) window.clearTimeout(searchHideSaveTimer);
+    searchHideSaveTimer = window.setTimeout(async () => {
+      searchHideSaveTimer = null;
+      searchHideState = await saveSearchHide(searchHideState);
+      renderSearchHideUI(searchHideState);
+    }, 120);
+  }
+
+  function renderSearchHideUI(state) {
+    searchHideState = normalizeSearchHide(state);
+    if (searchHideEnabled) searchHideEnabled.checked = searchHideState.enabled === true;
   }
 
   function renderVaultHideUI(state) {
@@ -1614,6 +1659,14 @@
     scheduleSaveSuffixHide();
   });
 
+  searchHideEnabled?.addEventListener("change", () => {
+    searchHideState = normalizeSearchHide({
+      enabled: searchHideEnabled.checked === true
+    });
+    renderSearchHideUI(searchHideState);
+    scheduleSaveSearchHide();
+  });
+
   vaultHideEnabled?.addEventListener("change", () => {
     vaultHideState = readVaultHideFromUI();
     renderVaultHideUI(vaultHideState);
@@ -1721,6 +1774,7 @@
         renderTaxRecvUI(taxRecvState);
         renderSuffixHideUI(suffixHideState);
         renderVaultHideUI(vaultHideState);
+        renderSearchHideUI(searchHideState);
       }
       if (changes[TAX_RECV_HIDE_KEY]) {
         taxRecvState = normalizeTaxRecvHide(changes[TAX_RECV_HIDE_KEY].newValue);
@@ -1733,6 +1787,10 @@
       if (changes[VAULT_HIDE_KEY]) {
         vaultHideState = normalizeVaultHide(changes[VAULT_HIDE_KEY].newValue);
         renderVaultHideUI(vaultHideState);
+      }
+      if (changes[SEARCH_HIDE_KEY]) {
+        searchHideState = normalizeSearchHide(changes[SEARCH_HIDE_KEY].newValue);
+        renderSearchHideUI(searchHideState);
       }
       if (changes[PREFS_KEY]) {
         prefsState = normalizePrefs(changes[PREFS_KEY].newValue);
@@ -1754,6 +1812,7 @@
       taxRecv: loadedTaxRecv,
       suffixHide: loadedSuffixHide,
       vaultHide: loadedVaultHide,
+      searchHide: loadedSearchHide,
       license: loadedLicense,
     }) => {
       uiLang = lang;
@@ -1766,12 +1825,14 @@
       taxRecvState = normalizeTaxRecvHide(loadedTaxRecv);
       suffixHideState = normalizeSuffixHide(loadedSuffixHide);
       vaultHideState = normalizeVaultHide(loadedVaultHide);
+      searchHideState = normalizeSearchHide(loadedSearchHide);
       applyStaticI18n();
       renderTheme(theme);
       renderPrefs(prefs);
       renderTaxRecvUI(taxRecvState);
       renderSuffixHideUI(suffixHideState);
       renderVaultHideUI(vaultHideState);
+      renderSearchHideUI(searchHideState);
       renderLicenseUI(loadedLicense);
       void refreshStoredLicense();
       bindCollapseHeads();
