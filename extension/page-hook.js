@@ -9,7 +9,7 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 112;
+  const HOOK_VER = 114;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -1080,18 +1080,80 @@
     if (dts.length > 1) return "";
     const dtAddr =
       typeof dt === "string" ? dt : dt && typeof dt === "object" ? dt.address : "";
+    if (gmgnAddrIsNativeQuote(dtAddr)) return "";
     return symbolFromKnownTokenAddress(dtAddr) || "";
+  }
+
+  function gmgnItemSelfSymbol(item) {
+    if (!item || typeof item !== "object") return "";
+    const f = item.f && typeof item.f === "object" ? item.f : null;
+    const raw = String(
+      item.symbol ||
+        item.s ||
+        item.name ||
+        item.n ||
+        item.sn ||
+        item.token_symbol ||
+        (f && (f.symbol || f.s || f.name || f.n)) ||
+        ""
+    ).trim();
+    if (!raw) return "";
+    return compactBasketSymbol(raw) || raw.slice(0, 6);
+  }
+
+  function gmgnDividendTokenAddr(tal) {
+    if (!tal || typeof tal !== "object") return "";
+    const dt = tal.dividend_token;
+    if (typeof dt === "string" && dt) return dt.trim().toLowerCase();
+    if (dt && typeof dt === "object") {
+      const a = String(dt.address || dt.token || "").trim().toLowerCase();
+      if (a) return a;
+    }
+    const dts = coerceDividendTokenList(tal.dividend_tokens);
+    if (dts.length === 1) {
+      const t = dts[0];
+      if (typeof t === "string") return t.trim().toLowerCase();
+      return String((t && (t.address || t.token)) || "")
+        .trim()
+        .toLowerCase();
+    }
+    return "";
+  }
+
+  /** GMGN 常把底池 WBNB 写进 dividend_tokens，不能当成真实分红。 */
+  function gmgnDividendAddrLooksLikeQuote(divAddr, item, tokenAddr) {
+    const a = String(divAddr || "")
+      .trim()
+      .toLowerCase();
+    const tok = String(tokenAddr || gmgnAddr(item) || "")
+      .trim()
+      .toLowerCase();
+    if (a && tok && a === tok) return false;
+    if (!a || gmgnAddrIsNativeQuote(a)) return true;
+    const quoteAddr = String(
+      item?.quote_address ||
+        item?.quote_token ||
+        item?.pool?.quote_address ||
+        item?.f?.quote_address ||
+        ""
+    )
+      .trim()
+      .toLowerCase();
+    return Boolean(quoteAddr) && a === quoteAddr;
   }
 
   function gmgnResolveDividendSymbol(item, tal, basket_assets) {
     if (basket_assets && basket_assets.length >= 2) return "";
-    if (basket_assets && basket_assets[0]?.symbol) return basket_assets[0].symbol;
+    const first = basket_assets && basket_assets[0];
+    if (first?.symbol && !gmgnAddrIsNativeQuote(first.address) && !/^(BNB|WBNB)$/i.test(first.symbol)) {
+      return first.symbol;
+    }
     const fromTal = gmgnDividendSymbolFromTal(tal);
-    if (fromTal) return fromTal;
+    if (fromTal && !/^(BNB|WBNB)$/i.test(fromTal)) return fromTal;
     const f = item?.f;
     if (f && typeof f === "object") {
       const fs = gmgnDividendSymbolFromTal(f);
-      if (fs) return fs;
+      if (fs && !/^(BNB|WBNB)$/i.test(fs)) return fs;
     }
     return "";
   }
@@ -1746,9 +1808,20 @@
     }
     const tax = gmgnSecurityTaxBps(item);
     const quote_symbol = gmgnResolveQuoteSymbol(item, tal);
-    const dividend_symbol = is_stocks_vault
+    let dividend_symbol = is_stocks_vault
       ? ""
       : gmgnResolveDividendSymbol(item, tal, basket_assets);
+    const divAddr = gmgnDividendTokenAddr(tal);
+    const divLooksLikeQuote =
+      !is_stocks_vault &&
+      dividend_bps > 0 &&
+      gmgnDividendAddrLooksLikeQuote(divAddr, item, addr);
+    const selfSym = gmgnItemSelfSymbol(item);
+    if (divLooksLikeQuote) {
+      dividend_symbol = selfSym || "";
+    } else if (!dividend_symbol && divAddr && divAddr === addr && selfSym) {
+      dividend_symbol = selfSym;
+    }
     const totalBps =
       dividend_bps +
       market_bps +
@@ -1771,11 +1844,14 @@
       },
       item
     );
+    const quoteLikeUnresolved =
+      dividend_bps > 0 && !is_vault && !is_stocks_vault && divLooksLikeQuote;
     const dividendNeedsChain =
-      ask &&
-      dividend_bps > 0 &&
-      (!symbolLooksLikeLatinTicker(dividend_symbol) ||
-        /^(BNB|WBNB)$/i.test(String(dividend_symbol || "").trim()));
+      quoteLikeUnresolved ||
+      (ask &&
+        dividend_bps > 0 &&
+        (!symbolLooksLikeLatinTicker(dividend_symbol) ||
+          /^(BNB|WBNB)$/i.test(String(dividend_symbol || "").trim())));
     const vaultNeedsBasket = is_stocks_vault && !basketSymbolsReady(basket_assets);
     const needsChain =
       totalBps <= 0 ||
@@ -1812,9 +1888,62 @@
         .trim()
         .toLowerCase(),
       dividend_symbol,
-      top_payout_symbol: dividend_symbol || quote_symbol,
+      top_payout_symbol: dividend_symbol || "",
       __needsChain: needsChain
     });
+  }
+
+  function addrLooksNativeQuote(addr) {
+    const a = String(addr || "")
+      .trim()
+      .toLowerCase();
+    return (
+      !a ||
+      a === WBNB_ADDR ||
+      a === "0x0000000000000000000000000000000000000000"
+    );
+  }
+
+  function debotRowSelfSymbol(row, meta) {
+    const extra = (meta && meta.launchpad_extra) || row?.launchpad_extra || {};
+    const raw = String(
+      row?.symbol ||
+        row?.name ||
+        meta?.symbol ||
+        meta?.name ||
+        extra.symbol ||
+        extra.name ||
+        ""
+    ).trim();
+    if (!raw) return "";
+    return compactBasketSymbol(raw) || raw.slice(0, 6);
+  }
+
+  function debotDividendTokenAddr(extra) {
+    if (!extra || typeof extra !== "object") return "";
+    return String(
+      extra.dividend_token || extra.holder_token || extra.reward_token || ""
+    )
+      .trim()
+      .toLowerCase();
+  }
+
+  /** Debot ranks 常把底池 WBNB/USDT 填进 dividend_token，不能当成真实分红。 */
+  function debotDividendAddrLooksLikeQuote(divAddr, extra, row) {
+    const a = String(divAddr || "")
+      .trim()
+      .toLowerCase();
+    if (!a || addrLooksNativeQuote(a)) return true;
+    const quoteAddr = String(
+      extra?.base_token ||
+        extra?.quote_token ||
+        row?.quote_token ||
+        row?.quote_address ||
+        ""
+    )
+      .trim()
+      .toLowerCase();
+    return Boolean(quoteAddr) && a === quoteAddr;
   }
 
   function debotRowChain(row) {
@@ -1872,13 +2001,24 @@
       row.sell_tax ?? row.sell_tax_rate ?? extra.sell_tax ?? extra.sell_tax_rate
     );
     const quote_symbol = String(row.quote_symbol || extra.quote_symbol || "").trim();
-    let dividend_symbol = basket_assets[0]?.symbol || quote_symbol;
-    if (is_stocks_vault && basket_assets.length >= 2) dividend_symbol = "";
-    const divAddr = String(
-      extra.dividend_token || extra.base_token || ""
-    ).toLowerCase();
-    const divFromAddr = symbolFromKnownTokenAddress(divAddr);
-    if (divFromAddr) dividend_symbol = divFromAddr;
+    const selfSym = debotRowSelfSymbol(row, meta);
+    const divAddr = debotDividendTokenAddr(extra);
+    const divIsSelf = Boolean(divAddr) && divAddr === addr;
+    const divLooksLikeQuote =
+      !divIsSelf && debotDividendAddrLooksLikeQuote(divAddr, extra, row);
+    let dividend_symbol = "";
+    if (is_stocks_vault && basket_assets.length >= 2) {
+      dividend_symbol = "";
+    } else if (basket_assets[0]?.symbol && !is_stocks_vault) {
+      dividend_symbol = basket_assets[0].symbol;
+    } else if (divIsSelf && selfSym) {
+      dividend_symbol = selfSym;
+    } else if (!divLooksLikeQuote) {
+      const fromKnown = symbolFromKnownTokenAddress(divAddr);
+      if (fromKnown) dividend_symbol = fromKnown;
+    } else if (selfSym) {
+      dividend_symbol = selfSym;
+    }
     const totalBps =
       dividend_bps +
       market_bps +
@@ -1901,11 +2041,14 @@
       },
       null
     );
+    const quoteLikeUnresolved =
+      dividend_bps > 0 && !is_vault && !is_stocks_vault && divLooksLikeQuote;
     const dividendNeedsChain =
-      ask &&
-      dividend_bps > 0 &&
-      (!symbolLooksLikeLatinTicker(dividend_symbol) ||
-        /^(BNB|WBNB)$/i.test(String(dividend_symbol || "").trim()));
+      quoteLikeUnresolved ||
+      (ask &&
+        dividend_bps > 0 &&
+        (!symbolLooksLikeLatinTicker(dividend_symbol) ||
+          /^(BNB|WBNB)$/i.test(String(dividend_symbol || "").trim())));
     const vaultNeedsBasket = is_stocks_vault && !basketSymbolsReady(basket_assets);
     const needsChain =
       totalBps <= 0 ||
@@ -1937,7 +2080,7 @@
         .toLowerCase(),
       quote_symbol,
       dividend_symbol,
-      top_payout_symbol: dividend_symbol || quote_symbol,
+      top_payout_symbol: dividend_symbol || "",
       __needsChain: needsChain
     });
   }
@@ -2453,13 +2596,9 @@
       return entry;
     }
     const domSym = debotSymbolFromPoolDom(scopeEl);
-    if (domSym) {
-      if (!entry.dividend_symbol && entry.dividend_bps > 0) {
-        entry.dividend_symbol = domSym;
-      }
-      if (!entry.quote_symbol) entry.quote_symbol = domSym;
-      entry.top_payout_symbol =
-        entry.dividend_symbol || entry.quote_symbol || domSym;
+    if (domSym && !entry.quote_symbol) entry.quote_symbol = domSym;
+    if (!entry.top_payout_symbol && entry.dividend_symbol) {
+      entry.top_payout_symbol = entry.dividend_symbol;
     }
     return entry;
   }
@@ -2554,27 +2693,38 @@
     return null;
   }
 
+  function debotRowFromLaunchpadProps(p) {
+    if (!p || typeof p !== "object") return null;
+    const bags = [p, p.data, p.token, p.row, p.item];
+    for (let i = 0; i < bags.length; i += 1) {
+      const bag = bags[i];
+      if (!bag || typeof bag !== "object") continue;
+      const extra = bag.launchpad_extra || (bag.meta && bag.meta.launchpad_extra);
+      if (!extra || typeof extra !== "object") continue;
+      const meta =
+        bag.meta && typeof bag.meta === "object" && bag.meta.launchpad_extra
+          ? bag.meta
+          : { launchpad_extra: extra };
+      return {
+        contract: String(bag.contract || p.contract || "").toLowerCase(),
+        symbol: String(bag.symbol || bag.token_symbol || meta.symbol || "").trim(),
+        name: String(bag.name || meta.name || "").trim(),
+        quote_symbol: String(bag.quote_symbol || extra.quote_symbol || "").trim(),
+        quote_token: String(
+          bag.quote_token || bag.quote_address || extra.quote_token || extra.base_token || ""
+        ).toLowerCase(),
+        chain: String(bag.chain || meta.chain || "").toLowerCase(),
+        meta
+      };
+    }
+    return null;
+  }
+
   function scrapeDebotLaunchpadFromFiber(root) {
     let f = reactFiberOf(root);
     for (let i = 0; i < 22 && f; i += 1) {
-      const p = f.memoizedProps;
-      if (p && typeof p === "object") {
-        if (p.launchpad_extra && typeof p.launchpad_extra === "object") {
-          return { contract: p.contract, meta: { launchpad_extra: p.launchpad_extra } };
-        }
-        if (p.meta?.launchpad_extra) {
-          return { contract: p.contract, meta: p.meta };
-        }
-        if (p.token?.meta?.launchpad_extra) {
-          return { contract: p.token.contract, meta: p.token.meta };
-        }
-        if (p.row?.meta?.launchpad_extra) {
-          return { contract: p.row.contract, meta: p.row.meta };
-        }
-        if (p.data?.meta?.launchpad_extra) {
-          return { contract: p.data.contract, meta: p.data.meta };
-        }
-      }
+      const row = debotRowFromLaunchpadProps(f.memoizedProps);
+      if (row) return row;
       f = f.return;
     }
     return null;
@@ -2690,8 +2840,11 @@
       const fromOuter = gmgnSymbolFromPoolDom(card);
       if (fromOuter) quote_symbol = fromOuter;
     }
+    const selfName = String((row && (row.symbol || row.name)) || "").trim();
     let entry = gmgnHostFeeFromItem({
       a: addr,
+      symbol: selfName,
+      name: selfName,
       tax_allocation: tal,
       s_tal: tal,
       launchpad: launchpad_platform,
@@ -2704,45 +2857,29 @@
       },
       f: {
         launchpad_platform,
-        launchpad: launchpad_platform
+        launchpad: launchpad_platform,
+        symbol: selfName,
+        name: selfName
       }
     });
     if (!entry) return;
-    const dt0 = coerceDividendTokenList(tal.dividend_tokens)[0];
-    const dtAddr = String(
-      (dt0 && typeof dt0 === "object" && dt0.address) || dt0 || ""
-    ).toLowerCase();
-    const selfName = String((row && (row.symbol || row.name)) || "").trim();
-    if (dtAddr && dtAddr === addr && selfName) {
-      const selfSym = compactBasketSymbol(selfName) || selfName.slice(0, 6);
+    const dtAddr = gmgnDividendTokenAddr(tal);
+    const selfSym = compactBasketSymbol(selfName) || (selfName ? selfName.slice(0, 6) : "");
+    if (dtAddr && dtAddr === addr && selfSym) {
+      entry.dividend_symbol = selfSym;
+      entry.top_payout_symbol = selfSym;
+    } else if (
+      (Number(tal.dividend) || Number(entry.dividend_bps) || 0) > 0 &&
+      gmgnDividendAddrLooksLikeQuote(dtAddr, { quote_address }, addr)
+    ) {
       if (selfSym) {
         entry.dividend_symbol = selfSym;
-        entry.top_payout_symbol = entry.top_payout_symbol || selfSym;
+        entry.top_payout_symbol = selfSym;
+      } else {
+        entry.dividend_symbol = "";
+        entry.top_payout_symbol = "";
       }
-    } else if (
-      dtAddr &&
-      quote_address &&
-      dtAddr === quote_address &&
-      quote_symbol &&
-      !/^(BNB|WBNB)$/i.test(quote_symbol)
-    ) {
-      const qsym = compactBasketSymbol(quote_symbol) || quote_symbol;
-      if (qsym) {
-        entry.dividend_symbol = qsym;
-        entry.top_payout_symbol = entry.top_payout_symbol || qsym;
-      }
-    } else if (
-      !dtAddr &&
-      (Number(tal.dividend) || 0) > 0 &&
-      selfName &&
-      /[\u4e00-\u9fff]/.test(selfName) &&
-      !gmgnSymbolFromTaxDom(card)
-    ) {
-      const selfSym = compactBasketSymbol(selfName) || selfName.slice(0, 6);
-      if (selfSym) {
-        entry.dividend_symbol = selfSym;
-        entry.top_payout_symbol = entry.top_payout_symbol || selfSym;
-      }
+      entry.__needsChain = true;
     }
     entry = applyDomSymbolsToHostFee(entry, card, "gmgn");
     entry = hydrateHostFeeBasket(entry, card, "gmgn");
@@ -2754,12 +2891,8 @@
     const scope = resolveDebotCardElement(card);
     const scraped = scrapeDebotLaunchpadFromFiber(scope);
     const addr = debotAddrFromCard(scope) || String(scraped?.contract || "").toLowerCase();
-    if (!TARGET_TOKEN_RE.test(addr)) return;
-    const row =
-      scraped && scraped.meta
-        ? { contract: addr, meta: scraped.meta }
-        : null;
-    if (!row) return;
+    if (!TARGET_TOKEN_RE.test(addr) || !scraped) return;
+    const row = { ...scraped, contract: addr };
     let entry = debotHostFeeFromRow(row);
     if (!entry) return;
     entry = applyDomSymbolsToHostFee(entry, scope, "debot");

@@ -17,6 +17,8 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.73: GMGN/Debot 自分红对齐 — host-fee 把底池 WBNB 写成 dividend_tokens 时不再画 💎→BNB 并 skip /modes。
+  // 0.8.72: Debot 自分红 — ranks 把底池 WBNB 写成 dividend_token 时不再画 💎→BNB 并 skip /modes。
   // 0.8.71: Debot 战壕徽章绝对贴 Tax 列外侧（不再进 space-between 挤掉 MC/买）；列表扫间隔对齐 GMGN。
   // 0.8.70: Debot 回战壕快绘 16→28 / 12ms→22ms，首波铺满三列视口（js-mcp: 22 目标被 16 上限漏 5）。
   // 0.8.69: Debot 只认 /token/bsc 与 row.chain=bsc；K→战壕列根门禁 + cache-first burst（对齐 GMGN）。
@@ -1252,7 +1254,7 @@
       const fromTok = symbolFromKnownPayoutAddress(
         out.dividend_token || out.top_payout_token
       );
-      if (fromTok) {
+      if (fromTok && fromTok !== "BNB" && fromTok !== "WBNB") {
         out.dividend_symbol = fromTok;
         changed = true;
       }
@@ -1284,16 +1286,21 @@
         changed = true;
       }
     }
-    if (
-      !out.dividend_symbol &&
-      out.dividend_bps > 0 &&
-      domQuote &&
-      isRealPoolQuoteSymbol(domQuote) &&
-      !looksLikeStockQuoteChip(domQuote, out) &&
-      dividendPayoutLooksNative(out)
-    ) {
-      out.dividend_symbol = domQuote;
-      changed = true;
+    if (out.__needsChain) {
+      const assets = normalizeBasketAssets(out.basket_assets);
+      const stockVault = out.is_vault && (out.is_stocks_vault || assets.length >= 2);
+      const divStillOpen =
+        (Number(out.dividend_bps) || 0) > 0 &&
+        dividendSymbolLooksUnresolved(out.dividend_symbol);
+      if (
+        !divStillOpen &&
+        stockVault &&
+        basketSymbolsReady(assets) &&
+        !basketLikelyTruncated(assets, out)
+      ) {
+        out.__needsChain = false;
+        changed = true;
+      }
     }
     const pickedPool = pickStablePoolQuote(out, card);
     if (
@@ -1304,20 +1311,9 @@
       out.quote_symbol = pickedPool;
       changed = true;
     }
-    if (!out.top_payout_symbol) {
-      out.top_payout_symbol =
-        out.dividend_symbol ||
-        out.quote_symbol ||
-        (dividendPayoutLooksNative(out) ? domQuote : "");
-      if (out.top_payout_symbol) changed = true;
-    }
-    if (out.__needsChain) {
-      const assets = normalizeBasketAssets(out.basket_assets);
-      const stockVault = out.is_vault && (out.is_stocks_vault || assets.length >= 2);
-      if ((!stockVault || basketSymbolsReady(assets)) && !basketLikelyTruncated(assets, out)) {
-        out.__needsChain = false;
-        changed = true;
-      }
+    if (!out.top_payout_symbol && out.dividend_symbol) {
+      out.top_payout_symbol = out.dividend_symbol;
+      changed = true;
     }
     return changed ? out : entry;
   }
@@ -1514,6 +1510,13 @@
     if (isHostFeeEntryPending(entry)) return false;
     if (entry.__needsChain === true) return false;
     if (hostFeeShouldDeferToModes(entry)) return false;
+    if (
+      entry.source_host &&
+      (Number(entry.dividend_bps) || 0) > 0 &&
+      dividendSymbolLooksUnresolved(entry.dividend_symbol)
+    ) {
+      return false;
+    }
     return hostFeeAllocationBps(entry) > 0;
   }
 
@@ -12727,12 +12730,15 @@
     const age = Date.now() - (Number(entry.fetched_at) || 0);
     const bps = hostFeeAllocationBps(entry);
     if (
-      entry.source_host === "debot" &&
+      entry.source_host &&
       bps > 0 &&
       !entry.is_vault &&
       !entry.is_stocks_vault
     ) {
-      return false;
+      const waitQuoteAsDividend =
+        (Number(entry.dividend_bps) || 0) > 0 &&
+        dividendSymbolLooksUnresolved(entry.dividend_symbol);
+      if (!waitQuoteAsDividend) return false;
     }
     const deferMs = hostFeeShouldDeferToModes(entry)
       ? HOST_FEE_DEFER_MODES_MS
@@ -14839,7 +14845,7 @@
       (Number(entry.dividend_bps) || 0) > 0 &&
       entry.source_host
     ) {
-      return true;
+      return false;
     }
     if (
       nb < pb &&
@@ -14935,7 +14941,7 @@
       if (!TARGET_TOKEN_RE.test(token)) continue;
       const derived = deriveHostFeeMode(raw);
       const top_payout_symbol = String(
-        raw.top_payout_symbol || raw.dividend_symbol || raw.quote_symbol || ""
+        raw.top_payout_symbol || raw.dividend_symbol || ""
       ).trim();
       const payload = {
         mode: derived.mode,
@@ -15980,13 +15986,14 @@
       if (top === "gift" && useStockGift) {
         topSym = ""; // basket pair appended without arrow / IB-xxx
       } else if (top === "holder") {
-        topSym = tickerSymbolForArrow(
-          entry.dividend_symbol ||
-            entry.top_payout_symbol ||
-            entry.quote_symbol ||
-            domQuote ||
-            ""
-        );
+        const src = entry.dividend_symbol || entry.top_payout_symbol || "";
+        if (src) {
+          topSym = tickerSymbolForArrow(src);
+        } else if (!entry.source_host) {
+          topSym = tickerSymbolForArrow(entry.quote_symbol || domQuote || "");
+        } else {
+          topSym = "";
+        }
       } else if (top === "gift") {
         const srcGift =
           entry.dividend_symbol ||

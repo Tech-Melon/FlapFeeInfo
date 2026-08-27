@@ -414,7 +414,7 @@ python tools/ctl.py watchdog-run
 | 只有 mode 无比例 | 命中旧缓存 | 清 storage 或等 miss；schema 已强制完整 payload |
 | GMGN 无 🪙BNB / 🪙USD1 | 未识别特殊 icon / 默认 BNB | 升到 `0.2.9+`；确认 `chain=bsc` |
 | Worker 403 | 无 UA / 边缘防护 | 浏览器正常；脚本请求带浏览器 UA |
-| KV Write 日账单 ≈$5 尖峰 | 0.7.57 并行回源对已 KV 命中的 key 仍 `put`（冷 isolate 反复重写热门 CA） | 升 Worker **0.7.65+**（只写真正 miss）；`wrangler deploy` |
+| KV Write 日账单 ≈$5 尖峰 | 冷 isolate 把 stale gift KV 当 miss 反复 `put`；旧版还会重写已命中 key | Worker **先返回 stale KV、isolate 只刷新一次** + 0.7.65 只写 miss；`wrangler deploy` |
 | Worker 仪表盘「错误」~数万/天 | 跨请求 await 共享 inflight Promise，插件 Abort 后 hang detector | 升 Worker **0.7.66+**；点 Errors→Invocation Statuses 应见 hung/exception 下降 |
 | 7777 无图标 | 未重载 0.2.x 插件 | 确认 manifest version |
 | K 线侧栏下滑徽章几十秒不更新 | settled 后 light 续扫不扫战壕；短地址未爬卡；滚动热路径过重 | 升到 **0.7.9+**；扩展重载 + 硬刷页 |
@@ -628,8 +628,10 @@ python tools/ctl.py watchdog-run
  - `0.8.69`：Debot 只扫 BSC 卡（href `/token/bsc` + ranks `chain:bsc`）；K→战壕改列根门禁 + cache-first burst/fill（修 first80 ticker 挡住 2.5s）
  - `0.8.70`：Debot 回战壕首波快绘 16→28，避免三列 22 张目标漏 5；burst 更密
  - `0.8.71`：Debot 徽章贴 Tax 列外侧绝对定位，不再进 space-between 挤掉 MC/买；列表扫间隔/mutation debounce 对齐 GMGN
-- 插件当前版本：见 `extension/manifest.json`（**0.8.71**，公开无剪切板）
-- page-hook：`HOOK_VER` **112**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.72`：Debot 自分红 — ranks `dividend_token=WBNB` 不再画 `💎→BNB` 并 skip `/modes`；先用发射名/⏳，链上结果纠正
+ - `0.8.73`：GMGN 对齐 Debot — `dividend_tokens=[WBNB]` 不再画 `💎→BNB` 并 skip `/modes`；发射名暂显，链上纠正
+- 插件当前版本：见 `extension/manifest.json`（**0.8.73**，公开无剪切板）
+- page-hook：`HOOK_VER` **114**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  
