@@ -17,6 +17,7 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.74: 分红箭头只在明确知道代币时写入（WBNB→BNB、TRX、CA=自身）；禁止默认成本币名。
   // 0.8.73: GMGN/Debot 自分红对齐 — host-fee 把底池 WBNB 写成 dividend_tokens 时不再画 💎→BNB 并 skip /modes。
   // 0.8.72: Debot 自分红 — ranks 把底池 WBNB 写成 dividend_token 时不再画 💎→BNB 并 skip /modes。
   // 0.8.71: Debot 战壕徽章绝对贴 Tax 列外侧（不再进 space-between 挤掉 MC/买）；列表扫间隔对齐 GMGN。
@@ -1032,9 +1033,7 @@
   }
 
   function dividendSymbolLooksUnresolved(sym) {
-    const s = compactDisplaySymbol(sym || "");
-    if (!s || s === "BNB" || s === "WBNB") return true;
-    return false;
+    return !compactDisplaySymbol(sym || "");
   }
 
   function tickerSymbolForArrow(symbol) {

@@ -630,8 +630,9 @@ python tools/ctl.py watchdog-run
  - `0.8.71`：Debot 徽章贴 Tax 列外侧绝对定位，不再进 space-between 挤掉 MC/买；列表扫间隔/mutation debounce 对齐 GMGN
  - `0.8.72`：Debot 自分红 — ranks `dividend_token=WBNB` 不再画 `💎→BNB` 并 skip `/modes`；先用发射名/⏳，链上结果纠正
  - `0.8.73`：GMGN 对齐 Debot — `dividend_tokens=[WBNB]` 不再画 `💎→BNB` 并 skip `/modes`；发射名暂显，链上纠正
-- 插件当前版本：见 `extension/manifest.json`（**0.8.73**，公开无剪切板）
-- page-hook：`HOOK_VER` **114**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.74`：分红箭头只在明确知道代币时写入（WBNB→BNB / TRX / 地址=CA）；禁止默认成本币名（指甲刀、我的前女友A）
+- 插件当前版本：见 `extension/manifest.json`（**0.8.74**，公开无剪切板）
+- page-hook：`HOOK_VER` **115**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  
