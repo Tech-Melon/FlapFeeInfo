@@ -17,6 +17,7 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.86: 单枚 FXIO 币股不要画 🎁→IBCO；IB-COCO 包装币不当箭头。
   // 0.8.85: 销毁为最大份额时 → 只用本币名，禁止底池/分红 USDT 冒充。
   // 0.8.84: 新卡分类/底池/分红不再靠 NVDA 名单；本卡结构 + 数据角色。
   // 0.8.83: 稳的 💎/👨‍🍳 立刻画，不再 ⏳ 8s；分红名（景甜）后补 /modes。
@@ -849,10 +850,18 @@
 
   function isSingleAssetStockVault(entry) {
     if (!entry || !entry.is_vault) return false;
-    if (entry.is_stocks_vault !== true) return false;
     const assets = normalizeBasketAssets(entry.basket_assets);
     if (assets.length !== 1) return false;
     return (Number(entry.market_bps) || 0) >= 10000 && (Number(entry.dividend_bps) || 0) === 0;
+  }
+
+  /** Flap 指数包装币 IB-COCO / IBCOCO，不是篮子成分。 */
+  function looksLikeIbWrapperSymbol(sym) {
+    const s = String(sym || "")
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "");
+    return s.length >= 4 && s.startsWith("IB");
   }
 
   /** 币股金库：fiber/API 的 is_stocks_vault，或篮子至少 2 成分。单枚 leftover Tax 图不算。 */
@@ -872,8 +881,8 @@
     if (basketLooksLikePoolQuote(entry)) return false;
     const n = normalizeBasketAssets(entry.basket_assets).length;
     if (n >= 2) return true;
-    // 单成分：仅 100% 金库且 API 标明币股（FXIO）。96%🎁+4%💎 的 NVDA/QQQB 是税收金库。
-    if (entry.is_stocks_vault === true) return isSingleAssetStockVault(entry);
+    // 单成分 100%金库+0分红（FXIO）；API 常不带 is_stocks_vault。96%🎁+4%💎 仍是税收金库。
+    if (isSingleAssetStockVault(entry)) return true;
     return false;
   }
 
@@ -12389,11 +12398,7 @@
         // 宿主金库 vs 旧 KV 🔥：不要用销毁盖掉金库。
         if (nextBag === 0) return;
       }
-      if (
-        entry.is_vault &&
-        normalizeBasketAssets(entry.basket_assets).length >= 2 &&
-        !basketLooksLikeNativeOnly(entry.basket_assets)
-      ) {
+      if (isTrustedStockVault(entry)) {
         entry.is_stocks_vault = true;
       }
       modeCache.set(token, entry);
@@ -15172,6 +15177,7 @@
       };
       const entry = normalizeResult(payload);
       if (!entry) continue;
+      if (isTrustedStockVault(entry)) entry.is_stocks_vault = true;
       if (!entry.dividend_symbol && entry.dividend_token) {
         const fromMem = symbolFromKnownPayoutAddress(entry.dividend_token);
         if (fromMem) entry.dividend_symbol = fromMem;
@@ -16233,7 +16239,10 @@
           entry.quote_symbol ||
           domQuote ||
           "";
-        if (forceVaultNativePoolQuote(entry) && looksLikeStockQuoteChip(srcGift, entry)) {
+        const bagSym = basketDisplaySymbols(basketAssets)[0] || "";
+        if (looksLikeIbWrapperSymbol(srcGift)) {
+          topSym = bagSym ? tickerSymbolForArrow(bagSym) : "";
+        } else if (forceVaultNativePoolQuote(entry) && looksLikeStockQuoteChip(srcGift, entry)) {
           topSym = compactDisplaySymbol(vaultDefaultPoolQuote());
         } else {
           topSym = tickerSymbolForArrow(srcGift);

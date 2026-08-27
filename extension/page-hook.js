@@ -9,7 +9,7 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 123;
+  const HOOK_VER = 124;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -1442,7 +1442,6 @@
 
   function isSingleAssetStockVault(entry) {
     if (!entry || !entry.is_vault) return false;
-    if (entry.is_stocks_vault !== true) return false;
     const n = Array.isArray(entry.basket_assets) ? entry.basket_assets.length : 0;
     if (n !== 1) return false;
     return (Number(entry.market_bps) || 0) >= 10000 && (Number(entry.dividend_bps) || 0) === 0;

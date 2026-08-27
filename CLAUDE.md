@@ -642,8 +642,9 @@ python tools/ctl.py watchdog-run
  - `0.8.83`：稳的 💎/👨‍🍳 立刻画，不再因补分红名 ⏳ 8s；`/modes` 后补 →景甜；同分红地址会话内复用
  - `0.8.84`：新卡底池/币股判定不再用 NVDA/QQQ 名单；残留内图只对照本卡篮子/分红；税收金库 vs 币股看 launchpad/篮子数量；删掉未再调用的股票 ticker 正则（防以后误当分类）
  - `0.8.85`：销毁为最大份额时 `→` 只用本币（tax_symbol）；禁止用底池/分红 USDT 冒充；host-fee 的 burn-top 仍打 `/modes`
-- 插件当前版本：见 `extension/manifest.json`（**0.8.85**，公开无剪切板）
-- page-hook：`HOOK_VER` **123**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.86`：单枚 FXIO 币股（100%金库+0分红）显示 📈FXIO；`IBCOCO` 包装币不当 `🎁→IBCO`
+- 插件当前版本：见 `extension/manifest.json`（**0.8.86**，公开无剪切板）
+- page-hook：`HOOK_VER` **124**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  
