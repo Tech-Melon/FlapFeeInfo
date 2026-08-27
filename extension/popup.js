@@ -123,15 +123,15 @@
       taxRecvAllowDup: "已添加过",
       vaultHideSection: "金库屏蔽",
       vaultHideHint:
-        "仅 BSC「新创建」列。区分税收金库 🎁 与币股金库 📈。Four ffff 税收钱包不算金库。默认关闭。搜索弹层需另开「搜索框结果也屏蔽」。GMGN 开启或改条件后会刷新战壕页。",
+        "仅 BSC「新创建」列。按类型屏蔽，不看分红比例：96%🎁+4%💎 仍是税收金库。Four ffff 税收钱包不算金库。默认关闭。搜索弹层需另开「搜索框结果也屏蔽」。GMGN 开启或改条件后会刷新战壕页。",
       vaultHideEnableTitle: "启用金库屏蔽",
       vaultHideEnableDesc: "开启后按下方选项过滤列表（GMGN / Debot 会刷新页面）",
       vaultHideTaxTitle: "屏蔽税收金库",
-      vaultHideTaxDesc: "Flap 纯 🎁 vault、GMGN is_vault（无篮子）",
+      vaultHideTaxDesc: "🎁 税收金库（含 96%金库+4%分红；单枚 QQQB/NVDA 分红币也算）",
       vaultHideStockTitle: "屏蔽币股金库",
       vaultHideStockDesc: "dividend_tokens / is_stocks_vault 篮子金库",
       vaultHideHint2:
-        "例：只勾「税收金库」→ 隐藏税收钱包币，保留 NVDA/FXIO 币股。可与资金接收方屏蔽叠加。",
+        "打开总开关且未勾子项时，默认屏蔽税收金库。只勾税收 → 保留 📈 币股篮子。可与资金接收叠加。",
       suffixHideSection: "自定义尾号屏蔽",
       suffixHideHint:
         "仅 BSC 生效。隐藏 CA 以指定十六进制尾号结尾的代币（可多条）。战壕「新创建」列数据层过滤。默认关闭。GMGN 开启或改条件后会刷新战壕页。",
@@ -269,11 +269,11 @@
       vaultHideEnableTitle: "Enable vault hide",
       vaultHideEnableDesc: "Filter list by options below (GMGN / Debot reload)",
       vaultHideTaxTitle: "Hide tax vaults",
-      vaultHideTaxDesc: "Flap pure 🎁 vault, GMGN is_vault (no basket)",
+      vaultHideTaxDesc: "🎁 tax vaults (including 96% vault + 4% holder; single QQQB/NVDA payout)",
       vaultHideStockTitle: "Hide equity vaults",
       vaultHideStockDesc: "dividend_tokens / is_stocks_vault basket vaults",
       vaultHideHint2:
-        "E.g. tax vault only → hide tax-wallet tokens, keep NVDA/FXIO baskets. Stacks with fund-recipient hide.",
+        "Master on with no subtype checked defaults to hiding tax vaults. Tax-only keeps 📈 baskets. Stacks with fund-recipient hide.",
       suffixHideSection: "Custom CA suffix hide",
       suffixHideHint:
         "BSC only. Hide tokens whose CA ends with a hex suffix (multi-rule). Filters New creation column at data layer. Off by default. GMGN / Debot reload the trench page when this changes.",
@@ -1669,6 +1669,13 @@
 
   vaultHideEnabled?.addEventListener("change", () => {
     vaultHideState = readVaultHideFromUI();
+    if (
+      vaultHideState.enabled &&
+      vaultHideState.hideTaxVault !== true &&
+      vaultHideState.hideStockVault !== true
+    ) {
+      vaultHideState.hideTaxVault = true;
+    }
     renderVaultHideUI(vaultHideState);
     scheduleSaveVaultHide();
   });

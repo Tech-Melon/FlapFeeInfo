@@ -17,6 +17,16 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.85: 销毁为最大份额时 → 只用本币名，禁止底池/分红 USDT 冒充。
+  // 0.8.84: 新卡分类/底池/分红不再靠 NVDA 名单；本卡结构 + 数据角色。
+  // 0.8.83: 稳的 💎/👨‍🍳 立刻画，不再 ⏳ 8s；分红名（景甜）后补 /modes。
+  // 0.8.82: Four 税收钱包(marketing 100%) 恢复 👨‍🍳；勿把残留 💎 画在税收钱包卡上。
+  // 0.8.80: 任意分红代币（含中文名 币安人生）要画 →；只在 WBNB 地址确认时才用 →BNB。
+  // 0.8.79: 96%金库+4%分红不当 📈；WBNB 确认才 →BNB；金库屏蔽按类型不看比例。
+  // 0.8.78: 搜索只走 /modes；禁止默认 BNB 覆盖已确认 USDT/TRX；host-fee 猜的 💎→BNB 不再 skip 链。
+  // 0.8.77: Debot 搜索无流动池时默认 🦋BNB；tokenPair 仅 USDT/USD1/BNB 当真底池。
+  // 0.8.76: Debot/GMGN 搜索框输入立刻快绘；Debot 结果换行后再补绘，避免徽章被冲掉。
+  // 0.8.75: 搜索弹层 cache-first，未命中立刻 /modes（不等等 host-fee / Debot 1.6s 新卡组批）。
   // 0.8.74: 分红箭头只在明确知道代币时写入（WBNB→BNB、TRX、CA=自身）；禁止默认成本币名。
   // 0.8.73: GMGN/Debot 自分红对齐 — host-fee 把底池 WBNB 写成 dividend_tokens 时不再画 💎→BNB 并 skip /modes。
   // 0.8.72: Debot 自分红 — ranks 把底池 WBNB 写成 dividend_token 时不再画 💎→BNB 并 skip /modes。
@@ -804,18 +814,37 @@
   }
 
   const WBNB_ADDRESS = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c";
+  /** 本页已解析的分红地址 → 符号（新创建连发同一分红币可秒出 →景甜） */
+  const payoutSymbolByAddr = new Map();
+
+  function rememberPayoutSymbol(addr, sym) {
+    const a = String(addr || "")
+      .trim()
+      .toLowerCase();
+    const s = compactDisplaySymbol(sym);
+    if (!/^0x[a-f0-9]{40}$/.test(a) || !s) return;
+    if (s === "BNB" || s === "WBNB") return;
+    payoutSymbolByAddr.set(a, s);
+  }
 
   function symbolFromKnownPayoutAddress(addr) {
     const a = String(addr || "")
       .trim()
       .toLowerCase();
+    if (!a) return "";
     if (
       a === WBNB_ADDRESS ||
       a === "0x0000000000000000000000000000000000000000"
     ) {
       return "BNB";
     }
-    return "";
+    if (a === "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c") return "BTCB";
+    if (a === "0xce7de646e7208a4ef112cb6ed5038fa6cc6b12e3") return "TRX";
+    if (a === "0x55d398326f99059ff775485246999027b3197955") return "USDT";
+    if (a === "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d") return "USDC";
+    if (payoutSymbolByAddr.has(a)) return payoutSymbolByAddr.get(a);
+    ensureGmgnQuotesCatalog();
+    return catalogTitleForQuoteAddr(a) || "";
   }
 
   function isSingleAssetStockVault(entry) {
@@ -841,11 +870,11 @@
     if (basketLooksLikeNativeOnly(entry.basket_assets)) return false;
     // 篮子只有 SPCXB/QQQB 且等于 LP quote → 税收金库，不是币股指数。
     if (basketLooksLikePoolQuote(entry)) return false;
-    if (entry.is_stocks_vault === true) return true;
     const n = normalizeBasketAssets(entry.basket_assets).length;
     if (n >= 2) return true;
-    // /modes 单成分篮子（FXIO 100% 金库）可信；host-fee 单枚 Tax 图仍当 leftover。
-    return n === 1 && !entry.source_host;
+    // 单成分：仅 100% 金库且 API 标明币股（FXIO）。96%🎁+4%💎 的 NVDA/QQQB 是税收金库。
+    if (entry.is_stocks_vault === true) return isSingleAssetStockVault(entry);
+    return false;
   }
 
   /** 单成分篮子地址/符号与底池报价相同（SPCX病毒/SPCXB）。 */
@@ -1055,6 +1084,13 @@
     );
   }
 
+  function dividendTokenIsConfirmedWbnb(entry) {
+    const addr = String(entry?.dividend_token || entry?.top_payout_token || "")
+      .trim()
+      .toLowerCase();
+    return addr === WBNB_ADDRESS;
+  }
+
   function isGmgnTaxInnerQuoteImg(img) {
     if (!(img instanceof Element)) return false;
     try {
@@ -1124,8 +1160,10 @@
     }
     if (outer && outer !== "BNB" && inner !== outer && inner !== "BNB") return true;
     if (
-      looksLikeStockQuoteChip(inner, entry) &&
-      dividendPayoutLooksNative(entry)
+      dividendPayoutLooksNative(entry) &&
+      inner &&
+      inner !== "BNB" &&
+      inner !== "WBNB"
     ) {
       return true;
     }
@@ -1203,8 +1241,14 @@
     if (!isGmgnHost() || !entry || forceVaultNativePoolQuote(entry)) return false;
     const want = pickStablePoolQuote(entry, card);
     if (paintedPoolLooksNonNative(icon)) {
-      // 错把 Tax 内 AAPLB 当底池后不能锁死：应对回 BNB / 正确外图
-      if (want && quoteSymbolLooksNative(want)) return paintedPoolDisagrees(icon, want);
+      if (want && quoteSymbolLooksNative(want)) {
+        const fromDom = extractQuoteSymbolFromDom(card);
+        // 只有 DOM 明确写出 BNB 才允许从 USDT 退回；空 DOM 默认 BNB 不能覆盖。
+        if (fromDom && isRealPoolQuoteSymbol(fromDom) && quoteSymbolLooksNative(fromDom)) {
+          return paintedPoolDisagrees(icon, want);
+        }
+        return false;
+      }
       if (want && !paintedPoolDisagrees(icon, want)) return false;
       return Boolean(want && paintedPoolDisagrees(icon, want));
     }
@@ -1509,10 +1553,13 @@
     if (isHostFeeEntryPending(entry)) return false;
     if (entry.__needsChain === true) return false;
     if (hostFeeShouldDeferToModes(entry)) return false;
+    // 销毁最大段：host-fee 常把分红/底池写成 top_payout（USDT），必须 /modes 拿本币名。
+    if (entry.source_host && entry.top_segment === "burn") return false;
     if (
       entry.source_host &&
       (Number(entry.dividend_bps) || 0) > 0 &&
-      dividendSymbolLooksUnresolved(entry.dividend_symbol)
+      (dividendSymbolLooksUnresolved(entry.dividend_symbol) ||
+        (dividendPayoutLooksNative(entry) && !dividendTokenIsConfirmedWbnb(entry)))
     ) {
       return false;
     }
@@ -1547,11 +1594,54 @@
     const tok = String(token || "").toLowerCase();
     if (!TARGET_TOKEN_RE.test(tok)) return false;
     if (shouldHideByCustomSuffix(tok)) return false;
+    if (searchOverlayModesTokens.has(tok)) return true;
     const entry =
       modeCache.get(tok) ||
       (isPersistentCacheHit(tok) ? persistentCache.get(tok) : null);
     if (!entry || isFeeLoadingEntry(entry)) return true;
     return !hostFeeCanSkipModes(entry);
+  }
+
+  function overlayHasModesResult(entry) {
+    if (!entry || isFeeLoadingEntry(entry) || isHostFeeEntryPending(entry)) return false;
+    if (entry.source_host) return false;
+    return true;
+  }
+
+  function overlayModesQueued() {
+    if (searchOverlayModesTokens.size === 0) return false;
+    for (const token of requestQueue) {
+      if (searchOverlayModesTokens.has(token)) return true;
+    }
+    return false;
+  }
+
+  function queueSearchOverlayModes(token) {
+    const tok = String(token || "").toLowerCase();
+    if (!TARGET_TOKEN_RE.test(tok) || !isExtensionContextValid()) return;
+    if (!isBadgeAccessAllowed() || !isAllowedScanChain()) return;
+    if (shouldHideByCustomSuffix(tok)) return;
+    if (searchOverlayModesTokens.size >= 48) {
+      const oldest = searchOverlayModesTokens.keys().next().value;
+      if (oldest) searchOverlayModesTokens.delete(oldest);
+    }
+    searchOverlayModesTokens.add(tok);
+    gmgnNewCardPendingTokens.delete(tok);
+    cancelLoadingModesKick(tok);
+    try {
+      hostFeeDeferWaiters.delete(tok);
+    } catch (_defer) {
+      // ignore
+    }
+    if (!requestQueue.has(tok)) queueToken(tok, { deferFlush: true, forceModes: true });
+    if (isGmgnHost() && batchActive && !hotLaneActive) {
+      try {
+        void flushHotLane();
+      } catch (_hot) {
+        // ignore
+      }
+    }
+    scheduleBatchFlush({ immediate: true, delayMs: 0 });
   }
 
   function forceModesForWaitingToken(tok) {
@@ -1561,6 +1651,10 @@
     if (releaseQueuedTokenIfHostFeeReady(token)) return;
     if (!tokenNeedsModesFetch(token)) return;
     if (!cardStillWaitingBadge(token)) return;
+    if (searchOverlayModesTokens.has(token) || overlayModesQueued()) {
+      queueSearchOverlayModes(token);
+      return;
+    }
     if (!requestQueue.has(token)) {
       queueToken(token, { deferFlush: true });
     }
@@ -1656,8 +1750,12 @@
     } catch (_err) {
       // ignore
     }
-    scheduleHostFeeAwareQueue(card, tok, options);
-    scheduleLoadingModesKick(tok);
+    if (options.searchOverlay === true) {
+      queueSearchOverlayModes(tok);
+    } else {
+      scheduleHostFeeAwareQueue(card, tok, options);
+      scheduleLoadingModesKick(tok);
+    }
     try {
       const existing = card.querySelector(`[${ICON_DATA}="1"]`);
       if (
@@ -2009,6 +2107,8 @@
   const gmgnMissingRequeueTimers = new Map();
   /** GMGN visible cards discovered directly from fixed-root mutations. */
   const gmgnNewCardPendingTokens = new Set();
+  /** 搜索弹层未命中缓存的 token：立刻 /modes，不进战壕新卡组批窗。 */
+  const searchOverlayModesTokens = new Set();
   let gmgnNewCardBatchTimer = null;
   /** 最近一次确认存在热工作（视口/新创建未画）的墙钟，用于退热 */
   let lastGmgnHotWorkAt = 0;
@@ -2496,11 +2596,13 @@
         return;
       }
       debugInfo("overlay:gmgn-pass", { reason, ...lastOverlayFastStats });
-      if (allowLateDomRetry && lastOverlayFastStats.seen === 0) {
+      const followSwap =
+        /type-search/.test(String(reason || "")) || isDebotHost();
+      if (allowLateDomRetry && (lastOverlayFastStats.seen === 0 || followSwap)) {
         gmgnOverlayRetryTimer = window.setTimeout(() => {
           gmgnOverlayRetryTimer = null;
           scheduleGmgnOverlayPaint(`${reason}-late-dom`, 0, false);
-        }, 240);
+        }, followSwap ? 480 : 240);
       }
     }, Math.max(0, delayMs));
   }
@@ -2567,12 +2669,13 @@
         card.dataset.flapOverlayCard = "1";
         seen.add(card);
         const entry = getEntryForCard(card, token);
-        if (!entry) {
-          if (paintLoadingBadgeAndQueue(card, token)) painted += 1;
-          queued += 1;
+        if (overlayHasModesResult(entry)) {
+          if (paintListCardFromCacheFast(card, token, entry)) painted += 1;
           continue;
         }
-        if (paintListCardFromCacheFast(card, token, entry)) painted += 1;
+        queueSearchOverlayModes(token);
+        if (paintLoadingBadgeAndQueue(card, token, { searchOverlay: true })) painted += 1;
+        queued += 1;
       }
       // Short CA leaves without full href (some history rows).
       if (painted < maxPaint) {
@@ -2596,18 +2699,19 @@
             : siteStrategy.extractToken(card);
           if (!token) continue;
           const entry = getEntryForCard(card, token);
-          if (!entry) {
-            if (paintLoadingBadgeAndQueue(card, token)) painted += 1;
-            queued += 1;
-            try {
-              card.dataset[CARD_MARK] = token;
-              card.setAttribute(CARD_DATA, token);
-            } catch (_err) {
-              // ignore
-            }
+          if (overlayHasModesResult(entry)) {
+            if (paintListCardFromCacheFast(card, token, entry)) painted += 1;
             continue;
           }
-          if (paintListCardFromCacheFast(card, token, entry)) painted += 1;
+          queueSearchOverlayModes(token);
+          if (paintLoadingBadgeAndQueue(card, token, { searchOverlay: true })) painted += 1;
+          queued += 1;
+          try {
+            card.dataset[CARD_MARK] = token;
+            card.setAttribute(CARD_DATA, token);
+          } catch (_err) {
+            // ignore
+          }
         }
       }
     }
@@ -4167,6 +4271,21 @@
         if (r.width >= 280 && r.height >= 120 && r.top < window.innerHeight && r.bottom > 0) {
           open = true;
           break;
+        }
+      }
+      if (!open && isDebotHost()) {
+        const modals = document.querySelectorAll(".MuiModal-root, .MuiDialog-root");
+        for (let i = 0; i < Math.min(modals.length, 6); i += 1) {
+          const el = modals[i];
+          if (!(el instanceof HTMLElement) || isExplicitlyHiddenOverlay(el)) continue;
+          const paper =
+            el.querySelector?.('[role="dialog"], .MuiDialog-paper, .MuiPaper-root') || el;
+          if (!(paper instanceof HTMLElement) || isExplicitlyHiddenOverlay(paper)) continue;
+          const r = paper.getBoundingClientRect();
+          if (r.width >= 280 && r.height >= 120 && r.top < window.innerHeight && r.bottom > 0) {
+            open = true;
+            break;
+          }
         }
       }
       if (!open && isGmgnHost()) {
@@ -7816,6 +7935,38 @@
           window.setTimeout(() => {
             if (quickHasOpenOverlay()) armOverlayFastScan("focus-search");
           }, 80);
+        } catch (_err) {
+          // ignore
+        }
+      },
+      true
+    );
+    document.addEventListener(
+      "input",
+      (event) => {
+        try {
+          if (!isExtensionContextValid()) return;
+          if (!isGmgnHost() && !isDebotHost()) return;
+          const t = event.target;
+          if (!(t instanceof HTMLInputElement)) return;
+          const name = String(t.getAttribute("name") || "");
+          const ph = String(t.getAttribute("placeholder") || "");
+          if (
+            name !== "new-search-input" &&
+            !/搜索代币|搜名称|合约地址|钱包/.test(ph)
+          ) {
+            return;
+          }
+          if (
+            !t.closest?.(".MuiModal-root, .MuiDialog-root, [role='dialog']") &&
+            name !== "new-search-input" &&
+            !quickHasOpenOverlay()
+          ) {
+            return;
+          }
+          overlayFastUntil = Date.now() + OVERLAY_FAST_MS;
+          overlayDetectCache = { at: 0, open: false };
+          scheduleGmgnOverlayPaint("type-search", 0, true);
         } catch (_err) {
           // ignore
         }
@@ -11872,6 +12023,17 @@
    */
   function maybeFlushRequestQueue(_reason) {
     if (requestQueue.size === 0) return;
+    if (overlayModesQueued()) {
+      if (isGmgnHost() && batchActive && !hotLaneActive) {
+        try {
+          void flushHotLane();
+        } catch (_hot) {
+          // ignore
+        }
+      }
+      scheduleBatchFlush({ immediate: true, delayMs: 0 });
+      return;
+    }
     if (needsHostTaxFeedPoll() && !hostTaxFeedReady()) {
       scheduleHostTaxFeedRetry(_reason);
       return;
@@ -11933,16 +12095,16 @@
     // 自定义尾号屏蔽：不入队、不打 /modes（省 RPC）
     if (shouldHideByCustomSuffix(tok)) return;
     const cachedHit = modeCache.get(tok);
-    // host-fee preview 常 __needsChain=false，但分红仍是 BNB → 仍要打 /modes
-    if (cachedHit && cachedHit.__needsChain !== true && !isHostFeeEntryPending(cachedHit)) {
-      if (!hostFeeShouldDeferToModes(cachedHit)) {
+    // 搜索弹层 forceModes：不走 host-fee 快路径。其余仅在真能 skip 时丢队。
+    if (options.forceModes !== true && !searchOverlayModesTokens.has(tok)) {
+      if (cachedHit && hostFeeCanSkipModes(cachedHit)) {
         requestQueue.delete(tok);
         gmgnNewCardPendingTokens.delete(tok);
         cancelLoadingModesKick(tok);
         return;
       }
+      if (!cachedHit && isPersistentCacheHit(tok)) return;
     }
-    if (!cachedHit && isPersistentCacheHit(tok)) return;
     if (requestQueue.has(tok)) return;
     const missingState = missingRetryState.get(tok);
     if (missingState && Date.now() < missingState.retryAt) return;
@@ -12218,6 +12380,9 @@
       const token = String(rawToken).toLowerCase();
       const entry = normalizeResult(result);
       if (!entry) return;
+      rememberPayoutSymbol(entry.dividend_token, entry.dividend_symbol);
+      rememberPayoutSymbol(entry.top_payout_token, entry.top_payout_symbol);
+      searchOverlayModesTokens.delete(token);
       const prev = modeCache.get(token);
       if (prev && prev.source_host && prev.is_vault && !entry.is_vault) {
         const nextBag = normalizeBasketAssets(entry.basket_assets).length;
@@ -12226,9 +12391,8 @@
       }
       if (
         entry.is_vault &&
-        normalizeBasketAssets(entry.basket_assets).length >= 1 &&
-        !basketLooksLikeNativeOnly(entry.basket_assets) &&
-        !basketLooksLikePoolQuote(entry)
+        normalizeBasketAssets(entry.basket_assets).length >= 2 &&
+        !basketLooksLikeNativeOnly(entry.basket_assets)
       ) {
         entry.is_stocks_vault = true;
       }
@@ -12710,20 +12874,21 @@
     );
   }
 
-  /** 空金库/无成分币股交给 /modes；普通 💎/👨‍🍳 与已出成分的 📈 走快路径。 */
+  /** 空金库/无成分币股交给 /modes；普通 💎/👨‍🍳 立刻画，箭头名后补。 */
   function hostFeeShouldDeferToModes(entry) {
     if (!entry || !entry.source_host) return false;
-    if (entry.__needsChain === true) return true;
     const n = normalizeBasketAssets(entry.basket_assets).length;
     const nativeOnly = basketLooksLikeNativeOnly(entry.basket_assets) || n === 0;
     if (entry.is_stocks_vault || n >= 2) {
       return n < 1 || nativeOnly;
     }
     if (entry.is_vault) return !isTrustedStockVault(entry);
-    return false;
+    // 稳的 💎/👨‍🍳 即使还要打 /modes 补名字，也不 ⏳
+    if (hostFeeAllocationBps(entry) > 0) return false;
+    return entry.__needsChain === true;
   }
 
-  /** host-fee / DOM 未齐：继续 ⏳，避免 NVDA&NVDA 或错分红先闪出来 */
+  /** host-fee / DOM 未齐：继续 ⏳。稳的 💎/👨‍🍳 不 round-trip 8s。 */
   function isHostFeeEntryPending(entry) {
     if (!entry || isFeeLoadingEntry(entry)) return false;
     const age = Date.now() - (Number(entry.fetched_at) || 0);
@@ -12734,10 +12899,7 @@
       !entry.is_vault &&
       !entry.is_stocks_vault
     ) {
-      const waitQuoteAsDividend =
-        (Number(entry.dividend_bps) || 0) > 0 &&
-        dividendSymbolLooksUnresolved(entry.dividend_symbol);
-      if (!waitQuoteAsDividend) return false;
+      return false;
     }
     const deferMs = hostFeeShouldDeferToModes(entry)
       ? HOST_FEE_DEFER_MODES_MS
@@ -12838,8 +13000,11 @@
       sell_tax_bps: Number(result.sell_tax_bps) || 0,
       top_segment: topSegment,
       top_payout_symbol: topPayoutSymbol,
+      tax_symbol: typeof result.tax_symbol === "string" ? result.tax_symbol.trim() : "",
       dividend_symbol:
         typeof result.dividend_symbol === "string" ? result.dividend_symbol : "",
+      dividend_token:
+        typeof result.dividend_token === "string" ? result.dividend_token.toLowerCase() : "",
       quote_symbol: typeof result.quote_symbol === "string" ? result.quote_symbol : "",
       quote_token: typeof result.quote_token === "string" ? result.quote_token.toLowerCase() : "",
       vault_address:
@@ -12941,6 +13106,28 @@
     if (value % 100 === 0) return `${value / 100}%`;
     const text = (value / 100).toFixed(1).replace(/\.0$/, "");
     return `${text}%`;
+  }
+
+  /** 销毁箭头 = 本币名。不知道就空着，禁止用底池/分红（USDT）冒充。 */
+  function burnPayoutSymbol(entry, quoteHint) {
+    const tax = String((entry && entry.tax_symbol) || "").trim();
+    const pay =
+      entry && entry.top_segment === "burn"
+        ? String(entry.top_payout_symbol || "").trim()
+        : "";
+    const src = tax || pay;
+    if (!src) return "";
+    const shown = tickerSymbolForArrow(src);
+    if (!shown) return "";
+    const q = compactDisplaySymbol(
+      (entry && entry.quote_symbol) || quoteHint || ""
+    );
+    if (q && compactDisplaySymbol(shown) === q) return "";
+    const div = compactDisplaySymbol((entry && entry.dividend_symbol) || "");
+    if (div && compactDisplaySymbol(shown) === div && compactDisplaySymbol(tax) !== div) {
+      return "";
+    }
+    return shown;
   }
 
   /**
@@ -13242,23 +13429,12 @@
   }
 
   function looksLikeStockQuoteChip(sym, entry) {
-    const s = String(sym || "")
-      .toUpperCase()
-      .replace(/[^A-Z0-9]/g, "");
+    const s = compactBasketSymbol(sym);
     if (!s || isRealPoolQuoteSymbol(s)) return false;
+    // 只认本卡篮子/分红符号（虚拟列表残留内图），不靠全球股票名单。
     if (stockChipMatchesBasket(s, entry)) return true;
-    if (s === "FXION" || s === "FXIO") return true;
-    // GMGN 币股芯片常见 NVDAB / SPCXB / TSLAB，不是 LP quote。
-    if (s.length >= 4 && s.endsWith("B") && s !== "WBTC") return true;
-    // compactDisplaySymbol 会把 NVDAB→NVDA，创作者箭头仍不能用股票名
-    if (
-      /^(NVDA|FXIO|SPCX|GME|QQQ|MSFT|AAPL|TSLA|AMD|INTC|META|AMZN|GOOG|NFLX|COIN|MSTR|HOOD|PLTR|BABA|NIO|SOXL)(ON)?$/.test(
-        s
-      )
-    ) {
-      return true;
-    }
-    return false;
+    const div = compactBasketSymbol(entry && entry.dividend_symbol);
+    return Boolean(div && s === div);
   }
 
   function vaultDefaultPoolQuote() {
@@ -13274,8 +13450,9 @@
    * 2) quote_address → quotes.json 目录（WSS 常有地址、无 quote_symbol）
    * 3) host-fee / HTTP / 链 quote_symbol（BNB/WBNB 视为未齐）
    * 4) 有非零 quote_token 但目录未命中 → 先空着，禁止闪 BNB
-   * 5) 无外图且地址为空/WBNB → BSC 默认 BNB
+   * 5) 无外图且地址为空/WBNB → GMGN 默认 BNB；Debot 战壕靠流动池 DOM，搜索等 /modes，不默认 BNB
    * 金库：Tax 内图是篮子，不当底池。
+   * 已画出的 USDT/QQQB 不能被空 DOM 的默认 BNB 回退覆盖。
    */
   function pickStablePoolQuote(entry, card) {
     const apiRaw =
@@ -13308,6 +13485,7 @@
     }
 
     if (fromDom) return formatPoolQuoteSymbol(fromDom);
+    if (fromApi && isRealPoolQuoteSymbol(fromApi)) return formatPoolQuoteSymbol(fromApi);
     if (siteStrategy.name === "gmgn") {
       return GMGN_CHAIN_NATIVE_QUOTE[getGmgnChainKey()] || "BNB";
     }
@@ -13323,7 +13501,13 @@
     if (displayPrefs && displayPrefs.pool === false) return false;
     const want = pickStablePoolQuote(entry, card);
     if (paintedPoolLooksNonNative(icon)) {
-      if (want && quoteSymbolLooksNative(want)) return paintedPoolDisagrees(icon, want);
+      if (want && quoteSymbolLooksNative(want)) {
+        const fromDom = extractQuoteSymbolFromDom(card);
+        if (fromDom && isRealPoolQuoteSymbol(fromDom) && quoteSymbolLooksNative(fromDom)) {
+          return paintedPoolDisagrees(icon, want);
+        }
+        return false;
+      }
       if (want) return paintedPoolDisagrees(icon, want);
       return false;
     }
@@ -14795,11 +14979,27 @@
     if (!prev || !entry) return false;
     const prevUnresolved = dividendSymbolLooksUnresolved(prev.dividend_symbol || "");
     const nextUnresolved = dividendSymbolLooksUnresolved(entry.dividend_symbol || "");
+    if (dividendPayoutLooksNative(entry)) return false;
     return prevUnresolved && !nextUnresolved;
   }
 
   function hostFeeEntryShouldApply(prev, entry) {
     if (!prev) return true;
+    if (
+      dividendPayoutLooksNative(entry) &&
+      !dividendPayoutLooksNative(prev) &&
+      (Number(entry.dividend_bps) || 0) > 0 &&
+      entry.source_host
+    ) {
+      return false;
+    }
+    if (
+      !quoteSymbolLooksNative(prev.quote_symbol) &&
+      quoteSymbolLooksNative(entry.quote_symbol) &&
+      entry.source_host
+    ) {
+      return false;
+    }
     if (hostFeeQuoteBecameReal(prev, entry)) return true;
     if (hostFeeDividendBecameReal(prev, entry)) return true;
     const prevDiv = compactBasketSymbol(prev.dividend_symbol || "");
@@ -14808,7 +15008,8 @@
       prevDiv &&
       nextDiv &&
       prevDiv !== nextDiv &&
-      !dividendSymbolLooksUnresolved(entry.dividend_symbol)
+      !dividendSymbolLooksUnresolved(entry.dividend_symbol) &&
+      !dividendPayoutLooksNative(entry)
     ) {
       return true;
     }
@@ -14939,15 +15140,18 @@
         .toLowerCase();
       if (!TARGET_TOKEN_RE.test(token)) continue;
       const derived = deriveHostFeeMode(raw);
-      const top_payout_symbol = String(
-        raw.top_payout_symbol || raw.dividend_symbol || ""
-      ).trim();
+      const tax_symbol = String(raw.tax_symbol || "").trim();
+      const top_payout_symbol =
+        derived.top_segment === "burn"
+          ? tax_symbol
+          : String(raw.top_payout_symbol || raw.dividend_symbol || "").trim();
       const payload = {
         mode: derived.mode,
         label: "",
         title: "",
         top_segment: derived.top_segment,
         top_payout_symbol,
+        tax_symbol,
         dividend_bps: Number(raw.dividend_bps) || 0,
         market_bps: Number(raw.market_bps) || 0,
         deflation_bps: Number(raw.deflation_bps) || 0,
@@ -14959,6 +15163,7 @@
         buy_tax_bps: Number(raw.buy_tax_bps) || 0,
         sell_tax_bps: Number(raw.sell_tax_bps) || 0,
         dividend_symbol: String(raw.dividend_symbol || "").trim(),
+        dividend_token: String(raw.dividend_token || "").toLowerCase(),
         quote_symbol: String(raw.quote_symbol || "").trim(),
         quote_token: String(raw.quote_token || raw.quote_address || "").toLowerCase(),
         vault_address: String(raw.vault_address || "").toLowerCase(),
@@ -14967,6 +15172,11 @@
       };
       const entry = normalizeResult(payload);
       if (!entry) continue;
+      if (!entry.dividend_symbol && entry.dividend_token) {
+        const fromMem = symbolFromKnownPayoutAddress(entry.dividend_token);
+        if (fromMem) entry.dividend_symbol = fromMem;
+      }
+      rememberPayoutSymbol(entry.dividend_token, entry.dividend_symbol);
       entry.source_host = raw.source === "debot" ? "debot" : "gmgn";
       entry.__needsChain = raw.__needsChain === true;
       entry.__awaitSecurity = raw.__awaitSecurity === true;
@@ -14996,16 +15206,30 @@
       if (prev && Number(prev.fetched_at) > 0) {
         entry.fetched_at = prev.fetched_at;
       }
+      if (prev) {
+        if (
+          !quoteSymbolLooksNative(prev.quote_symbol) &&
+          quoteSymbolLooksNative(entry.quote_symbol)
+        ) {
+          entry.quote_symbol = prev.quote_symbol;
+          entry.quote_token = prev.quote_token || entry.quote_token;
+        }
+        if (!dividendPayoutLooksNative(prev) && dividendPayoutLooksNative(entry)) {
+          entry.dividend_symbol = prev.dividend_symbol;
+          entry.dividend_token = prev.dividend_token || entry.dividend_token;
+          entry.top_payout_symbol = prev.top_payout_symbol || entry.top_payout_symbol;
+          entry.top_payout_token = prev.top_payout_token || entry.top_payout_token;
+        }
+      }
       modeCache.set(token, entry);
-      // Debot 稳的 💎/👨‍🍳（launchpad_extra 已有正 pct）不再排队 /modes。
-      // 空金库 / 币股篮子 / __needsChain 才回源。
-      if (
-        hostFeeShouldDeferToModes(entry) ||
-        entry.__needsChain === true ||
-        hostFeeAllocationBps(entry) <= 0
-      ) {
-        queueToken(token, { deferFlush: true });
-        if (isGmgnHost() || isDebotHost()) gmgnNewCardPendingTokens.add(token);
+      // 稳的 💎/👨‍🍳 skip /modes；销毁最大段 / 空金库 / 币股仍回源。
+      if (!hostFeeCanSkipModes(entry)) {
+        if (searchOverlayModesTokens.has(token)) {
+          queueSearchOverlayModes(token);
+        } else {
+          queueToken(token, { deferFlush: true });
+          if (isGmgnHost() || isDebotHost()) gmgnNewCardPendingTokens.add(token);
+        }
       } else {
         releaseQueuedTokenIfHostFeeReady(token);
       }
@@ -15923,7 +16147,7 @@
    * (never omit when equals pool quote — user wants explicit payout).
    * Index vault gift: 📈 + first two basket symbols (not →IB-xxx).
    */
-  function buildFeeLabel(entry, domQuoteSymbol) {
+  function buildFeeLabel(entry, domQuoteSymbol, token) {
     const prefs = displayPrefs || DEFAULT_DISPLAY_PREFS;
     const domQuote = compactDisplaySymbol(domQuoteSymbol || "");
     const basketAssets = getBasketAssetsForDisplay(entry);
@@ -15984,12 +16208,21 @@
     if (prefs.payoutArrow !== false && top) {
       if (top === "gift" && useStockGift) {
         topSym = ""; // basket pair appended without arrow / IB-xxx
+      } else if (top === "burn") {
+        topSym = burnPayoutSymbol(entry, domQuote);
       } else if (top === "holder") {
         const src = entry.dividend_symbol || entry.top_payout_symbol || "";
-        if (src) {
+        const guessedNative =
+          entry.source_host &&
+          dividendPayoutLooksNative(entry) &&
+          !dividendTokenIsConfirmedWbnb(entry);
+        // 任意分红币（含 币安人生）都要 →；仅 WBNB 地址确认时覆盖成 BNB，避免残留中文名。
+        if (dividendTokenIsConfirmedWbnb(entry)) {
+          topSym = "BNB";
+        } else if (src && !guessedNative) {
           topSym = tickerSymbolForArrow(src);
         } else if (!entry.source_host) {
-          topSym = tickerSymbolForArrow(entry.quote_symbol || domQuote || "");
+          topSym = tickerSymbolForArrow(src || entry.quote_symbol || domQuote || "");
         } else {
           topSym = "";
         }
@@ -16025,10 +16258,9 @@
         } else {
           topSym = compactDisplaySymbol(srcQ);
         }
-      } else if (top === entry.top_segment) {
-        topSym = compactDisplaySymbol(entry.top_payout_symbol || domQuote || "");
+      } else if (top === entry.top_segment && top !== "burn") {
+        topSym = compactDisplaySymbol(entry.top_payout_symbol || "");
       }
-      // burn: tax symbol not always cached client-side — omit arrow if unknown
     }
 
     // Highest share first (leftmost); tie-break matches server SEGMENT_PRIORITY.
@@ -16052,7 +16284,7 @@
    */
   function buildDisplayLabel(entry, quoteSymbol, token) {
     const prefs = displayPrefs || DEFAULT_DISPLAY_PREFS;
-    const fee = buildFeeLabel(entry, quoteSymbol);
+    const fee = buildFeeLabel(entry, quoteSymbol, token);
     const showPool = prefs.pool !== false && Boolean(quoteSymbol);
     const prefix = poolPrefixForToken(token || "");
     if (showPool && fee) return `${prefix}${quoteSymbol} | ${fee}`;

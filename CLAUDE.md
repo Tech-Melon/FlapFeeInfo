@@ -216,7 +216,7 @@ if lpBps > 0:              💧
 
 | 站点 | 识别方式 |
 |------|----------|
-| Debot / Gungnir | `[aria-label*="流动池"]` / `img[alt]`（如 `BNB 流动池`） |
+| Debot / Gungnir | 战壕 `[aria-label*="流动池"]` / `img[alt]`（如 `BNB 流动池`）；**搜索弹层不走 host-fee / tokenPair 快路径，只等 `/modes`**。已画出的非 BNB 底池不得被空 DOM 默认 BNB 回退 |
 | GMGN RWA/美股 | `img[alt$=" quote icon"]` 或 `/static/quotes/{sym}.png` |
 | GMGN 特殊报价 | `data-icon` / `/static/icons/icon_usd1_*` 等 → `USD1` / `USDT` / `USDC` / `WETH` |
 | GMGN 默认 BNB 池 | **常无图标**（`quote_address=0x0`）；BSC 上无特殊报价时默认 `BNB` |
@@ -631,8 +631,19 @@ python tools/ctl.py watchdog-run
  - `0.8.72`：Debot 自分红 — ranks `dividend_token=WBNB` 不再画 `💎→BNB` 并 skip `/modes`；先用发射名/⏳，链上结果纠正
  - `0.8.73`：GMGN 对齐 Debot — `dividend_tokens=[WBNB]` 不再画 `💎→BNB` 并 skip `/modes`；发射名暂显，链上纠正
  - `0.8.74`：分红箭头只在明确知道代币时写入（WBNB→BNB / TRX / 地址=CA）；禁止默认成本币名（指甲刀、我的前女友A）
-- 插件当前版本：见 `extension/manifest.json`（**0.8.74**，公开无剪切板）
-- page-hook：`HOOK_VER` **115**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.75`：搜索弹层 cache-first，未命中立刻 `/modes`（不等等 host-fee / Debot 1.6s 新卡组批）
+ - `0.8.76`：搜索框输入立刻快绘；Debot 弹层识别 MuiModal，结果换行后再补绘
+ - `0.8.77`：Debot 搜索无流动池 DOM 时 BSC 默认 `🦋BNB`；搜索 API `tokenPair` 仅 USDT/USD1/BNB 等真底池才用（`QQQB` 分红币不当底池）
+ - `0.8.78`：搜索（GMGN+Debot）放弃 host-fee 快路径，只画 `/modes`；host-fee 的 `💎→BNB` 不再 skip 链；已确认 USDT/TRX 不被空 DOM 默认 BNB 回退覆盖
+ - `0.8.79`：单枚 NVDA/QQQB 分红的税收金库不再标 📈；确认 WBNB 才画 `💎→BNB`；金库屏蔽按类型（不看分红比例），总开关未勾子项时默认屏蔽税收金库
+ - `0.8.80`：任意分红代币都画 `→`（含中文名「币安人生」）；GMGN `dividend_tokens` 只给地址时走 quotes 目录 + `/modes`；不再把中文分红名一律丢掉
+ - `0.8.81`：Four.meme 税收钱包（marketing+market_address）不当 👨‍🍳；ffff 等 `/modes` 看 rateFounder
+ - `0.8.82`：Four.meme 税收钱包 `marketing:1` 恢复 👨‍🍳（0.8.81 误藏分类）；税详情「税收钱包 100%」= 👨‍🍳
+ - `0.8.83`：稳的 💎/👨‍🍳 立刻画，不再因补分红名 ⏳ 8s；`/modes` 后补 →景甜；同分红地址会话内复用
+ - `0.8.84`：新卡底池/币股判定不再用 NVDA/QQQ 名单；残留内图只对照本卡篮子/分红；税收金库 vs 币股看 launchpad/篮子数量；删掉未再调用的股票 ticker 正则（防以后误当分类）
+ - `0.8.85`：销毁为最大份额时 `→` 只用本币（tax_symbol）；禁止用底池/分红 USDT 冒充；host-fee 的 burn-top 仍打 `/modes`
+- 插件当前版本：见 `extension/manifest.json`（**0.8.85**，公开无剪切板）
+- page-hook：`HOOK_VER` **123**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  

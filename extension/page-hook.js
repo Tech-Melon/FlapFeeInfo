@@ -9,7 +9,7 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 115;
+  const HOOK_VER = 123;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -664,32 +664,6 @@
     );
   }
 
-  function gmgnSymLooksLikeStockChip(sym) {
-    const s = compactBasketSymbol(sym);
-    if (!s || s === "BNB" || s === "WBNB") return false;
-    if (STOCK_CHIP_ALIASES[s]) return true;
-    return /^(FXIO|NVDA|QQQ|SPCX|AAPL|TSLA|GME|MSFT|GOOG|AMZN|META|BABA|AMD|INTC|NFLX|COIN|MSTR|HOOD|PLTR|NIO|SOXL|XAUT)/i.test(
-      s
-    );
-  }
-
-  function gmgnTalHasStockDividendTokens(tal) {
-    const list = coerceDividendTokenList(tal?.dividend_tokens);
-    if (!list.length) return false;
-    for (let i = 0; i < list.length; i += 1) {
-      const t = list[i];
-      const addr = String((t && (t.address || t.token)) || t || "").toLowerCase();
-      if (KNOWN_VAULT_STOCK_SYMBOL_BY_ADDR[addr]) return true;
-      if (gmgnAddrIsNativeQuote(addr)) continue;
-      const sym = gmgnTokenRowSymbol(
-        t && typeof t === "object" ? t : { address: addr },
-        list.length > 1
-      );
-      if (gmgnSymLooksLikeStockChip(sym)) return true;
-    }
-    return false;
-  }
-
   function gmgnDomLooksLikeFlapStocks(el) {
     if (!(el instanceof HTMLElement)) return false;
     try {
@@ -715,14 +689,26 @@
    */
   function gmgnVaultKind(tal, item) {
     if (!tal || typeof tal !== "object") return null;
-    if (gmgnHasBasketTokens(tal) || tal.is_stocks_vault === true) return "stock";
-    if (
-      gmgnTalHasStockDividendTokens(tal) &&
-      (isGmgnVaultTal(tal) || gmgnIsFlapStocksLaunchpad(item))
-    ) {
-      return "stock";
+    if (gmgnIsFlapStocksLaunchpad(item)) return "stock";
+    if (gmgnHasBasketTokens(tal)) return "stock";
+    if (isGmgnVaultTal(tal)) {
+      const list = coerceDividendTokenList(tal.dividend_tokens);
+      const div = ratioToBps(
+        pickTalField(tal, [
+          "dividend",
+          "dvtx",
+          "dividend_tax",
+          "holder_tax",
+          "holder",
+          "dividend_pct",
+          "dividend_rate"
+        ])
+      );
+      // 单枚 NVDA/QQQB 是税收金库分红币，不是币股篮子。有持有人分红更不可能是指数。
+      if (div > 0 && list.length <= 1) return "tax";
+      if (tal.is_stocks_vault === true && list.length === 1 && div <= 0) return "stock";
+      return "tax";
     }
-    if (isGmgnVaultTal(tal)) return "tax";
     return null;
   }
 
@@ -740,8 +726,14 @@
 
   function shouldHideVaultKind(kind) {
     if (!vaultHideEnabled || !kind) return false;
-    if (kind === "stock") return vaultHidePrefs.hideStockVault === true;
-    if (kind === "tax") return vaultHidePrefs.hideTaxVault === true;
+    const hideTax = vaultHidePrefs.hideTaxVault === true;
+    const hideStock = vaultHidePrefs.hideStockVault === true;
+    // 总开关开了但子项都没勾：默认按税收金库屏蔽（96%🎁+4%💎 也算）
+    if (!hideTax && !hideStock) {
+      return kind === "tax";
+    }
+    if (kind === "stock") return hideStock;
+    if (kind === "tax") return hideTax;
     return false;
   }
 
@@ -1019,6 +1011,48 @@
     }
     if (entry.is_vault) return true;
     return false;
+  }
+
+  /** 最大份额段的 → 符号。销毁永远是本币，禁止用分红/底池（USDT）冒充。 */
+  function hostFeeTopPayoutSymbol(p) {
+    const div = Number(p && p.dividend_bps) || 0;
+    const mkt = Number(p && p.market_bps) || 0;
+    const burn = Number(p && p.deflation_bps) || 0;
+    const lp = Number(p && p.lp_bps) || 0;
+    const giggle = Number(p && p.giggle_charity_bps) || 0;
+    const binance = Number(p && p.binance_charity_bps) || 0;
+    const segs = [];
+    if (div > 0) segs.push({ k: "holder", b: div, p: 0, s: p.dividend_symbol });
+    if (mkt > 0) {
+      segs.push({
+        k: p.is_vault ? "gift" : "creator",
+        b: mkt,
+        p: p.is_vault ? 1 : 4,
+        s: p.is_vault ? p.dividend_symbol || p.quote_symbol : p.quote_symbol
+      });
+    }
+    if (giggle > 0) segs.push({ k: "giggle", b: giggle, p: 2, s: p.quote_symbol });
+    if (binance > 0) segs.push({ k: "binance", b: binance, p: 3, s: p.quote_symbol });
+    if (burn > 0) segs.push({ k: "burn", b: burn, p: 5, s: p.tax_symbol });
+    if (lp > 0) segs.push({ k: "lp", b: lp, p: 6, s: p.quote_symbol });
+    if (!segs.length) return "";
+    segs.sort((a, b) => b.b - a.b || a.p - b.p);
+    return String(segs[0].s || "").trim();
+  }
+
+  function hostFeeBurnIsTop(entry) {
+    const burn = Number(entry && entry.deflation_bps) || 0;
+    if (burn <= 0) return false;
+    return (
+      burn >
+      Math.max(
+        Number(entry.dividend_bps) || 0,
+        Number(entry.market_bps) || 0,
+        Number(entry.lp_bps) || 0,
+        Number(entry.giggle_charity_bps) || 0,
+        Number(entry.binance_charity_bps) || 0
+      )
+    );
   }
 
   function symbolFromKnownStockAddress(addr) {
@@ -1690,7 +1724,8 @@
       (entry.basket_assets || []).map((b) => b.symbol).join("+"),
       entry.quote_symbol || "",
       entry.quote_token || "",
-      entry.dividend_symbol || ""
+      entry.dividend_symbol || "",
+      entry.tax_symbol || ""
     ].join("|");
   }
 
@@ -1785,12 +1820,7 @@
     let basket_assets = normalizeGmgnBasket(tal.dividend_tokens);
     const vaultKind = gmgnVaultKind(tal, item);
     let is_vault = isGmgnVaultTal(tal) || vaultKind === "stock" || vaultKind === "tax";
-    let is_stocks_vault =
-      tal.is_stocks_vault === true ||
-      tal.is_stocks_vault === 1 ||
-      tal.is_stocks_vault === "true" ||
-      vaultKind === "stock" ||
-      basket_assets.length >= 2;
+    let is_stocks_vault = vaultKind === "stock" || basket_assets.length >= 2;
     const nativeOnlyBasket =
       basket_assets.length > 0 &&
       basket_assets.every(
@@ -1798,11 +1828,7 @@
           gmgnAddrIsNativeQuote(a && a.address) ||
           /^(BNB|WBNB)$/i.test(String((a && a.symbol) || ""))
       );
-    if (
-      nativeOnlyBasket &&
-      !gmgnTalHasStockDividendTokens(tal) &&
-      !gmgnIsFlapStocksLaunchpad(item)
-    ) {
+    if (nativeOnlyBasket && !gmgnIsFlapStocksLaunchpad(item)) {
       is_stocks_vault = false;
       if (is_vault) basket_assets = [];
     }
@@ -1823,7 +1849,12 @@
         const fromTal = gmgnResolveDividendSymbol(item, tal, basket_assets);
         const fromTalCompact = compactBasketSymbol(fromTal);
         const selfCompact = compactBasketSymbol(selfSym);
-        if (fromTal && fromTalCompact && fromTalCompact !== selfCompact) {
+        const nativeDiv =
+          !divAddr ||
+          divAddr === WBNB_ADDR ||
+          divAddr === "0x0000000000000000000000000000000000000000";
+        // 任意分红币：拉丁 ticker 或中文名都可以；WBNB 不要用发射中文名冒充。
+        if (fromTal && fromTalCompact && (fromTalCompact !== selfCompact || !nativeDiv)) {
           dividend_symbol = fromTal;
         }
       }
@@ -1887,8 +1918,21 @@
       )
         .trim()
         .toLowerCase(),
+      dividend_token: divAddr,
       dividend_symbol,
-      top_payout_symbol: dividend_symbol || "",
+      tax_symbol: selfSym,
+      top_payout_symbol: hostFeeTopPayoutSymbol({
+        dividend_bps,
+        market_bps,
+        deflation_bps,
+        lp_bps,
+        giggle_charity_bps,
+        binance_charity_bps,
+        is_vault,
+        dividend_symbol,
+        quote_symbol,
+        tax_symbol: selfSym
+      }),
       __needsChain: needsChain
     });
   }
@@ -1931,10 +1975,33 @@
     return isBscPageContext();
   }
 
+  const DEBOT_REAL_POOL_QUOTE = new Set([
+    "BNB",
+    "WBNB",
+    "USD1",
+    "USDT",
+    "USDC",
+    "BUSD",
+    "BTCB",
+    "WETH",
+    "ETH"
+  ]);
+
+  function debotRealPoolQuoteSymbol(raw) {
+    const s = String(raw || "")
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "");
+    if (!s || !DEBOT_REAL_POOL_QUOTE.has(s)) return "";
+    return s === "WBNB" ? "BNB" : s;
+  }
+
   function debotHostFeeFromRow(row) {
     if (!row || typeof row !== "object") return null;
     if (!debotRowIsBsc(row)) return null;
-    const addr = String(row.contract || "")
+    const addr = String(
+      row.contract || row.tokenAddress || row.token_address || row.address || ""
+    )
       .trim()
       .toLowerCase();
     if (!TARGET_TOKEN_RE.test(addr)) return null;
@@ -1971,7 +2038,19 @@
     const sell_tax_bps = ratioToBps(
       row.sell_tax ?? row.sell_tax_rate ?? extra.sell_tax ?? extra.sell_tax_rate
     );
-    const quote_symbol = String(row.quote_symbol || extra.quote_symbol || "").trim();
+    let quote_symbol = String(row.quote_symbol || extra.quote_symbol || "").trim();
+    if (!debotRealPoolQuoteSymbol(quote_symbol)) {
+      const fromPair = debotRealPoolQuoteSymbol(
+        row.tokenPair || row.base_token_symbol || extra.base_token_symbol
+      );
+      if (fromPair) quote_symbol = fromPair;
+    }
+    if (!debotRealPoolQuoteSymbol(quote_symbol)) {
+      const fromBase = symbolFromKnownTokenAddress(
+        extra.base_token || row.base_token_address
+      );
+      if (debotRealPoolQuoteSymbol(fromBase)) quote_symbol = fromBase;
+    }
     const selfSym = debotRowSelfSymbol(row, meta);
     const divAddr = debotDividendTokenAddr(extra);
     let dividend_symbol = "";
@@ -1979,13 +2058,35 @@
       dividend_symbol = "";
     } else {
       dividend_symbol = resolveKnownDividendSymbol(divAddr, addr, selfSym);
+      if (!dividend_symbol) {
+        const extraName = String(
+          extra.dividend_token_symbol ||
+            extra.dividend_symbol ||
+            extra.holder_token_symbol ||
+            extra.reward_token_symbol ||
+            ""
+        ).trim();
+        const nativeDiv =
+          !divAddr ||
+          divAddr === WBNB_ADDR ||
+          divAddr === "0x0000000000000000000000000000000000000000";
+        const selfCompact = compactBasketSymbol(selfSym);
+        const extraCompact = compactBasketSymbol(extraName);
+        if (extraName && (!nativeDiv || extraCompact !== selfCompact)) {
+          dividend_symbol = extraName;
+        }
+      }
       if (!dividend_symbol && basket_assets[0] && !is_stocks_vault) {
         const baddr = String(basket_assets[0].address || "").toLowerCase();
         const bsym = String(basket_assets[0].symbol || "").trim();
         const fromAddr = symbolFromKnownTokenAddress(baddr);
         const selfCompact = compactBasketSymbol(selfSym);
+        const nativeDiv =
+          !divAddr ||
+          divAddr === WBNB_ADDR ||
+          divAddr === "0x0000000000000000000000000000000000000000";
         if (fromAddr) dividend_symbol = fromAddr;
-        else if (bsym && compactBasketSymbol(bsym) !== selfCompact) {
+        else if (bsym && compactBasketSymbol(bsym) !== selfCompact && !nativeDiv) {
           dividend_symbol = bsym;
         }
       }
@@ -2044,8 +2145,21 @@
         .trim()
         .toLowerCase(),
       quote_symbol,
+      dividend_token: divAddr,
       dividend_symbol,
-      top_payout_symbol: dividend_symbol || "",
+      tax_symbol: selfSym,
+      top_payout_symbol: hostFeeTopPayoutSymbol({
+        dividend_bps,
+        market_bps,
+        deflation_bps,
+        lp_bps,
+        giggle_charity_bps,
+        binance_charity_bps,
+        is_vault,
+        dividend_symbol,
+        quote_symbol,
+        tax_symbol: selfSym
+      }),
       __needsChain: needsChain
     });
   }
@@ -2204,7 +2318,7 @@
 
       tryGmgnNcBlock(json.new_creation);
       const data = json.data;
-      if (data && typeof data === "object") {
+      if (data && typeof data === "object" && !Array.isArray(data)) {
         tryGmgnNcBlock(data.new_creation);
         if (Array.isArray(data.new_creations)) {
           for (let i = 0; i < data.new_creations.length; i++) {
@@ -2513,12 +2627,7 @@
         if (fromPool) entry.quote_symbol = fromPool;
       }
       const staleInner = gmgnTaxInnerStaleAfterReuse(scopeEl);
-      const stockInfos = infos.filter(
-        (t) =>
-          t &&
-          (KNOWN_VAULT_STOCK_SYMBOL_BY_ADDR[String(t.address || "").toLowerCase()] ||
-            gmgnSymLooksLikeStockChip(t.symbol))
-      );
+      const stockInfos = infos.filter((t) => t && (t.symbol || t.address));
       // 币股金库：fiber 空篮子时，仅在内图未残留且是股票芯片时补 1+ 成分（地推币 FXION）
       if (
         entry.is_vault &&
@@ -2556,14 +2665,18 @@
         }
       }
       if (!entry.top_payout_symbol) {
-        entry.top_payout_symbol = entry.dividend_symbol || entry.quote_symbol || "";
+        entry.top_payout_symbol = hostFeeBurnIsTop(entry)
+          ? entry.tax_symbol || ""
+          : entry.dividend_symbol || entry.quote_symbol || "";
       }
       return entry;
     }
     const domSym = debotSymbolFromPoolDom(scopeEl);
     if (domSym && !entry.quote_symbol) entry.quote_symbol = domSym;
-    if (!entry.top_payout_symbol && entry.dividend_symbol) {
-      entry.top_payout_symbol = entry.dividend_symbol;
+    if (!entry.top_payout_symbol) {
+      entry.top_payout_symbol = hostFeeBurnIsTop(entry)
+        ? entry.tax_symbol || ""
+        : entry.dividend_symbol || "";
     }
     return entry;
   }
