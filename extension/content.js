@@ -17,6 +17,12 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.116: 新创建每一帧都整槽重铺过滤后的 0..n-1（8s 窗口过期后心跳 nRep=0 又截未过滤前 N 张；切多了会截空）。
+  // 0.8.115: SPA 重挂后 8s 内每帧整槽重铺（一次性 reseat 打在旧树上，K 线侧栏仍漏 🎁/👨‍🍳）。
+  // 0.8.114: SPA K↔首页重挂未过滤列，心跳截尾漏 🎁；ffff 资金接收按 founder/marketing 屏蔽。
+  // 0.8.113: js-mcp 实锤 0.8.112 hb-unready 写 targetLen=0，新创建整列「暂无数据」。未就绪心跳保原长度；HTTP 全量先种 ncServer。
+  // 0.8.112: 新创建屏蔽 — live PATCH 按宿主顺序重写 replaces，禁止 Full 截尾把厨师卡留在原位。
+  // 0.8.111: 搜索 search_v3 预打 /modes；只收 BSC+8888/7777/ffff；QN 100 rps。
   // 0.8.110: Debot 新创建对齐 GMGN — 不垫 keep-pool、hideAddr 贯穿、NFLX/DJTB 快画、rAF 挂徽章。
   // 0.8.109: 撤回 0.8.105–108 的 /modes 半包门禁与 Four 屏蔽改动，恢复 0.8.104 快画/过滤。
   // 0.8.104: pumpRank 新创建屏蔽镜像 Worker order，按宿主当前长度重写 PATCH（抽槽不截尾）。
@@ -1583,10 +1589,11 @@
     return false;
   }
 
-  function queueSearchOverlayModes(token) {
+  function queueSearchOverlayModes(token, href) {
     const tok = String(token || "").toLowerCase();
     if (!TARGET_TOKEN_RE.test(tok) || !isExtensionContextValid()) return;
     if (!isBadgeAccessAllowed() || !isAllowedScanChain()) return;
+    if (href && !isBscTaxTokenHref(href)) return;
     if (shouldHideByCustomSuffix(tok)) return;
     if (searchOverlayModesTokens.size >= 48) {
       const oldest = searchOverlayModesTokens.keys().next().value;
@@ -1597,6 +1604,25 @@
     if (!requestQueue.has(tok)) queueToken(tok, { deferFlush: true, forceModes: true });
     kickHotLaneIfBusy();
     scheduleBatchFlush({ immediate: true, delayMs: 0 });
+  }
+
+  /** search_v3 / Debot search 回包即入队，与结果行 DOM 并行。 */
+  function prefetchSearchOverlayModes(tokens) {
+    if (!Array.isArray(tokens) || !tokens.length) return;
+    if (!isExtensionContextValid() || !isTabVisible()) return;
+    if (!isBadgeAccessAllowed() || !isAllowedScanChain()) return;
+    let n = 0;
+    for (let i = 0; i < tokens.length; i += 1) {
+      const tok = String(tokens[i] || "").toLowerCase();
+      if (!TARGET_TOKEN_RE.test(tok)) continue;
+      const entry =
+        modeCache.get(tok) ||
+        (isPersistentCacheHit(tok) ? persistentCache.get(tok) : null);
+      if (overlayHasModesResult(entry)) continue;
+      queueSearchOverlayModes(tok);
+      n += 1;
+      if (n >= OVERLAY_MAX_CARDS) break;
+    }
   }
 
   function forceModesForWaitingToken(tok) {
@@ -1680,7 +1706,9 @@
       // ignore
     }
     if (options.searchOverlay === true) {
-      queueSearchOverlayModes(tok);
+      const href = readCardTokenHref(card);
+      if (href && !isBscTaxTokenHref(href)) return false;
+      queueSearchOverlayModes(tok, href);
     } else {
       scheduleIncompleteModes(tok);
     }
@@ -2612,14 +2640,16 @@
       const root = roots[ri];
       if (!root?.querySelectorAll) continue;
       const anchors = root.querySelectorAll(
-        "[href*='8888'], [href*='7777'], [href*='ffff'], [href*='/token/'][href*='0x']"
+        "[href*='/bsc/token/0x'], [href*='/token/bsc/']"
       );
       const lim = Math.min(anchors.length, OVERLAY_MAX_CANDIDATES);
       for (let i = 0; i < lim; i += 1) {
         if (painted >= maxPaint) break;
         const a = anchors[i];
         if (!(a instanceof HTMLElement)) continue;
-        const token = normalizeToken(a.getAttribute("href") || a.href || "");
+        const href = a.getAttribute("href") || a.href || "";
+        if (!isBscTaxTokenHref(href)) continue;
+        const token = normalizeToken(href);
         if (!token) continue;
         // GMGN search rows have a stable outer token link. Never fall through to
         // the generic page scanner here: on token pages that fallback also probes
@@ -2653,7 +2683,7 @@
           if (paintListCardFromCacheFast(card, token, entry)) painted += 1;
           continue;
         }
-        queueSearchOverlayModes(token);
+        queueSearchOverlayModes(token, href);
         if (paintLoadingBadgeAndQueue(card, token, { searchOverlay: true })) painted += 1;
         queued += 1;
       }
@@ -2674,8 +2704,10 @@
           if (!(card instanceof HTMLElement) || seen.has(card)) continue;
           seen.add(card);
           card.dataset.flapOverlayCard = "1";
+          const leafHref = card.getAttribute("href") || readCardTokenHref(card) || "";
+          if (leafHref && !isBscTaxTokenHref(leafHref)) continue;
           const token = isGmgnHost()
-            ? normalizeToken(card.getAttribute("href") || "")
+            ? normalizeToken(leafHref || card.getAttribute("href") || "")
             : siteStrategy.extractToken(card);
           if (!token) continue;
           const entry = getEntryForCard(card, token);
@@ -2683,7 +2715,7 @@
             if (paintListCardFromCacheFast(card, token, entry)) painted += 1;
             continue;
           }
-          queueSearchOverlayModes(token);
+          queueSearchOverlayModes(token, leafHref);
           if (paintLoadingBadgeAndQueue(card, token, { searchOverlay: true })) painted += 1;
           queued += 1;
           try {
@@ -3185,6 +3217,13 @@
     if (h.includes("/token/bsc/") || h.includes("/bsc/token/")) return true;
     if (/[?&]chain=bsc(?:&|$)/i.test(h)) return true;
     return false;
+  }
+
+  /** 搜索弹层：必须是 BSC 路由且尾号 8888/7777/ffff，才入 /modes。 */
+  function isBscTaxTokenHref(href) {
+    const h = String(href || "");
+    if (!isBscTokenRouteHref(h)) return false;
+    return Boolean(normalizeToken(h));
   }
 
   function readCardTokenHref(card) {
@@ -5059,11 +5098,7 @@
     if (isPersistentCacheHit(token)) {
       const entry = persistentCache.get(token);
       modeCache.set(token, entry);
-      try {
-        ingestFeeEntryForTaxRecv(token, entry);
-      } catch (_err) {
-        // ignore
-      }
+      ingestFeeAndNotifyListHide(token, entry);
       return entry;
     }
     return null;
@@ -5702,13 +5737,11 @@
   function findGmgnOverlayCard(node) {
     if (!(node instanceof HTMLElement)) return null;
     const link = node.closest?.(
-      "[href*='/bsc/token/0x'], [href*='/token/0x']"
+      "[href*='/bsc/token/0x'], [href*='/token/bsc/']"
     );
     if (!(link instanceof HTMLElement)) return null;
     const href = link.getAttribute("href") || "";
-    return /\/(?:bsc\/)?token\/0x[a-fA-F0-9]{40}/.test(href) && normalizeToken(href)
-      ? link
-      : null;
+    return isBscTaxTokenHref(href) ? link : null;
   }
 
   function scheduleGmgnEmbeddedDirtyPass() {
@@ -7117,7 +7150,7 @@
     });
   }
 
-  const PAGE_HOOK_VER = "147";
+  const PAGE_HOOK_VER = "153";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -8102,6 +8135,13 @@
       from: prevKey.slice(0, 80),
       to: nextKey.slice(0, 80)
     });
+    try {
+      if (isGmgnHost() && isAllowedScanChain()) {
+        window.postMessage({ source: "flap-fee-info", type: "nc-reseat" }, "*");
+      }
+    } catch (_reseat) {
+      // ignore
+    }
 
     // Coalesce multi pushState/replaceState / poll hits in one navigation frame.
     if (spaNavCoalesceTimer) {
@@ -10777,12 +10817,23 @@
       // 0.6.4: GMGN TokenItem is div[href] — do not require <a>.
       root
         .querySelectorAll(
-          "[href*='/token/'][href*='8888'], [href*='/token/'][href*='7777'], " +
-            "[href*='/token/'][href*='ffff'], " +
-            "[href*='/bsc/token/'][href*='8888'], [href*='/bsc/token/'][href*='7777'], " +
-            "[href*='/bsc/token/'][href*='ffff']"
+          overlayOnly
+            ? "[href*='/bsc/token/'][href*='8888'], [href*='/bsc/token/'][href*='7777'], " +
+                "[href*='/bsc/token/'][href*='ffff'], " +
+                "[href*='/token/bsc/'][href*='8888'], [href*='/token/bsc/'][href*='7777'], " +
+                "[href*='/token/bsc/'][href*='ffff']"
+            : "[href*='/token/'][href*='8888'], [href*='/token/'][href*='7777'], " +
+                "[href*='/token/'][href*='ffff'], " +
+                "[href*='/bsc/token/'][href*='8888'], [href*='/bsc/token/'][href*='7777'], " +
+                "[href*='/bsc/token/'][href*='ffff']"
         )
-        .forEach((n) => addNode(n, 2));
+        .forEach((n) => {
+          if (overlayOnly) {
+            const href = (n.getAttribute && n.getAttribute("href")) || "";
+            if (href && !isBscTaxTokenHref(href)) return;
+          }
+          addNode(n, 2);
+        });
       // 0.4.42 GMGN: also CA hrefs (flap/site) but NEVER leaf textContent walks.
       if (gmgnLite && !listReturnSoft) {
         root.querySelectorAll("[href*='8888'], [href*='7777'], [href*='ffff']").forEach((n) => {
@@ -12282,12 +12333,7 @@
         } catch (_bcSig) {
           // ignore
         }
-        // Tax-recv hide: use fee market_bps when list-hook missed first paint.
-        try {
-          ingestFeeEntryForTaxRecv(token, entry);
-        } catch (_errIngest) {
-          // ignore
-        }
+        ingestFeeAndNotifyListHide(token, entry);
       });
       persistConfirmedModes(confirmed);
       broadcastBasketAddrCache(confirmed);
@@ -14300,15 +14346,13 @@
     const addr = String(token).toLowerCase();
     if (!TARGET_TOKEN_RE.test(addr)) return false;
     if (entry.is_vault) return false;
-    // Four ffff 宿主 marketing = 税收钱包，不是 👨‍🍳 资金接收方
-    if (isFourTaxToken(addr) && entry.source_host) return false;
     const marketBps = Number(entry.market_bps) || 0;
     if (marketBps <= 0 && !entry.is_vault) {
       // no marketing share — do not invent hide signal
       return false;
     }
     const recvPct = marketBps / 100; // 10000 bps → 100%
-    return mergeTaxRecvEntries([
+    const merged = mergeTaxRecvEntries([
       {
         address: addr,
         recvPct,
@@ -14316,6 +14360,67 @@
         source: "fee"
       }
     ]);
+    if (shouldHideTaxRecv({ recvPct, isVault: false, source: "fee" })) {
+      notifyPageHookHideAddrs([addr]);
+    }
+    return merged;
+  }
+
+  function notifyPageHookHideAddrs(addrs) {
+    const list = [];
+    const seen = new Set();
+    for (let i = 0; i < (addrs || []).length; i += 1) {
+      const tok = String(addrs[i] || "").toLowerCase();
+      if (!TARGET_TOKEN_RE.test(tok) || seen.has(tok)) continue;
+      seen.add(tok);
+      list.push(tok);
+    }
+    if (!list.length) return;
+    try {
+      window.postMessage(
+        { source: "flap-fee-info", type: "hide-addrs", addrs: list },
+        "*"
+      );
+    } catch (_pm) {
+      // ignore
+    }
+  }
+
+  function entryShouldNotifyListHide(token, entry) {
+    if (!entry) return false;
+    const addr = String(token || "").toLowerCase();
+    if (!TARGET_TOKEN_RE.test(addr)) return false;
+    if (typeof shouldHideByCustomSuffix === "function" && shouldHideByCustomSuffix(addr)) {
+      return true;
+    }
+    if (vaultHidePrefs && vaultHidePrefs.enabled === true) {
+      const hideTax = vaultHidePrefs.hideTaxVault === true;
+      const hideStock = vaultHidePrefs.hideStockVault === true;
+      const taxOn = hideTax || (!hideTax && !hideStock);
+      if (entry.is_stocks_vault === true && hideStock) return true;
+      if (entry.is_vault === true && entry.is_stocks_vault !== true && taxOn) return true;
+    }
+    if (taxRecvHidePrefs && taxRecvHidePrefs.enabled === true) {
+      if (entry.is_vault === true || entry.is_stocks_vault === true) return false;
+      const pct = (Number(entry.market_bps) || 0) / 100;
+      if (pct > 0 && shouldHideTaxRecv({ recvPct: pct, isVault: false, source: "fee" })) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function ingestFeeAndNotifyListHide(token, entry) {
+    try {
+      ingestFeeEntryForTaxRecv(token, entry);
+    } catch (_ing) {
+      // ignore
+    }
+    try {
+      if (entryShouldNotifyListHide(token, entry)) notifyPageHookHideAddrs([token]);
+    } catch (_n) {
+      // ignore
+    }
   }
 
   /**
@@ -14907,11 +15012,7 @@
         releaseQueuedTokenIfHostFeeReady(token);
       }
       confirmed.push([token, entry]);
-      try {
-        ingestFeeEntryForTaxRecv(token, entry);
-      } catch (_ing) {
-        // ignore
-      }
+      ingestFeeAndNotifyListHide(token, entry);
     }
     if (!confirmed.length) return;
     broadcastBasketAddrCache(confirmed.map(([, e]) => e));
@@ -14958,6 +15059,10 @@
         if (event.source && event.source !== window) return;
         const data = event.data;
         if (!data || data.source !== "flap-fee-info") return;
+        if (data.type === "search-overlay-tokens") {
+          prefetchSearchOverlayModes(data.tokens);
+          return;
+        }
         if (data.type === "host-fee-ranks-done" && data.site === "debot") {
           if (requestQueue.size > 0) maybeFlushRequestQueue("ranks-done");
           return;

@@ -9,7 +9,7 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 147;
+  const HOOK_VER = 153;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -67,8 +67,20 @@
     ready: false
   };
   const ncRewrittenFrames = new WeakSet();
+  /** SPA 重挂后宿主先吃未过滤 order；js-mcp：一次性 reseat 打在旧树上，随后心跳截尾漏 🎁。 */
+  let ncReseatUntil = 0;
+  const NC_RESEAT_MS = 8000;
+
+  function markNcReseat() {
+    ncReseatUntil = Date.now() + NC_RESEAT_MS;
+  }
+
+  function shouldNcReseat() {
+    return ncReseatUntil > 0 && Date.now() < ncReseatUntil;
+  }
 
   function resetNcPumpShadows() {
+    ncReseatUntil = 0;
     ncServer.order = [];
     ncServer.map = new Map();
     ncServer.lastSeq = -1;
@@ -285,7 +297,6 @@
     }
     if (!taxRecvEnabled) return false;
     if (entry.is_vault === true || entry.is_stocks_vault === true) return false;
-    if (/ffff$/i.test(addr)) return false;
     const pct = (Number(entry.market_bps) || 0) / 100;
     if (!(pct > 0)) return false;
     return exceedsTaxRecvThreshold(pct, taxRecvPrefs.thresholdPct);
@@ -1295,12 +1306,69 @@
     return (
       u.includes("trenches_rank") ||
       /meme\/v\d+\/ranks/i.test(u) ||
-      u.includes("mutil_window_token_security_launchpad") ||
       u.includes("mutil_window_token_info") ||
+      u.includes("mutil_window_token_security_launchpad") ||
       u.includes("multi_token_info") ||
       u.includes("token_info_brief") ||
       u.includes("token_fee_info")
     );
+  }
+
+  function searchOverlayUrlLooksUseful(url) {
+    const u = String(url || "");
+    if (!u) return false;
+    if (/search_v3|search_v2/i.test(u)) return true;
+    if (/\/vas\/api\/v1\/search/i.test(u)) return true;
+    if (/meme\/v\d+\/search/i.test(u)) return true;
+    if (/\/search\/(token|coin|meme)/i.test(u)) return true;
+    return false;
+  }
+
+  function collectBscTaxSearchTokens(json) {
+    const out = [];
+    const seen = new Set();
+    const visit = (c) => {
+      if (!c || typeof c !== "object" || out.length >= 36) return;
+      const chain = String(c.chain || c.network || c.chain_id || "").toLowerCase();
+      if (chain && chain !== "bsc" && chain !== "56") return;
+      if (!chain && !isBscPageContext()) return;
+      const addr = String(
+        c.address || c.contract || c.token_address || c.ca || ""
+      ).toLowerCase();
+      if (!TARGET_TOKEN_RE.test(addr) || seen.has(addr)) return;
+      seen.add(addr);
+      out.push(addr);
+    };
+    try {
+      const data = json && json.data;
+      const bags = [];
+      if (data && Array.isArray(data.coins)) bags.push(data.coins);
+      if (data && Array.isArray(data.list)) bags.push(data.list);
+      if (data && Array.isArray(data.tokens)) bags.push(data.tokens);
+      if (Array.isArray(data)) bags.push(data);
+      for (let b = 0; b < bags.length; b += 1) {
+        const bag = bags[b];
+        for (let i = 0; i < bag.length && out.length < 36; i += 1) visit(bag[i]);
+      }
+    } catch (_walk) {
+      // ignore
+    }
+    return out;
+  }
+
+  function collectSearchOverlayTokensFromHttp(url, text) {
+    if (!searchOverlayUrlLooksUseful(url) || !text || text.length < 40) return;
+    try {
+      const json = nativeJsonParse(text);
+      const tokens = collectBscTaxSearchTokens(json);
+      if (!tokens.length) return;
+      window.postMessage(
+        { source: "flap-fee-info", type: "search-overlay-tokens", tokens },
+        "*"
+      );
+    } catch (_e) {
+      // ignore
+    }
   }
 
   const WBNB_ADDR = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c";
@@ -2321,6 +2389,13 @@
     const sample = unwrapGmgnTokenRow(list[0]);
     if (!sample || typeof sample !== "object") return 0;
     if (!gmgnAddr(sample) && !gmgnTal(sample)) return 0;
+    if (pad || looksLikeNcSnapshotList(list)) {
+      try {
+        seedNcServerFromSnapshotList(list);
+      } catch (_seed) {
+        // ignore
+      }
+    }
     const removed = filterTokenArrayInPlace(list, "gmgn");
     if (pad) rememberAndPadNewCreation(list, "gmgn");
     else rememberNewCreationItems(list, "gmgn");
@@ -2632,75 +2707,96 @@
     return { ok: true, replaces };
   }
 
+  function writeHostPatchFrame(frame, nextOrder, replaces) {
+    frame.kind = 1;
+    frame.targetLen = nextOrder.length;
+    frame.replaces = Array.isArray(replaces) ? replaces : [];
+    if ("data" in frame) delete frame.data;
+  }
+
+  /** Live 帧宿主只认 PATCH：先截到 targetLen，再 order[i]=id。
+   * 空 replaces + 截尾 = 未过滤列的前 N 张（SPA 漏 🎁）。
+   * 每一帧都把 0..n-1 写成过滤后的槽；targetLen=0 只在 server 非空且全部该藏时才发。 */
   function emitHostNcFrame(frame, seq, nextOrder, nextMap, origReplaces) {
-    const prev = ncHost.ready ? ncHost.order : [];
-    const same =
-      prev.length === nextOrder.length &&
-      prev.every((id, i) => id === nextOrder[i]);
     frame.seq = seq;
-    let mutated = 1;
-    if (same && ncHost.ready) {
-      const reps = [];
-      const list = Array.isArray(origReplaces) ? origReplaces : [];
-      for (let i = 0; i < list.length; i += 1) {
-        const rep = list[i];
-        const id = String((rep && rep.id) || "");
-        if (!id || !(rep && rep.data)) continue;
-        const hi = nextOrder.indexOf(id);
-        if (hi < 0) continue;
-        reps.push({ i: hi, id, data: rep.data });
-      }
-      frame.kind = 1;
-      frame.targetLen = nextOrder.length;
-      frame.replaces = reps;
-      if ("data" in frame) delete frame.data;
-    } else {
-      let diff = 0;
-      const lim = Math.min(prev.length, nextOrder.length);
-      for (let i = 0; i < lim; i += 1) {
-        if (prev[i] !== nextOrder[i]) diff += 1;
-      }
-      diff += Math.abs(prev.length - nextOrder.length);
-      const useFull =
-        !ncHost.ready ||
-        diff > 8 ||
-        prev.length === 0 ||
-        nextOrder.length === 0;
-      if (!useFull) {
-        const built = buildHostPatchReplaces(prev, nextOrder, nextMap);
-        if (built.ok) {
-          frame.kind = 1;
-          frame.targetLen = nextOrder.length;
-          frame.replaces = built.replaces;
-          if ("data" in frame) delete frame.data;
-        } else {
-          // data 不够拼 PATCH 时改发 Full
-          const data = [];
-          for (let i = 0; i < nextOrder.length; i += 1) {
-            const tok = nextMap.get(nextOrder[i]);
-            if (tok) data.push(tok);
-          }
-          frame.kind = 2;
-          frame.data = data;
-          frame.replaces = [];
-          frame.targetLen = data.length;
-        }
-      } else {
-        const data = [];
-        for (let i = 0; i < nextOrder.length; i += 1) {
-          const tok = nextMap.get(nextOrder[i]);
-          if (tok) data.push(tok);
-        }
-        frame.kind = 2;
-        frame.data = data;
-        frame.replaces = [];
-        frame.targetLen = data.length;
-      }
+    if (nextOrder.length > 0) {
+      return emitHostReseatFrame(frame, seq, nextOrder, nextMap);
     }
+    if (ncServer.order.length > 0) {
+      writeHostPatchFrame(frame, [], []);
+      ncHost.order = [];
+      ncHost.lastSeq = seq;
+      ncHost.ready = true;
+      return 1;
+    }
+    frame.kind = 1;
+    frame.replaces = [];
+    if ("data" in frame) delete frame.data;
+    return 1;
+  }
+
+  function emitHostReseatFrame(frame, seq, nextOrder, nextMap) {
+    const reps = [];
+    for (let i = 0; i < nextOrder.length; i += 1) {
+      const id = nextOrder[i];
+      if (!id) continue;
+      const rec = { i, id };
+      const data = nextMap.get(id);
+      if (data) rec.data = data;
+      reps.push(rec);
+    }
+    frame.seq = seq;
+    writeHostPatchFrame(frame, nextOrder, reps);
     ncHost.order = nextOrder.slice();
     ncHost.lastSeq = seq;
     ncHost.ready = true;
-    return mutated;
+    return 1;
+  }
+
+  function emitHostHeartbeat(frame) {
+    if (!ncHost.ready) {
+      // js-mcp 0.8.112：影子未就绪时写 targetLen=0，宿主截尾把「新创建」砍成「暂无数据」。
+      frame.kind = 1;
+      frame.replaces = [];
+      if ("data" in frame) delete frame.data;
+      return 1;
+    }
+    writeHostPatchFrame(frame, ncHost.order, []);
+    frame.seq = ncHost.lastSeq >= 0 ? ncHost.lastSeq : Number(frame.seq) || 0;
+    return 1;
+  }
+
+  /** HTTP / SNAP 全量在过滤前写入 ncServer（未过滤 order），否则 live PATCH 一直 unready。 */
+  function seedNcServerFromSnapshotList(list) {
+    if (ncServer.ready) return false;
+    if (!Array.isArray(list) || list.length < 3) return false;
+    const order = [];
+    const map = new Map();
+    for (let i = 0; i < list.length; i += 1) {
+      const row = list[i];
+      const tok = unwrapGmgnTokenRow(row);
+      const id = ncItemId(tok, (row && (row.__key || row.key)) || (tok && tok.__key));
+      if (!id || map.has(id)) continue;
+      order.push(id);
+      map.set(id, tok || row);
+    }
+    if (order.length < 3) return false;
+    ncServer.order = order;
+    ncServer.map = map;
+    ncServer.lastSeq = -1;
+    ncServer.ready = true;
+    ncServer.awaitingFullAt = 0;
+    const { nextOrder, removed } = filterNcServerToHost();
+    ncHost.order = nextOrder.slice();
+    ncHost.lastSeq = -1;
+    ncHost.ready = true;
+    noteNcAfter("http-seed", removed, {
+      kind: 2,
+      replaces: [],
+      data: nextOrder,
+      targetLen: nextOrder.length
+    });
+    return true;
   }
 
   function rewriteNcFullFrame(frame) {
@@ -2755,18 +2851,25 @@
         noteNcAfter("poke-full", 0, frame);
         return 1;
       }
-      return 0;
+      emitHostHeartbeat(frame);
+      noteNcAfter("hb-unready", 0, frame);
+      return 1;
     }
     const applied = applyIncomingNcPatch(frame);
     if (!applied.ok) {
-      if (applied.reason === "seq") return 0;
+      if (applied.reason === "seq") {
+        emitHostHeartbeat(frame);
+        noteNcAfter("hb-seq", 0, frame);
+        return 1;
+      }
       if (pokeNcRequestFull(frame)) {
         ncServer.ready = false;
-        ncHost.ready = false;
         noteNcAfter("apply-fail", 0, frame, { reason: applied.reason });
         return 1;
       }
-      return 0;
+      emitHostHeartbeat(frame);
+      noteNcAfter("hb-apply-fail", 0, frame, { reason: applied.reason });
+      return 1;
     }
     if (applied.heartbeat) ncServer.lastSeq = seq;
     const { nextOrder, nextMap, removed } = filterNcServerToHost();
@@ -4281,7 +4384,9 @@
     XMLHttpRequest.prototype.send = function (body) {
       const xhr = this;
       const url = xhr.__flapFeeHostFeeUrl || xhr.__flapFeeUrl || "";
-      if (hostFeeUrlLooksUseful(url)) {
+      const wantHost = hostFeeUrlLooksUseful(url);
+      const wantSearch = searchOverlayUrlLooksUseful(url);
+      if (wantHost || wantSearch) {
         xhr.addEventListener(
           "loadend",
           function flapFeeHostFeeXhrDone() {
@@ -4293,13 +4398,25 @@
                 if (!rt || rt === "text" || rt === "") {
                   text = typeof xhr.responseText === "string" ? xhr.responseText : "";
                 } else if (rt === "json" && xhr.response && typeof xhr.response === "object") {
-                  collectHostFeesFromJson(xhr.response);
+                  if (wantHost) collectHostFeesFromJson(xhr.response);
+                  if (wantSearch) {
+                    const tokens = collectBscTaxSearchTokens(xhr.response);
+                    if (tokens.length) {
+                      window.postMessage(
+                        { source: "flap-fee-info", type: "search-overlay-tokens", tokens },
+                        "*"
+                      );
+                    }
+                  }
                   return;
                 }
               } catch (_rt) {
                 // ignore
               }
-              if (text && text.length >= 40) collectHostFeesFromHttp(url, text);
+              if (text && text.length >= 40) {
+                if (wantHost) collectHostFeesFromHttp(url, text);
+                if (wantSearch) collectSearchOverlayTokensFromHttp(url, text);
+              }
             } catch (_e) {
               // ignore
             }
@@ -4325,10 +4442,13 @@
   function gmgnCreatorRecvPct(tal, item) {
     if (!tal || typeof tal !== "object") return null;
     if (isGmgnVaultTal(tal)) return null;
-    if (gmgnIsFourTaxWallet(tal, item)) return null;
-
-    const mkt = mktToPct(tal.marketing);
-    // 0 / "0" / 空 = 无营销份额
+    // Four ffff：marketing/founder 是创建税（链上 rateFounder），不是金库；按资金接收屏蔽。
+    // 例 0x9dc02fbe…ffff → 👨‍🍳→BNB，不能再因 gmgnIsFourTaxWallet 整段豁免。
+    const mkt = mktToPct(
+      tal.marketing != null && tal.marketing !== ""
+        ? tal.marketing
+        : pickTalField(tal, ["founder", "dev", "marketing_tax", "mktx", "dev_tax"])
+    );
     if (mkt == null || mkt <= 0) return null;
     return mkt;
   }
@@ -4351,17 +4471,18 @@
     if (isGmgnVaultTal(tal)) return false;
 
     const divOnly = mktToPct(tal.dividend);
-    const mktOnly = mktToPct(tal.marketing);
-    // 纯 💎：dividend≈100% 且无 marketing → 永不屏蔽
+    const chefPct = gmgnCreatorRecvPct(tal, t);
+    const mktOnly = chefPct;
+    // 纯 💎：dividend≈100% 且无创作者份额 → 永不屏蔽
     if (divOnly != null && divOnly + 1e-9 >= 99 && (mktOnly == null || mktOnly <= 0)) {
       return false;
     }
-    // 有 dividend、完全无 marketing 字段 → 持有人向，不屏蔽
+    // 有 dividend、完全无创作者份额 → 持有人向，不屏蔽
     if (divOnly != null && divOnly > 0 && (mktOnly == null || mktOnly <= 0)) {
       return false;
     }
 
-    const pct = gmgnCreatorRecvPct(tal, t);
+    const pct = chefPct;
     if (pct == null) return false;
     if (isTaxRecvAllowlisted(gmgnRecvAddresses(t, tal))) return false;
     // marketing% 达阈值 → 屏蔽（含 hybrid；0 = 严格 >0%，不是 ≥0%）
@@ -5690,6 +5811,7 @@
   if (!window.__flapFeeInfoSpaHook) {
     window.__flapFeeInfoSpaHook = 1;
     const fireSpa = (reason) => {
+      markNcReseat();
       try {
         window.postMessage(
           {
@@ -5735,6 +5857,19 @@
         if (!data || data.source !== "flap-fee-info") return;
         if (data.type === "basket-addr-cache") {
           learnVaultStockSymbols(data.rows);
+          return;
+        }
+        if (data.type === "nc-reseat") {
+          markNcReseat();
+          return;
+        }
+        if (data.type === "hide-addrs" && Array.isArray(data.addrs)) {
+          for (let i = 0; i < data.addrs.length; i += 1) {
+            const addr = String(data.addrs[i] || "").trim().toLowerCase();
+            if (!addr || !/^0x[a-f0-9]{40}$/.test(addr)) continue;
+            hideAddrSet.add(addr);
+            ncKeepPool.delete(addr);
+          }
           return;
         }
         if (data.type === "tax-recv-prefs") {
@@ -6662,18 +6797,17 @@
           }
           const p = origFetch.apply(this, args);
           const u = String(url || "");
-          if (
-            !p ||
-            typeof p.then !== "function" ||
-            !hostFeeUrlLooksUseful(u)
-          ) {
+          const wantHost = hostFeeUrlLooksUseful(u);
+          const wantSearch = searchOverlayUrlLooksUseful(u);
+          if (!p || typeof p.then !== "function" || (!wantHost && !wantSearch)) {
             return p;
           }
           return p.then(async (res) => {
             try {
               if (res && res.ok && typeof res.clone === "function") {
                 const text = await res.clone().text();
-                collectHostFeesFromHttp(url, text);
+                if (wantHost) collectHostFeesFromHttp(url, text);
+                if (wantSearch) collectSearchOverlayTokensFromHttp(url, text);
               }
             } catch (_e) {
               // ignore

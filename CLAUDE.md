@@ -303,8 +303,8 @@ uv run flap-fee-server
 | `FLAP_FEE_HOST` / `PORT` | 默认 `127.0.0.1:8765` |
 | `FLAP_FEE_BSC_RPC_QN` | QuickNode 主 RPC（优先） |
 | `FLAP_FEE_BSC_RPC` | 备用 / 公共 seed（QN 未设时用） |
-| `FLAP_FEE_RPC_RPS_LIMIT` | RPC 限速 |
-| `FLAP_FEE_MAX_FETCH_WORKERS` | 并发 |
+| `FLAP_FEE_RPC_RPS_LIMIT` | QN RPC 限速（生产 **100**/s） |
+| `FLAP_FEE_MAX_FETCH_WORKERS` | 并发（生产 **48**，配合 ~0.5s eth_call 才能吃满 100 rps） |
 | `FLAP_FEE_API_TOKEN` | Bearer；生产必开 |
 
 单 token 调试：
@@ -667,8 +667,15 @@ python tools/ctl.py watchdog-run
  - `0.8.108`：刷新徽章慢 — 100% 分红半包先画 💎，后台 /modes 纠金库占坑，不再整页 ⏳。Four 仅纯税收钱包（marketing≈100%无分红）豁免资金接收；`ffff` hybrid（如 💎50%👨‍🍳20%）按阈值屏蔽
  - `0.8.109`：撤回 0.8.105–108 半包 /modes 门禁与 Four 屏蔽改动（拖慢刷新、打乱 0.8.104 快画/过滤）。恢复 0.8.104 宿主快路径；PATCH 双影子过滤保留；仅留 token_fee_info ingest
  - `0.8.110`：Debot 新创建对齐 GMGN — ranks 只滤不垫 keep-pool；hideAddrSet 贯穿 HTTP/socket；补 NFLX/DJTB 报价快画；战壕徽章 rAF、禁止无谓 remount
-- 插件当前版本：见 `extension/manifest.json`（**0.8.110**，公开无剪切板）
-- page-hook：`HOOK_VER` **147**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - Worker 搜索混合批：KV 已命中的 CA 立刻返回，缺的后台 wait_chain（js-mcp：QQQB 16 KV+1 链把 TTFB 卡到 2.07s）
+ - `0.8.111`：搜索压缩 — `search_v3` 回包即预打 /modes（与 DOM 并行）；只收 BSC 且尾号 8888/7777/ffff，他链/非税币不组批。QN `FLAP_FEE_RPC_RPS_LIMIT=100`、workers=48
+ - `0.8.112`：新创建屏蔽 — live 宿主只认 PATCH 截尾+按下标替换。原先 diff>8 改发 Full / 只减 targetLen，等于砍队尾、厨师卡留在原位（刷新 HTTP 全量正常，随后一张屏蔽新卡把整列屏蔽打坏；再来一张可见卡 Full 又「修好」）。改成按宿主 order 重写 replaces；禁止把未过滤原帧放行；`/modes` 确认后补 hide-addrs
+ - `0.8.113`：js-mcp 实锤 0.8.112 `hb-unready` + `targetLen=0` 把新创建砍成「暂无数据」（shadow ready=0/hostLen=0）。未就绪心跳保留原 targetLen；HTTP 全量过滤前种 ncServer，live PATCH 才能抽槽
+ - `0.8.114`：js-mcp 首页→K 线侧栏漏 🎁 — SPA 重挂读 Worker 未过滤 60 条，心跳只截 targetLen=7 变成前 7 张未过滤。下一帧把 0..n-1 全部写成过滤后的槽。ffff `0x9dc02fbe…` 链上 👨‍🍳→BNB：资金接收不再豁免 Four marketing/founder
+ - `0.8.115`：js-mcp 多切 K↔首页 — 一次性 reseat 打在旧列表，重挂后再心跳 `nRep=0` 截未过滤前 N 张（🎁96%/👨‍🍳 漏出）。改为 SPA 后 8s 内每帧整槽重铺
+ - `0.8.116`：8s 窗口过期后再切仍漏；心跳 `nRep=0` 会截空。改为每一帧都把 0..n-1 写成过滤槽；仅 server 非空且全部该藏才 targetLen=0
+- 插件当前版本：见 `extension/manifest.json`（**0.8.116**，公开无剪切板）
+- page-hook：`HOOK_VER` **153**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  
