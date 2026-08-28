@@ -97,13 +97,9 @@
     }
   }
 
-  function syncShareWorker(taxOn, suffixOn, vaultOn) {
+  function syncShareWorker() {
     try {
-      const filterOn = (taxOn || suffixOn || vaultOn) && isBscPage();
-      if (filterOn) {
-        localStorage.setItem("disableShareWorker", "true");
-        localStorage.setItem(OWN_KEY, "1");
-      } else if (localStorage.getItem(OWN_KEY) === "1") {
+      if (localStorage.getItem(OWN_KEY) === "1") {
         localStorage.removeItem("disableShareWorker");
         localStorage.removeItem(OWN_KEY);
       }
@@ -231,7 +227,7 @@
     const suffixActive =
       suffix.enabled === true &&
       (suffix.rules || []).some((r) => r && r.enabled !== false && r.suffix);
-    syncShareWorker(tax.enabled === true, suffixActive, vault.enabled === true);
+    syncShareWorker();
   }
 
   // 启动时若 localStorage 已有，先同步 attr（storage 回调前的窗口）

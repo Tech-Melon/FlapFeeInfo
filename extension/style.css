@@ -121,10 +121,13 @@
 }
 
 .gmgn-fee-mode-icon--gmgn[data-fee-mount-side="tax-after"] {
-  display: inline-flex !important;
-  margin-left: 4px;
-  margin-right: 0;
-  vertical-align: middle;
+  position: absolute !important;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  margin: 0 0 0 4px !important;
+  z-index: 5;
+  pointer-events: auto;
   flex: 0 0 auto !important;
 }
 

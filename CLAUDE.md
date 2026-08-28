@@ -202,7 +202,7 @@ if lpBps > 0:              💧
 |------|--------|------|
 | `*.gmgn.ai` | gmgn | 找 Tax 芯片，徽章挂外侧（防裁切） |
 | `*.debot.ai` | debot | 指标行挂载 |
-| `*.gungnir.bot` | debot | **与 Debot 同前端**（同 Vite asset hash / 同 API 路径） |
+| `*.gungnir.bot` | debot | **与 Debot 同站不同域名**（同 Vite / 同 API）。测 Debot 即覆盖，不必单独开 Gungnir |
 
 新增站点：
 
@@ -643,8 +643,32 @@ python tools/ctl.py watchdog-run
  - `0.8.84`：新卡底池/币股判定不再用 NVDA/QQQ 名单；残留内图只对照本卡篮子/分红；税收金库 vs 币股看 launchpad/篮子数量；删掉未再调用的股票 ticker 正则（防以后误当分类）
  - `0.8.85`：销毁为最大份额时 `→` 只用本币（tax_symbol）；禁止用底池/分红 USDT 冒充；host-fee 的 burn-top 仍打 `/modes`
  - `0.8.86`：单枚 FXIO 币股（100%金库+0分红）显示 📈FXIO；`IBCOCO` 包装币不当 `🎁→IBCO`
-- 插件当前版本：见 `extension/manifest.json`（**0.8.86**，公开无剪切板）
-- page-hook：`HOOK_VER` **124**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.87`：金库屏蔽认 GMGN `lpp=flap_stocks` 与 Debot `vault_tokens`/`is_stocks_vault`；币股分红默认不屏蔽
+ - `0.8.88`：GMGN HTTP/WS/fiber 统一读 `qa` 报价地址；USDT 池无芯片时不再默认 BNB
+ - `0.8.89`：新卡只认首帧齐套（s_tal+qa+分红名）；缺任一立刻 `/modes` 回包即画，不等 HTTP/WSS 补洞
+ - `0.8.90`：不再写入 GMGN `disableShareWorker`；旧 owned 标记启动时清掉。Gungnir=Debot，不单独测
+ - `0.8.91`：齐套才快画；缺参等 80ms 再 `/modes`。拆掉 1s grace / 2.5s 首包门禁 / Debot 1.6s 组批 / 8s defer / GMGN security HTTP 补洞
+ - `0.8.92`：快路径只认新卡首帧底池+分红（GMGN `qa`/`s_tal`，Debot `base_token`/`dividend_token`）；去掉「可信底池地址」白名单；新卡 mutation 不再被首屏 700–800ms 静默窗挡住
+ - `0.8.93`：K 线内嵌战壕与首页对齐立刻快画（不再 header-only progressive / 等 1.4s boot / Debot 顶栏齐了才扫列）；Debot K 线同样修
+ - `0.8.94`：js-mcp 实锤 — 停写 `disableShareWorker` 后新创建走 SharedWorker `pumpRank-bsc`，host-fee 已抽、列表过滤仍只认 `trenches_delta`/HTTP → 👨‍🍳/🎁 漏进新创建；Port 过滤补齐 pumpRank `newCreations` frame/upserts。Debot `meme:new` 路径保持
+ - `0.8.95`：js-mcp 实锤 K 线 ~2s — 图表 capture `scroll` 把整页打进冷却；K 线只冷却 PumpSub 列滚动。屏蔽 hideAddr 禁回填 + 新创建列 DOM 重排兜底
+ - `0.8.96`：js-mcp K 线「新创建」整列空白 — DOM hide 把 13 张卡 height:0；K 线禁止 DOM hide/reflow，过滤只走 pumpRank 数据层
+ - `0.8.97`：新创建错序 — 禁止对 pumpRank upserts 做 keep-pool 回填，全量列按创建时间插入；GMGN 全面停 DOM reflow（children 重写 translateY 会打乱顺序）。K 线卡顿/新卡晚 ~2s — 顶栏齐后不再 200ms 扫列，mutation 不扫整列容器
+ - `0.8.98`：js-mcp SPA 进 K 线侧栏 48s 无徽章 — 侧栏挂载中不取消 progressive；PumpSub 出现后允许扫描；600/1200ms kick；hideAddr 写入 pumpRank/delta `r[]` 且 keep-pool 不吞删除
+ - `0.8.99`：js-mcp 实锤 GMGN 列是 Map：`upserts:[{key,data}]` + `removals`；原先不拆 `data` 导致过滤/host-fee 都落空，误写 `r` 宿主不删。解开 data + 写 removals
+ - `0.8.100`：js-mcp 虚拟列表 itemKey=`${address}-bsc`；0.8.99 往 removals 写裸 0x，Map.delete 对不上，新创建厨师仍在。splice 前记下 key，removals 同时写 `0x` 与 `0x-bsc`
+ - `0.8.101`：js-mcp 137 实锤 `newCreations` 只有 `{frame: Token[]}`，宿主 `nextData` 吃这份数组；外层 removals 无效。原地 splice `frame` + 对 `frame[]` 做 host-fee ingest（过滤 + K 线 2s 同一根因）
+ - `0.8.102`：js-mcp K 线 2min 对照 — 首页 card→badge p50 120ms（有 host-fee），K 线 p50 1508ms 且 nHost=0。live 帧是 PATCH `{kind,seq,targetLen,replaces:[{i,id,data}]}`。ingest `replaces[].data`；过滤丢掉该藏 replace 并压缩 i / targetLen
+ - `0.8.103`：新卡插入列闪烁 — 热路径禁止 forceRemount/拆徽章；GMGN 战壕徽章绝对定位；插入 rAF；PATCH 不再每帧灌 hideAddr removals
+ - `0.8.104`：js-mcp 实锤新创建 👨‍🍳/🎁 漏网 — Worker PATCH 下标相对未过滤 order，宿主 apply 是截尾不是按 i 删。page-hook 镜像 ncServer/ncHost，把隐藏 id 从中间抽出后按宿主当前长度重写帧（心跳也改 targetLen）；尾号走同一条
+ - `0.8.105`：新卡税收钱包半包 — GMGN 首帧常只有 dividend、market_address 已在，marketing/is_vault 后到；快路径误画 💎（偶发 →QQQB）。未填 marketing 的钱包地址不算齐套，走 /modes；K 线 `token_fee_info` 补 ingest
+ - `0.8.106`：分红半包改按份额核验 — 只有分红且 <99% 必 /modes；=100% 但 s_tal 未带 marketing/is_vault 也核验（首帧 dividend:1 占坑）。完整包 marketing:0 才快画 💎。不再用 market_address 当信号（真 💎 也有这个地址）
+ - `0.8.107`：s_tal 已有 金库+分红（🎁+💎）或 创作者+分红（👨‍🍳+💎）则快画、不打 /modes；币股篮子仍回源
+ - `0.8.108`：刷新徽章慢 — 100% 分红半包先画 💎，后台 /modes 纠金库占坑，不再整页 ⏳。Four 仅纯税收钱包（marketing≈100%无分红）豁免资金接收；`ffff` hybrid（如 💎50%👨‍🍳20%）按阈值屏蔽
+ - `0.8.109`：撤回 0.8.105–108 半包 /modes 门禁与 Four 屏蔽改动（拖慢刷新、打乱 0.8.104 快画/过滤）。恢复 0.8.104 宿主快路径；PATCH 双影子过滤保留；仅留 token_fee_info ingest
+ - `0.8.110`：Debot 新创建对齐 GMGN — ranks 只滤不垫 keep-pool；hideAddrSet 贯穿 HTTP/socket；补 NFLX/DJTB 报价快画；战壕徽章 rAF、禁止无谓 remount
+- 插件当前版本：见 `extension/manifest.json`（**0.8.110**，公开无剪切板）
+- page-hook：`HOOK_VER` **147**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  

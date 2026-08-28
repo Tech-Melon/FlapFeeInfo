@@ -5,11 +5,11 @@
  *   · 默认只装 SPA history 桥（对齐 0.5.25）
  *   · 仅 tax-recv / 自定义尾号屏蔽 enabled 时 installTaxRecvNetworkHooks()
  *     （XHR/fetch/WS/MessagePort/SharedWorker/JSON.parse）
- *   · 开屏蔽时 owned 写 gmgn disableShareWorker；关则清理
+ *   · 从不改 GMGN disableShareWorker（保持站点默认 SharedWorker）
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 124;
+  const HOOK_VER = 147;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -33,8 +33,7 @@
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
   /**
    * 新创建保留池（仅过滤开启时）：
-   * - 宿主 API 常在 ~2 分钟后把币移出 new_creation；开屏蔽后 disableShareWorker，
-   *   列表不再靠 SW 累积，币会「到点消失」。
+   * - 宿主 API 常在 ~2 分钟后把币移出 new_creation。
    * - 本池记住已见过的非屏蔽行：最多保留 NC_KEEP_MAX_AGE_MS，展示上限 NC_KEEP_MAX_CARDS。
    * - 满卡时优先保留更新鲜的（按 lastSeen）；超时一律丢弃。不再无限垫 1h 旧币。
    */
@@ -47,6 +46,38 @@
    * @type {Map<string, { item: object, firstSeen: number, lastSeen: number, kind: string }>}
    */
   const ncKeepPool = new Map();
+  /** 已判定应屏蔽的 CA：后续无 s_tal 的 PATCH 也删，且 keep-pool 不得回填 */
+  const hideAddrSet = new Set();
+  /**
+   * pumpRank 新创建双影子（js-mcp 0.8.104）：
+   * Worker 的 PATCH 下标相对「未过滤」order；宿主 apply 是截尾 + replaces。
+   * 不能只丢本帧 replace / 减 targetLen（会砍队尾、中间 👨‍🍳🎁 留着）。
+   * ncServer = Worker 未过滤；发给宿主的帧按 ncHost 重写。
+   */
+  const ncServer = {
+    order: /** @type {string[]} */ [],
+    map: /** @type {Map<string, object>} */ new Map(),
+    lastSeq: -1,
+    ready: false,
+    awaitingFullAt: 0
+  };
+  const ncHost = {
+    order: /** @type {string[]} */ [],
+    lastSeq: -1,
+    ready: false
+  };
+  const ncRewrittenFrames = new WeakSet();
+
+  function resetNcPumpShadows() {
+    ncServer.order = [];
+    ncServer.map = new Map();
+    ncServer.lastSeq = -1;
+    ncServer.ready = false;
+    ncServer.awaitingFullAt = 0;
+    ncHost.order = [];
+    ncHost.lastSeq = -1;
+    ncHost.ready = false;
+  }
 
   const NativeWebSocket = window.WebSocket;
   const NativeSharedWorker = window.SharedWorker;
@@ -236,6 +267,30 @@
   }
 
   /** 阈值 0 = 严格 >0%（有 dev 份额就挡）；>0 的阈值仍按 ≥ 比较。 */
+  function hostFeeEntryShouldHide(entry) {
+    if (!entry || !anyFilterEnabled()) return false;
+    const addr = String(entry.address || "").toLowerCase();
+    if (shouldHideByCustomSuffix(addr)) return true;
+    if (vaultHideEnabled) {
+      if (entry.is_stocks_vault === true && vaultHidePrefs.hideStockVault === true) {
+        return true;
+      }
+      if (
+        entry.is_vault === true &&
+        entry.is_stocks_vault !== true &&
+        vaultHidePrefs.hideTaxVault === true
+      ) {
+        return true;
+      }
+    }
+    if (!taxRecvEnabled) return false;
+    if (entry.is_vault === true || entry.is_stocks_vault === true) return false;
+    if (/ffff$/i.test(addr)) return false;
+    const pct = (Number(entry.market_bps) || 0) / 100;
+    if (!(pct > 0)) return false;
+    return exceedsTaxRecvThreshold(pct, taxRecvPrefs.thresholdPct);
+  }
+
   function exceedsTaxRecvThreshold(pct, thr) {
     if (!Number.isFinite(pct) || pct <= 0) return false;
     const t = Number(thr);
@@ -637,13 +692,16 @@
   }
 
   function gmgnLaunchpadFamily(item) {
+    // trenches_rank 缩写：lpp=flap_stocks|flap；lp 始终是 flap，不能用来区分币股。
     const raw =
       item?.launchpad_platform ||
-      item?.launchpad ||
+      item?.lpp ||
       item?.launchpad_platform_name ||
       item?.f?.launchpad_platform ||
-      item?.f?.launchpad ||
+      item?.f?.lpp ||
       item?.f?.launchpad_platform_name ||
+      item?.launchpad ||
+      item?.f?.launchpad ||
       "";
     return String(raw || "").toLowerCase();
   }
@@ -683,14 +741,28 @@
     return false;
   }
 
+  function gmgnTalLooksLikeStocksVault(tal) {
+    const list = coerceDividendTokenList(tal?.dividend_tokens);
+    if (!list.length) return false;
+    let vaultish = 0;
+    for (let i = 0; i < list.length; i += 1) {
+      const t = list[i];
+      const dt = String((t && t.distribution_type) || "").toLowerCase();
+      if (dt === "vault") vaultish += 1;
+    }
+    return vaultish === list.length;
+  }
+
   /**
    * GMGN s_tal 金库分型：stock=币股篮子金库；tax=税收金库（纯 🎁 vault）。
    * Four ffff 的 marketing+market_address 是「税收钱包」，不是 is_vault 金库 → 返回 null。
+   * js-mcp：币股 lpp=flap_stocks 且 dividend_tokens.distribution_type=vault；
+   * 税收金库 lpp=flap 且 type=direct / 空篮子。
    */
   function gmgnVaultKind(tal, item) {
-    if (!tal || typeof tal !== "object") return null;
     if (gmgnIsFlapStocksLaunchpad(item)) return "stock";
-    if (gmgnHasBasketTokens(tal)) return "stock";
+    if (!tal || typeof tal !== "object") return null;
+    if (gmgnHasBasketTokens(tal) || gmgnTalLooksLikeStocksVault(tal)) return "stock";
     if (isGmgnVaultTal(tal)) {
       const list = coerceDividendTokenList(tal.dividend_tokens);
       const div = ratioToBps(
@@ -715,6 +787,8 @@
   function debotVaultKind(extra) {
     if (!extra || typeof extra !== "object") return null;
     if (extra.is_stocks_vault === true) return "stock";
+    // js-mcp：币股 launchpad_extra.vault_tokens + is_stocks_vault；税收金库走 vault_shares。
+    if (Array.isArray(extra.vault_tokens) && extra.vault_tokens.length >= 1) return "stock";
     const basket = extra.basket_assets || extra.rwa_assets || extra.stock_assets;
     if (Array.isArray(basket) && basket.length >= 2) return "stock";
     if (extra.is_vault === true) return "tax";
@@ -744,9 +818,6 @@
   let hostFeePending = [];
   let hostFeeFlushTimer = 0;
   const HOST_FEE_DEDUPE_MS = 8000;
-  const SECURITY_BASKET_FETCH_GAP_MS = 45000;
-  const securityBasketInflight = new Set();
-  const securityBasketLastAt = new Map();
 
   function ratioToBps(v) {
     if (v == null || v === "") return 0;
@@ -781,6 +852,7 @@
     if (a === "0xce7de646e7208a4ef112cb6ed5038fa6cc6b12e3") return "TRX";
     if (a === "0x55d398326f99059ff775485246999027b3197955") return "USDT";
     if (a === "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d") return "USDC";
+    if (a === "0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d") return "USD1";
     return "";
   }
 
@@ -821,7 +893,9 @@
     "0x75fd4cf6f8392e41e70391d60c90c0d5211603a1": "AMDB",
     "0x431a3bee82e2ca41e49895cbece5bb0f76a89b7a": "AAPL",
     "0x7138b48df7d98d7e3cc221bfe7192d0a178182d8": "SPYB",
-    "0x3f53de71c126bdabae20f9cd64848d317f6c3238": "GOOG"
+    "0x3f53de71c126bdabae20f9cd64848d317f6c3238": "GOOG",
+    "0xd6829ea836b6fa224d099d40e54b31262f874631": "NFLX",
+    "0xf2ec508422174ee564de98187db9359d318afb6b": "DJTB"
   };
 
   /** GMGN /quotes 芯片名 → 链上 symbol（FXION 等无尾缀 B，compact 剥不掉） */
@@ -1073,46 +1147,63 @@
     return [];
   }
 
-  function gmgnResolveQuoteSymbol(item, tal) {
-    const pool = item && typeof item.pool === "object" ? item.pool : null;
-    const data = item && typeof item.data === "object" ? item.data : null;
-    const candidates = [
-      item?.quote_symbol,
-      item?.quote,
-      pool?.quote_symbol,
-      pool?.quote,
-      data?.quote_symbol,
-      item?.f?.quote_symbol,
-      item?.f?.quote,
-      item?.f?.pool?.quote_symbol,
-      tal?.quote_symbol,
-      tal?.quote
-    ];
-    let nativeHit = "";
-    for (let i = 0; i < candidates.length; i++) {
-      const s = String(candidates[i] || "").trim();
-      if (!s || s.length > 16) continue;
-      if (/^(BNB|WBNB)$/i.test(s)) {
-        if (!nativeHit) nativeHit = s;
-        continue;
-      }
-      if (/^[A-Za-z][A-Za-z0-9]{1,15}$/.test(s)) return s;
-    }
-    const qAddr = String(
-      item?.quote_address ||
-        item?.quote_token ||
-        pool?.quote_address ||
-        data?.quote_address ||
-        item?.launch_quote_address ||
+  /** HTTP trenches_rank 用 qa/qs；WSS/fiber 可能是 quote_address。不要用 lp。 */
+  function gmgnItemQuoteFields(item) {
+    if (!item || typeof item !== "object") return { symbol: "", address: "" };
+    const pool = item.pool && typeof item.pool === "object" ? item.pool : null;
+    const data = item.data && typeof item.data === "object" ? item.data : null;
+    const f = item.f && typeof item.f === "object" ? item.f : null;
+    const fp = f && f.pool && typeof f.pool === "object" ? f.pool : null;
+    const address = String(
+      item.qa ||
+        item.quote_address ||
+        item.quote_token ||
+        item.launch_quote_address ||
+        (pool && (pool.qa || pool.quote_address || pool.quote_token)) ||
+        (data && (data.qa || data.quote_address || data.quote_token)) ||
+        (f && (f.qa || f.quote_address || f.quote_token)) ||
+        (fp && (fp.qa || fp.quote_address)) ||
         ""
     )
       .trim()
       .toLowerCase();
-    const fromStock = symbolFromKnownStockAddress(qAddr);
-    if (fromStock) return fromStock;
-    const fromKnown = symbolFromKnownTokenAddress(qAddr);
-    if (fromKnown) return fromKnown;
-    return nativeHit || "";
+    const cands = [
+      item.qs,
+      item.quote_symbol,
+      item.quote,
+      pool && (pool.qs || pool.quote_symbol || pool.quote),
+      data && (data.qs || data.quote_symbol),
+      f && (f.qs || f.quote_symbol || f.quote),
+      fp && (fp.qs || fp.quote_symbol)
+    ];
+    let nativeHit = "";
+    let symbol = "";
+    for (let i = 0; i < cands.length; i += 1) {
+      const s = String(cands[i] || "").trim();
+      if (!s || s.length > 16) continue;
+      if (/^(BNB|WBNB)$/i.test(s)) {
+        if (!nativeHit) nativeHit = s === "WBNB" ? "BNB" : s;
+        continue;
+      }
+      if (/^[A-Za-z][A-Za-z0-9]{1,15}$/.test(s)) {
+        symbol = s;
+        break;
+      }
+    }
+    if (!symbol && /^0x[a-f0-9]{40}$/.test(address)) {
+      symbol =
+        symbolFromKnownTokenAddress(address) || symbolFromKnownStockAddress(address) || "";
+    }
+    if (!symbol) symbol = nativeHit;
+    return { symbol, address };
+  }
+
+  function gmgnResolveQuoteSymbol(item, tal) {
+    const fields = gmgnItemQuoteFields(item);
+    if (fields.symbol && !/^(BNB|WBNB)$/i.test(fields.symbol)) return fields.symbol;
+    const fromTal = String((tal && (tal.quote_symbol || tal.quote)) || "").trim();
+    if (fromTal && !/^(BNB|WBNB)$/i.test(fromTal) && fromTal.length <= 16) return fromTal;
+    return fields.symbol || "";
   }
 
   function gmgnDividendSymbolFromTal(tal) {
@@ -1135,7 +1226,7 @@
     const dtAddr =
       typeof dt === "string" ? dt : dt && typeof dt === "object" ? dt.address : "";
     if (!dtAddr) return "";
-    return symbolFromKnownTokenAddress(dtAddr) || "";
+    return symbolFromKnownTokenAddress(dtAddr) || symbolFromKnownStockAddress(dtAddr) || "";
   }
 
   function gmgnItemSelfSymbol(item) {
@@ -1207,7 +1298,8 @@
       u.includes("mutil_window_token_security_launchpad") ||
       u.includes("mutil_window_token_info") ||
       u.includes("multi_token_info") ||
-      u.includes("token_info_brief")
+      u.includes("token_info_brief") ||
+      u.includes("token_fee_info")
     );
   }
 
@@ -1231,22 +1323,9 @@
     if (!item || typeof item !== "object") return null;
     const addr = gmgnAddr(item);
     if (!TARGET_TOKEN_RE.test(addr)) return null;
-    const pool = item.pool && typeof item.pool === "object" ? item.pool : null;
-    const quote_symbol = String(
-      (pool && (pool.quote_symbol || pool.quote)) ||
-        item.quote_symbol ||
-        item.quote ||
-        ""
-    ).trim();
-    const quote_token = String(
-      (pool && (pool.quote_address || pool.quote_token)) ||
-        item.quote_address ||
-        item.quote_token ||
-        item.launch_quote_address ||
-        ""
-    )
-      .trim()
-      .toLowerCase();
+    const q = gmgnItemQuoteFields(item);
+    const quote_symbol = q.symbol;
+    const quote_token = q.address;
     if (gmgnQuoteLooksNative(quote_symbol, quote_token)) return null;
     if (!quote_symbol && !/^0x[a-f0-9]{40}$/.test(quote_token)) return null;
     return { address: addr, quote_symbol, quote_token };
@@ -1342,8 +1421,9 @@
       if (!t || typeof t !== "object") continue;
       const address = String(t.address || t.token || "").toLowerCase();
       let sym = String(t.symbol || t.name || t.ticker || "").trim();
-      const multi = raw.length > 1;
-      if (!sym && address && !multi) sym = symbolFromKnownStockAddress(address);
+      if (!sym && address) {
+        sym = symbolFromKnownStockAddress(address) || symbolFromKnownTokenAddress(address);
+      }
       if (!sym) continue;
       sym = resolveStockBasketSymbol(sym, address);
       out.push({
@@ -1584,6 +1664,25 @@
     return out;
   }
 
+  function hostFeePaintComplete(entry) {
+    if (!entry) return false;
+    const bps =
+      (Number(entry.dividend_bps) || 0) +
+      (Number(entry.market_bps) || 0) +
+      (Number(entry.deflation_bps) || 0) +
+      (Number(entry.lp_bps) || 0) +
+      (Number(entry.giggle_charity_bps) || 0) +
+      (Number(entry.binance_charity_bps) || 0);
+    if (bps <= 0) return false;
+    const qTok = String(entry.quote_token || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(qTok)) return false;
+    if ((Number(entry.dividend_bps) || 0) > 0 && !String(entry.dividend_symbol || "").trim()) {
+      return false;
+    }
+    if (entry.is_stocks_vault && !basketSymbolsReady(entry.basket_assets)) return false;
+    return true;
+  }
+
   function finalizeHostFeeEntry(entry) {
     if (!entry) return entry;
     const isStockVault =
@@ -1605,6 +1704,7 @@
       entry.__awaitSecurity = false;
       entry.__basketPendingUntil = 0;
     }
+    entry.__paintComplete = hostFeePaintComplete(entry);
     return entry;
   }
 
@@ -1620,91 +1720,6 @@
       buy: ratioToBps(sec.buy_tax ?? sec.buy_tax_rate ?? sec.buyTax),
       sell: ratioToBps(sec.sell_tax ?? sec.sell_tax_rate ?? sec.sellTax)
     };
-  }
-
-  function gmgnChainKey() {
-    const path = String(location.pathname || "");
-    const m = path.match(/\/(bsc|eth|base|sol|tron)(?:\/|$)/i);
-    return m ? m[1].toLowerCase() : "bsc";
-  }
-
-  function maybeScheduleSecurityBasketFetch(entry) {
-    if (!entry || entry.source !== "gmgn") return;
-    const n = Array.isArray(entry.basket_assets) ? entry.basket_assets.length : 0;
-    if (n < 1 || n > 8) return;
-    if (!entry.is_stocks_vault && n < 2) return;
-    if ((Number(entry.market_bps) || 0) < 9000 && (Number(entry.dividend_bps) || 0) < 9000) {
-      return;
-    }
-    scheduleSecurityBasketFetch(entry.address);
-    const addr = String(entry.address || "").toLowerCase();
-    if (!TARGET_TOKEN_RE.test(addr)) return;
-    window.setTimeout(() => {
-      try {
-        window.dispatchEvent(
-          new CustomEvent("flap-fee-scan-card", { detail: { token: addr } })
-        );
-      } catch (_rescan) {
-        // ignore
-      }
-    }, 900);
-    window.setTimeout(() => {
-      try {
-        window.dispatchEvent(
-          new CustomEvent("flap-fee-scan-card", { detail: { token: addr } })
-        );
-      } catch (_rescan2) {
-        // ignore
-      }
-    }, 2200);
-  }
-
-  function scheduleSecurityBasketFetch(addr) {
-    const a = String(addr || "")
-      .trim()
-      .toLowerCase();
-    if (!TARGET_TOKEN_RE.test(a) || securityBasketInflight.has(a)) return;
-    const last = securityBasketLastAt.get(a) || 0;
-    if (Date.now() - last < SECURITY_BASKET_FETCH_GAP_MS) return;
-    securityBasketInflight.add(a);
-    window.setTimeout(() => {
-      void fetchGmgnSecurityBasket(a).finally(() => {
-        securityBasketInflight.delete(a);
-      });
-    }, 0);
-  }
-
-  async function fetchGmgnSecurityBasket(addr) {
-    const a = String(addr || "")
-      .trim()
-      .toLowerCase();
-    if (!TARGET_TOKEN_RE.test(a)) return;
-    const url = `https://gmgn.ai/api/v1/mutil_window_token_security_launchpad?chain=${encodeURIComponent(
-      gmgnChainKey()
-    )}&address=${encodeURIComponent(a)}`;
-    try {
-      const res = await fetch(url, { credentials: "include" });
-      if (!res.ok) return;
-      const json = await res.json();
-      const lp = json?.data?.launchpad;
-      const sec = json?.data?.security || json?.data?.token?.security;
-      const tal = sec?.tax_allocation || sec?.s_tal;
-      if (!tal || typeof tal !== "object") return;
-      collectHostFeesFromGmgnItem({
-        a,
-        s_tal: tal,
-        security: sec,
-        launchpad: lp?.launchpad,
-        launchpad_platform: lp?.launchpad_platform,
-        f: {
-          launchpad: lp?.launchpad,
-          launchpad_platform: lp?.launchpad_platform
-        }
-      });
-      securityBasketLastAt.set(a, Date.now());
-    } catch (_sec) {
-      // ignore
-    }
   }
 
   function hostFeeSig(entry) {
@@ -1757,6 +1772,14 @@
     hostFeeDedupe.set(addr, { sig, at: now });
     hostFeePending.push(entry);
     try {
+      if (hostFeeEntryShouldHide(entry)) {
+        hideAddrSet.add(addr);
+        ncKeepPool.delete(addr);
+      }
+    } catch (_hide) {
+      // ignore
+    }
+    try {
       window.__flapFeeLastHostFeeQ = {
         t: now,
         addr,
@@ -1769,7 +1792,6 @@
     } catch (_q) {
       // ignore
     }
-    maybeScheduleSecurityBasketFetch(entry);
     if (hostFeeFlushTimer) return;
     hostFeeFlushTimer = window.setTimeout(() => {
       hostFeeFlushTimer = 0;
@@ -1912,11 +1934,7 @@
         .trim()
         .toLowerCase(),
       quote_symbol,
-      quote_token: String(
-        item?.quote_address || item?.quote_token || item?.pool?.quote_address || ""
-      )
-        .trim()
-        .toLowerCase(),
+      quote_token: gmgnItemQuoteFields(item).address,
       dividend_token: divAddr,
       dividend_symbol,
       tax_symbol: selfSym,
@@ -2037,18 +2055,30 @@
     const sell_tax_bps = ratioToBps(
       row.sell_tax ?? row.sell_tax_rate ?? extra.sell_tax ?? extra.sell_tax_rate
     );
+    const quote_token = String(
+      extra.quote_token ||
+        extra.quote_address ||
+        extra.base_token ||
+        row.quote_token ||
+        row.quote_address ||
+        row.base_token ||
+        row.base_token_address ||
+        ""
+    )
+      .trim()
+      .toLowerCase();
     let quote_symbol = String(row.quote_symbol || extra.quote_symbol || "").trim();
-    if (!debotRealPoolQuoteSymbol(quote_symbol)) {
+    if (!quote_symbol && /^0x[a-f0-9]{40}$/.test(quote_token)) {
+      quote_symbol =
+        symbolFromKnownTokenAddress(quote_token) ||
+        symbolFromKnownStockAddress(quote_token) ||
+        "";
+    }
+    if (!quote_symbol) {
       const fromPair = debotRealPoolQuoteSymbol(
         row.tokenPair || row.base_token_symbol || extra.base_token_symbol
       );
       if (fromPair) quote_symbol = fromPair;
-    }
-    if (!debotRealPoolQuoteSymbol(quote_symbol)) {
-      const fromBase = symbolFromKnownTokenAddress(
-        extra.base_token || row.base_token_address
-      );
-      if (debotRealPoolQuoteSymbol(fromBase)) quote_symbol = fromBase;
     }
     const selfSym = debotRowSelfSymbol(row, meta);
     const divAddr = debotDividendTokenAddr(extra);
@@ -2074,6 +2104,9 @@
         if (extraName && (!nativeDiv || extraCompact !== selfCompact)) {
           dividend_symbol = extraName;
         }
+      }
+      if (!dividend_symbol && quote_symbol && divAddr && divAddr === quote_token) {
+        dividend_symbol = quote_symbol;
       }
       if (!dividend_symbol && basket_assets[0] && !is_stocks_vault) {
         const baddr = String(basket_assets[0].address || "").toLowerCase();
@@ -2144,6 +2177,7 @@
         .trim()
         .toLowerCase(),
       quote_symbol,
+      quote_token,
       dividend_token: divAddr,
       dividend_symbol,
       tax_symbol: selfSym,
@@ -2188,15 +2222,21 @@
 
   function ingestGmgnTokenLike(row) {
     if (!row || typeof row !== "object") return;
-    if (row.value && typeof row.value === "object" && (row.value.address || row.value.a)) {
-      collectHostFeesFromGmgnItem(row.value);
-      return;
+    collectHostFeesFromGmgnItem(unwrapGmgnTokenRow(row));
+  }
+
+  /** PATCH frame.replaces[].data / Full frame.data */
+  function ingestPumpRankFrame(frame) {
+    if (!frame || typeof frame !== "object") return;
+    if (Array.isArray(frame.data)) {
+      for (let i = 0; i < frame.data.length; i += 1) ingestGmgnTokenLike(frame.data[i]);
     }
-    if (row.token && typeof row.token === "object" && (row.token.address || row.token.a)) {
-      collectHostFeesFromGmgnItem(row.token);
-      return;
+    if (Array.isArray(frame.replaces)) {
+      for (let i = 0; i < frame.replaces.length; i += 1) {
+        const rep = frame.replaces[i];
+        if (rep && rep.data) ingestGmgnTokenLike(rep.data);
+      }
     }
-    collectHostFeesFromGmgnItem(row);
   }
 
   /**
@@ -2221,15 +2261,20 @@
         continue;
       }
       if (typeof block !== "object") continue;
+      ingestPumpRankFrame(block.frame);
       const lists = [
         block.tokens,
         block.data,
         block.upserts,
+        Array.isArray(block.frame) ? block.frame : null,
         block.frame && block.frame.data,
-        block.frame && block.frame.upserts
+        block.frame && block.frame.upserts,
+        block.frame && block.frame.replaces
       ];
       for (let k = 0; k < lists.length; k += 1) {
-        const list = lists[k];
+        let list = lists[k];
+        if (!list) continue;
+        if (!Array.isArray(list) && typeof list === "object") list = Object.values(list);
         if (!Array.isArray(list)) continue;
         for (let j = 0; j < list.length; j += 1) ingestGmgnTokenLike(list[j]);
       }
@@ -2249,6 +2294,590 @@
     if (msg.data && typeof msg.data === "object" && msg.data !== msg) {
       collectPumpRankData(msg.data);
     }
+  }
+
+  function unwrapGmgnTokenRow(row) {
+    if (!row || typeof row !== "object") return row;
+    if (row.value && typeof row.value === "object" && (row.value.address || row.value.a)) {
+      return row.value;
+    }
+    if (row.token && typeof row.token === "object" && (row.token.address || row.token.a)) {
+      return row.token;
+    }
+    // pumpRank Map 增量：{ key, data: token }
+    if (row.data && typeof row.data === "object" && (row.data.address || row.data.a)) {
+      return row.data;
+    }
+    return row;
+  }
+
+  /** 全量列才允许 keep-pool 回填；upserts/PATCH 只记不垫，避免旧币插进增量打乱新→旧。 */
+  function looksLikeNcSnapshotList(list) {
+    return Array.isArray(list) && list.length >= 8;
+  }
+
+  function filterAndRememberNcList(list, pad) {
+    if (!Array.isArray(list) || !list.length) return 0;
+    const sample = unwrapGmgnTokenRow(list[0]);
+    if (!sample || typeof sample !== "object") return 0;
+    if (!gmgnAddr(sample) && !gmgnTal(sample)) return 0;
+    const removed = filterTokenArrayInPlace(list, "gmgn");
+    if (pad) rememberAndPadNewCreation(list, "gmgn");
+    else rememberNewCreationItems(list, "gmgn");
+    return removed;
+  }
+
+  function appendHideAddrsToRemoveList(list) {
+    if (!Array.isArray(list) || !hideAddrSet.size) return 0;
+    const have = new Set();
+    for (let i = 0; i < list.length; i += 1) {
+      const a = String(list[i] || "").trim().toLowerCase();
+      if (a) have.add(a);
+    }
+    let added = 0;
+    for (const addr of hideAddrSet) {
+      if (have.has(addr)) continue;
+      list.push(addr);
+      have.add(addr);
+      added += 1;
+    }
+    return added;
+  }
+
+  function upsertRowKey(row) {
+    if (!row || typeof row !== "object") return "";
+    if (row.key != null && String(row.key).length >= 8) return String(row.key);
+    return gmgnAddr(unwrapGmgnTokenRow(row));
+  }
+
+  /** js-mcp：虚拟列表 itemKey = `${address}-bsc`，裸 0x 删不掉 Map。 */
+  function hideKeysForAddr(addr, row) {
+    const keys = [];
+    const fromRow = upsertRowKey(row);
+    if (fromRow) keys.push(fromRow);
+    const a = String(addr || "").trim().toLowerCase();
+    if (!a) return keys;
+    keys.push(a);
+    if (a.indexOf("-") === -1) {
+      keys.push(`${a}-bsc`);
+      keys.push(`${a}-BSC`);
+    }
+    return keys;
+  }
+
+  function takeHiddenUpsertKeys(list) {
+    const keys = [];
+    if (!Array.isArray(list)) return keys;
+    for (let i = 0; i < list.length; i += 1) {
+      const row = list[i];
+      const t = unwrapGmgnTokenRow(row);
+      const addr = gmgnAddr(t);
+      if (!addr) continue;
+      const hide =
+        hideAddrSet.has(addr) ||
+        shouldHideByCustomSuffix(addr) ||
+        (isGmgnTokenItem(t) && gmgnTokenHide(t));
+      if (!hide) continue;
+      hideAddrSet.add(addr);
+      ncKeepPool.delete(addr);
+      const ks = hideKeysForAddr(addr, row);
+      for (let k = 0; k < ks.length; k += 1) keys.push(ks[k]);
+    }
+    return keys;
+  }
+
+  function pushRemovals(block, keys) {
+    if (!block || typeof block !== "object" || !keys || !keys.length) return 0;
+    if (!Array.isArray(block.removals)) block.removals = [];
+    const have = new Set();
+    for (let i = 0; i < block.removals.length; i += 1) {
+      have.add(String(block.removals[i] || "").trim().toLowerCase());
+    }
+    let added = 0;
+    for (let i = 0; i < keys.length; i += 1) {
+      const key = keys[i];
+      if (!key) continue;
+      const lk = String(key).trim().toLowerCase();
+      if (have.has(lk)) continue;
+      block.removals.push(key);
+      have.add(lk);
+      added += 1;
+    }
+    return added;
+  }
+
+  /**
+   * js-mcp：GMGN 用 Map + `{ upserts:[{key,data}], removals:[key] }`，
+   * key 是 `0x…-bsc`。写 `r` 或裸地址宿主都不会 delete。
+   */
+  function injectHideAddrRemovesOnNcBlock(block) {
+    if (!block || typeof block !== "object" || !hideAddrSet.size) return 0;
+    const keys = [];
+    for (const addr of hideAddrSet) {
+      const ks = hideKeysForAddr(addr, null);
+      for (let i = 0; i < ks.length; i += 1) keys.push(ks[i]);
+    }
+    let added = pushRemovals(block, keys);
+    if (block.frame && typeof block.frame === "object") {
+      added += pushRemovals(block.frame, keys);
+    }
+    return added;
+  }
+
+  function addrFromPatchId(id) {
+    const m = String(id || "")
+      .trim()
+      .toLowerCase()
+      .match(/0x[a-f0-9]{40}/);
+    return m ? m[0] : "";
+  }
+
+  function ncItemId(tok, fallback) {
+    if (fallback != null && String(fallback).length >= 8) return String(fallback);
+    if (tok && tok.__key) return String(tok.__key);
+    const addr = gmgnAddr(tok);
+    if (!addr) return "";
+    return `${addr}-bsc`;
+  }
+
+  function ncMarkHidden(addr, tok, channel) {
+    if (!addr) return;
+    hideAddrSet.add(addr);
+    ncKeepPool.delete(addr);
+    noteRemovedSample(addr, gmgnTal(unwrapGmgnTokenRow(tok)), channel || "nc-shadow");
+  }
+
+  function ncRowShouldHide(tok, id) {
+    const t = unwrapGmgnTokenRow(tok);
+    const addr = gmgnAddr(t) || addrFromPatchId(id);
+    if (!addr) return false;
+    if (hideAddrSet.has(addr) || shouldHideByCustomSuffix(addr)) return true;
+    if (t && isGmgnTokenItem(t) && gmgnTokenHide(t)) {
+      ncMarkHidden(addr, t, "nc-hide");
+      return true;
+    }
+    return false;
+  }
+
+  function patchReplaceShouldHide(rep) {
+    if (!rep || typeof rep !== "object") return false;
+    const tok = unwrapGmgnTokenRow(rep.data);
+    const addr = gmgnAddr(tok) || addrFromPatchId(rep.id);
+    if (!addr) return false;
+    if (hideAddrSet.has(addr) || shouldHideByCustomSuffix(addr)) return true;
+    return Boolean(tok && isGmgnTokenItem(tok) && gmgnTokenHide(tok));
+  }
+
+  function filterNcServerToHost() {
+    const nextOrder = [];
+    const nextMap = new Map();
+    let removed = 0;
+    const order = ncServer.order;
+    for (let i = 0; i < order.length; i += 1) {
+      const id = order[i];
+      if (!id) continue;
+      const data = ncServer.map.get(id);
+      if (ncRowShouldHide(data, id)) {
+        ncMarkHidden(gmgnAddr(unwrapGmgnTokenRow(data)) || addrFromPatchId(id), data, "nc-shadow");
+        removed += 1;
+        continue;
+      }
+      nextOrder.push(id);
+      if (data) nextMap.set(id, data);
+    }
+    return { nextOrder, nextMap, removed };
+  }
+
+  function noteNcAfter(mode, removed, frame, extra) {
+    try {
+      window.__flapFeeLastNcAfter = {
+        t: Date.now(),
+        mode: mode || "",
+        removed: Number(removed) || 0,
+        kind: frame && frame.kind != null ? frame.kind : "",
+        nRep: frame && Array.isArray(frame.replaces) ? frame.replaces.length : -1,
+        nData: frame && Array.isArray(frame.data) ? frame.data.length : -1,
+        targetLen: frame && frame.targetLen != null ? frame.targetLen : -1,
+        serverLen: ncServer.order.length,
+        hostLen: ncHost.order.length,
+        ready: ncServer.ready ? 1 : 0,
+        ...(extra || {})
+      };
+      window.__flapFeeNcShadow = {
+        server: ncServer.order.length,
+        host: ncHost.order.length,
+        hide: hideAddrSet.size,
+        seq: ncServer.lastSeq
+      };
+    } catch (_after) {
+      // ignore
+    }
+  }
+
+  function pokeNcRequestFull(frame) {
+    const now = Date.now();
+    if (ncServer.awaitingFullAt && now - ncServer.awaitingFullAt < 2000) return false;
+    ncServer.awaitingFullAt = now;
+    const tl = Number(frame.targetLen);
+    const cap = Number.isFinite(tl) && tl >= 0 ? tl : 0;
+    frame.kind = 1;
+    frame.replaces = [{ i: cap, id: "0", data: null }];
+    if (Number.isFinite(tl)) frame.targetLen = tl;
+    return true;
+  }
+
+  function seedNcServerFromDensePatch(frame) {
+    const tl = Number(frame.targetLen);
+    const reps = frame.replaces;
+    if (!Number.isFinite(tl) || tl <= 0 || !Array.isArray(reps) || reps.length < tl) {
+      return false;
+    }
+    const slots = new Array(tl);
+    for (let i = 0; i < reps.length; i += 1) {
+      const rep = reps[i];
+      const idx = Number(rep && rep.i);
+      if (!Number.isFinite(idx) || idx < 0 || idx >= tl) continue;
+      const id = String((rep && rep.id) || "");
+      if (!id || !rep.data) continue;
+      slots[idx] = { id, data: unwrapGmgnTokenRow(rep.data) || rep.data };
+    }
+    for (let i = 0; i < tl; i += 1) {
+      if (!slots[i]) return false;
+    }
+    const map = new Map();
+    const order = [];
+    for (let i = 0; i < tl; i += 1) {
+      order.push(slots[i].id);
+      map.set(slots[i].id, slots[i].data);
+    }
+    ncServer.order = order;
+    ncServer.map = map;
+    ncServer.lastSeq = Number(frame.seq);
+    ncServer.ready = true;
+    ncServer.awaitingFullAt = 0;
+    return true;
+  }
+
+  function applyIncomingNcPatch(frame) {
+    const seq = Number(frame.seq);
+    const targetLen = Number(frame.targetLen);
+    const replaces = Array.isArray(frame.replaces) ? frame.replaces : [];
+    if (!Number.isFinite(seq) || !Number.isFinite(targetLen) || targetLen < 0) {
+      return { ok: false, reason: "tl" };
+    }
+    const baseSeq = seq === 0 ? -1 : ncServer.lastSeq;
+    if (seq <= baseSeq) return { ok: false, reason: "seq" };
+    if (replaces.length === 0 && targetLen === ncServer.order.length) {
+      return { ok: true, heartbeat: true };
+    }
+    const order = ncServer.order.slice();
+    const map = new Map(ncServer.map);
+    if (targetLen < order.length) order.length = targetLen;
+    else if (targetLen > order.length) {
+      for (let i = order.length; i < targetLen; i += 1) order[i] = "";
+    }
+    for (let i = 0; i < replaces.length; i += 1) {
+      const rep = replaces[i];
+      if (!rep) continue;
+      const idx = Number(rep.i);
+      if (!Number.isFinite(idx) || idx < 0 || idx >= targetLen) {
+        return { ok: false, reason: "idx" };
+      }
+      const id = String(rep.id || "");
+      if (!id) return { ok: false, reason: "id" };
+      if (rep.data) map.set(id, unwrapGmgnTokenRow(rep.data) || rep.data);
+      else if (!map.has(id)) return { ok: false, reason: "missing" };
+      order[idx] = id;
+    }
+    const seen = new Set();
+    for (let i = 0; i < order.length; i += 1) {
+      const id = order[i];
+      if (!id || seen.has(id) || !map.has(id)) return { ok: false, reason: "order" };
+      seen.add(id);
+    }
+    for (const key of [...map.keys()]) {
+      if (!seen.has(key)) map.delete(key);
+    }
+    ncServer.order = order;
+    ncServer.map = map;
+    ncServer.lastSeq = seq;
+    ncServer.ready = true;
+    ncServer.awaitingFullAt = 0;
+    return { ok: true, heartbeat: false };
+  }
+
+  function buildHostPatchReplaces(prev, next, map) {
+    const replaces = [];
+    const prevSet = new Set(prev);
+    const n = next.length;
+    const p = prev.length;
+    const lim = Math.min(p, n);
+    for (let i = 0; i < lim; i += 1) {
+      if (prev[i] === next[i]) continue;
+      const id = next[i];
+      const rec = { i, id };
+      const data = map.get(id);
+      if (data) rec.data = data;
+      else if (!prevSet.has(id)) return { ok: false, replaces: [] };
+      replaces.push(rec);
+    }
+    for (let i = p; i < n; i += 1) {
+      const id = next[i];
+      const data = map.get(id);
+      if (!data && !prevSet.has(id)) return { ok: false, replaces: [] };
+      const rec = { i, id };
+      if (data) rec.data = data;
+      replaces.push(rec);
+    }
+    return { ok: true, replaces };
+  }
+
+  function emitHostNcFrame(frame, seq, nextOrder, nextMap, origReplaces) {
+    const prev = ncHost.ready ? ncHost.order : [];
+    const same =
+      prev.length === nextOrder.length &&
+      prev.every((id, i) => id === nextOrder[i]);
+    frame.seq = seq;
+    let mutated = 1;
+    if (same && ncHost.ready) {
+      const reps = [];
+      const list = Array.isArray(origReplaces) ? origReplaces : [];
+      for (let i = 0; i < list.length; i += 1) {
+        const rep = list[i];
+        const id = String((rep && rep.id) || "");
+        if (!id || !(rep && rep.data)) continue;
+        const hi = nextOrder.indexOf(id);
+        if (hi < 0) continue;
+        reps.push({ i: hi, id, data: rep.data });
+      }
+      frame.kind = 1;
+      frame.targetLen = nextOrder.length;
+      frame.replaces = reps;
+      if ("data" in frame) delete frame.data;
+    } else {
+      let diff = 0;
+      const lim = Math.min(prev.length, nextOrder.length);
+      for (let i = 0; i < lim; i += 1) {
+        if (prev[i] !== nextOrder[i]) diff += 1;
+      }
+      diff += Math.abs(prev.length - nextOrder.length);
+      const useFull =
+        !ncHost.ready ||
+        diff > 8 ||
+        prev.length === 0 ||
+        nextOrder.length === 0;
+      if (!useFull) {
+        const built = buildHostPatchReplaces(prev, nextOrder, nextMap);
+        if (built.ok) {
+          frame.kind = 1;
+          frame.targetLen = nextOrder.length;
+          frame.replaces = built.replaces;
+          if ("data" in frame) delete frame.data;
+        } else {
+          // data 不够拼 PATCH 时改发 Full
+          const data = [];
+          for (let i = 0; i < nextOrder.length; i += 1) {
+            const tok = nextMap.get(nextOrder[i]);
+            if (tok) data.push(tok);
+          }
+          frame.kind = 2;
+          frame.data = data;
+          frame.replaces = [];
+          frame.targetLen = data.length;
+        }
+      } else {
+        const data = [];
+        for (let i = 0; i < nextOrder.length; i += 1) {
+          const tok = nextMap.get(nextOrder[i]);
+          if (tok) data.push(tok);
+        }
+        frame.kind = 2;
+        frame.data = data;
+        frame.replaces = [];
+        frame.targetLen = data.length;
+      }
+    }
+    ncHost.order = nextOrder.slice();
+    ncHost.lastSeq = seq;
+    ncHost.ready = true;
+    return mutated;
+  }
+
+  function rewriteNcFullFrame(frame) {
+    const raw = Array.isArray(frame.data) ? frame.data : [];
+    const order = [];
+    const map = new Map();
+    for (let i = 0; i < raw.length; i += 1) {
+      const row = raw[i];
+      const tok = unwrapGmgnTokenRow(row);
+      const id = ncItemId(tok, (row && row.__key) || (tok && tok.__key));
+      if (!id || map.has(id)) continue;
+      order.push(id);
+      map.set(id, tok || row);
+    }
+    ncServer.order = order;
+    ncServer.map = map;
+    ncServer.lastSeq = Number(frame.seq);
+    ncServer.ready = true;
+    ncServer.awaitingFullAt = 0;
+    const { nextOrder, nextMap, removed } = filterNcServerToHost();
+    const data = [];
+    for (let i = 0; i < nextOrder.length; i += 1) {
+      const tok = nextMap.get(nextOrder[i]);
+      if (tok) data.push(tok);
+    }
+    frame.kind = 2;
+    frame.data = data;
+    frame.replaces = [];
+    frame.targetLen = data.length;
+    ncHost.order = nextOrder.slice();
+    ncHost.lastSeq = ncServer.lastSeq;
+    ncHost.ready = true;
+    noteNcAfter("full", removed, frame);
+    return raw.length !== data.length ? Math.max(removed, 1) : removed;
+  }
+
+  /**
+   * PATCH：先按 Worker 语义喂 ncServer，再按宿主当前 order 重写帧。
+   * 心跳也要把 targetLen 改成宿主长度，否则 30≠23 会 shouldRequestFull。
+   */
+  function rewriteNcPatchFrame(frame) {
+    const origReplaces = Array.isArray(frame.replaces) ? frame.replaces.slice() : [];
+    const seq = Number(frame.seq);
+    if (!ncServer.ready) {
+      if (seedNcServerFromDensePatch(frame)) {
+        const { nextOrder, nextMap, removed } = filterNcServerToHost();
+        const mutated = emitHostNcFrame(frame, seq, nextOrder, nextMap, origReplaces);
+        noteNcAfter("dense", removed, frame);
+        return Math.max(removed, mutated);
+      }
+      if (pokeNcRequestFull(frame)) {
+        noteNcAfter("poke-full", 0, frame);
+        return 1;
+      }
+      return 0;
+    }
+    const applied = applyIncomingNcPatch(frame);
+    if (!applied.ok) {
+      if (applied.reason === "seq") return 0;
+      if (pokeNcRequestFull(frame)) {
+        ncServer.ready = false;
+        ncHost.ready = false;
+        noteNcAfter("apply-fail", 0, frame, { reason: applied.reason });
+        return 1;
+      }
+      return 0;
+    }
+    if (applied.heartbeat) ncServer.lastSeq = seq;
+    const { nextOrder, nextMap, removed } = filterNcServerToHost();
+    const mutated = emitHostNcFrame(frame, seq, nextOrder, nextMap, origReplaces);
+    noteNcAfter(applied.heartbeat ? "hb" : "patch", removed, frame);
+    return Math.max(removed, mutated);
+  }
+
+  function filterPumpRankFrameInPlace(frame) {
+    if (!frame || typeof frame !== "object") return 0;
+    if (ncRewrittenFrames.has(frame)) return 0;
+    ncRewrittenFrames.add(frame);
+    const kind = Number(frame.kind);
+    if (kind === 2 || (Array.isArray(frame.data) && !Array.isArray(frame.replaces))) {
+      return rewriteNcFullFrame(frame);
+    }
+    if (kind === 1 || Array.isArray(frame.replaces)) {
+      return rewriteNcPatchFrame(frame);
+    }
+    if (Array.isArray(frame.data)) {
+      return rewriteNcFullFrame(frame);
+    }
+    return 0;
+  }
+
+  /** 与 collectPumpRankData 同一套 newCreations 列；即将打满/已开盘不滤。 */
+  function filterPumpRankDataInPlace(data) {
+    if (!prefsOn() || !data || typeof data !== "object") return 0;
+    let removed = 0;
+    const cols = ["newCreations", "new_creation", "new_creations"];
+    for (let i = 0; i < cols.length; i += 1) {
+      const block = data[cols[i]];
+      if (!block) continue;
+      if (Array.isArray(block)) {
+        removed += filterAndRememberNcList(block, true);
+        continue;
+      }
+      if (typeof block !== "object") continue;
+      if (Array.isArray(block.frame)) {
+        removed += filterAndRememberNcList(block.frame, true);
+      } else if (block.frame && typeof block.frame === "object") {
+        removed += filterPumpRankFrameInPlace(block.frame);
+      }
+      if (Array.isArray(block.tokens)) {
+        removed += filterAndRememberNcList(block.tokens, true);
+      }
+      const deltas = [
+        block.upserts,
+        block.frame && block.frame.upserts
+      ];
+      for (let k = 0; k < deltas.length; k += 1) {
+        const list = deltas[k];
+        const hiddenKeys = takeHiddenUpsertKeys(list);
+        removed += filterAndRememberNcList(list, false);
+        const target = k === 0 ? block : block.frame;
+        removed += pushRemovals(target, hiddenKeys);
+        if (target !== block) removed += pushRemovals(block, hiddenKeys);
+      }
+      const maybeSnap = [
+        Array.isArray(block.data) ? block.data : null,
+        block.frame && Array.isArray(block.frame.data) ? block.frame.data : null
+      ];
+      for (let k = 0; k < maybeSnap.length; k += 1) {
+        const list = maybeSnap[k];
+        if (!list || list === block.tokens) continue;
+        removed += filterAndRememberNcList(list, looksLikeNcSnapshotList(list));
+      }
+      // PATCH 宿主只认 frame.replaces；不要每帧把 hideAddr 灌进 removals。
+      if (!(block.frame && Array.isArray(block.frame.replaces))) {
+        removed += injectHideAddrRemovesOnNcBlock(block);
+      }
+      try {
+        const prev = window.__flapFeeLastNcAfter;
+        const fr = block.frame;
+        window.__flapFeeLastNcAfter = {
+          ...(prev && typeof prev === "object" ? prev : {}),
+          t: Date.now(),
+          removed,
+          frLen: Array.isArray(fr) ? fr.length : -1,
+          nRem: Array.isArray(block.removals) ? block.removals.length : -1,
+          rem0: Array.isArray(block.removals) && block.removals[0]
+            ? String(block.removals[0]).slice(0, 72)
+            : "",
+          kind: fr && fr.kind != null ? fr.kind : (prev && prev.kind),
+          nRep: fr && Array.isArray(fr.replaces) ? fr.replaces.length : (prev && prev.nRep),
+          hostLen: ncHost.order.length,
+          serverLen: ncServer.order.length
+        };
+      } catch (_after) {
+        // ignore
+      }
+    }
+    return removed;
+  }
+
+  function filterPumpRankEnvelopeInPlace(msg) {
+    if (!prefsOn() || !msg || typeof msg !== "object") return 0;
+    let removed = 0;
+    const seen = new Set();
+    const walk = (obj, depth) => {
+      if (!obj || typeof obj !== "object" || depth > 6 || seen.has(obj)) return;
+      seen.add(obj);
+      removed += filterPumpRankDataInPlace(obj);
+      const keys = ["res", "payload", "data", "body", "message", "frame", "result"];
+      for (let i = 0; i < keys.length; i += 1) {
+        const inner = obj[keys[i]];
+        if (inner && typeof inner === "object") walk(inner, depth + 1);
+      }
+    };
+    walk(msg, 0);
+    return removed;
   }
 
   const hostFeeJsonSeen = new WeakSet();
@@ -2390,15 +3019,21 @@
           // ignore
         }
       }
-      if (u.includes("mutil_window_token_security_launchpad")) {
+      if (
+        u.includes("mutil_window_token_security_launchpad") ||
+        u.includes("token_fee_info")
+      ) {
         const lp = json?.data?.launchpad;
         const sec = json?.data?.security || json?.data?.token?.security;
-        const tal = sec?.tax_allocation || sec?.s_tal;
-        const ca = String(json?.data?.address || lp?.address || "").toLowerCase();
+        const tal = sec?.tax_allocation || sec?.s_tal || json?.data?.tax_allocation;
+        const ca = String(
+          json?.data?.address || sec?.address || lp?.address || ""
+        ).toLowerCase();
         if (tal && TARGET_TOKEN_RE.test(ca)) {
           collectHostFeesFromGmgnItem({
             a: ca,
             s_tal: tal,
+            tax_allocation: tal,
             security: sec,
             launchpad: lp?.launchpad,
             launchpad_platform: lp?.launchpad_platform,
@@ -2444,6 +3079,57 @@
   function tapHostFeePortData(data) {
     if (!isBscPageContext() || data == null) return;
     try {
+      try {
+        window.__flapFeeLastPortTap = {
+          t: Date.now(),
+          typ: typeof data,
+          keys:
+            data && typeof data === "object"
+              ? Object.keys(data).slice(0, 24)
+              : [],
+          plugin: String(
+            (data && data.pluginName) ||
+              (data && data.payload && data.payload.pluginName) ||
+              ""
+          ).slice(0, 48),
+          preview: typeof data === "string" ? data.slice(0, 180) : ""
+        };
+        const inner =
+          (data && data.res && (data.res.data || data.res)) ||
+          (data && data.data) ||
+          data;
+        const nc = inner && (inner.newCreations || inner.new_creation);
+        if (nc && typeof nc === "object") {
+          const fr = nc.frame;
+          const u0 = Array.isArray(nc.upserts)
+            ? nc.upserts[0]
+            : fr && Array.isArray(fr.upserts)
+              ? fr.upserts[0]
+              : null;
+          window.__flapFeeLastNc = {
+            t: Date.now(),
+            mode: inner.mode || nc.mode || "",
+            keys: Object.keys(nc).slice(0, 14),
+            frType: Array.isArray(fr) ? "arr" : typeof fr,
+            frLen: Array.isArray(fr) ? fr.length : -1,
+            frKeys:
+              fr && typeof fr === "object" && !Array.isArray(fr)
+                ? Object.keys(fr).slice(0, 12)
+                : [],
+            nUps: Array.isArray(nc.upserts)
+              ? nc.upserts.length
+              : fr && Array.isArray(fr.upserts)
+                ? fr.upserts.length
+                : -1,
+            nRem: Array.isArray(nc.removals) ? nc.removals.length : -1,
+            nRep: fr && Array.isArray(fr.replaces) ? fr.replaces.length : -1,
+            kind: fr && fr.kind != null ? fr.kind : "",
+            u0key: u0 ? String(u0.key || "").slice(0, 72) : ""
+          };
+        }
+      } catch (_meta) {
+        // ignore
+      }
       const NativeJSONParse =
         (JSON.parse && JSON.parse.__flapFeeNative) || JSON.parse.bind(JSON);
       if (typeof data === "string") {
@@ -2714,6 +3400,7 @@
     const fromRow = String(
       (row &&
         (row.launchpad_platform ||
+          row.lpp ||
           row.launchpad_platform_name ||
           row.launchpad)) ||
         ""
@@ -2725,10 +3412,13 @@
       if (p && typeof p === "object") {
         const s = String(
           p.launchpad_platform ||
+            p.lpp ||
             p.launchpad_platform_name ||
             p.launchpad ||
             p.token?.launchpad_platform ||
+            p.token?.lpp ||
             p.data?.launchpad_platform ||
+            p.data?.lpp ||
             p.data?.launchpad_platform_name ||
             p.data?.launchpad ||
             ""
@@ -2743,14 +3433,10 @@
   function scrapeGmgnQuoteFromFiber(root) {
     const row = scrapeGmgnTokenRowFromFiber(root);
     if (row && typeof row === "object") {
-      const pool = row.pool && typeof row.pool === "object" ? row.pool : null;
-      const addr = String(
-        row.quote_address || (pool && pool.quote_address) || ""
-      )
-        .trim()
-        .toLowerCase();
-      const sym = String(row.quote_symbol || (pool && pool.quote_symbol) || "").trim();
-      if (/^0x[a-f0-9]{40}$/.test(addr) || sym) return { address: addr, symbol: sym };
+      const q = gmgnItemQuoteFields(row);
+      if (/^0x[a-f0-9]{40}$/.test(q.address) || q.symbol) {
+        return { address: q.address, symbol: q.symbol };
+      }
     }
     return { address: "", symbol: "" };
   }
@@ -2893,6 +3579,7 @@
     let launchpad_platform = String(
       (row &&
         (row.launchpad_platform ||
+          row.lpp ||
           row.launchpad_platform_name ||
           row.launchpad)) ||
         scrapeGmgnLaunchpadFromFiber(card) ||
@@ -2905,11 +3592,16 @@
       launchpad_platform = "flap_stocks";
     }
     const quote = scrapeGmgnQuoteFromFiber(card);
+    const rowQuote = row ? gmgnItemQuoteFields(row) : { symbol: "", address: "" };
     let quote_symbol = String(
-      quote.symbol || (row && row.quote_symbol) || (pool && pool.quote_symbol) || ""
+      quote.symbol || rowQuote.symbol || (pool && pool.quote_symbol) || ""
     ).trim();
     const quote_address = String(
-      quote.address || (row && row.quote_address) || (pool && pool.quote_address) || ""
+      quote.address ||
+        rowQuote.address ||
+        (row && (row.qa || row.quote_address)) ||
+        (pool && pool.quote_address) ||
+        ""
     )
       .trim()
       .toLowerCase();
@@ -3230,6 +3922,14 @@
         try {
           if (ev && ev.data != null) tapHostFeePortData(ev.data);
         } catch (_e) {
+          // ignore
+        }
+        try {
+          if (prefsOn() && ev && ev.data && typeof ev.data === "object") {
+            const r = filterLiveObject(ev.data, "host-port");
+            if (r.drop) return undefined;
+          }
+        } catch (_flt) {
           // ignore
         }
         return fn.apply(this, arguments);
@@ -3752,6 +4452,10 @@
 
   function debotSocketArgShouldHide(arg) {
     if (!arg || typeof arg !== "object") return false;
+    const ca = String(arg.contract || arg.token?.contract || "")
+      .trim()
+      .toLowerCase();
+    if (ca && hideAddrSet.has(ca)) return true;
     if (debotRowHide(arg)) return true;
     if (arg.token && debotRowHide(arg.token)) return true;
     if (arg.data && typeof arg.data === "object") {
@@ -4005,19 +4709,26 @@
     if (!Array.isArray(arr)) return 0;
     const hideFn = (item) => {
       if (kind === "gmgn") {
+        const t = unwrapGmgnTokenRow(item);
+        const addr = gmgnAddr(t);
+        if (addr && hideAddrSet.has(addr)) return true;
         // 尾号可拦任意 CA；资金接收仍走 s_tal 税币
-        if (gmgnAddr(item) && shouldHideByCustomSuffix(gmgnAddr(item))) return true;
-        return isGmgnTokenItem(item) && gmgnTokenHide(item);
+        if (addr && shouldHideByCustomSuffix(addr)) return true;
+        return isGmgnTokenItem(t) && gmgnTokenHide(t);
       }
       if (kind === "debot") {
         const c = String(item?.contract || "").toLowerCase();
+        if (c && hideAddrSet.has(c)) return true;
         if (c && shouldHideByCustomSuffix(c)) return true;
         return debotRowHide(item);
       }
       return tokenShouldHide(item);
     };
     const isTok = (item) => {
-      if (kind === "gmgn") return Boolean(gmgnAddr(item)) || isGmgnTokenItem(item);
+      if (kind === "gmgn") {
+        const t = unwrapGmgnTokenRow(item);
+        return Boolean(gmgnAddr(t)) || isGmgnTokenItem(t);
+      }
       if (kind === "debot") {
         return Boolean(item && typeof item.contract === "string") || isDebotTokenItem(item);
       }
@@ -4038,7 +4749,10 @@
           const gone = String(gmgnAddr(item) || item.contract || "")
             .trim()
             .toLowerCase();
-          if (gone) ncKeepPool.delete(gone);
+          if (gone) {
+            ncKeepPool.delete(gone);
+            hideAddrSet.add(gone);
+          }
           noteRemovedSample(gmgnAddr(item) || item.contract, gmgnTal(item), "col");
         } catch (_nr) {
           // ignore
@@ -4059,7 +4773,8 @@
         .trim()
         .toLowerCase();
     }
-    return String(gmgnAddr(item) || item.contract || item.address || "")
+    const t = unwrapGmgnTokenRow(item);
+    return String(gmgnAddr(t) || t.contract || t.address || "")
       .trim()
       .toLowerCase();
   }
@@ -4148,8 +4863,39 @@
     pruneNcKeepPool();
   }
 
+  function ncItemCreatedMs(item, kind) {
+    const row = kind === "debot" ? item : unwrapGmgnTokenRow(item) || item;
+    if (!row || typeof row !== "object") return 0;
+    const raw =
+      row.open_timestamp ??
+      row.create_time ??
+      row.created_at ??
+      row.t ??
+      (row.f && row.f.t) ??
+      (row.f && row.f.open_timestamp);
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return n < 1e12 ? n * 1000 : n;
+  }
+
+  /** 按创建时间插入（新在前），不要 push 到列尾把旧币插进新创建中间。 */
+  function insertNcItemNewestFirst(arr, item, kind) {
+    const ts = ncItemCreatedMs(item, kind);
+    if (!ts) {
+      arr.push(cloneNcItem(item));
+      return;
+    }
+    let i = 0;
+    for (; i < arr.length; i += 1) {
+      const other = ncItemCreatedMs(arr[i], kind);
+      if (other && other < ts) break;
+    }
+    arr.splice(i, 0, cloneNcItem(item));
+  }
+
   /**
-   * 按 10 分钟 / 满 NC_KEEP_MAX_CARDS 回填到 HTTP 全量 tokens 数组。
+   * 按 10 分钟 / 满 NC_KEEP_MAX_CARDS 回填到 HTTP/SNAP 全量 tokens 数组。
+   * 只用于全量列，禁止对 upserts 调用。
    * @returns {number} padded count
    */
   function padNewCreationArray(arr, kind) {
@@ -4167,6 +4913,7 @@
     const cands = [];
     for (const [addr, ent] of ncKeepPool) {
       if (have.has(addr)) continue;
+      if (hideAddrSet.has(addr)) continue;
       if (ent.kind && ent.kind !== k) continue;
       if (now - ent.firstSeen > maxAge) continue;
       if (ent.item && !itemWithinNcKeepAge(ent.item)) continue;
@@ -4174,13 +4921,15 @@
       if (!ent.item || Object.keys(ent.item).length < 4) continue;
       cands.push([addr, ent]);
     }
-    // 较新 lastSeen 优先垫回（live 顺序在前，垫在列尾）
-    cands.sort((a, b) => (b[1].lastSeen || 0) - (a[1].lastSeen || 0));
+    cands.sort(
+      (a, b) =>
+        ncItemCreatedMs(b[1].item, kind) - ncItemCreatedMs(a[1].item, kind)
+    );
     let padded = 0;
     for (let i = 0; i < cands.length; i++) {
       if (arr.length >= NC_KEEP_MAX_CARDS) break;
       const [addr, ent] = cands[i];
-      arr.push(cloneNcItem(ent.item));
+      insertNcItemNewestFirst(arr, ent.item, kind);
       have.add(addr);
       padded += 1;
     }
@@ -4217,6 +4966,10 @@
       const addr = String(data.r[i] || "")
         .trim()
         .toLowerCase();
+      if (addr && hideAddrSet.has(addr)) {
+        data.r[w++] = data.r[i];
+        continue;
+      }
       if (addr && ncKeepPool.has(addr)) {
         const ent = ncKeepPool.get(addr);
         if (ent && now - ent.firstSeen <= maxAge && itemWithinNcKeepAge(ent.item)) {
@@ -4326,16 +5079,38 @@
         rememberNewCreationItems(data.t, "gmgn");
       }
       // a = 本帧 add 列表：剔除屏蔽地址（尾号规则可拦任意 CA）
-      if (Array.isArray(data.a) && (hideAddrs.size > 0 || suffixHideEnabled)) {
+      if (Array.isArray(data.a) && (hideAddrs.size > 0 || suffixHideEnabled || hideAddrSet.size > 0)) {
         let wa = 0;
         for (let i = 0; i < data.a.length; i++) {
           const addr = String(data.a[i] || "")
             .trim()
             .toLowerCase();
-          if (addr && (hideAddrs.has(addr) || shouldHideByCustomSuffix(addr))) continue;
+          if (
+            addr &&
+            (hideAddrs.has(addr) ||
+              hideAddrSet.has(addr) ||
+              shouldHideByCustomSuffix(addr))
+          ) {
+            continue;
+          }
           data.a[wa++] = data.a[i];
         }
         data.a.length = wa;
+      }
+      // fiber 后知该藏：写进 r，让宿主卸已渲染的卡
+      if (hideAddrSet.size) {
+        if (!Array.isArray(data.r)) data.r = [];
+        const haveR = new Set();
+        for (let i = 0; i < data.r.length; i += 1) {
+          const a = String(data.r[i] || "").trim().toLowerCase();
+          if (a) haveR.add(a);
+        }
+        for (const addr of hideAddrSet) {
+          if (haveR.has(addr)) continue;
+          data.r.push(addr);
+          haveR.add(addr);
+          removed += 1;
+        }
       }
       // r = 宿主要移除的地址：保留期内的 CA 吞掉，避免 ~2 分钟被踢出新创建
       const rBlocked = filterNcDeltaRemovesInPlace(data);
@@ -4359,6 +5134,7 @@
     if (kind === "gmgn" || kind === "auto") {
       removed += filterGmgnTrenchesDeltaInPlace(json);
       removed += filterGmgnHttpNewCreationInPlace(json);
+      removed += filterPumpRankEnvelopeInPlace(json);
       // Debot WS upsert 等 auto 路径：顺带处理 meme:new
       try {
         removed += neutralizeDebotUpsertMessages(json);
@@ -4372,7 +5148,7 @@
       const d = json.data;
       if (d && typeof d === "object" && Array.isArray(d.new_creations)) {
         removed += filterTokenArrayInPlace(d.new_creations, "debot");
-        rememberAndPadNewCreation(d.new_creations, "debot");
+        rememberNewCreationItems(d.new_creations, "debot");
         return removed;
       }
     } catch (_nc) {
@@ -4522,6 +5298,20 @@
     }
     if (!prefsOn()) {
       return { data, changed: false, drop: false };
+    }
+    try {
+      const pumpRemoved = filterPumpRankEnvelopeInPlace(data);
+      if (pumpRemoved > 0) {
+        noteFilter({
+          channel: channel || "port",
+          removed: pumpRemoved,
+          thr: taxRecvPrefs.thresholdPct,
+          shape: "pumpRank"
+        });
+        return { data, changed: true, drop: false };
+      }
+    } catch (_pr) {
+      // ignore
     }
     if (tokenShouldHide(data)) {
       noteFilter({ channel, drop: 1, thr: taxRecvPrefs.thresholdPct });
@@ -4966,6 +5756,7 @@
             ensureTaxRecvRuntime(anyFilterEnabled() ? "prefs-on" : "prefs-off");
           }
           if (anyFilterEnabled() && (!was || data.refresh === true)) {
+            resetNcPumpShadows();
             queueMicrotask(softRefreshLists);
           }
         }
@@ -4989,6 +5780,7 @@
             ensureTaxRecvRuntime(anyFilterEnabled() ? "suffix-on" : "suffix-off");
           }
           if (anyFilterEnabled()) {
+            resetNcPumpShadows();
             queueMicrotask(softRefreshLists);
           }
         }
@@ -5010,10 +5802,12 @@
             ensureTaxRecvRuntime(anyFilterEnabled() ? "vault-on" : "vault-off");
           }
           if (anyFilterEnabled() && (!was || data.refresh === true)) {
+            resetNcPumpShadows();
             queueMicrotask(softRefreshLists);
           }
         }
         if (data.type === "tax-recv-refresh" || data.type === "list-filter-refresh") {
+          resetNcPumpShadows();
           queueMicrotask(softRefreshLists);
         }
       } catch (_e) {
@@ -5024,22 +5818,10 @@
     // ignore
   }
 
-  function syncGmgnShareWorkerMode(enabled) {
+  function syncGmgnShareWorkerMode() {
     try {
-      // 仅 GMGN：开过滤时改走页面 WSS。Debot 必须留着 portal-ws-shared。
-      const host = location.hostname || "";
-      if (host.endsWith("debot.ai") || host.endsWith("gungnir.bot")) {
-        if (localStorage.getItem(OWNED_DISABLE_SW) === "1") {
-          localStorage.removeItem("disableShareWorker");
-          localStorage.removeItem(OWNED_DISABLE_SW);
-        }
-        return;
-      }
-      if (!host.endsWith("gmgn.ai")) return;
-      if (enabled && isBscPageContext()) {
-        localStorage.setItem("disableShareWorker", "true");
-        localStorage.setItem(OWNED_DISABLE_SW, "1");
-      } else if (localStorage.getItem(OWNED_DISABLE_SW) === "1") {
+      // 统一走 GMGN 默认 SharedWorker。若旧版插件写过 disableShareWorker，清掉。
+      if (localStorage.getItem(OWNED_DISABLE_SW) === "1") {
         localStorage.removeItem("disableShareWorker");
         localStorage.removeItem(OWNED_DISABLE_SW);
       }
@@ -5263,7 +6045,9 @@
         text.indexOf("trenches_update") !== -1 ||
         text.indexOf("meme:new") !== -1 ||
         text.indexOf("meme:update") !== -1 ||
-        text.indexOf("socket-event") !== -1
+        text.indexOf("socket-event") !== -1 ||
+        text.indexOf("pumpRank") !== -1 ||
+        text.indexOf("newCreations") !== -1
       );
     }
 
@@ -5289,6 +6073,16 @@
         parsed.length >= 2 &&
         typeof parsed[0] === "string" &&
         /meme:|token:|rank/i.test(parsed[0]);
+      const pumpRemovedEarly = filterPumpRankEnvelopeInPlace(parsed);
+      if (pumpRemovedEarly > 0) {
+        noteFilter({
+          channel: channel || "ws",
+          removed: pumpRemovedEarly,
+          thr: taxRecvPrefs.thresholdPct,
+          shape: "pumpRank"
+        });
+        return (prefix || "") + JSON.stringify(parsed);
+      }
       if (
         !isDelta &&
         !isDebotSock &&
@@ -5385,6 +6179,8 @@
             (text.charAt(0) === "{" || text.charAt(0) === "[") &&
             (text.indexOf("trenches_delta") !== -1 ||
               text.indexOf("trenches_update") !== -1 ||
+              text.indexOf("pumpRank") !== -1 ||
+              text.indexOf("newCreations") !== -1 ||
               (text.indexOf("s_tal") !== -1 && text.indexOf("marketing") !== -1));
           if (!mightFilter) {
             return NativeJSONParse(text, reviver);
@@ -5791,11 +6587,10 @@
   }
 
   function ensureTaxRecvRuntime(reason) {
+    syncGmgnShareWorkerMode();
     if (!anyFilterEnabled()) {
-      syncGmgnShareWorkerMode(false);
       return;
     }
-    syncGmgnShareWorkerMode(true);
     try {
       installTaxRecvNetworkHooks();
     } catch (_inst) {

@@ -129,7 +129,7 @@
       vaultHideTaxTitle: "屏蔽税收金库",
       vaultHideTaxDesc: "🎁 税收金库（含 96%金库+4%分红；单枚 QQQB/NVDA 分红币也算）",
       vaultHideStockTitle: "屏蔽币股金库",
-      vaultHideStockDesc: "dividend_tokens / is_stocks_vault 篮子金库",
+      vaultHideStockDesc: "📈 Flap Stocks / Flap 币股（FXIO 等篮子）。默认不屏蔽",
       vaultHideHint2:
         "打开总开关且未勾子项时，默认屏蔽税收金库。只勾税收 → 保留 📈 币股篮子。可与资金接收叠加。",
       suffixHideSection: "自定义尾号屏蔽",
@@ -271,7 +271,7 @@
       vaultHideTaxTitle: "Hide tax vaults",
       vaultHideTaxDesc: "🎁 tax vaults (including 96% vault + 4% holder; single QQQB/NVDA payout)",
       vaultHideStockTitle: "Hide equity vaults",
-      vaultHideStockDesc: "dividend_tokens / is_stocks_vault basket vaults",
+      vaultHideStockDesc: "📈 Flap Stocks / Flap 币股 baskets (FXIO). Off by default",
       vaultHideHint2:
         "Master on with no subtype checked defaults to hiding tax vaults. Tax-only keeps 📈 baskets. Stacks with fund-recipient hide.",
       suffixHideSection: "Custom CA suffix hide",
