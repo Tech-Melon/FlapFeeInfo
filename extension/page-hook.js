@@ -9,7 +9,7 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 153;
+  const HOOK_VER = 156;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -2716,9 +2716,14 @@
 
   /** Live 帧宿主只认 PATCH：先截到 targetLen，再 order[i]=id。
    * 空 replaces + 截尾 = 未过滤列的前 N 张（SPA 漏 🎁）。
-   * 每一帧都把 0..n-1 写成过滤后的槽；targetLen=0 只在 server 非空且全部该藏时才发。 */
+   * 每一帧都把 0..n-1 写成过滤后的槽；targetLen=0 只在 server 非空且全部该藏时才发。
+   * SPA 重挂会从 SharedWorker 内存读未过滤 60 条，且同 seq 心跳 PATCH 会被新树丢掉；
+   * 窗口内改发 kind=2 过滤全量，让新侧栏整列替换而不是截未过滤前 N 张。 */
   function emitHostNcFrame(frame, seq, nextOrder, nextMap, origReplaces) {
     frame.seq = seq;
+    if (shouldNcReseat()) {
+      return emitHostFullFrame(frame, seq, nextOrder, nextMap);
+    }
     if (nextOrder.length > 0) {
       return emitHostReseatFrame(frame, seq, nextOrder, nextMap);
     }
@@ -2732,6 +2737,25 @@
     frame.kind = 1;
     frame.replaces = [];
     if ("data" in frame) delete frame.data;
+    return 1;
+  }
+
+  function emitHostFullFrame(frame, seq, nextOrder, nextMap) {
+    const data = [];
+    for (let i = 0; i < nextOrder.length; i += 1) {
+      const id = nextOrder[i];
+      if (!id) continue;
+      const tok = nextMap.get(id);
+      if (tok) data.push(tok);
+    }
+    frame.kind = 2;
+    frame.data = data;
+    frame.replaces = [];
+    frame.targetLen = data.length;
+    frame.seq = seq;
+    ncHost.order = nextOrder.slice();
+    ncHost.lastSeq = seq;
+    ncHost.ready = true;
     return 1;
   }
 
@@ -5810,8 +5834,15 @@
   // ---------- SPA ----------
   if (!window.__flapFeeInfoSpaHook) {
     window.__flapFeeInfoSpaHook = 1;
+    let lastSpaPath = String(location.pathname || "");
     const fireSpa = (reason) => {
-      markNcReseat();
+      const path = String(location.pathname || "");
+      const wasToken = /\/token\//i.test(lastSpaPath);
+      const nowToken = /\/token\//i.test(path);
+      if (path !== lastSpaPath && wasToken !== nowToken) {
+        markNcReseat();
+      }
+      lastSpaPath = path;
       try {
         window.postMessage(
           {

@@ -674,8 +674,12 @@ python tools/ctl.py watchdog-run
  - `0.8.114`：js-mcp 首页→K 线侧栏漏 🎁 — SPA 重挂读 Worker 未过滤 60 条，心跳只截 targetLen=7 变成前 7 张未过滤。下一帧把 0..n-1 全部写成过滤后的槽。ffff `0x9dc02fbe…` 链上 👨‍🍳→BNB：资金接收不再豁免 Four marketing/founder
  - `0.8.115`：js-mcp 多切 K↔首页 — 一次性 reseat 打在旧列表，重挂后再心跳 `nRep=0` 截未过滤前 N 张（🎁96%/👨‍🍳 漏出）。改为 SPA 后 8s 内每帧整槽重铺
  - `0.8.116`：8s 窗口过期后再切仍漏；心跳 `nRep=0` 会截空。改为每一帧都把 0..n-1 写成过滤槽；仅 server 非空且全部该藏才 targetLen=0
-- 插件当前版本：见 `extension/manifest.json`（**0.8.116**，公开无剪切板）
-- page-hook：`HOOK_VER` **153**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.117`：js-mcp 回首页 t=200 已过滤 2 张，t=341 未过滤 9 张闪出（seq 不变，非 PATCH），t=702 才重铺。SPA 切列 750ms 隐「新创建」列，避免闪厨师
+ - `0.8.118`：0.8.117 的 `opacity:0` + retag `removeAttribute` 让新侧栏吃到未过滤 60 条，同 seq 心跳 PATCH 不落地（js-mcp 首页→K：t=1172 n=13 leak=13 host=1）。改遮罩、pending 期间不剥列标记、SPA 8s 窗口发 kind=2 过滤全量
+ - `0.8.119`：js-mcp 遮罩把已过滤列盖住 1.4–2s。token→token 列数据未丢只被 cover；K→战壕 t=240 已有过滤卡仍等到 t=1453。去掉 pending 遮罩；仅 token↔列表 reseat（kind=2）
+ - `0.8.120`：列表过滤文案改为「首页战壕与 K 线左侧新创建」，避免读成不含 K 线
+- 插件当前版本：见 `extension/manifest.json`（**0.8.120**，公开无剪切板）
+- page-hook：`HOOK_VER` **156**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  

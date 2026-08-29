@@ -42,7 +42,7 @@
       catBadge: "徽章外观",
       catBadgeDesc: "主题与显示项",
       catFilter: "列表过滤",
-      catFilterDesc: "战壕新创建列",
+      catFilterDesc: "首页与 K 线左侧「新创建」",
       searchHideTitle: "搜索框结果也屏蔽",
       searchHideDesc: "默认关。开启后，已启用的资金接收/金库规则同样作用于搜索弹层",
       catPosition: "徽章位置",
@@ -107,13 +107,13 @@
       pref_unknown_desc: "链上无有效分配时",
       taxRecvSection: "资金接收方屏蔽",
       taxRecvHint:
-        "仅战壕/Meme「新创建」栏生效。不含 K 线顶栏。搜索弹层需另开上方「搜索框结果也屏蔽」。不额外请求；默认关闭。GMGN / Debot 开启或改条件后会刷新战壕页。金库类型见下方「金库屏蔽」。",
+        "BSC 首页战壕与 K 线左侧「新创建」列生效，不含 K 线顶栏。搜索弹层需另开上方「搜索框结果也屏蔽」。不额外请求；默认关闭。改开关后 GMGN / Debot 会刷新页面。金库类型见下方「金库屏蔽」。",
       taxRecvEnableTitle: "启用屏蔽",
-      taxRecvEnableDesc: "开启后只过滤「新创建」列（GMGN / Debot 会刷新页面）",
+      taxRecvEnableDesc: "过滤首页与 K 线左侧「新创建」（改开关会刷新页面）",
       taxRecvThresholdLabel: "阈值 ≥",
       taxRecvThresholdLabelGt: "阈值 >",
       taxRecvHint2:
-        "仅新创建：7777/8888 且 👨‍🍳 达阈值则屏蔽（含 hybrid）。0% = 严格大于 0%（只要有 dev 分配就挡，不会挡 0%）。纯 💎 持有人分红不挡。",
+        "首页/K 线左侧「新创建」：7777/8888/ffff 且 👨‍🍳 达阈值则屏蔽（含 hybrid）。0% = 严格大于 0%（有 dev 分配就挡，不挡 0%）。纯 💎 持有人分红不挡。",
       taxRecvAllowLabel: "接收地址白名单",
       taxRecvAllowPh: "0x… 接收地址",
       taxRecvAllowHint:
@@ -123,9 +123,9 @@
       taxRecvAllowDup: "已添加过",
       vaultHideSection: "金库屏蔽",
       vaultHideHint:
-        "仅 BSC「新创建」列。按类型屏蔽，不看分红比例：96%🎁+4%💎 仍是税收金库。Four ffff 税收钱包不算金库。默认关闭。搜索弹层需另开「搜索框结果也屏蔽」。GMGN 开启或改条件后会刷新战壕页。",
+        "BSC 首页战壕与 K 线左侧「新创建」列。按类型屏蔽，不看分红比例：96%🎁+4%💎 仍是税收金库。Four ffff 税收钱包不算金库。默认关闭。搜索弹层需另开「搜索框结果也屏蔽」。改开关后 GMGN 会刷新页面。",
       vaultHideEnableTitle: "启用金库屏蔽",
-      vaultHideEnableDesc: "开启后按下方选项过滤列表（GMGN / Debot 会刷新页面）",
+      vaultHideEnableDesc: "按下方选项过滤首页与 K 线左侧「新创建」（改开关会刷新页面）",
       vaultHideTaxTitle: "屏蔽税收金库",
       vaultHideTaxDesc: "🎁 税收金库（含 96%金库+4%分红；单枚 QQQB/NVDA 分红币也算）",
       vaultHideStockTitle: "屏蔽币股金库",
@@ -134,7 +134,7 @@
         "打开总开关且未勾子项时，默认屏蔽税收金库。只勾税收 → 保留 📈 币股篮子。可与资金接收叠加。",
       suffixHideSection: "自定义尾号屏蔽",
       suffixHideHint:
-        "仅 BSC 生效。隐藏 CA 以指定十六进制尾号结尾的代币（可多条）。战壕「新创建」列数据层过滤。默认关闭。GMGN 开启或改条件后会刷新战壕页。",
+        "仅 BSC。隐藏指定十六进制尾号的 CA（可多条）。首页战壕与 K 线左侧「新创建」数据层过滤。默认关闭。改开关后 GMGN 会刷新页面。",
       suffixHideEnableTitle: "启用尾号屏蔽",
       suffixHideEnableDesc: "开启后按下方规则过滤列表",
       suffixAddPlaceholder: "如 0000 / dead",
@@ -182,7 +182,7 @@
       catBadge: "Badge look",
       catBadgeDesc: "Theme & display",
       catFilter: "List filters",
-      catFilterDesc: "New column only",
+      catFilterDesc: "Home & K-line left New creation",
       searchHideTitle: "Also hide in search",
       searchHideDesc: "Off by default. When on, enabled fund-recipient/vault rules also apply to the search overlay",
       catPosition: "Badge position",
@@ -249,13 +249,13 @@
       pref_unknown_desc: "no valid on-chain split",
       taxRecvSection: "Hide fund recipients",
       taxRecvHint:
-        "New/Creation column on trench lists only. No K-line header. Search overlay needs “Also hide in search” above. No extra requests; off by default. GMGN / Debot reload the trench page when this changes. See Vault hide below.",
+        "BSC home trench and K-line left New creation column. Not the K-line header. Search overlay needs “Also hide in search” above. No extra requests; off by default. GMGN / Debot reload when this changes. See Vault hide below.",
       taxRecvEnableTitle: "Enable hide",
-      taxRecvEnableDesc: "Only filter the New creation column (GMGN / Debot reload)",
+      taxRecvEnableDesc: "Filter home & K-line left New creation (page reloads)",
       taxRecvThresholdLabel: "Threshold ≥",
       taxRecvThresholdLabelGt: "Threshold >",
       taxRecvHint2:
-        "New column only: hide 7777/8888 when marketing hits threshold (incl. hybrid). 0% = strictly > 0%. Pure 💎 holder dividend kept.",
+        "Home/K-line left New creation: hide 7777/8888/ffff when marketing hits threshold (incl. hybrid). 0% = strictly > 0%. Pure 💎 holder dividend kept.",
       taxRecvAllowLabel: "Recipient allowlist",
       taxRecvAllowPh: "0x… recipient",
       taxRecvAllowHint:
@@ -265,9 +265,9 @@
       taxRecvAllowDup: "Already added",
       vaultHideSection: "Vault hide",
       vaultHideHint:
-        "BSC New creation column only. Tax vault 🎁 vs equity basket vault 📈. Four ffff tax wallet is not a vault. Off by default. Search overlay needs “Also hide in search”. GMGN / Debot reload the trench page when this changes.",
+        "BSC home trench and K-line left New creation. Hide by type, not share: 96%🎁+4%💎 is still a tax vault. Four ffff tax wallet is not a vault. Off by default. Search overlay needs “Also hide in search”. GMGN reloads when this changes.",
       vaultHideEnableTitle: "Enable vault hide",
-      vaultHideEnableDesc: "Filter list by options below (GMGN / Debot reload)",
+      vaultHideEnableDesc: "Filter home & K-line left New creation (page reloads)",
       vaultHideTaxTitle: "Hide tax vaults",
       vaultHideTaxDesc: "🎁 tax vaults (including 96% vault + 4% holder; single QQQB/NVDA payout)",
       vaultHideStockTitle: "Hide equity vaults",
@@ -276,7 +276,7 @@
         "Master on with no subtype checked defaults to hiding tax vaults. Tax-only keeps 📈 baskets. Stacks with fund-recipient hide.",
       suffixHideSection: "Custom CA suffix hide",
       suffixHideHint:
-        "BSC only. Hide tokens whose CA ends with a hex suffix (multi-rule). Filters New creation column at data layer. Off by default. GMGN / Debot reload the trench page when this changes.",
+        "BSC only. Hide CAs ending with a hex suffix (multi-rule). Filters home trench and K-line left New creation. Off by default. GMGN reloads when this changes.",
       suffixHideEnableTitle: "Enable suffix hide",
       suffixHideEnableDesc: "Filter list by rules below",
       suffixAddPlaceholder: "e.g. 0000 / dead",
