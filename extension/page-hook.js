@@ -9,7 +9,7 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 156;
+  const HOOK_VER = 158;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -2792,7 +2792,7 @@
 
   /** HTTP / SNAP 全量在过滤前写入 ncServer（未过滤 order），否则 live PATCH 一直 unready。 */
   function seedNcServerFromSnapshotList(list) {
-    if (ncServer.ready) return false;
+    if (ncServer.ready && ncServer.order.length >= 3) return false;
     if (!Array.isArray(list) || list.length < 3) return false;
     const order = [];
     const map = new Map();
@@ -5139,6 +5139,13 @@
       if (!block || typeof block !== "object" || seen.has(block)) return;
       seen.add(block);
       if (Array.isArray(block.tokens)) {
+        // 必须在 splice 前种 ncServer：live pumpRank 心跳是空 replaces + targetLen=60。
+        // 不种影子 → hb-unready 原样放行未过滤 60 条（刷新先正常、几秒后 🎁 漏出）。
+        try {
+          seedNcServerFromSnapshotList(block.tokens);
+        } catch (_seedHttp) {
+          // ignore
+        }
         removed += filterTokenArrayInPlace(block.tokens, "gmgn");
         rememberAndPadNewCreation(block.tokens, "gmgn");
       }
@@ -5927,25 +5934,34 @@
           }
         }
         if (data.type === "suffix-hide-prefs") {
-          const was = anyFilterEnabled();
+          const prevSig = JSON.stringify({
+            enabled: suffixHidePrefs.enabled === true,
+            rules: (suffixHidePrefs.rules || []).map((r) => ({
+              suffix: r.suffix,
+              enabled: r.enabled !== false
+            }))
+          });
           applySuffixHideObject(data.prefs || {});
+          const nextSig = JSON.stringify({
+            enabled: suffixHidePrefs.enabled === true,
+            rules: (suffixHidePrefs.rules || []).map((r) => ({
+              suffix: r.suffix,
+              enabled: r.enabled !== false
+            }))
+          });
           try {
-            const payload = JSON.stringify({
-              enabled: suffixHidePrefs.enabled === true,
-              rules: (suffixHidePrefs.rules || []).map((r) => ({
-                suffix: r.suffix,
-                enabled: r.enabled !== false
-              }))
-            });
-            document.documentElement?.setAttribute(SUFFIX_ATTR, payload);
-            localStorage.setItem(SUFFIX_LS_KEY, payload);
+            document.documentElement?.setAttribute(SUFFIX_ATTR, nextSig);
+            localStorage.setItem(SUFFIX_LS_KEY, nextSig);
           } catch (_a2) {
             // ignore
           }
           if (typeof ensureTaxRecvRuntime === "function") {
             ensureTaxRecvRuntime(anyFilterEnabled() ? "suffix-on" : "suffix-off");
           }
-          if (anyFilterEnabled()) {
+          // js-mcp：content hydrate 会在 0/200/1000ms 重推相同 suffix。
+          // 旧逻辑「只要过滤开着就 resetNcPumpShadows」把 HTTP 种好的影子清掉，
+          // live 心跳 hb-unready + targetLen=60 → 几秒后 🎁 漏回。规则没变不重置。
+          if (prevSig !== nextSig && anyFilterEnabled()) {
             resetNcPumpShadows();
             queueMicrotask(softRefreshLists);
           }

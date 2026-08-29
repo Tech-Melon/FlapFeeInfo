@@ -17,6 +17,8 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.122: js-mcp 复现 suffix-hide-prefs 重推（hydrate 0/200/1000ms）无条件 resetNcPumpShadows，影子清空后 hb-unready 漏 🎁。规则未变不重置。0.8.86 能用是因为当时 disableShareWorker、没有双影子。
+  // 0.8.121: 刷新后屏蔽正常、几秒后又漏 🎁 — HTTP 滤了 tokens 但没种 ncServer；pumpRank 心跳 hb-unready 把 targetLen=60 原样交给宿主。首包先 seed 再 splice。
   // 0.8.119: js-mcp 遮罩把已过滤列盖住 1.4–2s（token→token 列还在只是被 cover；K→战壕 t=240 已有 3 张仍等到 t=1453）。去掉 pending 遮罩；仅 token↔列表 reseat。
   // 0.8.118: 0.8.117 opacity:0 + retag 误剥 data-flap-nc-col，K 线侧栏吃未过滤 60 条且同 seq 心跳不落地。改遮罩、pending 不剥标记、SPA 窗口 kind=2 过滤全量。
   // 0.8.117: js-mcp 回首页 t=200 已是 2 张过滤，t=341 又闪 9 张未过滤（seq 未变，SW 缓存），t=702 才 PATCH 回去。切列 750ms 隐新创建。
@@ -7153,7 +7155,7 @@
     });
   }
 
-  const PAGE_HOOK_VER = "156";
+  const PAGE_HOOK_VER = "158";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 

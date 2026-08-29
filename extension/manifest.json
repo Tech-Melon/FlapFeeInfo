@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.120",
-  "description": "FlapFeeInfo 0.8.120: 列表屏蔽文案写明首页与 K 线左侧新创建。",
+  "version": "0.8.122",
+  "description": "FlapFeeInfo 0.8.122: 尾号 prefs 重推不再清空新创建影子，几秒后不再漏厨师。",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

@@ -678,8 +678,10 @@ python tools/ctl.py watchdog-run
  - `0.8.118`：0.8.117 的 `opacity:0` + retag `removeAttribute` 让新侧栏吃到未过滤 60 条，同 seq 心跳 PATCH 不落地（js-mcp 首页→K：t=1172 n=13 leak=13 host=1）。改遮罩、pending 期间不剥列标记、SPA 8s 窗口发 kind=2 过滤全量
  - `0.8.119`：js-mcp 遮罩把已过滤列盖住 1.4–2s。token→token 列数据未丢只被 cover；K→战壕 t=240 已有过滤卡仍等到 t=1453。去掉 pending 遮罩；仅 token↔列表 reseat（kind=2）
  - `0.8.120`：列表过滤文案改为「首页战壕与 K 线左侧新创建」，避免读成不含 K 线
-- 插件当前版本：见 `extension/manifest.json`（**0.8.120**，公开无剪切板）
-- page-hook：`HOOK_VER` **156**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.121`：js-mcp 刷新后 `hide=72` 但 `server=0/hb-unready/targetLen=60`，几秒内漏 12 张 🎁。HTTP 滤 tokens 未种 ncServer，SharedWorker 空心跳把未过滤 60 条交回宿主。首包 seed 后再 splice
+ - `0.8.122`：js-mcp 实锤 content hydrate 0/200/1000ms 重推 `suffix-hide-prefs` 无条件 `resetNcPumpShadows`（尾号关着也会清）。影子清空 → hb-unready `targetLen=60` → leak=11。规则未变不重置。0.8.86 用户觉得正常是因为当时 `disableShareWorker`、无双影子
+- 插件当前版本：见 `extension/manifest.json`（**0.8.122**，公开无剪切板）
+- page-hook：`HOOK_VER` **158**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  
