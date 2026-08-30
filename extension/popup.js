@@ -68,7 +68,7 @@
       devCountEmpty: "暂无规则，填写次数并选色后添加",
       twHandleSection: "推特备注（右侧色条）",
       twHandleHint:
-        "仅 GMGN / Debot 战壕卡。扫一眼：左侧色条+×次数 = 发币次数；右侧色条 + 推特链接旁备注 = 关注的号。备注挂在可跳转的 x.com/twitter 链接右侧（图标或 @handle 都行）。",
+        "仅 GMGN / Debot 战壕卡。扫一眼：左侧色条+×次数 = 发币次数；右侧色条 + 推特旁备注 = 关注的号。Debot 备注挂在指标行第 2 个小图标后面。",
       twHandleEnableTitle: "启用推特标记",
       twHandleEnableDesc: "右侧色条颜色 + 链接旁备注名",
       twHandlePh: "@handle",
@@ -238,7 +238,7 @@
       devCountEmpty: "No rules yet. Enter a count and pick a color.",
       twHandleSection: "Twitter note (right bar)",
       twHandleHint:
-        "GMGN and Debot trench cards. Left bar + ×count = launch count; right bar + note beside the Twitter link = watched handle. Note sits to the right of the clickable x.com/twitter link (icon or @handle).",
+        "GMGN and Debot trench cards. Left bar + ×count = launch count; right bar + note = watched handle. On Debot the note sits after the second small icon in the stats row.",
       twHandleEnableTitle: "Mark Twitter handles",
       twHandleEnableDesc: "Right-bar color + note beside the link",
       twHandlePh: "@handle",

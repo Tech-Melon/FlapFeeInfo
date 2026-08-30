@@ -17,6 +17,7 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.135: Debot 推特备注挂到指标行第 2 个小图标后，避开 overflow:auto/hidden 裁切。
   // 0.8.134: 三项卡片标记热路径降载 — 关闭时不扫 DOM；Debot 禁 fiber/innerText；Mutation 节流。
   // 0.8.133: 推特备注挂可跳转的 x.com/twitter 链接右侧（图标或 @handle 链都认，跳过 search）。
   // 0.8.132: 重复 symbol 按发布时间最早的上色；红泡挂行卡左上角防裁切。
@@ -14603,8 +14604,100 @@
     return true;
   }
 
+  function isDebotMetricGlyph(el, cardRect) {
+    if (!(el instanceof HTMLElement)) return false;
+    let br;
+    try {
+      br = el.getBoundingClientRect();
+    } catch (_r) {
+      return false;
+    }
+    if (br.width < 8 || br.width > 22 || br.height < 8 || br.height > 22) return false;
+    const top = br.top - cardRect.top;
+    return top >= 36 && top <= 84;
+  }
+
+  function findDebotMetricStrip(card) {
+    if (!(card instanceof HTMLElement) || !isDebotHost()) return null;
+    let cr;
+    try {
+      cr = card.getBoundingClientRect();
+    } catch (_c) {
+      return null;
+    }
+    const seeds = card.querySelectorAll(
+      'img, a[href*="x.com"], a[href*="twitter.com"], a[href*="youtube"], a[href*="tiktok"], a[href*="douyin"]'
+    );
+    const lim = Math.min(seeds.length, 24);
+    for (let i = 0; i < lim; i += 1) {
+      const el = seeds[i];
+      if (!isDebotMetricGlyph(el, cr)) continue;
+      let p = el.parentElement;
+      for (let d = 0; d < 6 && p && p !== card; d += 1) {
+        if (!(p instanceof HTMLElement)) break;
+        let pr;
+        let cs;
+        try {
+          pr = p.getBoundingClientRect();
+          cs = getComputedStyle(p);
+        } catch (_p) {
+          break;
+        }
+        const flex = cs.display === "flex" || cs.display === "inline-flex";
+        if (
+          flex &&
+          p.children.length >= 3 &&
+          pr.width >= 160 &&
+          pr.height >= 14 &&
+          pr.height <= 28
+        ) {
+          return p;
+        }
+        p = p.parentElement;
+      }
+    }
+    return null;
+  }
+
+  function findDebotSecondIcon(card) {
+    const strip = findDebotMetricStrip(card);
+    if (!strip) return null;
+    const visuals = [];
+    for (let i = 0; i < strip.children.length; i += 1) {
+      const child = strip.children[i];
+      if (!(child instanceof HTMLElement)) continue;
+      const t = String(child.textContent || "").replace(/\s+/g, "");
+      if (/^\d+[smhd]\|?$/i.test(t) || t === "|") continue;
+      visuals.push(child);
+    }
+    const cluster = visuals[1];
+    if (cluster instanceof HTMLElement) {
+      const nodes = cluster.querySelectorAll("a, img");
+      const nlim = Math.min(nodes.length, 8);
+      for (let i = 0; i < nlim; i += 1) {
+        const el = nodes[i];
+        if (!(el instanceof HTMLElement)) continue;
+        const href =
+          el.getAttribute("href") || el.closest?.("a")?.getAttribute("href") || "";
+        if (/\/search\?/i.test(href)) continue;
+        let br;
+        try {
+          br = el.getBoundingClientRect();
+        } catch (_b) {
+          continue;
+        }
+        if (br.width >= 8 && br.width <= 22 && br.height >= 8 && br.height <= 22) {
+          return el.closest?.("a") instanceof HTMLElement ? el.closest("a") : el;
+        }
+      }
+      return cluster;
+    }
+    return visuals[0] instanceof HTMLElement ? visuals[0] : null;
+  }
+
   function findTwNoteAnchor(card) {
     if (!(card instanceof HTMLElement)) return null;
+    if (isDebotHost()) return findDebotSecondIcon(card);
     const links = card.querySelectorAll('a[href*="x.com"], a[href*="twitter.com"]');
     let best = null;
     let bestScore = -1;
@@ -14645,14 +14738,49 @@
 
   function scrapeTwHandleFromDom(card) {
     if (!(card instanceof HTMLElement)) return "";
-    const anchor = findTwNoteAnchor(card);
-    if (anchor instanceof HTMLElement) {
-      const fromText = normalizeCardMarkHandle(anchor.textContent || "");
-      if (fromText) return fromText;
-      const fromHref = normalizeCardMarkHandle(anchor.getAttribute("href") || "");
+    const links = card.querySelectorAll('a[href*="x.com"], a[href*="twitter.com"]');
+    const lim = Math.min(links.length, 12);
+    for (let i = 0; i < lim; i += 1) {
+      const el = links[i];
+      if (!(el instanceof HTMLElement)) continue;
+      const href = el.getAttribute("href") || "";
+      if (!isTwitterJumpHref(href)) continue;
+      const fromHref = normalizeCardMarkHandle(href);
       if (fromHref) return fromHref;
+      const fromText = normalizeCardMarkHandle(el.textContent || "");
+      if (fromText) return fromText;
+    }
+    const nodes = card.querySelectorAll("div, span, a");
+    const nlim = Math.min(nodes.length, 40);
+    for (let i = 0; i < nlim; i += 1) {
+      const el = nodes[i];
+      if (!(el instanceof HTMLElement)) continue;
+      if (el.querySelector?.("div, span, a")) continue;
+      const t = String(el.textContent || "").trim();
+      if (/^@[A-Za-z0-9_]{2,32}$/.test(t)) return normalizeCardMarkHandle(t);
     }
     return "";
+  }
+
+  function placeTwNoteChip(card, chip, anchor) {
+    if (!(chip instanceof HTMLElement) || !(card instanceof HTMLElement) || !isDebotHost()) {
+      return;
+    }
+    if (chip.parentNode !== card) card.appendChild(chip);
+    let x = 140;
+    let y = 52;
+    try {
+      const cr = card.getBoundingClientRect();
+      if (anchor instanceof HTMLElement) {
+        const ar = anchor.getBoundingClientRect();
+        x = Math.round(ar.right - cr.left + 4);
+        y = Math.round(ar.top - cr.top + (ar.height - 15) / 2);
+      }
+    } catch (_pos) {
+      // keep fallback
+    }
+    chip.style.left = `${Math.max(8, x)}px`;
+    chip.style.top = `${Math.max(2, y)}px`;
   }
 
   function resolveGmgnMarkCard(el) {
@@ -14729,11 +14857,15 @@
       chip.setAttribute(attr, "1");
       chip.className = cls;
       chip.setAttribute("aria-hidden", "true");
-      if (kind === "tw" && anchor instanceof HTMLElement && anchor.parentNode) {
+      if (kind === "tw" && isDebotHost()) {
+        card.appendChild(chip);
+      } else if (kind === "tw" && anchor instanceof HTMLElement && anchor.parentNode) {
         anchor.insertAdjacentElement("afterend", chip);
       } else {
         card.appendChild(chip);
       }
+    } else if (kind === "tw" && isDebotHost()) {
+      if (chip.parentNode !== card) card.appendChild(chip);
     } else if (
       kind === "tw" &&
       anchor instanceof HTMLElement &&
@@ -14745,6 +14877,7 @@
     if (chip.textContent !== text) chip.textContent = text;
     chip.style.setProperty("--flap-chip-color", color);
     chip.style.color = chipInkForHex(color);
+    if (kind === "tw" && isDebotHost()) placeTwNoteChip(card, chip, anchor);
   }
 
   function chipInkForHex(hex) {
@@ -14789,6 +14922,10 @@
       (!devRule || hasDevChip) &&
       (!twRule || hasTwChip)
     ) {
+      if (twRule && isDebotHost()) {
+        const chip = card.querySelector("[data-flap-tw-chip='1']");
+        if (chip instanceof HTMLElement) placeTwNoteChip(card, chip, findTwNoteAnchor(card));
+      }
       return;
     }
     if (!devRule && !twRule) {
@@ -14814,7 +14951,7 @@
     upsertMarkChip(
       card,
       "tw",
-      twRule && twAnchor ? twRule.note || `@${twRule.handle}` : "",
+      twRule ? twRule.note || `@${twRule.handle}` : "",
       twRule ? twRule.color : "",
       twAnchor
     );

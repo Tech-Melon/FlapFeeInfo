@@ -700,7 +700,8 @@ python tools/ctl.py watchdog-run
  - `0.8.132`：重复 symbol 按发布时间最早的上色（新创建列新币在上会误把后发当第 1）；红泡改挂行卡、对准代号左上角，避免被右侧图标裁切
  - `0.8.133`：推特备注挂可跳转的 x.com/twitter 链接右侧（Debot 是 14px 推文图标，不是下面的 @handle 文本；跳过 search）
  - `0.8.134`：三项卡片标记热路径降载 — 关闭时不扫 DOM；Debot 禁 fiber/innerText；Mutation 约 120ms 节流（href 换卡立刻重画）
-- 插件当前版本：见 `extension/manifest.json`（**0.8.134**，公开无剪切板）
+ - `0.8.135`：Debot 推特备注改挂指标行第 2 个小图标后（避开 overflow 裁切，不再压住徽章）
+- 插件当前版本：见 `extension/manifest.json`（**0.8.135**，公开无剪切板）
 - page-hook：`HOOK_VER` **165**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  

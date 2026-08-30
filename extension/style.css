@@ -818,6 +818,13 @@ a[href*="/token/"].flap-card-mark {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--flap-chip-color, #fbbf24) 50%, #000);
 }
 
+a[href*="/token/"] > .flap-tw-note-chip {
+  position: absolute;
+  z-index: 20;
+  margin-left: 0;
+  pointer-events: none;
+}
+
 .flap-sym-first {
   color: var(--flap-sym-color, #facc15) !important;
   font-weight: 700 !important;
