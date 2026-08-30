@@ -17,6 +17,7 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.130: Debot 卡片标记 — ranks dev_token_stats.created_count + social_info.twitter_screen_name；行卡 a[/token/bsc]。
   // 0.8.129: 推特备注 = 右侧色条（对左侧发币次数）；链接旁实心小备注。
   // 0.8.128: 推特备注改挂链接旁、淡描边；0.8.127 右上大胶囊过抢。
   // 0.8.127: 发币次数比较符 <≤=≥>；推特备注右上大胶囊；虚拟列表 href 复用后立刻重画标记。
@@ -5671,6 +5672,7 @@
       try {
         paintDebotUnpaintedViewportQuick("scroll-settle", columnRoot, true);
         scrubBadgesToHostHref(columnRoot || document, true);
+        paintGmgnCardMarks(columnRoot);
       } catch (_vp) {
         // The follow-up remains the fallback.
       }
@@ -5680,6 +5682,7 @@
           try {
             paintDebotUnpaintedViewportQuick("scroll-settle-followup", columnRoot, true);
             scrubBadgesToHostHref(columnRoot, true);
+            paintGmgnCardMarks(columnRoot);
           } catch (_vp2) {
             // ignore
           }
@@ -7174,7 +7177,7 @@
     });
   }
 
-  const PAGE_HOOK_VER = "162";
+  const PAGE_HOOK_VER = "163";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -13886,7 +13889,19 @@
     s = s.replace(/^@+/, "");
     s = s.split(/[/?#\s]/)[0] || "";
     s = s.replace(/\u2026|\.{2,}$/g, "");
-    return s.toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 32);
+    s = s.toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 32);
+    if (
+      !s ||
+      s === "search" ||
+      s === "intent" ||
+      s === "i" ||
+      s === "home" ||
+      s === "share" ||
+      s === "explore"
+    ) {
+      return "";
+    }
+    return s;
   }
 
   function normalizeTwHandleMarkPrefs(raw) {
@@ -14020,14 +14035,27 @@
     for (let i = 0; i < 20 && f; i += 1) {
       const p = f.memoizedProps;
       if (p && typeof p === "object") {
-        const bags = [p.data, p.token, p.item];
+        const bags = [p.data, p.token, p.item, p.row];
         for (let j = 0; j < bags.length; j += 1) {
           const d = bags[j];
           if (!d || typeof d !== "object") continue;
-          const address = cardMarkMetaAddr(d.address || d.a);
-          const count = Math.floor(Number(d.creator_created_count ?? d.d_ccc) || 0);
+          const stats =
+            d.dev_token_stats && typeof d.dev_token_stats === "object" ? d.dev_token_stats : null;
+          const social =
+            d.social_info && typeof d.social_info === "object" ? d.social_info : null;
+          const address = cardMarkMetaAddr(
+            d.address || d.a || d.contract || d.tokenAddress || d.token_address
+          );
+          const count = Math.floor(
+            Number(d.creator_created_count ?? d.d_ccc ?? (stats && stats.created_count)) || 0
+          );
           const twitter = normalizeCardMarkHandle(
-            d.twitter_username || d.twitter || d.m_x || d.tu || ""
+            (social && (social.twitter_screen_name || social.twitter)) ||
+              d.twitter_username ||
+              d.twitter ||
+              d.m_x ||
+              d.tu ||
+              ""
           );
           if (address || count > 0 || twitter) {
             return { address, count: count > 0 ? count : 0, twitter };
@@ -14039,16 +14067,35 @@
     return null;
   }
 
+  function findTwNoteAnchor(card) {
+    if (!(card instanceof HTMLElement)) return null;
+    const nodes = card.querySelectorAll("div, span, a, p");
+    for (let i = 0; i < nodes.length; i += 1) {
+      const el = nodes[i];
+      if (!(el instanceof HTMLElement)) continue;
+      if (el.querySelector?.("div, span, a, p")) continue;
+      const t = String(el.textContent || "").trim();
+      if (/^@[A-Za-z0-9_]{2,32}$/.test(t)) return el;
+    }
+    const links = card.querySelectorAll?.('a[href*="x.com/"], a[href*="twitter.com/"]') || [];
+    for (let i = 0; i < links.length; i += 1) {
+      const a = links[i];
+      if (!(a instanceof HTMLElement)) continue;
+      const href = a.getAttribute("href") || "";
+      if (/\/search/i.test(href)) continue;
+      return a;
+    }
+    return null;
+  }
+
   function scrapeTwHandleFromDom(card) {
     if (!(card instanceof HTMLElement)) return "";
-    const a = card.querySelector?.(
-      'a[href*="x.com/"], a[href*="twitter.com/"]'
-    );
-    if (a instanceof HTMLElement) {
-      const fromHref = normalizeCardMarkHandle(a.getAttribute("href") || "");
-      if (fromHref) return fromHref;
-      const fromText = normalizeCardMarkHandle(a.textContent || "");
+    const anchor = findTwNoteAnchor(card);
+    if (anchor instanceof HTMLElement) {
+      const fromText = normalizeCardMarkHandle(anchor.textContent || "");
       if (fromText) return fromText;
+      const fromHref = normalizeCardMarkHandle(anchor.getAttribute("href") || "");
+      if (fromHref) return fromHref;
     }
     return "";
   }
@@ -14057,6 +14104,33 @@
     if (!(el instanceof HTMLElement)) return null;
     if (el.matches?.('[data-sentry-source-file="TokenItem.tsx"]')) return el;
     return el.closest?.('[data-sentry-source-file="TokenItem.tsx"]') || null;
+  }
+
+  function resolveDebotMarkCard(el) {
+    if (!(el instanceof HTMLElement) || !isDebotHost()) return null;
+    const a = el.matches?.('a[href*="/token/"]')
+      ? el
+      : el.closest?.('a[href*="/token/"]');
+    if (!(a instanceof HTMLElement)) return null;
+    const href = a.getAttribute("href") || "";
+    if (!/\/token\/bsc\//i.test(href) && !isBscTokenRouteHref(href)) return null;
+    if (isDebotTickerChip(a) || isDebotSideRailCard(a) || isBadgeMountForbidden(a)) return null;
+    if (isDebotTokenPage() && isDebotTokenHeaderCard(a)) {
+      return null;
+    }
+    try {
+      const r = a.getBoundingClientRect();
+      if (r.width < 160 || r.height < 48 || r.height > DEBOT_TRENCH_ROW_MAX_H) return null;
+    } catch (_sz) {
+      // ignore
+    }
+    return a;
+  }
+
+  function resolveMarkCard(el) {
+    if (isGmgnHost()) return resolveGmgnMarkCard(el);
+    if (isDebotHost()) return resolveDebotMarkCard(el);
+    return null;
   }
 
   function clearCardMark(card) {
@@ -14147,9 +14221,7 @@
     }`;
     const chipsOk =
       (!devRule || Boolean(card.querySelector?.("[data-flap-dev-chip='1']"))) &&
-      (!twRule ||
-        !card.querySelector?.('a[href*="x.com/"], a[href*="twitter.com/"]') ||
-        Boolean(card.querySelector?.("[data-flap-tw-chip='1']")));
+      (!twRule || !findTwNoteAnchor(card) || Boolean(card.querySelector?.("[data-flap-tw-chip='1']")));
     if (
       chipsOk &&
       cardMarkSigCache.get(card) === sig &&
@@ -14176,9 +14248,7 @@
       devRule ? devRule.color : "",
       null
     );
-    const twAnchor = card.querySelector?.(
-      'a[href*="x.com/"], a[href*="twitter.com/"]'
-    );
+    const twAnchor = findTwNoteAnchor(card);
     upsertMarkChip(
       card,
       "tw",
@@ -14190,7 +14260,7 @@
   }
 
   function paintGmgnCardMarks(root = null) {
-    if (!isGmgnHost()) return;
+    if (!isGmgnHost() && !isDebotHost()) return;
     if (!isScanPageAllowed()) {
       clearAllCardMarks();
       return;
@@ -14200,13 +14270,15 @@
       return;
     }
     const scope = root instanceof HTMLElement ? root : document;
-    const items = scope.querySelectorAll('[data-sentry-source-file="TokenItem.tsx"]');
+    const items = isGmgnHost()
+      ? scope.querySelectorAll('[data-sentry-source-file="TokenItem.tsx"]')
+      : scope.querySelectorAll('a[href*="/token/bsc/"], a[href*="/token/"][href*="0x"]');
     const vh = window.innerHeight || 800;
     let n = 0;
     for (let i = 0; i < items.length && n < 48; i += 1) {
       const el = items[i];
       if (!(el instanceof HTMLElement) || !el.isConnected) continue;
-      const card = resolveGmgnMarkCard(el);
+      const card = resolveMarkCard(el);
       if (!card) continue;
       let vis = true;
       try {
@@ -14221,7 +14293,7 @@
       n += 1;
       const href =
         card.getAttribute("href") ||
-        card.querySelector?.("[href*='/bsc/token/0x']")?.getAttribute("href") ||
+        card.querySelector?.("[href*='/bsc/token/0x'], [href*='/token/bsc/0x']")?.getAttribute("href") ||
         "";
       const m = String(href).match(/0x[a-fA-F0-9]{40}/i);
       const token = m ? m[0].toLowerCase() : "";
@@ -14239,22 +14311,21 @@
     if (!(card instanceof HTMLElement)) return "";
     const href =
       card.getAttribute("href") ||
-      card.querySelector?.("[href*='/bsc/token/0x']")?.getAttribute("href") ||
+      card.querySelector?.("[href*='/bsc/token/0x'], [href*='/token/bsc/0x']")?.getAttribute("href") ||
       "";
     const m = String(href).match(/0x[a-fA-F0-9]{40}/i);
     return m ? m[0].toLowerCase() : "";
   }
 
-  /** Virtual list reuses TokenItem: href swap + inner childList wipe chips. Re-paint immediately. */
+  /** Virtual list reuses TokenItem / Debot row: href swap + inner childList wipe chips. */
   function applyCardMarksFromMutations(records) {
-    if (!isGmgnHost() || !records?.length) return;
+    if ((!isGmgnHost() && !isDebotHost()) || !records?.length) return;
     if (!devCountMarkPrefs.enabled && !twHandleMarkPrefs.enabled) return;
     if (!isScanPageAllowed()) return;
-    const itemSel = '[data-sentry-source-file="TokenItem.tsx"]';
     const seen = new Set();
     const consider = (node) => {
       if (!(node instanceof HTMLElement) || seen.size >= 24) return;
-      const card = node.matches?.(itemSel) ? node : node.closest?.(itemSel);
+      const card = resolveMarkCard(node);
       if (!(card instanceof HTMLElement) || !card.isConnected || seen.has(card)) return;
       seen.add(card);
       const token = hrefTokenFromMarkCard(card);

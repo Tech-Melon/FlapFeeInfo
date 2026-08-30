@@ -430,7 +430,7 @@ python tools/ctl.py watchdog-run
 | GMGN 整页打不开 / 白屏 | 0.8.123 在 `Object.prototype` 上挂了 `onmessage` | **0.8.124+** 重载插件并硬刷页；不要停留在 0.8.123 |
 | 资金接收/金库我这边正常、部分用户没有 | GMGN 手机或 Worker 降级走 MAIN_THREAD：假 MessagePort + SNAP_SHOT，旧钩子只拦 SharedWorker PATCH | **0.8.124+**（勿用 0.8.123，会把 Object.prototype.onmessage 挂上导致打不开）；对方重载插件并硬刷 GMGN |
 | 刷新或多开 GMGN 新创建无法屏蔽 | SharedWorker 已有约 60 条，新页不打 HTTP，改走 `getFullFrame` RPC（`request_plugin.response.body`）；旧钩子不拆 `response` | **0.8.125+** 重载插件并硬刷每个 GMGN 标签 |
-| 卡片标记（发币次数/推特备注）没出现 | 未开开关 / 没加规则 / 新币 count 仍为 0 / 非 GMGN TokenItem | **0.8.126+** 弹窗「卡片标记」启用并加规则；开盘后再看次数；重载插件并硬刷 GMGN |
+| 卡片标记（发币次数/推特备注）没出现 | 未开开关 / 没加规则 / GMGN 新币 count 仍为 0 / 非战壕行卡 | **0.8.130+** 弹窗启用并加规则；Debot 看 ranks `created_count`；重载插件并硬刷 GMGN/Debot |
 | 卡片标记上下滑就消失 | 虚拟列表复用 TokenItem：改 href + 拆内部 DOM；旧版停滚只补徽章不重画标记 | **0.8.127+** 重载插件并硬刷 GMGN |
 
 ---
@@ -693,8 +693,9 @@ python tools/ctl.py watchdog-run
  - `0.8.127`：发币次数比较符可选 `< ≤ = ≥ >`（默认 `<`，旧规则无 op 仍当 ≥）；推特备注改卡片右上大胶囊+内描边；js-mcp 实锤虚拟列表复用 TokenItem（href 换、内 DOM 拆），滚动冷却/停滚立刻按当前 href 重画标记
  - `0.8.128`：推特备注改挂在 handle 链接旁（小胶囊、半透明）；卡片描边改为 1px 淡内框，不再铺厚橙边
  - `0.8.129`：推特备注改为右侧色条（对左侧发币次数），链接旁实心小备注；一眼分「次数 / 关注号」
-- 插件当前版本：见 `extension/manifest.json`（**0.8.129**，公开无剪切板）
-- page-hook：`HOOK_VER` **162**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.130`：Debot/Gungnir 战壕也画卡片标记。次数来自 ranks `dev_token_stats.created_count`（新创建列已有值，不像 GMGN 常为 0）；推特来自 `social_info.twitter_screen_name`，备注挂在 `@handle` 文本旁（不要认 x.com/search）
+- 插件当前版本：见 `extension/manifest.json`（**0.8.130**，公开无剪切板）
+- page-hook：`HOOK_VER` **163**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  

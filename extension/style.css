@@ -741,8 +741,9 @@ body .gmgn-fee-mode-icon {
   transform: translateY(0.5px);
 }
 
-/* GMGN 战壕卡标记：左侧光条 / 描边，不铺满底色 */
-[data-sentry-source-file="TokenItem.tsx"].flap-card-mark {
+/* GMGN 战壕卡 / Debot 行卡标记：左侧发币次数、右侧推特备注 */
+[data-sentry-source-file="TokenItem.tsx"].flap-card-mark,
+a[href*="/token/"].flap-card-mark {
   position: relative;
 }
 

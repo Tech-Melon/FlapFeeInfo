@@ -53,7 +53,7 @@
       catMarkDesc: "发币次数 · 推特备注",
       devCountSection: "Dev 发币次数",
       devCountHint:
-        "仅 GMGN 战壕卡。按 creator_created_count 给卡片左侧光条 + 「×次数」小签。比较符可选 < ≤ = ≥ >（默认 <）。新币前几秒常为 0。多条命中时精确相等优先，其次更严的阈值。",
+        "仅 GMGN / Debot 战壕卡。GMGN 用 creator_created_count；Debot 用 ranks 的 dev_token_stats.created_count。左侧光条 + 「×次数」。比较符可选 < ≤ = ≥ >（默认 <）。多条命中时精确相等优先。",
       devCountEnableTitle: "启用发币次数标记",
       devCountEnableDesc: "左侧光条颜色自定义；次数显示在头像旁",
       devCountMinPh: "次数",
@@ -61,7 +61,7 @@
       devCountEmpty: "暂无规则，填写次数并选色后添加",
       twHandleSection: "推特备注（右侧色条）",
       twHandleHint:
-        "仅 GMGN 战壕卡。扫一眼：左侧色条+×次数 = 发币次数；右侧色条+链接旁备注 = 关注的推特。颜色都在规则里自选。",
+        "仅 GMGN / Debot 战壕卡。扫一眼：左侧色条+×次数 = 发币次数；右侧色条+推特旁备注 = 关注的号。Debot 认 twitter_screen_name 和 @handle 文本。",
       twHandleEnableTitle: "启用推特标记",
       twHandleEnableDesc: "右侧色条颜色 + 链接旁备注名",
       twHandlePh: "@handle",
@@ -214,7 +214,7 @@
       catMarkDesc: "Dev count · Twitter notes",
       devCountSection: "Dev launch count",
       devCountHint:
-        "GMGN trench cards only. Left glow bar + ×count from creator_created_count. Choose < ≤ = ≥ > (default <). New tokens often stay 0 for a few seconds. Exact match wins, then the tighter threshold.",
+        "GMGN and Debot trench cards. GMGN uses creator_created_count; Debot uses ranks dev_token_stats.created_count. Left bar + ×count. Choose < ≤ = ≥ > (default <). Exact match wins, then the tighter threshold.",
       devCountEnableTitle: "Mark by launch count",
       devCountEnableDesc: "Custom bar color; count chip beside the avatar",
       devCountMinPh: "count",
@@ -222,7 +222,7 @@
       devCountEmpty: "No rules yet. Enter a count and pick a color.",
       twHandleSection: "Twitter note (right bar)",
       twHandleHint:
-        "GMGN trench cards only. Left bar + ×count = launch count; right bar + note beside the handle = watched Twitter. Pick colors per rule.",
+        "GMGN and Debot trench cards. Left bar + ×count = launch count; right bar + note beside the handle = watched Twitter. Debot reads twitter_screen_name and @handle text.",
       twHandleEnableTitle: "Mark Twitter handles",
       twHandleEnableDesc: "Right-bar color + note beside the link",
       twHandlePh: "@handle",

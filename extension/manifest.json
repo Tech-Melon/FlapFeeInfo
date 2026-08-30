@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.129",
-  "description": "FlapFeeInfo 0.8.129: 推特备注改为右侧色条，和左侧发币次数对称。",
+  "version": "0.8.130",
+  "description": "FlapFeeInfo 0.8.130: Debot 战壕也显示发币次数与推特备注标记。",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

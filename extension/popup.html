@@ -176,7 +176,7 @@
           <div class="collapse-body" id="devCountCollapseBody" hidden>
             <div class="tax-recv-section" id="devCountSection">
               <p class="theme-hint" data-i18n="devCountHint">
-                仅 GMGN 战壕卡。按 creator_created_count 给卡片左侧光条 + 「×次数」小签。比较符可选 &lt; ≤ = ≥ &gt;（默认 &lt;）。新币前几秒常为 0。多条命中时精确相等优先，其次更严的阈值。
+                仅 GMGN / Debot 战壕卡。GMGN 用 creator_created_count；Debot 用 ranks 的 dev_token_stats.created_count。左侧光条 + 「×次数」。比较符可选 &lt; ≤ = ≥ &gt;（默认 &lt;）。多条命中时精确相等优先。
               </p>
               <label class="row drag-row" for="devCountEnabled">
                 <input type="checkbox" id="devCountEnabled" />
@@ -231,7 +231,7 @@
           <div class="collapse-body" id="twHandleCollapseBody" hidden>
             <div class="tax-recv-section" id="twHandleSection">
               <p class="theme-hint" data-i18n="twHandleHint">
-                仅 GMGN 战壕卡。扫一眼：左侧色条+×次数 = 发币次数；右侧色条+链接旁备注 = 关注的推特。颜色都在规则里自选。
+                仅 GMGN / Debot 战壕卡。扫一眼：左侧色条+×次数 = 发币次数；右侧色条+推特旁备注 = 关注的号。Debot 认 twitter_screen_name 和 @handle 文本。
               </p>
               <label class="row drag-row" for="twHandleEnabled">
                 <input type="checkbox" id="twHandleEnabled" />

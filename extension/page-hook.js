@@ -10,7 +10,7 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 162;
+  const HOOK_VER = 163;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -2292,21 +2292,60 @@
     s = s.replace(/^@+/, "");
     s = s.split(/[/?#\s]/)[0] || "";
     s = s.replace(/\u2026|\.{2,}$/g, "");
-    return s.toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 32);
+    s = s.toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 32);
+    if (
+      !s ||
+      s === "search" ||
+      s === "intent" ||
+      s === "i" ||
+      s === "home" ||
+      s === "share" ||
+      s === "explore"
+    ) {
+      return "";
+    }
+    return s;
   }
 
   function pickCardMarkMeta(item, addrHint) {
     if (!item || typeof item !== "object") item = {};
-    const addr = String(addrHint || item.address || item.a || "")
+    const nested =
+      item.token && typeof item.token === "object" && !item.contract && !item.address
+        ? item.token
+        : item;
+    const stats =
+      nested.dev_token_stats && typeof nested.dev_token_stats === "object"
+        ? nested.dev_token_stats
+        : null;
+    const social =
+      nested.social_info && typeof nested.social_info === "object" ? nested.social_info : null;
+    const meta = nested.meta && typeof nested.meta === "object" ? nested.meta : null;
+    const addr = String(
+      addrHint ||
+        nested.address ||
+        nested.a ||
+        nested.contract ||
+        nested.tokenAddress ||
+        nested.token_address ||
+        ""
+    )
       .trim()
       .toLowerCase();
     if (!CARD_MARK_ADDR_RE.test(addr)) return null;
-    const countRaw = item.creator_created_count ?? item.d_ccc;
+    const countRaw =
+      nested.creator_created_count ?? nested.d_ccc ?? (stats && stats.created_count);
     const count = Math.floor(Number(countRaw));
     const twitter = normalizeCardMarkHandle(
-      item.twitter_username || item.twitter || item.m_x || item.tu || ""
+      (social && (social.twitter_screen_name || social.twitter)) ||
+        nested.twitter_username ||
+        nested.twitter ||
+        nested.m_x ||
+        nested.tu ||
+        ""
     );
-    const creator = String(item.creator || item.d_ct || "")
+    const creator = String(
+      nested.creator || nested.d_ct || (meta && meta.dev_address) || ""
+    )
       .trim()
       .toLowerCase();
     const creatorOk = CARD_MARK_ADDR_RE.test(creator) ? creator : "";
@@ -2363,6 +2402,11 @@
   }
 
   function collectHostFeesFromDebotRow(row) {
+    try {
+      if (debotRowIsBsc(row)) queueCardMarkFromItem(row);
+    } catch (_q) {
+      // ignore
+    }
     try {
       const entry = debotHostFeeFromRow(row);
       if (entry) queueHostFeeEntry(entry);
