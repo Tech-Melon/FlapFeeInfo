@@ -12,6 +12,7 @@
   const SEARCH_HIDE_KEY = "flapFeeInfo.searchHide.v1";
   const DEV_COUNT_MARK_KEY = "flapFeeInfo.devCountMark.v1";
   const TW_HANDLE_MARK_KEY = "flapFeeInfo.twHandleMark.v1";
+  const SYMBOL_DUP_MARK_KEY = "flapFeeInfo.symbolDupMark.v1";
   const LICENSE_KEY = "flapFeeInfo.license.v1";
   const DEVICE_ID_KEY = "flapFeeInfo.deviceId.v1";
   const LICENSE_API_BASE = "https://flap-fee-info.tech-melon.workers.dev";
@@ -28,6 +29,12 @@
   const DEFAULT_SEARCH_HIDE = { enabled: false };
   const DEFAULT_DEV_COUNT_MARK = { enabled: false, rules: [] };
   const DEFAULT_TW_HANDLE_MARK = { enabled: false, rules: [] };
+  const DEFAULT_SYMBOL_DUP_MARK = {
+    enabled: false,
+    waitDup: true,
+    windowMin: 5,
+    color: "#facc15"
+  };
   const DEV_COUNT_MARK_MAX = 12;
   const TW_HANDLE_MARK_MAX = 24;
   const DEFAULT_LICENSE = { key: "" };
@@ -50,7 +57,7 @@
       catFilter: "列表过滤",
       catFilterDesc: "首页与 K 线左侧「新创建」",
       catMark: "卡片标记",
-      catMarkDesc: "发币次数 · 推特备注",
+      catMarkDesc: "发币次数 · 推特备注 · 重复代号",
       devCountSection: "Dev 发币次数",
       devCountHint:
         "仅 GMGN / Debot 战壕卡。GMGN 用 creator_created_count；Debot 用 ranks 的 dev_token_stats.created_count。左侧光条 + 「×次数」。比较符可选 < ≤ = ≥ >（默认 <）。多条命中时精确相等优先。",
@@ -61,7 +68,7 @@
       devCountEmpty: "暂无规则，填写次数并选色后添加",
       twHandleSection: "推特备注（右侧色条）",
       twHandleHint:
-        "仅 GMGN / Debot 战壕卡。扫一眼：左侧色条+×次数 = 发币次数；右侧色条+推特旁备注 = 关注的号。Debot 认 twitter_screen_name 和 @handle 文本。",
+        "仅 GMGN / Debot 战壕卡。扫一眼：左侧色条+×次数 = 发币次数；右侧色条 + 推特链接旁备注 = 关注的号。备注挂在可跳转的 x.com/twitter 链接右侧（图标或 @handle 都行）。",
       twHandleEnableTitle: "启用推特标记",
       twHandleEnableDesc: "右侧色条颜色 + 链接旁备注名",
       twHandlePh: "@handle",
@@ -70,6 +77,15 @@
       twHandleEmpty: "暂无规则，填写 handle 与备注后添加",
       twHandleInvalid: "请填写有效 handle",
       twHandleDup: "已添加过",
+      symbolDupSection: "新创建重复代号",
+      symbolDupHint:
+        "仅「新创建」列。按发布时间：先发的 symbol 上色（参考价值更高）。默认要等到出现第 2 个相同 symbol 才给最早那个上色，并在后发的代号左上角加红泡。",
+      symbolDupEnableTitle: "启用重复代号标记",
+      symbolDupEnableDesc: "只作用于 GMGN / Debot 新创建列",
+      symbolDupWaitTitle: "等出现相同代号再标记",
+      symbolDupWaitDesc: "默认开。关掉则第一次出现立刻上色，不再画红泡",
+      symbolDupWindowLabel: "计数窗口（分钟）",
+      symbolDupColorLabel: "首次颜色",
       searchHideTitle: "搜索框结果也屏蔽",
       searchHideDesc: "默认关。开启后，已启用的资金接收/金库规则同样作用于搜索弹层",
       catPosition: "徽章位置",
@@ -211,7 +227,7 @@
       catFilter: "List filters",
       catFilterDesc: "Home & K-line left New creation",
       catMark: "Card marks",
-      catMarkDesc: "Dev count · Twitter notes",
+      catMarkDesc: "Dev count · Twitter notes · Repeat ticker",
       devCountSection: "Dev launch count",
       devCountHint:
         "GMGN and Debot trench cards. GMGN uses creator_created_count; Debot uses ranks dev_token_stats.created_count. Left bar + ×count. Choose < ≤ = ≥ > (default <). Exact match wins, then the tighter threshold.",
@@ -222,7 +238,7 @@
       devCountEmpty: "No rules yet. Enter a count and pick a color.",
       twHandleSection: "Twitter note (right bar)",
       twHandleHint:
-        "GMGN and Debot trench cards. Left bar + ×count = launch count; right bar + note beside the handle = watched Twitter. Debot reads twitter_screen_name and @handle text.",
+        "GMGN and Debot trench cards. Left bar + ×count = launch count; right bar + note beside the Twitter link = watched handle. Note sits to the right of the clickable x.com/twitter link (icon or @handle).",
       twHandleEnableTitle: "Mark Twitter handles",
       twHandleEnableDesc: "Right-bar color + note beside the link",
       twHandlePh: "@handle",
@@ -231,6 +247,15 @@
       twHandleEmpty: "No rules yet. Add a handle and a note.",
       twHandleInvalid: "Enter a valid handle",
       twHandleDup: "Already added",
+      symbolDupSection: "Repeat ticker on new creations",
+      symbolDupHint:
+        "New-creation column only. The earliest published ticker is highlighted (more useful as a reference). By default it waits for a 2nd same symbol, then colors the earliest and puts a red bubble on the later copies' top-left.",
+      symbolDupEnableTitle: "Mark repeat tickers",
+      symbolDupEnableDesc: "GMGN / Debot new-creation column only",
+      symbolDupWaitTitle: "Wait for a duplicate before marking",
+      symbolDupWaitDesc: "On by default. Off: color the first hit immediately, no red bubbles",
+      symbolDupWindowLabel: "Window (minutes)",
+      symbolDupColorLabel: "First-hit color",
       searchHideTitle: "Also hide in search",
       searchHideDesc: "Off by default. When on, enabled fund-recipient/vault rules also apply to the search overlay",
       catPosition: "Badge position",
@@ -454,6 +479,11 @@
   const twHandleNoteInput = document.getElementById("twHandleNoteInput");
   const twHandleColorInput = document.getElementById("twHandleColorInput");
   const twHandleAddBtn = document.getElementById("twHandleAddBtn");
+  const symbolDupEnabled = document.getElementById("symbolDupEnabled");
+  const symbolDupRulesWrap = document.getElementById("symbolDupRulesWrap");
+  const symbolDupWait = document.getElementById("symbolDupWait");
+  const symbolDupWindow = document.getElementById("symbolDupWindow");
+  const symbolDupColor = document.getElementById("symbolDupColor");
 
   /** @type {{ gmgn: {enabled:boolean,x:number,y:number}, debot: {enabled:boolean,x:number,y:number} }} */
   let offsets = {
@@ -480,6 +510,8 @@
   let devCountSaveTimer = null;
   let twHandleMarkState = { ...DEFAULT_TW_HANDLE_MARK };
   let twHandleSaveTimer = null;
+  let symbolDupMarkState = { ...DEFAULT_SYMBOL_DUP_MARK };
+  let symbolDupSaveTimer = null;
 
   function t(key) {
     const pack = I18N[uiLang] || I18N.zh;
@@ -660,6 +692,17 @@
         enabled: r.enabled !== false
       });
     }
+    return out;
+  }
+
+  function normalizeSymbolDupMark(raw) {
+    const out = { ...DEFAULT_SYMBOL_DUP_MARK };
+    if (!raw || typeof raw !== "object") return out;
+    out.enabled = raw.enabled === true;
+    out.waitDup = raw.waitDup !== false;
+    const win = Math.floor(Number(raw.windowMin));
+    out.windowMin = Number.isFinite(win) ? Math.max(1, Math.min(60, win)) : 5;
+    out.color = normalizeHexColor(raw.color, DEFAULT_SYMBOL_DUP_MARK.color);
     return out;
   }
 
@@ -1116,6 +1159,7 @@
             LICENSE_KEY,
             DEV_COUNT_MARK_KEY,
             TW_HANDLE_MARK_KEY,
+            SYMBOL_DUP_MARK_KEY,
           ],
           (items) => {
             if (chrome.runtime.lastError) {
@@ -1133,6 +1177,7 @@
                 license: { ...DEFAULT_LICENSE },
                 devCountMark: { ...DEFAULT_DEV_COUNT_MARK },
                 twHandleMark: { ...DEFAULT_TW_HANDLE_MARK },
+                symbolDupMark: { ...DEFAULT_SYMBOL_DUP_MARK },
               });
               return;
             }
@@ -1158,6 +1203,7 @@
               license: normalizeLicense(items?.[LICENSE_KEY]) || { ...DEFAULT_LICENSE },
               devCountMark: normalizeDevCountMark(items?.[DEV_COUNT_MARK_KEY]),
               twHandleMark: normalizeTwHandleMark(items?.[TW_HANDLE_MARK_KEY]),
+              symbolDupMark: normalizeSymbolDupMark(items?.[SYMBOL_DUP_MARK_KEY]),
             });
           }
         );
@@ -1176,6 +1222,7 @@
           license: { ...DEFAULT_LICENSE },
           devCountMark: { ...DEFAULT_DEV_COUNT_MARK },
           twHandleMark: { ...DEFAULT_TW_HANDLE_MARK },
+          symbolDupMark: { ...DEFAULT_SYMBOL_DUP_MARK },
         });
       }
     });
@@ -1705,6 +1752,42 @@
     scheduleSaveTwHandleMark();
   }
 
+  function saveSymbolDupMark(state) {
+    const normalized = normalizeSymbolDupMark(state);
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.set({ [SYMBOL_DUP_MARK_KEY]: normalized }, () => {
+          void chrome.runtime?.lastError;
+          resolve(normalized);
+        });
+      } catch {
+        resolve(normalized);
+      }
+    });
+  }
+
+  function scheduleSaveSymbolDupMark() {
+    if (symbolDupSaveTimer) window.clearTimeout(symbolDupSaveTimer);
+    renderSymbolDupMarkUI(symbolDupMarkState);
+    symbolDupSaveTimer = window.setTimeout(() => {
+      symbolDupSaveTimer = null;
+      void saveSymbolDupMark(symbolDupMarkState);
+    }, 120);
+  }
+
+  function renderSymbolDupMarkUI(state) {
+    symbolDupMarkState = normalizeSymbolDupMark(state);
+    if (symbolDupEnabled) {
+      symbolDupEnabled.checked = symbolDupMarkState.enabled === true;
+    }
+    if (symbolDupRulesWrap) {
+      symbolDupRulesWrap.classList.toggle("is-disabled", symbolDupMarkState.enabled !== true);
+    }
+    if (symbolDupWait) symbolDupWait.checked = symbolDupMarkState.waitDup !== false;
+    if (symbolDupWindow) symbolDupWindow.value = String(symbolDupMarkState.windowMin);
+    if (symbolDupColor) symbolDupColor.value = symbolDupMarkState.color;
+  }
+
   function savePrefs(prefs) {
     return new Promise((resolve) => {
       try {
@@ -2124,6 +2207,23 @@
       tryAddTwHandleRule();
     }
   });
+  symbolDupEnabled?.addEventListener("change", () => {
+    symbolDupMarkState.enabled = symbolDupEnabled.checked === true;
+    scheduleSaveSymbolDupMark();
+  });
+  symbolDupWait?.addEventListener("change", () => {
+    symbolDupMarkState.waitDup = symbolDupWait.checked === true;
+    scheduleSaveSymbolDupMark();
+  });
+  symbolDupWindow?.addEventListener("change", () => {
+    const n = Math.floor(Number(symbolDupWindow.value));
+    symbolDupMarkState.windowMin = Number.isFinite(n) ? Math.max(1, Math.min(60, n)) : 5;
+    scheduleSaveSymbolDupMark();
+  });
+  symbolDupColor?.addEventListener("input", () => {
+    symbolDupMarkState.color = normalizeHexColor(symbolDupColor.value, DEFAULT_SYMBOL_DUP_MARK.color);
+    scheduleSaveSymbolDupMark();
+  });
 
 
   for (const cb of offsetEnables) {
@@ -2204,6 +2304,7 @@
         renderSearchHideUI(searchHideState);
         renderDevCountMarkUI(devCountMarkState);
         renderTwHandleMarkUI(twHandleMarkState);
+        renderSymbolDupMarkUI(symbolDupMarkState);
       }
       if (changes[TAX_RECV_HIDE_KEY]) {
         taxRecvState = normalizeTaxRecvHide(changes[TAX_RECV_HIDE_KEY].newValue);
@@ -2229,6 +2330,10 @@
         twHandleMarkState = normalizeTwHandleMark(changes[TW_HANDLE_MARK_KEY].newValue);
         renderTwHandleMarkUI(twHandleMarkState);
       }
+      if (changes[SYMBOL_DUP_MARK_KEY]) {
+        symbolDupMarkState = normalizeSymbolDupMark(changes[SYMBOL_DUP_MARK_KEY].newValue);
+        renderSymbolDupMarkUI(symbolDupMarkState);
+      }
       if (changes[PREFS_KEY]) {
         prefsState = normalizePrefs(changes[PREFS_KEY].newValue);
         if (prefsExpanded) renderPrefs(prefsState);
@@ -2253,6 +2358,7 @@
       license: loadedLicense,
       devCountMark: loadedDevCount,
       twHandleMark: loadedTwHandle,
+      symbolDupMark: loadedSymbolDup,
     }) => {
       uiLang = lang;
       solidDark = loadedSolid === true;
@@ -2267,6 +2373,7 @@
       searchHideState = normalizeSearchHide(loadedSearchHide);
       devCountMarkState = normalizeDevCountMark(loadedDevCount);
       twHandleMarkState = normalizeTwHandleMark(loadedTwHandle);
+      symbolDupMarkState = normalizeSymbolDupMark(loadedSymbolDup);
       applyStaticI18n();
       renderTheme(theme);
       renderPrefs(prefs);
@@ -2276,6 +2383,7 @@
       renderSearchHideUI(searchHideState);
       renderDevCountMarkUI(devCountMarkState);
       renderTwHandleMarkUI(twHandleMarkState);
+      renderSymbolDupMarkUI(symbolDupMarkState);
       renderLicenseUI(loadedLicense);
       void refreshStoredLicense();
       bindCollapseHeads();
@@ -2285,6 +2393,7 @@
       setSectionExpanded("suffixHide", false);
       setSectionExpanded("devCount", false);
       setSectionExpanded("twHandle", false);
+      setSectionExpanded("symbolDup", false);
       setSectionExpanded("pref", false);
       setSectionExpanded("pos", false);
       fillOffsetUI(offsets);

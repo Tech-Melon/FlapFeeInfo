@@ -17,6 +17,10 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.134: 三项卡片标记热路径降载 — 关闭时不扫 DOM；Debot 禁 fiber/innerText；Mutation 节流。
+  // 0.8.133: 推特备注挂可跳转的 x.com/twitter 链接右侧（图标或 @handle 链都认，跳过 search）。
+  // 0.8.132: 重复 symbol 按发布时间最早的上色；红泡挂行卡左上角防裁切。
+  // 0.8.131: 新创建重复 symbol — 窗口内首次高亮；可选等第 2 个才亮，2/3/4… 旁红泡。
   // 0.8.130: Debot 卡片标记 — ranks dev_token_stats.created_count + social_info.twitter_screen_name；行卡 a[/token/bsc]。
   // 0.8.129: 推特备注 = 右侧色条（对左侧发币次数）；链接旁实心小备注。
   // 0.8.128: 推特备注改挂链接旁、淡描边；0.8.127 右上大胶囊过抢。
@@ -548,8 +552,16 @@
   const SEARCH_HIDE_KEY = "flapFeeInfo.searchHide.v1";
   const DEV_COUNT_MARK_KEY = "flapFeeInfo.devCountMark.v1";
   const TW_HANDLE_MARK_KEY = "flapFeeInfo.twHandleMark.v1";
+  const SYMBOL_DUP_MARK_KEY = "flapFeeInfo.symbolDupMark.v1";
+  const SYMBOL_DUP_SEEN_KEY = "flapFeeInfo.symbolDupSeen.v1";
   const DEFAULT_DEV_COUNT_MARK = { enabled: false, rules: [] };
   const DEFAULT_TW_HANDLE_MARK = { enabled: false, rules: [] };
+  const DEFAULT_SYMBOL_DUP_MARK = {
+    enabled: false,
+    waitDup: true,
+    windowMin: 5,
+    color: "#facc15"
+  };
   const DEV_COUNT_MARK_MAX = 12;
   const TW_HANDLE_MARK_MAX = 24;
   const LICENSE_KEY = "flapFeeInfo.license.v1";
@@ -2110,8 +2122,15 @@
   let searchHidePrefs = { ...DEFAULT_SEARCH_HIDE };
   let devCountMarkPrefs = { ...DEFAULT_DEV_COUNT_MARK };
   let twHandleMarkPrefs = { ...DEFAULT_TW_HANDLE_MARK };
+  let symbolDupMarkPrefs = { ...DEFAULT_SYMBOL_DUP_MARK };
   const cardMarkMetaByAddr = new Map();
   const cardMarkSigCache = new WeakMap();
+  const symbolDupByKey = new Map();
+  const symbolDupSigCache = new WeakMap();
+  let symbolDupSeenSaveTimer = 0;
+  let symbolDupPaintRaf = 0;
+  let cardMarkMutAt = 0;
+  let cachedReactFiberKey = "";
   let searchOverlayDidHide = false;
   let searchOverlayHideTimer = 0;
   const requestQueue = new Set();
@@ -5424,7 +5443,7 @@
         try {
           paintUnpaintedTargetViewportQuick("scroll-settle-fixed", fixedScrollRoot, true);
           scrubBadgesToHostHref(fixedScrollRoot, true);
-          paintGmgnCardMarks(fixedScrollRoot);
+          paintTrenchCardExtras(fixedScrollRoot);
         } catch (_vp) {
           // The follow-up remains the fallback.
         }
@@ -5433,7 +5452,7 @@
           try {
             paintUnpaintedTargetViewportQuick("scroll-settle-fixed-followup", fixedScrollRoot, true);
             scrubBadgesToHostHref(fixedScrollRoot, true);
-            paintGmgnCardMarks(fixedScrollRoot);
+            paintTrenchCardExtras(fixedScrollRoot);
           } catch (_vp) {
             // ignore
           }
@@ -5672,7 +5691,7 @@
       try {
         paintDebotUnpaintedViewportQuick("scroll-settle", columnRoot, true);
         scrubBadgesToHostHref(columnRoot || document, true);
-        paintGmgnCardMarks(columnRoot);
+        paintTrenchCardExtras(columnRoot);
       } catch (_vp) {
         // The follow-up remains the fallback.
       }
@@ -5682,7 +5701,7 @@
           try {
             paintDebotUnpaintedViewportQuick("scroll-settle-followup", columnRoot, true);
             scrubBadgesToHostHref(columnRoot, true);
-            paintGmgnCardMarks(columnRoot);
+            paintTrenchCardExtras(columnRoot);
           } catch (_vp2) {
             // ignore
           }
@@ -7177,7 +7196,7 @@
     });
   }
 
-  const PAGE_HOOK_VER = "163";
+  const PAGE_HOOK_VER = "165";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -9412,7 +9431,7 @@
     }
 
     try {
-      paintGmgnCardMarks();
+      if (anyTrenchMarkOn()) paintTrenchCardExtras();
     } catch (_mk) {
       // ignore
     }
@@ -13942,16 +13961,22 @@
       const nextCount = Math.max(0, Math.floor(Number(row.count) || 0));
       const nextTwitter = normalizeCardMarkHandle(row.twitter || "");
       const nextCreator = cardMarkMetaAddr(row.creator);
+      const nextSymbol = normalizeDupSymbol(row.symbol || "");
+      const nextCreated = hostCreatedAtFromRaw(row.created || row.create_time || row.created_at);
       const next = {
         count: nextCount > 0 ? nextCount : prev?.count || 0,
         twitter: nextTwitter || prev?.twitter || "",
-        creator: nextCreator || prev?.creator || ""
+        creator: nextCreator || prev?.creator || "",
+        symbol: nextSymbol || prev?.symbol || "",
+        created: nextCreated > 0 ? nextCreated : prev?.created || 0
       };
       if (
         prev &&
         prev.count === next.count &&
         prev.twitter === next.twitter &&
-        prev.creator === next.creator
+        prev.creator === next.creator &&
+        prev.symbol === next.symbol &&
+        prev.created === next.created
       ) {
         continue;
       }
@@ -14017,12 +14042,496 @@
     return truncated;
   }
 
-  function reactFiberOfCard(el) {
-    if (!el) return null;
+  function anyTrenchMarkOn() {
+    return (
+      devCountMarkPrefs.enabled === true ||
+      twHandleMarkPrefs.enabled === true ||
+      symbolDupMarkPrefs.enabled === true
+    );
+  }
+
+  function trenchMarkCardSelector() {
+    return isGmgnHost()
+      ? '[data-sentry-source-file="TokenItem.tsx"]'
+      : 'a[href*="/token/bsc/"]';
+  }
+
+  function syncTrenchMarksAfterPrefs() {
+    if (!anyTrenchMarkOn()) {
+      clearAllCardMarks();
+      clearAllSymbolDupMarks();
+      return;
+    }
     try {
+      paintTrenchCardExtras();
+    } catch (_p) {
+      // ignore
+    }
+  }
+
+  function normalizeSymbolDupMarkPrefs(raw) {
+    const out = { ...DEFAULT_SYMBOL_DUP_MARK };
+    if (!raw || typeof raw !== "object") return out;
+    out.enabled = raw.enabled === true;
+    out.waitDup = raw.waitDup !== false;
+    const win = Math.floor(Number(raw.windowMin));
+    out.windowMin = Number.isFinite(win) ? Math.max(1, Math.min(60, win)) : 5;
+    out.color = normalizeCardMarkHexColor(raw.color, DEFAULT_SYMBOL_DUP_MARK.color);
+    return out;
+  }
+
+  function normalizeDupSymbol(raw) {
+    let s = String(raw || "").trim().replace(/\s+/g, "");
+    if (!s) return "";
+    try {
+      s = s.normalize("NFKC");
+    } catch (_nf) {
+      // ignore
+    }
+    s = s.toLowerCase().slice(0, 32);
+    if (!s || /^[$0-9.]+[kmb]?$/i.test(s)) return "";
+    return s;
+  }
+
+  function hostCreatedAtFromRaw(raw) {
+    let n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    if (n < 1e12) n *= 1000;
+    const now = Date.now();
+    if (n > now + 120000 || now - n > 14 * 86400000) return 0;
+    return Math.floor(n);
+  }
+
+  function scrapeCardCreatedAt(card) {
+    if (!(card instanceof HTMLElement)) return 0;
+    const nodes = card.querySelectorAll("div, span, p");
+    const lim = Math.min(nodes.length, 40);
+    for (let i = 0; i < lim; i += 1) {
+      const el = nodes[i];
+      if (!(el instanceof HTMLElement)) continue;
+      if (el.querySelector?.("div, span, p")) continue;
+      const t = String(el.textContent || "").trim();
+      const m = t.match(/^(\d+)\s*([smhd])$/i);
+      if (!m) continue;
+      const n = Math.max(0, Number(m[1]) || 0);
+      const u = m[2].toLowerCase();
+      let ms = n * 1000;
+      if (u === "m") ms = n * 60000;
+      else if (u === "h") ms = n * 3600000;
+      else if (u === "d") ms = n * 86400000;
+      const created = Date.now() - ms;
+      if (created > 0) return created;
+    }
+    return 0;
+  }
+
+  function sortSymbolDupCas(a, b) {
+    const ca = a.created > 0 ? a.created : a.at;
+    const cb = b.created > 0 ? b.created : b.at;
+    return ca - cb || a.at - b.at;
+  }
+
+  function symbolDupWindowMs() {
+    return Math.max(1, symbolDupMarkPrefs.windowMin || 5) * 60 * 1000;
+  }
+
+  function pruneSymbolDupMap(now) {
+    const win = symbolDupWindowMs();
+    const t = now || Date.now();
+    for (const [key, rec] of symbolDupByKey) {
+      const cas = Array.isArray(rec?.cas) ? rec.cas.filter((x) => x && t - x.at <= win) : [];
+      if (!cas.length) symbolDupByKey.delete(key);
+      else rec.cas = cas;
+    }
+    if (symbolDupByKey.size > 400) {
+      const keys = Array.from(symbolDupByKey.keys());
+      for (let i = 0; i < keys.length - 280; i += 1) symbolDupByKey.delete(keys[i]);
+    }
+  }
+
+  function schedulePersistSymbolDupSeen() {
+    if (symbolDupSeenSaveTimer) return;
+    symbolDupSeenSaveTimer = window.setTimeout(() => {
+      symbolDupSeenSaveTimer = 0;
+      persistSymbolDupSeen();
+    }, 400);
+  }
+
+  function persistSymbolDupSeen() {
+    if (!isExtensionContextValid() || !chrome.storage?.session) return;
+    pruneSymbolDupMap(Date.now());
+    const out = {};
+    for (const [key, rec] of symbolDupByKey) {
+      const cas = (rec.cas || [])
+        .slice(0, 24)
+        .map((x) => ({ a: x.addr, t: x.at, c: x.created || 0 }))
+        .filter((x) => x.a);
+      if (cas.length) out[key] = cas;
+    }
+    try {
+      chrome.storage.session.set({ [SYMBOL_DUP_SEEN_KEY]: out });
+    } catch (_st) {
+      // ignore
+    }
+  }
+
+  function hydrateSymbolDupSeen(raw) {
+    if (!raw || typeof raw !== "object") return;
+    const now = Date.now();
+    const win = symbolDupWindowMs();
+    for (const key of Object.keys(raw)) {
+      const nk = normalizeDupSymbol(key);
+      if (!nk) continue;
+      const list = Array.isArray(raw[key]) ? raw[key] : [];
+      const cas = [];
+      const seen = new Set();
+      for (let i = 0; i < list.length && cas.length < 24; i += 1) {
+        const row = list[i] || {};
+        const addr = cardMarkMetaAddr(row.a || row.addr);
+        const at = Math.floor(Number(row.t || row.at) || 0);
+        const created = hostCreatedAtFromRaw(row.c || row.created);
+        if (!addr || seen.has(addr) || now - at > win) continue;
+        seen.add(addr);
+        cas.push({ addr, at, created });
+      }
+      if (cas.length) {
+        cas.sort(sortSymbolDupCas);
+        symbolDupByKey.set(nk, { cas });
+      }
+    }
+  }
+
+  function noteSymbolDupSeen(addr, symbol, created) {
+    const key = normalizeDupSymbol(symbol);
+    const a = cardMarkMetaAddr(addr);
+    if (!key || !a) return;
+    const now = Date.now();
+    pruneSymbolDupMap(now);
+    let rec = symbolDupByKey.get(key);
+    if (!rec) {
+      rec = { cas: [] };
+      symbolDupByKey.set(key, rec);
+    }
+    const createdOk = created > 0 ? created : 0;
+    const existing = rec.cas.find((x) => x.addr === a);
+    let flipped = false;
+    if (!existing) {
+      rec.cas.push({ addr: a, at: now, created: createdOk });
+      flipped = true;
+    } else if (createdOk && (!existing.created || createdOk < existing.created)) {
+      existing.created = createdOk;
+      flipped = true;
+    }
+    if (flipped) {
+      rec.cas.sort(sortSymbolDupCas);
+      schedulePersistSymbolDupSeen();
+      if (rec.cas.length >= 2) {
+        if (!symbolDupPaintRaf) {
+          symbolDupPaintRaf = window.requestAnimationFrame(() => {
+            symbolDupPaintRaf = 0;
+            try {
+              paintSymbolDupMarks();
+            } catch (_p) {
+              // ignore
+            }
+          });
+        }
+      }
+    }
+  }
+
+  function lookupSymbolDup(addr, symbol) {
+    const key = normalizeDupSymbol(symbol);
+    const a = cardMarkMetaAddr(addr);
+    if (!key || !a) return { n: 0, total: 0 };
+    const rec = symbolDupByKey.get(key);
+    const cas = rec?.cas || [];
+    const idx = cas.findIndex((x) => x.addr === a);
+    return { n: idx >= 0 ? idx + 1 : 0, total: cas.length };
+  }
+
+  function isNewCreationMarkScopeCard(card) {
+    if (!(card instanceof HTMLElement)) return false;
+    if (isDebotHost()) return isDebotNewCreationColumnCard(card);
+    if (!isGmgnHost()) return false;
+    if (isBadgeMountForbidden(card)) return false;
+    try {
+      if (
+        card.closest?.(
+          '[role="dialog"], [role="presentation"], .MuiModal-root, [data-sentry-source-file="SearchModalDetail.tsx"]'
+        )
+      ) {
+        return false;
+      }
+    } catch (_dlg) {
+      // ignore
+    }
+    try {
+      const root = card.closest?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR);
+      const cr = card.getBoundingClientRect();
+      if (root instanceof HTMLElement) {
+        const rr = root.getBoundingClientRect();
+        if (rr.width > 0 && rr.width < 560) return true;
+        if (cr.left < rr.left + rr.width * 0.38) return true;
+      }
+      if (cr.left >= 0 && cr.left < Math.min(560, window.innerWidth / 3 + 48)) return true;
+    } catch (_g) {
+      // ignore
+    }
+    return false;
+  }
+
+  function tickerTextLooksNoise(text) {
+    const t = String(text || "").trim();
+    if (!t || t.length > 32) return true;
+    if (/^\$/.test(t) || /^@/.test(t)) return true;
+    if (/^\d+[smhd]$/i.test(t)) return true;
+    if (/^[0-9.,]+[kmb]?$/i.test(t)) return true;
+    if (/^(mc|v|f|n|tx|tax|buy|卖|买)$/i.test(t)) return true;
+    if (/[|]/.test(t) || /[🦋🖐️🪙💎👨🔥💧🎁]/.test(t)) return true;
+    return false;
+  }
+
+  function findTickerEl(card, wantSymbol) {
+    if (!(card instanceof HTMLElement)) return null;
+    const want = normalizeDupSymbol(wantSymbol);
+    const prev = card.querySelector(".flap-sym-first");
+    if (prev instanceof HTMLElement) {
+      if (!want || normalizeDupSymbol(prev.textContent || "") === want) return prev;
+    }
+    const cr = card.getBoundingClientRect();
+    const leaves = card.querySelectorAll("div, span");
+    let best = null;
+    let bestScore = -1;
+    const lim = Math.min(leaves.length, 80);
+    for (let i = 0; i < lim; i += 1) {
+      const el = leaves[i];
+      if (!(el instanceof HTMLElement)) continue;
+      if (el.closest?.(".gmgn-fee-mode-icon, [data-flap-dev-chip], [data-flap-tw-chip], [data-flap-sym-bubble]")) {
+        continue;
+      }
+      if (el.querySelector?.("div, span")) continue;
+      const t = String(el.textContent || "").trim();
+      if (tickerTextLooksNoise(t)) continue;
+      if (want && normalizeDupSymbol(t) === want) return el;
+      let br;
+      try {
+        br = el.getBoundingClientRect();
+      } catch (_b) {
+        continue;
+      }
+      const top = br.top - cr.top;
+      const left = br.left - cr.left;
+      if (top < 0 || top > 42 || left < 36 || left > 280) continue;
+      if (br.height < 12 || br.height > 36 || br.width < 8) continue;
+      const fs = br.height >= 18 ? 16 : 14;
+      const score = fs * 4 - top * 0.4;
+      if (score > bestScore) {
+        bestScore = score;
+        best = el;
+      }
+    }
+    return best;
+  }
+
+  function scrapeTickerFromCard(card) {
+    const el = findTickerEl(card, "");
+    return el ? String(el.textContent || "").trim() : "";
+  }
+
+  function clearSymbolDupOnCard(card) {
+    if (!(card instanceof HTMLElement)) return;
+    card.classList.remove("flap-sym-dup");
+    try {
+      card.querySelectorAll(".flap-sym-first").forEach((n) => {
+        n.classList.remove("flap-sym-first");
+        if (n instanceof HTMLElement) n.style.removeProperty("--flap-sym-color");
+      });
+      card.querySelectorAll("[data-flap-sym-bubble='1']").forEach((n) => n.remove());
+    } catch (_rm) {
+      // ignore
+    }
+    try {
+      symbolDupSigCache.delete(card);
+    } catch (_wm) {
+      // ignore
+    }
+  }
+
+  function clearAllSymbolDupMarks() {
+    try {
+      document.querySelectorAll(".flap-sym-dup").forEach((el) => {
+        if (el instanceof HTMLElement) el.classList.remove("flap-sym-dup");
+      });
+      document.querySelectorAll(".flap-sym-first, [data-flap-sym-bubble='1']").forEach((el) => {
+        if (!(el instanceof HTMLElement)) return;
+        if (el.getAttribute("data-flap-sym-bubble") === "1") el.remove();
+        else {
+          el.classList.remove("flap-sym-first");
+          el.style.removeProperty("--flap-sym-color");
+        }
+      });
+    } catch (_all) {
+      // ignore
+    }
+  }
+
+  function applySymbolDupToEl(card, token) {
+    if (!(card instanceof HTMLElement) || !token || !symbolDupMarkPrefs.enabled) {
+      if (card instanceof HTMLElement) clearSymbolDupOnCard(card);
+      return;
+    }
+    if (!isScanPageAllowed() || !isNewCreationMarkScopeCard(card)) {
+      clearSymbolDupOnCard(card);
+      return;
+    }
+    const addr = String(token).toLowerCase();
+    const cached = cardMarkMetaByAddr.get(addr);
+    const fiber =
+      isGmgnHost() && !(cached && cached.symbol)
+        ? scrapeCardMarkFromFiber(card)
+        : null;
+    const fromFiber =
+      fiber && (!fiber.address || fiber.address === addr) ? fiber.symbol || "" : "";
+    const symbol = (cached && cached.symbol) || fromFiber || scrapeTickerFromCard(card) || "";
+    if (!normalizeDupSymbol(symbol)) {
+      clearSymbolDupOnCard(card);
+      return;
+    }
+    const created =
+      (cached && cached.created) ||
+      (fiber && (!fiber.address || fiber.address === addr) ? fiber.created : 0) ||
+      scrapeCardCreatedAt(card) ||
+      0;
+    if (created > 0 && cached && !cached.created) cached.created = created;
+    noteSymbolDupSeen(addr, symbol, created);
+    const { n, total } = lookupSymbolDup(addr, symbol);
+    const waitDup = symbolDupMarkPrefs.waitDup !== false;
+    const showFirst = n === 1 && (!waitDup || total >= 2);
+    const showBubble = waitDup && total >= 2 && n >= 2;
+    const color = symbolDupMarkPrefs.color || DEFAULT_SYMBOL_DUP_MARK.color;
+    const sig = `${addr}|${normalizeDupSymbol(symbol)}|${n}|${total}|${waitDup ? 1 : 0}|${color}`;
+    const ticker = findTickerEl(card, symbol);
+    if (symbolDupSigCache.get(card) === sig) {
+      if (showBubble && ticker instanceof HTMLElement) placeSymBubble(card, ticker);
+      if (showFirst && ticker?.classList.contains("flap-sym-first")) return;
+      if (showBubble && card.querySelector("[data-flap-sym-bubble='1']")) return;
+      if (!showFirst && !showBubble && !card.querySelector("[data-flap-sym-bubble='1']")) return;
+    }
+    card.classList.toggle("flap-sym-dup", showFirst || showBubble);
+    card.querySelectorAll(".flap-sym-first").forEach((nEl) => {
+      if (nEl !== ticker) {
+        nEl.classList.remove("flap-sym-first");
+        if (nEl instanceof HTMLElement) nEl.style.removeProperty("--flap-sym-color");
+      }
+    });
+    if (ticker instanceof HTMLElement) {
+      ticker.classList.toggle("flap-sym-first", showFirst);
+      if (showFirst) ticker.style.setProperty("--flap-sym-color", color);
+      else ticker.style.removeProperty("--flap-sym-color");
+    }
+    let bubble = card.querySelector("[data-flap-sym-bubble='1']");
+    if (!showBubble || !(ticker instanceof HTMLElement)) {
+      if (bubble) bubble.remove();
+    } else {
+      if (!(bubble instanceof HTMLElement)) {
+        bubble = document.createElement("span");
+        bubble.setAttribute("data-flap-sym-bubble", "1");
+        bubble.className = "flap-sym-bubble";
+        bubble.setAttribute("aria-hidden", "true");
+        card.appendChild(bubble);
+      } else if (bubble.parentNode !== card) {
+        card.appendChild(bubble);
+      }
+      const label = String(n);
+      if (bubble.textContent !== label) bubble.textContent = label;
+      placeSymBubble(card, ticker, bubble);
+    }
+    symbolDupSigCache.set(card, sig);
+  }
+
+  function placeSymBubble(card, ticker, bubble) {
+    const el = bubble || card.querySelector("[data-flap-sym-bubble='1']");
+    if (!(el instanceof HTMLElement) || !(card instanceof HTMLElement) || !(ticker instanceof HTMLElement)) {
+      return;
+    }
+    try {
+      const cr = card.getBoundingClientRect();
+      const tr = ticker.getBoundingClientRect();
+      el.style.left = `${Math.round(tr.left - cr.left - 6)}px`;
+      el.style.top = `${Math.round(tr.top - cr.top - 8)}px`;
+    } catch (_pos) {
+      el.style.left = "88px";
+      el.style.top = "2px";
+    }
+  }
+
+  function paintTrenchCardExtras(root = null) {
+    if (!isGmgnHost() && !isDebotHost()) return;
+    if (!isScanPageAllowed()) return;
+    const marksOn = devCountMarkPrefs.enabled === true || twHandleMarkPrefs.enabled === true;
+    const symOn = symbolDupMarkPrefs.enabled === true;
+    if (!marksOn && !symOn) return;
+    const scope = root instanceof HTMLElement ? root : document;
+    let items;
+    try {
+      items = scope.querySelectorAll(trenchMarkCardSelector());
+    } catch (_q) {
+      return;
+    }
+    const vh = window.innerHeight || 800;
+    let n = 0;
+    const cap = 32;
+    for (let i = 0; i < items.length && n < cap; i += 1) {
+      const el = items[i];
+      if (!(el instanceof HTMLElement) || !el.isConnected) continue;
+      const card = resolveMarkCard(el);
+      if (!card) continue;
+      try {
+        if (!root) {
+          const r = card.getBoundingClientRect();
+          if (!(r.width >= 160 && r.height >= 48 && r.bottom > -40 && r.top < vh + 80)) continue;
+        }
+      } catch (_g) {
+        // keep
+      }
+      n += 1;
+      const token = hrefTokenFromMarkCard(card);
+      if (!token) {
+        if (marksOn) clearCardMark(card);
+        if (symOn) clearSymbolDupOnCard(card);
+        continue;
+      }
+      const prev = card.getAttribute("data-flap-mark-ca") || "";
+      if (prev && prev !== token) {
+        clearCardMark(card);
+        clearSymbolDupOnCard(card);
+      }
+      if (marksOn) applyCardMarkToEl(card, token);
+      if (symOn) applySymbolDupToEl(card, token);
+    }
+  }
+
+  function paintSymbolDupMarks(root = null) {
+    if (!symbolDupMarkPrefs.enabled) return;
+    paintTrenchCardExtras(root);
+  }
+
+  function paintGmgnCardMarks(root = null) {
+    if (!devCountMarkPrefs.enabled && !twHandleMarkPrefs.enabled) return;
+    paintTrenchCardExtras(root);
+  }
+
+  function reactFiberOfCard(el) {
+    if (!el || isDebotHost()) return null;
+    try {
+      if (cachedReactFiberKey && cachedReactFiberKey in el) return el[cachedReactFiberKey];
       const names = Object.getOwnPropertyNames(el);
       for (let i = 0; i < names.length; i += 1) {
-        if (String(names[i]).startsWith("__reactFiber")) return el[names[i]];
+        if (String(names[i]).startsWith("__reactFiber")) {
+          cachedReactFiberKey = names[i];
+          return el[cachedReactFiberKey];
+        }
       }
     } catch (_rf) {
       // ignore
@@ -14057,8 +14566,27 @@
               d.tu ||
               ""
           );
-          if (address || count > 0 || twitter) {
-            return { address, count: count > 0 ? count : 0, twitter };
+          const symbol = String(
+            d.symbol ||
+              d.s ||
+              d.ticker ||
+              d.token_symbol ||
+              (d.meta && (d.meta.symbol || d.meta.token_symbol)) ||
+              ""
+          )
+            .trim()
+            .slice(0, 32);
+          const created = hostCreatedAtFromRaw(
+            (d.meta && (d.meta.create_time || d.meta.created_at || d.meta.created_timestamp)) ||
+              d.create_time ||
+              d.created_timestamp ||
+              d.open_timestamp ||
+              d.created_at ||
+              d.c ||
+              0
+          );
+          if (address || count > 0 || twitter || symbol) {
+            return { address, count: count > 0 ? count : 0, twitter, symbol, created };
           }
         }
       }
@@ -14067,23 +14595,50 @@
     return null;
   }
 
+  function isTwitterJumpHref(href) {
+    const s = String(href || "").trim();
+    if (!s) return false;
+    if (!/(?:^https?:\/\/)?(?:www\.)?(?:x\.com|twitter\.com)\//i.test(s)) return false;
+    if (/\/(search|intent|i\/|home|share|explore|hashtag|compose)\b/i.test(s)) return false;
+    return true;
+  }
+
   function findTwNoteAnchor(card) {
     if (!(card instanceof HTMLElement)) return null;
-    const nodes = card.querySelectorAll("div, span, a, p");
-    for (let i = 0; i < nodes.length; i += 1) {
+    const links = card.querySelectorAll('a[href*="x.com"], a[href*="twitter.com"]');
+    let best = null;
+    let bestScore = -1;
+    const lim = Math.min(links.length, 12);
+    for (let i = 0; i < lim; i += 1) {
+      const el = links[i];
+      if (!(el instanceof HTMLElement) || el === card) continue;
+      const href = el.getAttribute("href") || "";
+      if (!isTwitterJumpHref(href)) continue;
+      let score = 20;
+      const t = String(el.textContent || "").trim();
+      if (/^@[A-Za-z0-9_]{2,32}$/.test(t)) score += 40;
+      if (/\/status\//i.test(href)) score += 16;
+      try {
+        const r = el.getBoundingClientRect();
+        if (r.width < 4 || r.height < 4) continue;
+        if (r.width <= 32 && r.height <= 32) score += 12;
+      } catch (_br) {
+        // ignore
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        best = el;
+      }
+    }
+    if (best) return best;
+    const nodes = card.querySelectorAll("div, span, a");
+    const nlim = Math.min(nodes.length, 40);
+    for (let i = 0; i < nlim; i += 1) {
       const el = nodes[i];
       if (!(el instanceof HTMLElement)) continue;
-      if (el.querySelector?.("div, span, a, p")) continue;
+      if (el.querySelector?.("div, span, a")) continue;
       const t = String(el.textContent || "").trim();
       if (/^@[A-Za-z0-9_]{2,32}$/.test(t)) return el;
-    }
-    const links = card.querySelectorAll?.('a[href*="x.com/"], a[href*="twitter.com/"]') || [];
-    for (let i = 0; i < links.length; i += 1) {
-      const a = links[i];
-      if (!(a instanceof HTMLElement)) continue;
-      const href = a.getAttribute("href") || "";
-      if (/\/search/i.test(href)) continue;
-      return a;
     }
     return null;
   }
@@ -14209,23 +14764,30 @@
     }
     const addr = String(token).toLowerCase();
     const cached = cardMarkMetaByAddr.get(addr) || { count: 0, twitter: "" };
-    const fiber = scrapeCardMarkFromFiber(card);
+    const needFiber =
+      isGmgnHost() &&
+      ((devCountMarkPrefs.enabled && !cached.count) ||
+        (twHandleMarkPrefs.enabled && !cached.twitter));
+    const fiber = needFiber ? scrapeCardMarkFromFiber(card) : null;
     const fiberOk = Boolean(fiber) && (!fiber.address || fiber.address === addr);
     const count = (fiberOk && fiber.count > 0 ? fiber.count : 0) || cached.count || 0;
     const twitter =
-      (fiberOk && fiber.twitter) || cached.twitter || scrapeTwHandleFromDom(card) || "";
+      (fiberOk && fiber.twitter) ||
+      cached.twitter ||
+      (twHandleMarkPrefs.enabled ? scrapeTwHandleFromDom(card) : "") ||
+      "";
     const devRule = pickDevCountRule(count);
     const twRule = pickTwHandleRule(twitter);
     const sig = `${addr}|${devRule ? `${devRule.op}:${devRule.min}:${devRule.color}:${count}` : ""}|${
       twRule ? `${twRule.handle}:${twRule.note}:${twRule.color}` : ""
     }`;
-    const chipsOk =
-      (!devRule || Boolean(card.querySelector?.("[data-flap-dev-chip='1']"))) &&
-      (!twRule || !findTwNoteAnchor(card) || Boolean(card.querySelector?.("[data-flap-tw-chip='1']")));
+    const hasDevChip = Boolean(card.querySelector?.("[data-flap-dev-chip='1']"));
+    const hasTwChip = Boolean(card.querySelector?.("[data-flap-tw-chip='1']"));
     if (
-      chipsOk &&
       cardMarkSigCache.get(card) === sig &&
-      card.getAttribute("data-flap-mark-ca") === addr
+      card.getAttribute("data-flap-mark-ca") === addr &&
+      (!devRule || hasDevChip) &&
+      (!twRule || hasTwChip)
     ) {
       return;
     }
@@ -14248,7 +14810,7 @@
       devRule ? devRule.color : "",
       null
     );
-    const twAnchor = findTwNoteAnchor(card);
+    const twAnchor = twRule ? findTwNoteAnchor(card) : null;
     upsertMarkChip(
       card,
       "tw",
@@ -14257,54 +14819,6 @@
       twAnchor
     );
     cardMarkSigCache.set(card, sig);
-  }
-
-  function paintGmgnCardMarks(root = null) {
-    if (!isGmgnHost() && !isDebotHost()) return;
-    if (!isScanPageAllowed()) {
-      clearAllCardMarks();
-      return;
-    }
-    if (!devCountMarkPrefs.enabled && !twHandleMarkPrefs.enabled) {
-      clearAllCardMarks();
-      return;
-    }
-    const scope = root instanceof HTMLElement ? root : document;
-    const items = isGmgnHost()
-      ? scope.querySelectorAll('[data-sentry-source-file="TokenItem.tsx"]')
-      : scope.querySelectorAll('a[href*="/token/bsc/"], a[href*="/token/"][href*="0x"]');
-    const vh = window.innerHeight || 800;
-    let n = 0;
-    for (let i = 0; i < items.length && n < 48; i += 1) {
-      const el = items[i];
-      if (!(el instanceof HTMLElement) || !el.isConnected) continue;
-      const card = resolveMarkCard(el);
-      if (!card) continue;
-      let vis = true;
-      try {
-        if (!root) {
-          const r = card.getBoundingClientRect();
-          vis = r.width >= 160 && r.height >= 48 && r.bottom > -40 && r.top < vh + 80;
-        }
-      } catch (_g) {
-        vis = true;
-      }
-      if (!vis) continue;
-      n += 1;
-      const href =
-        card.getAttribute("href") ||
-        card.querySelector?.("[href*='/bsc/token/0x'], [href*='/token/bsc/0x']")?.getAttribute("href") ||
-        "";
-      const m = String(href).match(/0x[a-fA-F0-9]{40}/i);
-      const token = m ? m[0].toLowerCase() : "";
-      const prev = card.getAttribute("data-flap-mark-ca") || "";
-      if (prev && token && prev !== token) clearCardMark(card);
-      if (!token) {
-        clearCardMark(card);
-        continue;
-      }
-      applyCardMarkToEl(card, token);
-    }
   }
 
   function hrefTokenFromMarkCard(card) {
@@ -14320,8 +14834,19 @@
   /** Virtual list reuses TokenItem / Debot row: href swap + inner childList wipe chips. */
   function applyCardMarksFromMutations(records) {
     if ((!isGmgnHost() && !isDebotHost()) || !records?.length) return;
-    if (!devCountMarkPrefs.enabled && !twHandleMarkPrefs.enabled) return;
-    if (!isScanPageAllowed()) return;
+    if (!anyTrenchMarkOn() || !isScanPageAllowed()) return;
+    let hrefSwap = false;
+    for (let i = 0; i < records.length; i += 1) {
+      if (records[i] && records[i].type === "attributes" && records[i].attributeName === "href") {
+        hrefSwap = true;
+        break;
+      }
+    }
+    const now = Date.now();
+    if (!hrefSwap && now - cardMarkMutAt < 120) return;
+    cardMarkMutAt = now;
+    const marksOn = devCountMarkPrefs.enabled || twHandleMarkPrefs.enabled;
+    const symOn = symbolDupMarkPrefs.enabled === true;
     const seen = new Set();
     const consider = (node) => {
       if (!(node instanceof HTMLElement) || seen.size >= 24) return;
@@ -14330,12 +14855,17 @@
       seen.add(card);
       const token = hrefTokenFromMarkCard(card);
       const prev = card.getAttribute("data-flap-mark-ca") || "";
-      if (prev && token && prev !== token) clearCardMark(card);
-      if (!token) {
+      if (prev && token && prev !== token) {
         clearCardMark(card);
+        clearSymbolDupOnCard(card);
+      }
+      if (!token) {
+        if (marksOn) clearCardMark(card);
+        if (symOn) clearSymbolDupOnCard(card);
         return;
       }
-      applyCardMarkToEl(card, token);
+      if (marksOn) applyCardMarkToEl(card, token);
+      if (symOn) applySymbolDupToEl(card, token);
     };
     for (let i = 0; i < records.length && seen.size < 24; i += 1) {
       const rec = records[i];
@@ -14355,7 +14885,7 @@
     if (!isExtensionContextValid() || !chrome.storage?.local) return;
     try {
       chrome.storage.local.get(
-        [TAX_RECV_HIDE_KEY, SUFFIX_HIDE_KEY, VAULT_HIDE_KEY, SEARCH_HIDE_KEY, LICENSE_KEY, DEVICE_ID_KEY, DEV_COUNT_MARK_KEY, TW_HANDLE_MARK_KEY],
+        [TAX_RECV_HIDE_KEY, SUFFIX_HIDE_KEY, VAULT_HIDE_KEY, SEARCH_HIDE_KEY, LICENSE_KEY, DEVICE_ID_KEY, DEV_COUNT_MARK_KEY, TW_HANDLE_MARK_KEY, SYMBOL_DUP_MARK_KEY],
         (items) => {
         if (!isExtensionContextValid() || chrome.runtime.lastError) return;
         taxRecvHidePrefs = normalizeTaxRecvHidePrefs(items?.[TAX_RECV_HIDE_KEY]);
@@ -14364,6 +14894,20 @@
         searchHidePrefs = normalizeSearchHidePrefs(items?.[SEARCH_HIDE_KEY]);
         devCountMarkPrefs = normalizeDevCountMarkPrefs(items?.[DEV_COUNT_MARK_KEY]);
         twHandleMarkPrefs = normalizeTwHandleMarkPrefs(items?.[TW_HANDLE_MARK_KEY]);
+        symbolDupMarkPrefs = normalizeSymbolDupMarkPrefs(items?.[SYMBOL_DUP_MARK_KEY]);
+        try {
+          chrome.storage.session?.get([SYMBOL_DUP_SEEN_KEY], (seenItems) => {
+            if (!isExtensionContextValid() || chrome.runtime.lastError) return;
+            hydrateSymbolDupSeen(seenItems?.[SYMBOL_DUP_SEEN_KEY]);
+            try {
+              paintTrenchCardExtras();
+            } catch (_ps) {
+              // ignore
+            }
+          });
+        } catch (_sess) {
+          // ignore
+        }
         const lic = items?.[LICENSE_KEY];
         licenseAccessKey = String(lic?.key || "").trim();
         let devId = normalizeLicenseDeviceId(items?.[DEVICE_ID_KEY]);
@@ -14389,7 +14933,7 @@
         }, 1000);
         scheduleTaxRecvHideApply(0);
         try {
-          paintGmgnCardMarks();
+          paintTrenchCardExtras();
         } catch (_pm) {
           // ignore
         }
@@ -14520,21 +15064,13 @@
     if (!(card instanceof HTMLElement) || !isDebotHost()) return false;
     try {
       const cr0 = card.getBoundingClientRect();
-      if (
-        cr0.left >= 250 &&
-        cr0.left < 920 &&
-        cr0.width >= 240 &&
-        cr0.height >= 70 &&
-        cr0.height <= 220
-      ) {
-        return true;
-      }
+      if (cr0.left < 250 || cr0.left >= 900) return false;
     } catch (_band) {
       // fall through
     }
     try {
       let el = card;
-      for (let d = 0; d < 14 && el; d += 1) {
+      for (let d = 0; d < 10 && el; d += 1) {
         if (!(el instanceof HTMLElement)) break;
         let r = null;
         try {
@@ -14542,8 +15078,6 @@
         } catch (_e) {
           r = null;
         }
-        // 列容器：高面板（js-mcp：Debot 列宽约 554–667）。
-        // 虚拟列表 inner 可高达 12900px，innerText 开头是代币名不是列头。
         if (
           r &&
           r.height > 280 &&
@@ -14551,21 +15085,19 @@
           r.width > 260 &&
           r.width < 780
         ) {
-          const head = String(el.innerText || "")
+          const head = String((el.children && el.children[0] && el.children[0].textContent) || "")
             .replace(/\s+/g, " ")
-            .slice(0, 48);
+            .slice(0, 24);
           if (/新创建/.test(head)) return true;
           if (/即将打满|已迁移|已开盘/.test(head)) return false;
         }
         el = el.parentElement;
       }
-      // 几何兜底：主区三列最左（侧栏已在 isTaxRecvHideScopeCard 排除 left&lt;260）
       const cr = card.getBoundingClientRect();
-      if (cr.width < 2) return false;
+      if (cr.width < 2 || cr.left < 250 || cr.left >= 900) return false;
       const mainLeft = 260;
       const mainW = Math.max(300, window.innerWidth - mainLeft - 80);
       const colW = mainW / 3;
-      // 落在第一列中心带
       if (cr.left >= mainLeft - 20 && cr.left < mainLeft + colW - 40) return true;
     } catch (_err) {
       // ignore
@@ -15634,11 +16166,16 @@
           return;
         }
         if (data.type === "card-mark-meta") {
-          if (mergeCardMarkMetaEntries(data.entries)) {
-            try {
-              paintGmgnCardMarks();
-            } catch (_cm) {
-              // ignore
+          if (mergeCardMarkMetaEntries(data.entries) && anyTrenchMarkOn()) {
+            if (!symbolDupPaintRaf) {
+              symbolDupPaintRaf = window.requestAnimationFrame(() => {
+                symbolDupPaintRaf = 0;
+                try {
+                  paintTrenchCardExtras();
+                } catch (_cm) {
+                  // ignore
+                }
+              });
             }
           }
           return;
@@ -16435,19 +16972,15 @@
         }
         if (changes[DEV_COUNT_MARK_KEY]) {
           devCountMarkPrefs = normalizeDevCountMarkPrefs(changes[DEV_COUNT_MARK_KEY].newValue);
-          try {
-            paintGmgnCardMarks();
-          } catch (_dc) {
-            // ignore
-          }
+          syncTrenchMarksAfterPrefs();
         }
         if (changes[TW_HANDLE_MARK_KEY]) {
           twHandleMarkPrefs = normalizeTwHandleMarkPrefs(changes[TW_HANDLE_MARK_KEY].newValue);
-          try {
-            paintGmgnCardMarks();
-          } catch (_tw) {
-            // ignore
-          }
+          syncTrenchMarksAfterPrefs();
+        }
+        if (changes[SYMBOL_DUP_MARK_KEY]) {
+          symbolDupMarkPrefs = normalizeSymbolDupMarkPrefs(changes[SYMBOL_DUP_MARK_KEY].newValue);
+          syncTrenchMarksAfterPrefs();
         }
         if (changes[LICENSE_KEY]) {
           licenseAccessKey = String(changes[LICENSE_KEY].newValue?.key || "").trim();

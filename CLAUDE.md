@@ -431,7 +431,9 @@ python tools/ctl.py watchdog-run
 | 资金接收/金库我这边正常、部分用户没有 | GMGN 手机或 Worker 降级走 MAIN_THREAD：假 MessagePort + SNAP_SHOT，旧钩子只拦 SharedWorker PATCH | **0.8.124+**（勿用 0.8.123，会把 Object.prototype.onmessage 挂上导致打不开）；对方重载插件并硬刷 GMGN |
 | 刷新或多开 GMGN 新创建无法屏蔽 | SharedWorker 已有约 60 条，新页不打 HTTP，改走 `getFullFrame` RPC（`request_plugin.response.body`）；旧钩子不拆 `response` | **0.8.125+** 重载插件并硬刷每个 GMGN 标签 |
 | 卡片标记（发币次数/推特备注）没出现 | 未开开关 / 没加规则 / GMGN 新币 count 仍为 0 / 非战壕行卡 | **0.8.130+** 弹窗启用并加规则；Debot 看 ranks `created_count`；重载插件并硬刷 GMGN/Debot |
+| 新创建重复代号没高亮 | 未开开关 / 窗口内只有 1 个且开了「等相同代号」 / 不在新创建列 | **0.8.131+** 弹窗「卡片标记 → 新创建重复代号」；关「等相同」则首次立刻上色 |
 | 卡片标记上下滑就消失 | 虚拟列表复用 TokenItem：改 href + 拆内部 DOM；旧版停滚只补徽章不重画标记 | **0.8.127+** 重载插件并硬刷 GMGN |
+| 开卡片标记后战壕卡顿 | 旧版关着也会 clearAll 全页扫；开着会 fiber + innerText 强制布局 | **0.8.134+** 关着不扫；Debot 禁 fiber/innerText；Mutation 节流 |
 
 ---
 
@@ -694,8 +696,12 @@ python tools/ctl.py watchdog-run
  - `0.8.128`：推特备注改挂在 handle 链接旁（小胶囊、半透明）；卡片描边改为 1px 淡内框，不再铺厚橙边
  - `0.8.129`：推特备注改为右侧色条（对左侧发币次数），链接旁实心小备注；一眼分「次数 / 关注号」
  - `0.8.130`：Debot/Gungnir 战壕也画卡片标记。次数来自 ranks `dev_token_stats.created_count`（新创建列已有值，不像 GMGN 常为 0）；推特来自 `social_info.twitter_screen_name`，备注挂在 `@handle` 文本旁（不要认 x.com/search）
-- 插件当前版本：见 `extension/manifest.json`（**0.8.130**，公开无剪切板）
-- page-hook：`HOOK_VER` **163**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.131`：新创建重复 symbol — 默认 5 分钟窗口；「等相同代号」默认开（第 2 个出现才给第 1 个上色，2/3/4… 旁红泡）；关掉则首次立刻上色。Debot 挂 16px 代号节点，数据来自 ranks `meta.symbol`
+ - `0.8.132`：重复 symbol 按发布时间最早的上色（新创建列新币在上会误把后发当第 1）；红泡改挂行卡、对准代号左上角，避免被右侧图标裁切
+ - `0.8.133`：推特备注挂可跳转的 x.com/twitter 链接右侧（Debot 是 14px 推文图标，不是下面的 @handle 文本；跳过 search）
+ - `0.8.134`：三项卡片标记热路径降载 — 关闭时不扫 DOM；Debot 禁 fiber/innerText；Mutation 约 120ms 节流（href 换卡立刻重画）
+- 插件当前版本：见 `extension/manifest.json`（**0.8.134**，公开无剪切板）
+- page-hook：`HOOK_VER` **165**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  
@@ -705,6 +711,7 @@ python tools/ctl.py watchdog-run
 - 搜索框也屏蔽：`flapFeeInfo.searchHide.v1` = `{ enabled:false }`（默认关；开启后把已启用的资金接收/金库规则套到 GMGN 搜索弹层）
 - Dev 发币次数标记：`flapFeeInfo.devCountMark.v1` = `{ enabled, rules:[{id,op,min,color,enabled}] }`（`op` 为 `lt|lte|eq|gte|gt`，缺省按 `gte`；最多 12 条；默认关）
 - 推特备注描边：`flapFeeInfo.twHandleMark.v1` = `{ enabled, rules:[{id,handle,note,color,enabled}] }`（最多 24 条 handle，备注如「何一」；默认关）
+- 新创建重复代号：`flapFeeInfo.symbolDupMark.v1` = `{ enabled, waitDup:true, windowMin:5, color:"#facc15" }`（默认关；`waitDup` 默认开；session 计数 `symbolDupSeen.v1`）
 - 剪切板跳转：`flapFeeInfo.clipJump.v1` = `{ enabled:false, target:"gmgn"|"debot", sites:"both"|"gmgn"|"debot", activeTabOnly:true, reuseSiteTab:false, pageMarkCa:false, overrideHostCa:false }`（默认关；开启需确认 + `clipboardRead` 可选权限）
 - 许可证（可选，默认免费）：`flapFeeInfo.license.v1` = `{ key:"" }`；有 key 时 content 带 `Authorization: Bearer`；Worker `REQUIRE_LICENSE` 默认 `0`（不强制）；开启付费时设 `1` 并写入 KV `license:<key>` → `{ exp, plan:"flap", flap_perm?:1 }`；**发卡**：TG Bot `flap_fee` **0.01 BNB/月**（动态尾数 0.009501~0.010100）；详见 `ENABLE_FLAP_MONETIZATION.md`
 - 复制即搜（仅完整包 / 仅 GMGN）：`flapFeeInfo.clipSearch.v1` = `{ enabled:false, minChars:2, maxChars:8 }`（默认关；开启需确认 + `clipboardRead`；与跳转共用 `clipJump.seen.v1` 去重）

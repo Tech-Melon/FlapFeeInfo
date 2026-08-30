@@ -162,7 +162,7 @@
       <div class="cat-head">
         <span class="cat-icon" aria-hidden="true">🖍</span>
         <span class="cat-title" data-i18n="catMark">卡片标记</span>
-        <span class="cat-desc" data-i18n="catMarkDesc">发币次数 · 推特备注</span>
+        <span class="cat-desc" data-i18n="catMarkDesc">发币次数 · 推特备注 · 重复代号</span>
       </div>
       <div class="cat-body">
         <section class="section">
@@ -231,7 +231,7 @@
           <div class="collapse-body" id="twHandleCollapseBody" hidden>
             <div class="tax-recv-section" id="twHandleSection">
               <p class="theme-hint" data-i18n="twHandleHint">
-                仅 GMGN / Debot 战壕卡。扫一眼：左侧色条+×次数 = 发币次数；右侧色条+推特旁备注 = 关注的号。Debot 认 twitter_screen_name 和 @handle 文本。
+                仅 GMGN / Debot 战壕卡。扫一眼：左侧色条+×次数 = 发币次数；右侧色条 + 推特链接旁备注 = 关注的号。备注挂在可跳转的 x.com/twitter 链接右侧（图标或 @handle 都行）。
               </p>
               <label class="row drag-row" for="twHandleEnabled">
                 <input type="checkbox" id="twHandleEnabled" />
@@ -272,6 +272,59 @@
                 <p class="theme-hint" data-i18n="twHandleHint2">
                   handle 不区分大小写，可带 @。最多 24 条。
                 </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section">
+          <button type="button" class="collapse-head" data-collapse="symbolDup" aria-expanded="false">
+            <span class="collapse-head-left">
+              <span class="collapse-icon" aria-hidden="true">🅂</span>
+              <span class="collapse-title" data-i18n="symbolDupSection">新创建重复代号</span>
+            </span>
+            <span class="collapse-chevron">▸</span>
+          </button>
+          <div class="collapse-body" id="symbolDupCollapseBody" hidden>
+            <div class="tax-recv-section" id="symbolDupSection">
+              <p class="theme-hint" data-i18n="symbolDupHint">
+                仅「新创建」列。按发布时间：先发的 symbol 上色（参考价值更高）。默认要等到出现第 2 个相同 symbol 才给最早那个上色，并在后发的代号左上角加红泡。
+              </p>
+              <label class="row drag-row" for="symbolDupEnabled">
+                <input type="checkbox" id="symbolDupEnabled" />
+                <span class="emoji">🅂</span>
+                <div class="label">
+                  <strong data-i18n="symbolDupEnableTitle">启用重复代号标记</strong>
+                  <span data-i18n="symbolDupEnableDesc">只作用于 GMGN / Debot 新创建列</span>
+                </div>
+              </label>
+              <div class="suffix-rules-wrap" id="symbolDupRulesWrap">
+                <label class="row drag-row" for="symbolDupWait">
+                  <input type="checkbox" id="symbolDupWait" checked />
+                  <span class="emoji">②</span>
+                  <div class="label">
+                    <strong data-i18n="symbolDupWaitTitle">等出现相同代号再标记</strong>
+                    <span data-i18n="symbolDupWaitDesc">默认开。关掉则第一次出现立刻上色，不再画红泡</span>
+                  </div>
+                </label>
+                <div class="tax-recv-threshold-row symbol-dup-row">
+                  <label class="tax-recv-threshold-label" for="symbolDupWindow">
+                    <span data-i18n="symbolDupWindowLabel">计数窗口（分钟）</span>
+                    <input
+                      type="number"
+                      id="symbolDupWindow"
+                      class="tax-recv-threshold-input"
+                      min="1"
+                      max="60"
+                      step="1"
+                      value="5"
+                    />
+                  </label>
+                  <label class="tax-recv-threshold-label" for="symbolDupColor">
+                    <span data-i18n="symbolDupColorLabel">首次颜色</span>
+                    <input type="color" id="symbolDupColor" class="mark-color-input" value="#facc15" title="color" />
+                  </label>
+                </div>
               </div>
             </div>
           </div>

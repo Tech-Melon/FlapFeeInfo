@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.130",
-  "description": "FlapFeeInfo 0.8.130: Debot 战壕也显示发币次数与推特备注标记。",
+  "version": "0.8.134",
+  "description": "FlapFeeInfo 0.8.134: 卡片标记热路径降载，减轻战壕卡顿。",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

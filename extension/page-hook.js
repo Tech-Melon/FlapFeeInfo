@@ -10,7 +10,7 @@
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 163;
+  const HOOK_VER = 165;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -2349,13 +2349,42 @@
       .trim()
       .toLowerCase();
     const creatorOk = CARD_MARK_ADDR_RE.test(creator) ? creator : "";
-    if (!(Number.isFinite(count) && count > 0) && !twitter && !creatorOk) return null;
+    const symbol = String(
+      nested.symbol ||
+        nested.s ||
+        nested.ticker ||
+        nested.token_symbol ||
+        (meta && (meta.symbol || meta.token_symbol)) ||
+        ""
+    )
+      .trim()
+      .slice(0, 32);
+    const created = createdAtFromHostRow(nested, meta);
+    if (!(Number.isFinite(count) && count > 0) && !twitter && !creatorOk && !symbol) return null;
     return {
       address: addr,
       count: Number.isFinite(count) && count > 0 ? count : 0,
       twitter,
-      creator: creatorOk
+      creator: creatorOk,
+      symbol,
+      created
     };
+  }
+
+  function createdAtFromHostRow(nested, meta) {
+    const raw =
+      (meta && (meta.create_time || meta.created_at || meta.created_timestamp)) ||
+      nested.create_time ||
+      nested.created_timestamp ||
+      nested.open_timestamp ||
+      nested.created_at ||
+      nested.c ||
+      nested.ctime ||
+      0;
+    let n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    if (n < 1e12) n *= 1000;
+    return Math.floor(n);
   }
 
   function flushCardMarkPending() {
@@ -2376,7 +2405,7 @@
 
   function queueCardMarkMeta(meta) {
     if (!meta || !meta.address) return;
-    const sig = `${meta.count}|${meta.twitter}|${meta.creator}`;
+    const sig = `${meta.count}|${meta.twitter}|${meta.creator}|${meta.symbol || ""}|${meta.created || 0}`;
     const prev = cardMarkDedupe.get(meta.address);
     const now = Date.now();
     if (prev && prev.sig === sig && now - prev.at < 2000) return;

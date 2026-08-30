@@ -487,6 +487,14 @@ body {
   flex-wrap: wrap;
 }
 
+.symbol-dup-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  align-items: center;
+  margin-top: 8px;
+}
+
 .mark-op-select {
   flex-shrink: 0;
   width: 52px;
