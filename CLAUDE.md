@@ -331,11 +331,13 @@ wrangler deploy
 2. 加载已解压：`extension/`  
 3. 改代码后点 **重新加载**，并 **刷新** 目标页  
 
-打包：
+打包（**每次都打公开包 + 完整包**）：
 
 ```powershell
 python _run_pack_extension.py
-# → dist/FlapFeeInfo-extension-vX.Y.Z.zip
+# → dist/FlapFeeInfo-extension-vX.Y.Z.zip          公开（仅徽章）
+# → dist/FlapFeeInfo-extension-clip-vX.Y.Z.zip     完整（叠 clip-jump）
+# → dist/unpacked-full                             本机加载用
 ```
 
 ### 5.4 运维 ctl
@@ -425,7 +427,11 @@ python tools/ctl.py watchdog-run
 | 剪切板跳转不生效 | 未授权 / iOS 禁后台读 / 文本过长或不像地址 | 弹窗里确认开启；Windows 允许读取剪切板；iOS 用「立即检测」或粘贴框 |
 | 复制短名没有弹出 GMGN 搜索 | 未开「复制即搜」/ 未授权 / 不在 GMGN 前台 / 字数超出或含空格 / 已搜过这段 | 完整包弹窗开启并刷新 GMGN；再复制一次才再搜 |
 | 文章重点样式没出现 | 未开开关 / 站点未加入 / 未授权 / 只加了路径但当前不在该路径 | 完整包弹窗添加主机名或 `debot.ai/popout/xTracker` 并允许访问；刷新目标页 |
-| 新创建一直 ⏳待加载 | GMGN 战壕走 SharedWorker，页面无 WSS；旧 fiber 读取用 Object.keys 拿不到 `__reactFiber` | **0.8.39+** 从卡片祖先 fiber `data.tax_allocation` 提取；重载插件并硬刷页 |
+| GMGN 整页打不开 / 白屏 | 0.8.123 在 `Object.prototype` 上挂了 `onmessage` | **0.8.124+** 重载插件并硬刷页；不要停留在 0.8.123 |
+| 资金接收/金库我这边正常、部分用户没有 | GMGN 手机或 Worker 降级走 MAIN_THREAD：假 MessagePort + SNAP_SHOT，旧钩子只拦 SharedWorker PATCH | **0.8.124+**（勿用 0.8.123，会把 Object.prototype.onmessage 挂上导致打不开）；对方重载插件并硬刷 GMGN |
+| 刷新或多开 GMGN 新创建无法屏蔽 | SharedWorker 已有约 60 条，新页不打 HTTP，改走 `getFullFrame` RPC（`request_plugin.response.body`）；旧钩子不拆 `response` | **0.8.125+** 重载插件并硬刷每个 GMGN 标签 |
+| 卡片标记（发币次数/推特备注）没出现 | 未开开关 / 没加规则 / 新币 count 仍为 0 / 非 GMGN TokenItem | **0.8.126+** 弹窗「卡片标记」启用并加规则；开盘后再看次数；重载插件并硬刷 GMGN |
+| 卡片标记上下滑就消失 | 虚拟列表复用 TokenItem：改 href + 拆内部 DOM；旧版停滚只补徽章不重画标记 | **0.8.127+** 重载插件并硬刷 GMGN |
 
 ---
 
@@ -680,8 +686,15 @@ python tools/ctl.py watchdog-run
  - `0.8.120`：列表过滤文案改为「首页战壕与 K 线左侧新创建」，避免读成不含 K 线
  - `0.8.121`：js-mcp 刷新后 `hide=72` 但 `server=0/hb-unready/targetLen=60`，几秒内漏 12 张 🎁。HTTP 滤 tokens 未种 ncServer，SharedWorker 空心跳把未过滤 60 条交回宿主。首包 seed 后再 splice
  - `0.8.122`：js-mcp 实锤 content hydrate 0/200/1000ms 重推 `suffix-hide-prefs` 无条件 `resetNcPumpShadows`（尾号关着也会清）。影子清空 → hb-unready `targetLen=60` → leak=11。规则未变不重置。0.8.86 用户觉得正常是因为当时 `disableShareWorker`、无双影子
-- 插件当前版本：见 `extension/manifest.json`（**0.8.122**，公开无剪切板）
-- page-hook：`HOOK_VER` **158**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.123`：js-mcp 实锤 GMGN 双通道 — SharedWorker 走 PATCH + 真 MessagePort；MAIN_THREAD（手机 UA / `disableShareWorker` / Worker 心跳降级）走假 port + SNAP_SHOT 数组。假 port 不是 `window.MessagePort`，旧钩子看不见。拦 `onmessage` 赋值 + `Response.json` / `JSON.parse` 补 SNAP_SHOT，资金接收/金库在主线程也能滤
+ - `0.8.124`：撤回 0.8.123 的 `Object.prototype.onmessage`（`'onmessage' in {}` 变 true，GMGN 整页打不开）。MAIN_THREAD 过滤只保留 JSON.parse / Response.json / fetch / WS
+ - `0.8.125`：刷新/多开 GMGN 无法屏蔽 — `getFullFrame` 是 `{ type:request_plugin, response:{ body } }`，信封 walk 补 `response`，全量帧才能种影子并滤掉厨师/金库
+ - `0.8.126`：GMGN 卡片标记 — Dev `creator_created_count` 左侧光条+头像旁 ×N（自定义选色，≥min 取最高）；指定推特 handle 备注胶囊（如何一）+ 描边外发光（对齐站点关注 dev 金边）。仅 TokenItem，不改整卡底色。新币 count 常为 0
+ - `0.8.127`：发币次数比较符可选 `< ≤ = ≥ >`（默认 `<`，旧规则无 op 仍当 ≥）；推特备注改卡片右上大胶囊+内描边；js-mcp 实锤虚拟列表复用 TokenItem（href 换、内 DOM 拆），滚动冷却/停滚立刻按当前 href 重画标记
+ - `0.8.128`：推特备注改挂在 handle 链接旁（小胶囊、半透明）；卡片描边改为 1px 淡内框，不再铺厚橙边
+ - `0.8.129`：推特备注改为右侧色条（对左侧发币次数），链接旁实心小备注；一眼分「次数 / 关注号」
+- 插件当前版本：见 `extension/manifest.json`（**0.8.129**，公开无剪切板）
+- page-hook：`HOOK_VER` **162**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  
@@ -689,6 +702,8 @@ python tools/ctl.py watchdog-run
 - 尾号屏蔽：`flapFeeInfo.suffixHide.v1` = `{ enabled, rules:[{id,suffix,enabled}] }`（最多 24 条 hex 1–12 位）
 - 资金接收：`flapFeeInfo.taxRecvHide.v1` = `{ enabled, thresholdPct, allow:[{id,address,enabled}] }`（白名单最多 24 个 0x 地址）
 - 搜索框也屏蔽：`flapFeeInfo.searchHide.v1` = `{ enabled:false }`（默认关；开启后把已启用的资金接收/金库规则套到 GMGN 搜索弹层）
+- Dev 发币次数标记：`flapFeeInfo.devCountMark.v1` = `{ enabled, rules:[{id,op,min,color,enabled}] }`（`op` 为 `lt|lte|eq|gte|gt`，缺省按 `gte`；最多 12 条；默认关）
+- 推特备注描边：`flapFeeInfo.twHandleMark.v1` = `{ enabled, rules:[{id,handle,note,color,enabled}] }`（最多 24 条 handle，备注如「何一」；默认关）
 - 剪切板跳转：`flapFeeInfo.clipJump.v1` = `{ enabled:false, target:"gmgn"|"debot", sites:"both"|"gmgn"|"debot", activeTabOnly:true, reuseSiteTab:false, pageMarkCa:false, overrideHostCa:false }`（默认关；开启需确认 + `clipboardRead` 可选权限）
 - 许可证（可选，默认免费）：`flapFeeInfo.license.v1` = `{ key:"" }`；有 key 时 content 带 `Authorization: Bearer`；Worker `REQUIRE_LICENSE` 默认 `0`（不强制）；开启付费时设 `1` 并写入 KV `license:<key>` → `{ exp, plan:"flap", flap_perm?:1 }`；**发卡**：TG Bot `flap_fee` **0.01 BNB/月**（动态尾数 0.009501~0.010100）；详见 `ENABLE_FLAP_MONETIZATION.md`
 - 复制即搜（仅完整包 / 仅 GMGN）：`flapFeeInfo.clipSearch.v1` = `{ enabled:false, minChars:2, maxChars:8 }`（默认关；开启需确认 + `clipboardRead`；与跳转共用 `clipJump.seen.v1` 去重）

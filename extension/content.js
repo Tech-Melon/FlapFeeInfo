@@ -17,6 +17,13 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.129: 推特备注 = 右侧色条（对左侧发币次数）；链接旁实心小备注。
+  // 0.8.128: 推特备注改挂链接旁、淡描边；0.8.127 右上大胶囊过抢。
+  // 0.8.127: 发币次数比较符 <≤=≥>；推特备注右上大胶囊；虚拟列表 href 复用后立刻重画标记。
+  // 0.8.126: GMGN 卡片标记 — Dev 发币次数左侧光条+×N；推特备注胶囊+描边（对齐站点关注 dev 金边）。
+  // 0.8.125: 刷新/多开 GMGN 无法屏蔽 — SharedWorker getFullFrame 走 { type:request_plugin, response.body }，信封 walk 补 response 才能种影子并滤 60 条。
+  // 0.8.124: 撤回 0.8.123 的 Object.prototype.onmessage（`'onmessage' in {}` 为 true，GMGN 打不开）。MAIN_THREAD 只走 JSON.parse / Response.json / WS。
+  // 0.8.123: GMGN MAIN_THREAD（手机 UA / disableShareWorker / Worker 降级）走假 MessagePort + SNAP_SHOT 数组，MessagePort.prototype 钩不到。page-hook 拦假 port.onmessage，资金接收/金库才能滤。
   // 0.8.122: js-mcp 复现 suffix-hide-prefs 重推（hydrate 0/200/1000ms）无条件 resetNcPumpShadows，影子清空后 hb-unready 漏 🎁。规则未变不重置。0.8.86 能用是因为当时 disableShareWorker、没有双影子。
   // 0.8.121: 刷新后屏蔽正常、几秒后又漏 🎁 — HTTP 滤了 tokens 但没种 ncServer；pumpRank 心跳 hb-unready 把 targetLen=60 原样交给宿主。首包先 seed 再 splice。
   // 0.8.119: js-mcp 遮罩把已过滤列盖住 1.4–2s（token→token 列还在只是被 cover；K→战壕 t=240 已有 3 张仍等到 t=1453）。去掉 pending 遮罩；仅 token↔列表 reseat。
@@ -538,6 +545,12 @@
   /** 金库屏蔽：税收金库 🎁 vs 币股金库 📈 */
   const VAULT_HIDE_KEY = "flapFeeInfo.vaultHide.v1";
   const SEARCH_HIDE_KEY = "flapFeeInfo.searchHide.v1";
+  const DEV_COUNT_MARK_KEY = "flapFeeInfo.devCountMark.v1";
+  const TW_HANDLE_MARK_KEY = "flapFeeInfo.twHandleMark.v1";
+  const DEFAULT_DEV_COUNT_MARK = { enabled: false, rules: [] };
+  const DEFAULT_TW_HANDLE_MARK = { enabled: false, rules: [] };
+  const DEV_COUNT_MARK_MAX = 12;
+  const TW_HANDLE_MARK_MAX = 24;
   const LICENSE_KEY = "flapFeeInfo.license.v1";
   const DEVICE_ID_KEY = "flapFeeInfo.deviceId.v1";
   /** Optional paid key; empty = free mode. Sent as Authorization when set. */
@@ -2094,6 +2107,10 @@
   /** @type {{ enabled: boolean, hideTaxVault: boolean, hideStockVault: boolean }} */
   let vaultHidePrefs = { ...DEFAULT_VAULT_HIDE };
   let searchHidePrefs = { ...DEFAULT_SEARCH_HIDE };
+  let devCountMarkPrefs = { ...DEFAULT_DEV_COUNT_MARK };
+  let twHandleMarkPrefs = { ...DEFAULT_TW_HANDLE_MARK };
+  const cardMarkMetaByAddr = new Map();
+  const cardMarkSigCache = new WeakMap();
   let searchOverlayDidHide = false;
   let searchOverlayHideTimer = 0;
   const requestQueue = new Set();
@@ -5406,6 +5423,7 @@
         try {
           paintUnpaintedTargetViewportQuick("scroll-settle-fixed", fixedScrollRoot, true);
           scrubBadgesToHostHref(fixedScrollRoot, true);
+          paintGmgnCardMarks(fixedScrollRoot);
         } catch (_vp) {
           // The follow-up remains the fallback.
         }
@@ -5414,6 +5432,7 @@
           try {
             paintUnpaintedTargetViewportQuick("scroll-settle-fixed-followup", fixedScrollRoot, true);
             scrubBadgesToHostHref(fixedScrollRoot, true);
+            paintGmgnCardMarks(fixedScrollRoot);
           } catch (_vp) {
             // ignore
           }
@@ -7155,7 +7174,7 @@
     });
   }
 
-  const PAGE_HOOK_VER = "158";
+  const PAGE_HOOK_VER = "162";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -9176,6 +9195,7 @@
       document.querySelectorAll(`[${CARD_DATA}]`).forEach((card) => {
         if (card instanceof HTMLElement) delete card.dataset[CARD_MARK];
       });
+      clearAllCardMarks();
     } catch (_err) {
       // ignore
     }
@@ -9386,6 +9406,12 @@
       // Leave robinhood / 非 BSC clean — 立即卸徽章（勿隔 N 代才清）
       purgeMarksIfChainDisallowed();
       return;
+    }
+
+    try {
+      paintGmgnCardMarks();
+    } catch (_mk) {
+      // ignore
     }
 
     // Detect SPA path changes missed by history hooks (site may capture native history).
@@ -13805,17 +13831,468 @@
     return "";
   }
 
+  function normalizeCardMarkHexColor(raw, fallback) {
+    const s = String(raw || "").trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
+    if (/^#[0-9a-fA-F]{3}$/.test(s)) {
+      return `#${s[1]}${s[1]}${s[2]}${s[2]}${s[3]}${s[3]}`.toLowerCase();
+    }
+    return fallback;
+  }
+
+  function normalizeDevCountOp(raw) {
+    const s = String(raw || "").trim().toLowerCase();
+    if (s === "lt" || s === "<") return "lt";
+    if (s === "lte" || s === "<=" || s === "≤") return "lte";
+    if (s === "eq" || s === "=" || s === "==" || s === "===") return "eq";
+    if (s === "gt" || s === ">") return "gt";
+    if (s === "gte" || s === ">=" || s === "≥") return "gte";
+    return "";
+  }
+
+  function matchDevCountOp(count, op, min) {
+    if (op === "lt") return count < min;
+    if (op === "lte") return count <= min;
+    if (op === "eq") return count === min;
+    if (op === "gt") return count > min;
+    return count >= min;
+  }
+
+  function normalizeDevCountMarkPrefs(raw) {
+    const out = { enabled: false, rules: [] };
+    if (!raw || typeof raw !== "object") return out;
+    out.enabled = raw.enabled === true;
+    const list = Array.isArray(raw.rules) ? raw.rules : [];
+    for (let i = 0; i < list.length && out.rules.length < DEV_COUNT_MARK_MAX; i += 1) {
+      const r = list[i] || {};
+      const min = Math.max(0, Math.min(999999, Math.floor(Number(r.min))));
+      if (!Number.isFinite(min)) continue;
+      const op = normalizeDevCountOp(r.op) || (r.op == null ? "gte" : "lt");
+      out.rules.push({
+        id: String(r.id || `d${i}`),
+        op,
+        min,
+        color: normalizeCardMarkHexColor(r.color, "#f59e0b"),
+        enabled: r.enabled !== false
+      });
+    }
+    return out;
+  }
+
+  function normalizeCardMarkHandle(raw) {
+    let s = String(raw || "").trim();
+    if (!s) return "";
+    s = s.replace(/^https?:\/\/(www\.)?(twitter\.com|x\.com)\//i, "");
+    s = s.replace(/^@+/, "");
+    s = s.split(/[/?#\s]/)[0] || "";
+    s = s.replace(/\u2026|\.{2,}$/g, "");
+    return s.toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 32);
+  }
+
+  function normalizeTwHandleMarkPrefs(raw) {
+    const out = { enabled: false, rules: [] };
+    if (!raw || typeof raw !== "object") return out;
+    out.enabled = raw.enabled === true;
+    const list = Array.isArray(raw.rules) ? raw.rules : [];
+    const seen = new Set();
+    for (let i = 0; i < list.length && out.rules.length < TW_HANDLE_MARK_MAX; i += 1) {
+      const r = list[i] || {};
+      const handle = normalizeCardMarkHandle(r.handle);
+      if (!handle || handle.length < 2 || seen.has(handle)) continue;
+      seen.add(handle);
+      out.rules.push({
+        id: String(r.id || `t${i}`),
+        handle,
+        note: String(r.note || "").trim().slice(0, 16),
+        color: normalizeCardMarkHexColor(r.color, "#fbbf24"),
+        enabled: r.enabled !== false
+      });
+    }
+    return out;
+  }
+
+  function cardMarkMetaAddr(raw) {
+    const a = String(raw || "").trim().toLowerCase();
+    return /^0x[a-f0-9]{40}$/.test(a) ? a : "";
+  }
+
+  function mergeCardMarkMetaEntries(entries) {
+    if (!Array.isArray(entries) || !entries.length) return false;
+    let changed = false;
+    for (let i = 0; i < entries.length; i += 1) {
+      const row = entries[i];
+      const addr = cardMarkMetaAddr(row && row.address);
+      if (!addr) continue;
+      const prev = cardMarkMetaByAddr.get(addr);
+      const nextCount = Math.max(0, Math.floor(Number(row.count) || 0));
+      const nextTwitter = normalizeCardMarkHandle(row.twitter || "");
+      const nextCreator = cardMarkMetaAddr(row.creator);
+      const next = {
+        count: nextCount > 0 ? nextCount : prev?.count || 0,
+        twitter: nextTwitter || prev?.twitter || "",
+        creator: nextCreator || prev?.creator || ""
+      };
+      if (
+        prev &&
+        prev.count === next.count &&
+        prev.twitter === next.twitter &&
+        prev.creator === next.creator
+      ) {
+        continue;
+      }
+      cardMarkMetaByAddr.set(addr, next);
+      changed = true;
+    }
+    if (cardMarkMetaByAddr.size > 1200) {
+      const keys = Array.from(cardMarkMetaByAddr.keys());
+      for (let i = 0; i < keys.length - 800; i += 1) {
+        cardMarkMetaByAddr.delete(keys[i]);
+      }
+    }
+    return changed;
+  }
+
+  function formatDevCountChip(n) {
+    if (n >= 10000) {
+      const k = n / 1000;
+      return `×${k >= 100 ? Math.round(k) : k.toFixed(1).replace(/\.0$/, "")}k`;
+    }
+    return `×${n}`;
+  }
+
+  function pickDevCountRule(count) {
+    if (!devCountMarkPrefs.enabled) return null;
+    const n = Math.max(0, Math.floor(Number(count) || 0));
+    const rules = devCountMarkPrefs.rules || [];
+    const hits = [];
+    for (let i = 0; i < rules.length; i += 1) {
+      const r = rules[i];
+      if (r.enabled === false) continue;
+      if (matchDevCountOp(n, r.op || "lt", r.min)) hits.push(r);
+    }
+    if (!hits.length) return null;
+    for (let i = 0; i < hits.length; i += 1) {
+      if (hits[i].op === "eq") return hits[i];
+    }
+    hits.sort((a, b) => {
+      const spec = (r) => {
+        if (r.op === "gt" || r.op === "gte") return r.min;
+        if (r.op === "lt" || r.op === "lte") return -r.min;
+        return 0;
+      };
+      return spec(b) - spec(a);
+    });
+    return hits[0];
+  }
+
+  function pickTwHandleRule(handle) {
+    if (!twHandleMarkPrefs.enabled) return null;
+    const h = normalizeCardMarkHandle(handle);
+    if (!h) return null;
+    const rules = twHandleMarkPrefs.rules || [];
+    let truncated = null;
+    for (let i = 0; i < rules.length; i += 1) {
+      const r = rules[i];
+      if (r.enabled === false) continue;
+      if (h === r.handle) return r;
+      if (h.length >= 4 && r.handle.startsWith(h)) {
+        if (!truncated || r.handle.length > truncated.handle.length) truncated = r;
+      }
+    }
+    return truncated;
+  }
+
+  function reactFiberOfCard(el) {
+    if (!el) return null;
+    try {
+      const names = Object.getOwnPropertyNames(el);
+      for (let i = 0; i < names.length; i += 1) {
+        if (String(names[i]).startsWith("__reactFiber")) return el[names[i]];
+      }
+    } catch (_rf) {
+      // ignore
+    }
+    return null;
+  }
+
+  function scrapeCardMarkFromFiber(root) {
+    let f = reactFiberOfCard(root);
+    for (let i = 0; i < 20 && f; i += 1) {
+      const p = f.memoizedProps;
+      if (p && typeof p === "object") {
+        const bags = [p.data, p.token, p.item];
+        for (let j = 0; j < bags.length; j += 1) {
+          const d = bags[j];
+          if (!d || typeof d !== "object") continue;
+          const address = cardMarkMetaAddr(d.address || d.a);
+          const count = Math.floor(Number(d.creator_created_count ?? d.d_ccc) || 0);
+          const twitter = normalizeCardMarkHandle(
+            d.twitter_username || d.twitter || d.m_x || d.tu || ""
+          );
+          if (address || count > 0 || twitter) {
+            return { address, count: count > 0 ? count : 0, twitter };
+          }
+        }
+      }
+      f = f.return;
+    }
+    return null;
+  }
+
+  function scrapeTwHandleFromDom(card) {
+    if (!(card instanceof HTMLElement)) return "";
+    const a = card.querySelector?.(
+      'a[href*="x.com/"], a[href*="twitter.com/"]'
+    );
+    if (a instanceof HTMLElement) {
+      const fromHref = normalizeCardMarkHandle(a.getAttribute("href") || "");
+      if (fromHref) return fromHref;
+      const fromText = normalizeCardMarkHandle(a.textContent || "");
+      if (fromText) return fromText;
+    }
+    return "";
+  }
+
+  function resolveGmgnMarkCard(el) {
+    if (!(el instanceof HTMLElement)) return null;
+    if (el.matches?.('[data-sentry-source-file="TokenItem.tsx"]')) return el;
+    return el.closest?.('[data-sentry-source-file="TokenItem.tsx"]') || null;
+  }
+
+  function clearCardMark(card) {
+    if (!(card instanceof HTMLElement)) return;
+    card.classList.remove("flap-card-mark", "flap-card-mark--dev", "flap-card-mark--tw");
+    card.style.removeProperty("--flap-dev-color");
+    card.style.removeProperty("--flap-tw-color");
+    card.removeAttribute("data-flap-mark-ca");
+    try {
+      card.querySelectorAll("[data-flap-dev-chip='1'], [data-flap-tw-chip='1']").forEach((n) => n.remove());
+    } catch (_rm) {
+      // ignore
+    }
+    try {
+      cardMarkSigCache.delete(card);
+    } catch (_wm) {
+      // ignore
+    }
+  }
+
+  function clearAllCardMarks() {
+    try {
+      document.querySelectorAll(".flap-card-mark, [data-flap-mark-ca]").forEach((el) => {
+        if (el instanceof HTMLElement) clearCardMark(el);
+      });
+    } catch (_all) {
+      // ignore
+    }
+  }
+
+  function upsertMarkChip(card, kind, text, color, anchor) {
+    const attr = kind === "dev" ? "data-flap-dev-chip" : "data-flap-tw-chip";
+    const cls = kind === "dev" ? "flap-dev-count-chip" : "flap-tw-note-chip";
+    let chip = card.querySelector(`[${attr}="1"]`);
+    if (!text) {
+      if (chip) chip.remove();
+      return;
+    }
+    if (!(chip instanceof HTMLElement)) {
+      chip = document.createElement("span");
+      chip.setAttribute(attr, "1");
+      chip.className = cls;
+      chip.setAttribute("aria-hidden", "true");
+      if (kind === "tw" && anchor instanceof HTMLElement && anchor.parentNode) {
+        anchor.insertAdjacentElement("afterend", chip);
+      } else {
+        card.appendChild(chip);
+      }
+    } else if (
+      kind === "tw" &&
+      anchor instanceof HTMLElement &&
+      chip.previousElementSibling !== anchor &&
+      anchor.parentNode
+    ) {
+      anchor.insertAdjacentElement("afterend", chip);
+    }
+    if (chip.textContent !== text) chip.textContent = text;
+    chip.style.setProperty("--flap-chip-color", color);
+    chip.style.color = chipInkForHex(color);
+  }
+
+  function chipInkForHex(hex) {
+    const s = String(hex || "");
+    if (!/^#[0-9a-fA-F]{6}$/.test(s)) return "#111";
+    const n = parseInt(s.slice(1), 16);
+    const r = (n >> 16) & 255;
+    const g = (n >> 8) & 255;
+    const b = n & 255;
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b > 148 ? "#111" : "#fff";
+  }
+
+  function applyCardMarkToEl(card, token) {
+    if (!(card instanceof HTMLElement) || !token) {
+      if (card instanceof HTMLElement) clearCardMark(card);
+      return;
+    }
+    const addr = String(token).toLowerCase();
+    const cached = cardMarkMetaByAddr.get(addr) || { count: 0, twitter: "" };
+    const fiber = scrapeCardMarkFromFiber(card);
+    const fiberOk = Boolean(fiber) && (!fiber.address || fiber.address === addr);
+    const count = (fiberOk && fiber.count > 0 ? fiber.count : 0) || cached.count || 0;
+    const twitter =
+      (fiberOk && fiber.twitter) || cached.twitter || scrapeTwHandleFromDom(card) || "";
+    const devRule = pickDevCountRule(count);
+    const twRule = pickTwHandleRule(twitter);
+    const sig = `${addr}|${devRule ? `${devRule.op}:${devRule.min}:${devRule.color}:${count}` : ""}|${
+      twRule ? `${twRule.handle}:${twRule.note}:${twRule.color}` : ""
+    }`;
+    const chipsOk =
+      (!devRule || Boolean(card.querySelector?.("[data-flap-dev-chip='1']"))) &&
+      (!twRule ||
+        !card.querySelector?.('a[href*="x.com/"], a[href*="twitter.com/"]') ||
+        Boolean(card.querySelector?.("[data-flap-tw-chip='1']")));
+    if (
+      chipsOk &&
+      cardMarkSigCache.get(card) === sig &&
+      card.getAttribute("data-flap-mark-ca") === addr
+    ) {
+      return;
+    }
+    if (!devRule && !twRule) {
+      clearCardMark(card);
+      return;
+    }
+    card.classList.add("flap-card-mark");
+    card.classList.toggle("flap-card-mark--dev", Boolean(devRule));
+    card.classList.toggle("flap-card-mark--tw", Boolean(twRule));
+    if (devRule) card.style.setProperty("--flap-dev-color", devRule.color);
+    else card.style.removeProperty("--flap-dev-color");
+    if (twRule) card.style.setProperty("--flap-tw-color", twRule.color);
+    else card.style.removeProperty("--flap-tw-color");
+    card.setAttribute("data-flap-mark-ca", addr);
+    upsertMarkChip(
+      card,
+      "dev",
+      devRule ? formatDevCountChip(count) : "",
+      devRule ? devRule.color : "",
+      null
+    );
+    const twAnchor = card.querySelector?.(
+      'a[href*="x.com/"], a[href*="twitter.com/"]'
+    );
+    upsertMarkChip(
+      card,
+      "tw",
+      twRule && twAnchor ? twRule.note || `@${twRule.handle}` : "",
+      twRule ? twRule.color : "",
+      twAnchor
+    );
+    cardMarkSigCache.set(card, sig);
+  }
+
+  function paintGmgnCardMarks(root = null) {
+    if (!isGmgnHost()) return;
+    if (!isScanPageAllowed()) {
+      clearAllCardMarks();
+      return;
+    }
+    if (!devCountMarkPrefs.enabled && !twHandleMarkPrefs.enabled) {
+      clearAllCardMarks();
+      return;
+    }
+    const scope = root instanceof HTMLElement ? root : document;
+    const items = scope.querySelectorAll('[data-sentry-source-file="TokenItem.tsx"]');
+    const vh = window.innerHeight || 800;
+    let n = 0;
+    for (let i = 0; i < items.length && n < 48; i += 1) {
+      const el = items[i];
+      if (!(el instanceof HTMLElement) || !el.isConnected) continue;
+      const card = resolveGmgnMarkCard(el);
+      if (!card) continue;
+      let vis = true;
+      try {
+        if (!root) {
+          const r = card.getBoundingClientRect();
+          vis = r.width >= 160 && r.height >= 48 && r.bottom > -40 && r.top < vh + 80;
+        }
+      } catch (_g) {
+        vis = true;
+      }
+      if (!vis) continue;
+      n += 1;
+      const href =
+        card.getAttribute("href") ||
+        card.querySelector?.("[href*='/bsc/token/0x']")?.getAttribute("href") ||
+        "";
+      const m = String(href).match(/0x[a-fA-F0-9]{40}/i);
+      const token = m ? m[0].toLowerCase() : "";
+      const prev = card.getAttribute("data-flap-mark-ca") || "";
+      if (prev && token && prev !== token) clearCardMark(card);
+      if (!token) {
+        clearCardMark(card);
+        continue;
+      }
+      applyCardMarkToEl(card, token);
+    }
+  }
+
+  function hrefTokenFromMarkCard(card) {
+    if (!(card instanceof HTMLElement)) return "";
+    const href =
+      card.getAttribute("href") ||
+      card.querySelector?.("[href*='/bsc/token/0x']")?.getAttribute("href") ||
+      "";
+    const m = String(href).match(/0x[a-fA-F0-9]{40}/i);
+    return m ? m[0].toLowerCase() : "";
+  }
+
+  /** Virtual list reuses TokenItem: href swap + inner childList wipe chips. Re-paint immediately. */
+  function applyCardMarksFromMutations(records) {
+    if (!isGmgnHost() || !records?.length) return;
+    if (!devCountMarkPrefs.enabled && !twHandleMarkPrefs.enabled) return;
+    if (!isScanPageAllowed()) return;
+    const itemSel = '[data-sentry-source-file="TokenItem.tsx"]';
+    const seen = new Set();
+    const consider = (node) => {
+      if (!(node instanceof HTMLElement) || seen.size >= 24) return;
+      const card = node.matches?.(itemSel) ? node : node.closest?.(itemSel);
+      if (!(card instanceof HTMLElement) || !card.isConnected || seen.has(card)) return;
+      seen.add(card);
+      const token = hrefTokenFromMarkCard(card);
+      const prev = card.getAttribute("data-flap-mark-ca") || "";
+      if (prev && token && prev !== token) clearCardMark(card);
+      if (!token) {
+        clearCardMark(card);
+        return;
+      }
+      applyCardMarkToEl(card, token);
+    };
+    for (let i = 0; i < records.length && seen.size < 24; i += 1) {
+      const rec = records[i];
+      if (!rec) continue;
+      if (rec.type === "attributes" && rec.attributeName === "href") {
+        consider(rec.target);
+        continue;
+      }
+      if (rec.type !== "childList") continue;
+      consider(rec.target);
+      const added = rec.addedNodes || [];
+      for (let j = 0; j < added.length && seen.size < 24; j += 1) consider(added[j]);
+    }
+  }
+
   function hydrateTaxRecvHidePrefs() {
     if (!isExtensionContextValid() || !chrome.storage?.local) return;
     try {
       chrome.storage.local.get(
-        [TAX_RECV_HIDE_KEY, SUFFIX_HIDE_KEY, VAULT_HIDE_KEY, SEARCH_HIDE_KEY, LICENSE_KEY, DEVICE_ID_KEY],
+        [TAX_RECV_HIDE_KEY, SUFFIX_HIDE_KEY, VAULT_HIDE_KEY, SEARCH_HIDE_KEY, LICENSE_KEY, DEVICE_ID_KEY, DEV_COUNT_MARK_KEY, TW_HANDLE_MARK_KEY],
         (items) => {
         if (!isExtensionContextValid() || chrome.runtime.lastError) return;
         taxRecvHidePrefs = normalizeTaxRecvHidePrefs(items?.[TAX_RECV_HIDE_KEY]);
         suffixHidePrefs = normalizeSuffixHidePrefs(items?.[SUFFIX_HIDE_KEY]);
         vaultHidePrefs = normalizeVaultHidePrefs(items?.[VAULT_HIDE_KEY]);
         searchHidePrefs = normalizeSearchHidePrefs(items?.[SEARCH_HIDE_KEY]);
+        devCountMarkPrefs = normalizeDevCountMarkPrefs(items?.[DEV_COUNT_MARK_KEY]);
+        twHandleMarkPrefs = normalizeTwHandleMarkPrefs(items?.[TW_HANDLE_MARK_KEY]);
         const lic = items?.[LICENSE_KEY];
         licenseAccessKey = String(lic?.key || "").trim();
         let devId = normalizeLicenseDeviceId(items?.[DEVICE_ID_KEY]);
@@ -13840,6 +14317,11 @@
           pushVaultHidePrefsToPage();
         }, 1000);
         scheduleTaxRecvHideApply(0);
+        try {
+          paintGmgnCardMarks();
+        } catch (_pm) {
+          // ignore
+        }
       });
     } catch {
       // ignore
@@ -15080,6 +15562,16 @@
           applyHostFeeQuotePatches(data.entries);
           return;
         }
+        if (data.type === "card-mark-meta") {
+          if (mergeCardMarkMetaEntries(data.entries)) {
+            try {
+              paintGmgnCardMarks();
+            } catch (_cm) {
+              // ignore
+            }
+          }
+          return;
+        }
         if (data.type !== "host-fee-map") return;
         applyHostFeeEntries(data.entries);
       } catch (_err) {
@@ -15869,6 +16361,22 @@
         if (changes[SEARCH_HIDE_KEY]) {
           searchHidePrefs = normalizeSearchHidePrefs(changes[SEARCH_HIDE_KEY].newValue);
           scheduleSearchOverlayHideApply(0);
+        }
+        if (changes[DEV_COUNT_MARK_KEY]) {
+          devCountMarkPrefs = normalizeDevCountMarkPrefs(changes[DEV_COUNT_MARK_KEY].newValue);
+          try {
+            paintGmgnCardMarks();
+          } catch (_dc) {
+            // ignore
+          }
+        }
+        if (changes[TW_HANDLE_MARK_KEY]) {
+          twHandleMarkPrefs = normalizeTwHandleMarkPrefs(changes[TW_HANDLE_MARK_KEY].newValue);
+          try {
+            paintGmgnCardMarks();
+          } catch (_tw) {
+            // ignore
+          }
         }
         if (changes[LICENSE_KEY]) {
           licenseAccessKey = String(changes[LICENSE_KEY].newValue?.key || "").trim();
@@ -18027,6 +18535,11 @@
     // Exit before any route/context checks or layout reads on the scroll hot path.
     // K 线图表滚动不得冻侧栏新卡收集。
     if (!isTokenDetailRoute() && (isGmgnScrollCooling() || isDebotScrollCooling())) {
+      try {
+        applyCardMarksFromMutations(records);
+      } catch (_mk) {
+        // ignore
+      }
       return;
     }
     if (isGmgnTrenchResizeCooling()) {
@@ -18036,6 +18549,11 @@
     if (!isTabVisible()) return;
     if (!isExtensionContextValid()) return;
     if (!isScanPageAllowed()) return;
+    try {
+      applyCardMarksFromMutations(records);
+    } catch (_mk) {
+      // ignore
+    }
     if (!tryFinishListReturnTransition("document-mutation")) return;
 
     // Header badges live inside React-owned rows. Repair only when the current address row

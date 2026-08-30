@@ -6,10 +6,11 @@
  *   · 仅 tax-recv / 自定义尾号屏蔽 enabled 时 installTaxRecvNetworkHooks()
  *     （XHR/fetch/WS/MessagePort/SharedWorker/JSON.parse）
  *   · 从不改 GMGN disableShareWorker（保持站点默认 SharedWorker）
+ *   · 禁止改 Object.prototype（0.8.123 挂 onmessage 导致 GMGN 打不开）
  * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 158;
+  const HOOK_VER = 162;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -19,6 +20,11 @@
     }
   } catch (_bootMark) {
     // ignore — 继续安装钩子（重复注入时仍要补齐 host-fee）
+  }
+  try {
+    uninstallMainThreadProtoTap();
+  } catch (_undo123) {
+    // ignore
   }
   /** 仅当列表过滤开启时，由插件临时写入，关闭时清理 */
   const OWNED_DISABLE_SW = "flapFeeInfo.ownedDisableShareWorker";
@@ -2274,6 +2280,88 @@
     }
   }
 
+  const CARD_MARK_ADDR_RE = /^0x[a-f0-9]{40}$/;
+  const cardMarkPending = [];
+  const cardMarkDedupe = new Map();
+  let cardMarkFlushTimer = 0;
+
+  function normalizeCardMarkHandle(raw) {
+    let s = String(raw || "").trim();
+    if (!s) return "";
+    s = s.replace(/^https?:\/\/(www\.)?(twitter\.com|x\.com)\//i, "");
+    s = s.replace(/^@+/, "");
+    s = s.split(/[/?#\s]/)[0] || "";
+    s = s.replace(/\u2026|\.{2,}$/g, "");
+    return s.toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 32);
+  }
+
+  function pickCardMarkMeta(item, addrHint) {
+    if (!item || typeof item !== "object") item = {};
+    const addr = String(addrHint || item.address || item.a || "")
+      .trim()
+      .toLowerCase();
+    if (!CARD_MARK_ADDR_RE.test(addr)) return null;
+    const countRaw = item.creator_created_count ?? item.d_ccc;
+    const count = Math.floor(Number(countRaw));
+    const twitter = normalizeCardMarkHandle(
+      item.twitter_username || item.twitter || item.m_x || item.tu || ""
+    );
+    const creator = String(item.creator || item.d_ct || "")
+      .trim()
+      .toLowerCase();
+    const creatorOk = CARD_MARK_ADDR_RE.test(creator) ? creator : "";
+    if (!(Number.isFinite(count) && count > 0) && !twitter && !creatorOk) return null;
+    return {
+      address: addr,
+      count: Number.isFinite(count) && count > 0 ? count : 0,
+      twitter,
+      creator: creatorOk
+    };
+  }
+
+  function flushCardMarkPending() {
+    cardMarkFlushTimer = 0;
+    while (cardMarkPending.length > 0) {
+      const batch = cardMarkPending.splice(0, 64);
+      if (!batch.length) break;
+      try {
+        window.postMessage(
+          { source: "flap-fee-info", type: "card-mark-meta", entries: batch },
+          "*"
+        );
+      } catch (_pm) {
+        // ignore
+      }
+    }
+  }
+
+  function queueCardMarkMeta(meta) {
+    if (!meta || !meta.address) return;
+    const sig = `${meta.count}|${meta.twitter}|${meta.creator}`;
+    const prev = cardMarkDedupe.get(meta.address);
+    const now = Date.now();
+    if (prev && prev.sig === sig && now - prev.at < 2000) return;
+    cardMarkDedupe.set(meta.address, { sig, at: now });
+    if (cardMarkDedupe.size > 800) {
+      const old = now - 120000;
+      for (const [k, v] of cardMarkDedupe) {
+        if (v.at < old) cardMarkDedupe.delete(k);
+      }
+    }
+    cardMarkPending.push(meta);
+    if (!cardMarkFlushTimer) {
+      cardMarkFlushTimer = window.setTimeout(flushCardMarkPending, 80);
+    }
+  }
+
+  function queueCardMarkFromItem(item, addrHint) {
+    try {
+      queueCardMarkMeta(pickCardMarkMeta(item, addrHint));
+    } catch (_q) {
+      // ignore
+    }
+  }
+
   function collectHostFeesFromDebotRow(row) {
     try {
       const entry = debotHostFeeFromRow(row);
@@ -2290,7 +2378,9 @@
 
   function ingestGmgnTokenLike(row) {
     if (!row || typeof row !== "object") return;
-    collectHostFeesFromGmgnItem(unwrapGmgnTokenRow(row));
+    const tok = unwrapGmgnTokenRow(row);
+    queueCardMarkFromItem(tok);
+    collectHostFeesFromGmgnItem(tok);
   }
 
   /** PATCH frame.replaces[].data / Full frame.data */
@@ -2361,6 +2451,15 @@
     }
     if (msg.data && typeof msg.data === "object" && msg.data !== msg) {
       collectPumpRankData(msg.data);
+    }
+    // SharedWorker RPC：{ type:"request_plugin", response:{ body:{ newCreations } } }
+    const rpc = msg.response;
+    if (rpc && typeof rpc === "object" && rpc !== msg) {
+      const body = rpc.body || rpc.payload;
+      if (body && typeof body === "object") {
+        collectPumpRankData(body);
+        if (body.data && body.data !== body) collectPumpRankData(body.data);
+      }
     }
   }
 
@@ -2923,6 +3022,20 @@
   function filterPumpRankDataInPlace(data) {
     if (!prefsOn() || !data || typeof data !== "object") return 0;
     let removed = 0;
+    const dut = data.dataUpdateType;
+    if (
+      (dut === 2 || dut === "SNAP_SHOT" || String(dut).toUpperCase() === "SNAP_SHOT") &&
+      data.data &&
+      data.data !== data &&
+      typeof data.data === "object"
+    ) {
+      try {
+        noteGmgnTransport("main-thread");
+      } catch (_mt) {
+        // ignore
+      }
+      removed += filterPumpRankDataInPlace(data.data);
+    }
     const cols = ["newCreations", "new_creation", "new_creations"];
     for (let i = 0; i < cols.length; i += 1) {
       const block = data[cols[i]];
@@ -2997,7 +3110,19 @@
       if (!obj || typeof obj !== "object" || depth > 6 || seen.has(obj)) return;
       seen.add(obj);
       removed += filterPumpRankDataInPlace(obj);
-      const keys = ["res", "payload", "data", "body", "message", "frame", "result"];
+      // 必须含 response：刷新/多开时 getFullFrame 是
+      // { type:"request_plugin", response:{ body:{ newCreations:{ frame } } } }
+      // 旧键表拆不到 body，未过滤 60 条会直接 publishState。
+      const keys = [
+        "res",
+        "payload",
+        "data",
+        "body",
+        "message",
+        "frame",
+        "result",
+        "response"
+      ];
       for (let i = 0; i < keys.length; i += 1) {
         const inner = obj[keys[i]];
         if (inner && typeof inner === "object") walk(inner, depth + 1);
@@ -3105,9 +3230,9 @@
         if (isGmgnNewCreationColumnKey(k)) tryGmgnNcBlock(json[k]);
       }
 
-      // SharedWorker 外壳：{ type, payload/data/message/body: { channel, data } }
+      // SharedWorker 外壳：{ type, payload/data/message/body/response: { channel, data } }
       if (!handled && d < 3) {
-        for (const k of ["payload", "data", "body", "message", "res"]) {
+        for (const k of ["payload", "data", "body", "message", "res", "response"]) {
           const inner = json[k];
           if (inner && typeof inner === "object" && inner !== json) {
             collectHostFeesFromJson(inner, d + 1);
@@ -3568,6 +3693,33 @@
     return { address: "", symbol: "" };
   }
 
+  function scrapeGmgnTokenDataLoose(root) {
+    let f = reactFiberOf(root);
+    for (let i = 0; i < 24 && f; i += 1) {
+      const p = f.memoizedProps;
+      if (p && typeof p === "object") {
+        const bags = [p.data, p.token, p.item];
+        for (let j = 0; j < bags.length; j += 1) {
+          const d = bags[j];
+          if (!d || typeof d !== "object") continue;
+          if (
+            d.address ||
+            d.a ||
+            d.creator_created_count != null ||
+            d.d_ccc != null ||
+            d.twitter_username ||
+            d.twitter ||
+            d.m_x
+          ) {
+            return d;
+          }
+        }
+      }
+      f = f.return;
+    }
+    return null;
+  }
+
   function scrapeGmgnTaxAllocationFromFiber(root) {
     const row = scrapeGmgnTokenRowFromFiber(root);
     if (row) {
@@ -3696,6 +3848,8 @@
     if (!(card instanceof HTMLElement)) return;
     noteGmgnTransport("fiber");
     const addr = gmgnAddrFromCard(card);
+    const loose = scrapeGmgnTokenDataLoose(card) || scrapeGmgnTokenRowFromFiber(card);
+    if (addr) queueCardMarkFromItem(loose, addr);
     if (!TARGET_TOKEN_RE.test(addr)) return;
     const row = scrapeGmgnTokenRowFromFiber(card);
     const tal =
@@ -4055,6 +4209,15 @@
           if (prefsOn() && ev && ev.data && typeof ev.data === "object") {
             const r = filterLiveObject(ev.data, "host-port");
             if (r.drop) return undefined;
+            if (r.changed && r.data !== ev.data) {
+              if (!patchEventData(ev, r.data)) {
+                try {
+                  return fn.call(this, { data: r.data, type: "message" });
+                } catch (_d) {
+                  // fallthrough
+                }
+              }
+            }
           }
         } catch (_flt) {
           // ignore
@@ -4250,6 +4413,12 @@
       } catch (_e) {
         // ignore
       }
+    }
+    try {
+      uninstallMainThreadProtoTap();
+      noteMainThreadTransportHints();
+    } catch (_mt) {
+      // ignore
     }
   }
 
@@ -5659,6 +5828,50 @@
     }
   }
 
+  /**
+   * GMGN MAIN_THREAD（手机 / disableShareWorker / Worker 降级）不 new SharedWorker，
+   * 假 port 不是 MessagePort，不能靠 prototype 钩。
+   * 0.8.123 曾在 Object.prototype 上挂 onmessage，导致 `'onmessage' in {}` 为 true，
+   * GMGN 直接打不开。禁止再碰 Object.prototype。
+   * MAIN_THREAD 的 SNAP_SHOT 仍走页面 JSON.parse / Response.json / fetch / WS。
+   */
+  function uninstallMainThreadProtoTap() {
+    try {
+      if (Object.prototype.hasOwnProperty.call(Object.prototype, "onmessage")) {
+        delete Object.prototype.onmessage;
+      }
+    } catch (_d1) {
+      // ignore
+    }
+    try {
+      delete Object.prototype.__flapFeeFakePortOm;
+    } catch (_d2) {
+      // ignore
+    }
+  }
+
+  function noteMainThreadTransportHints() {
+    try {
+      if (localStorage.getItem("disableShareWorker") === "true") {
+        noteGmgnTransport("main-thread-flag");
+      }
+    } catch (_ls) {
+      // ignore
+    }
+    try {
+      const ua = String(navigator.userAgent || "").toLowerCase();
+      if (
+        /android|webos|iphone|ipad|ipod|blackberry|huaweibrowser|iemobile|opera mini/.test(
+          ua
+        )
+      ) {
+        noteGmgnTransport("main-thread-ua");
+      }
+    } catch (_ua) {
+      // ignore
+    }
+  }
+
   // ---------- HTTP（对齐原生：筛完的列表再进 React）----------
   function urlLooksUseful(url) {
     const u = String(url || "");
@@ -6035,6 +6248,12 @@
     } catch (_clr) {
       // ignore
     }
+    try {
+      uninstallMainThreadProtoTap();
+      noteMainThreadTransportHints();
+    } catch (_mt) {
+      // ignore
+    }
 
     // ============================================================
     // MessagePort.prototype — GMGN SharedWorker 实时主路径
@@ -6372,6 +6591,24 @@
             if (!obj || typeof obj !== "object") {
               return NativeJSONParse(text, reviver);
             }
+            let pumpRemoved = 0;
+            try {
+              pumpRemoved = filterPumpRankEnvelopeInPlace(obj);
+            } catch (_pr) {
+              pumpRemoved = 0;
+            }
+            if (pumpRemoved > 0) {
+              noteFilter({
+                channel: "json-parse",
+                removed: pumpRemoved,
+                thr: taxRecvPrefs.thresholdPct,
+                shape: "pumpRank"
+              });
+              const out = JSON.stringify(obj);
+              return reviver !== undefined
+                ? NativeJSONParse(out, reviver)
+                : NativeJSONParse(out);
+            }
             let removed = filterGmgnTrenchesDeltaInPlace(obj);
             let padded = 0;
             if (removed <= 0) {
@@ -6411,6 +6648,44 @@
       // ignore
     }
 
+    try {
+      const respProto = Response.prototype;
+      if (typeof respProto.json === "function" && respProto.json.__flapFeeTaxRecv !== HOOK_VER) {
+        const nativeRespJson = respProto.json;
+        const wrappedRespJson = async function flapFeeResponseJson() {
+          const data = await nativeRespJson.apply(this, arguments);
+          if (!prefsOn() || data == null || typeof data !== "object") return data;
+          try {
+            const pump = filterPumpRankEnvelopeInPlace(data);
+            let removed = pump;
+            if (removed <= 0) removed = filterGmgnTrenchesDeltaInPlace(data);
+            if (removed <= 0) {
+              removed = filterJsonInPlace(data, "auto");
+              const padded =
+                (window.__flapFeeNcKeep && Number(window.__flapFeeNcKeep.padded)) ||
+                0;
+              if (removed > 0 || padded > 0) scrubGmgnDeltaAddList(data);
+            }
+            if (removed > 0) {
+              noteFilter({
+                channel: "response-json",
+                removed,
+                thr: taxRecvPrefs.thresholdPct,
+                shape: pump > 0 ? "pumpRank" : "feed"
+              });
+            }
+          } catch (_rj) {
+            // ignore
+          }
+          return data;
+        };
+        wrappedRespJson.__flapFeeTaxRecv = HOOK_VER;
+        respProto.json = wrappedRespJson;
+      }
+    } catch (_respJson) {
+      // ignore
+    }
+
     if (typeof NativeWebSocket === "function") {
       const nativeWsOm = Object.getOwnPropertyDescriptor(
         NativeWebSocket.prototype,
@@ -6431,6 +6706,12 @@
               const next = filterLiveText(ev.data, channel);
               if (next !== ev.data) {
                 return deliverWsMessage.call(this, fn, ev, next);
+              }
+            } else if (prefsOn() && ev && ev.data && typeof ev.data === "object") {
+              const r = filterLiveObject(ev.data, channel || "ws-obj");
+              if (r.drop) return undefined;
+              if (r.changed && r.data !== ev.data) {
+                return deliverWsMessage.call(this, fn, ev, r.data);
               }
             }
           } catch (_e) {
@@ -6887,6 +7168,12 @@
 
   // ---------- boot：SPA 已装；host-fee 常开；过滤 enabled 时装网络过滤 ----------
   readPrefsSync();
+  try {
+    uninstallMainThreadProtoTap();
+      noteMainThreadTransportHints();
+  } catch (_mtBoot) {
+    // ignore
+  }
   try {
     if (isBscPageContext()) {
       installHostFeePortTap();

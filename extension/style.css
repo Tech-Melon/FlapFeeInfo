@@ -740,3 +740,77 @@ body .gmgn-fee-mode-icon {
   filter: brightness(0.96);
   transform: translateY(0.5px);
 }
+
+/* GMGN 战壕卡标记：左侧光条 / 描边，不铺满底色 */
+[data-sentry-source-file="TokenItem.tsx"].flap-card-mark {
+  position: relative;
+}
+
+.flap-card-mark--dev {
+  box-shadow:
+    inset 3px 0 0 var(--flap-dev-color, #f59e0b),
+    inset 18px 0 16px -10px color-mix(in srgb, var(--flap-dev-color, #f59e0b) 28%, transparent);
+}
+
+.flap-card-mark--tw {
+  box-shadow:
+    inset -4px 0 0 var(--flap-tw-color, #fbbf24),
+    inset -110px 0 42px -14px color-mix(in srgb, var(--flap-tw-color, #fbbf24) 52%, transparent);
+}
+
+.flap-card-mark--dev.flap-card-mark--tw {
+  box-shadow:
+    inset 3px 0 0 var(--flap-dev-color, #f59e0b),
+    inset -4px 0 0 var(--flap-tw-color, #fbbf24),
+    inset 18px 0 16px -10px color-mix(in srgb, var(--flap-dev-color, #f59e0b) 26%, transparent),
+    inset -110px 0 42px -14px color-mix(in srgb, var(--flap-tw-color, #fbbf24) 52%, transparent);
+}
+
+.flap-dev-count-chip,
+.flap-tw-note-chip {
+  pointer-events: none;
+  user-select: none;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    "Helvetica Neue",
+    Arial,
+    sans-serif;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.flap-dev-count-chip {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  z-index: 6;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  color: #111;
+  background: var(--flap-chip-color, #f59e0b);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--flap-chip-color, #f59e0b) 55%, #000);
+}
+
+.flap-tw-note-chip {
+  display: inline-flex;
+  align-items: center;
+  position: static;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.35;
+  max-width: none;
+  overflow: visible;
+  vertical-align: middle;
+  color: #111;
+  background: var(--flap-chip-color, #fbbf24);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--flap-chip-color, #fbbf24) 50%, #000);
+}

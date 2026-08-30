@@ -10,6 +10,8 @@
   const SUFFIX_HIDE_KEY = "flapFeeInfo.suffixHide.v1";
   const VAULT_HIDE_KEY = "flapFeeInfo.vaultHide.v1";
   const SEARCH_HIDE_KEY = "flapFeeInfo.searchHide.v1";
+  const DEV_COUNT_MARK_KEY = "flapFeeInfo.devCountMark.v1";
+  const TW_HANDLE_MARK_KEY = "flapFeeInfo.twHandleMark.v1";
   const LICENSE_KEY = "flapFeeInfo.license.v1";
   const DEVICE_ID_KEY = "flapFeeInfo.deviceId.v1";
   const LICENSE_API_BASE = "https://flap-fee-info.tech-melon.workers.dev";
@@ -24,6 +26,10 @@
     hideStockVault: false
   };
   const DEFAULT_SEARCH_HIDE = { enabled: false };
+  const DEFAULT_DEV_COUNT_MARK = { enabled: false, rules: [] };
+  const DEFAULT_TW_HANDLE_MARK = { enabled: false, rules: [] };
+  const DEV_COUNT_MARK_MAX = 12;
+  const TW_HANDLE_MARK_MAX = 24;
   const DEFAULT_LICENSE = { key: "" };
   const SUFFIX_HIDE_MAX_RULES = 24;
   const DEFAULT_OFFSETS = {
@@ -43,6 +49,27 @@
       catBadgeDesc: "主题与显示项",
       catFilter: "列表过滤",
       catFilterDesc: "首页与 K 线左侧「新创建」",
+      catMark: "卡片标记",
+      catMarkDesc: "发币次数 · 推特备注",
+      devCountSection: "Dev 发币次数",
+      devCountHint:
+        "仅 GMGN 战壕卡。按 creator_created_count 给卡片左侧光条 + 「×次数」小签。比较符可选 < ≤ = ≥ >（默认 <）。新币前几秒常为 0。多条命中时精确相等优先，其次更严的阈值。",
+      devCountEnableTitle: "启用发币次数标记",
+      devCountEnableDesc: "左侧光条颜色自定义；次数显示在头像旁",
+      devCountMinPh: "次数",
+      devCountHint2: "例：<10 绿色、=1 蓝色、>100 红色。最多 12 条。",
+      devCountEmpty: "暂无规则，填写次数并选色后添加",
+      twHandleSection: "推特备注（右侧色条）",
+      twHandleHint:
+        "仅 GMGN 战壕卡。扫一眼：左侧色条+×次数 = 发币次数；右侧色条+链接旁备注 = 关注的推特。颜色都在规则里自选。",
+      twHandleEnableTitle: "启用推特标记",
+      twHandleEnableDesc: "右侧色条颜色 + 链接旁备注名",
+      twHandlePh: "@handle",
+      twHandleNotePh: "备注·何一",
+      twHandleHint2: "handle 不区分大小写，可带 @。最多 24 条。",
+      twHandleEmpty: "暂无规则，填写 handle 与备注后添加",
+      twHandleInvalid: "请填写有效 handle",
+      twHandleDup: "已添加过",
       searchHideTitle: "搜索框结果也屏蔽",
       searchHideDesc: "默认关。开启后，已启用的资金接收/金库规则同样作用于搜索弹层",
       catPosition: "徽章位置",
@@ -183,6 +210,27 @@
       catBadgeDesc: "Theme & display",
       catFilter: "List filters",
       catFilterDesc: "Home & K-line left New creation",
+      catMark: "Card marks",
+      catMarkDesc: "Dev count · Twitter notes",
+      devCountSection: "Dev launch count",
+      devCountHint:
+        "GMGN trench cards only. Left glow bar + ×count from creator_created_count. Choose < ≤ = ≥ > (default <). New tokens often stay 0 for a few seconds. Exact match wins, then the tighter threshold.",
+      devCountEnableTitle: "Mark by launch count",
+      devCountEnableDesc: "Custom bar color; count chip beside the avatar",
+      devCountMinPh: "count",
+      devCountHint2: "e.g. <10 green, =1 blue, >100 red. Max 12 rules.",
+      devCountEmpty: "No rules yet. Enter a count and pick a color.",
+      twHandleSection: "Twitter note (right bar)",
+      twHandleHint:
+        "GMGN trench cards only. Left bar + ×count = launch count; right bar + note beside the handle = watched Twitter. Pick colors per rule.",
+      twHandleEnableTitle: "Mark Twitter handles",
+      twHandleEnableDesc: "Right-bar color + note beside the link",
+      twHandlePh: "@handle",
+      twHandleNotePh: "note",
+      twHandleHint2: "Case-insensitive; @ optional. Max 24.",
+      twHandleEmpty: "No rules yet. Add a handle and a note.",
+      twHandleInvalid: "Enter a valid handle",
+      twHandleDup: "Already added",
       searchHideTitle: "Also hide in search",
       searchHideDesc: "Off by default. When on, enabled fund-recipient/vault rules also apply to the search overlay",
       catPosition: "Badge position",
@@ -392,6 +440,20 @@
   const vaultHideTax = document.getElementById("vaultHideTax");
   const vaultHideStock = document.getElementById("vaultHideStock");
   const vaultHideOptions = document.getElementById("vaultHideOptions");
+  const devCountEnabled = document.getElementById("devCountEnabled");
+  const devCountRulesWrap = document.getElementById("devCountRulesWrap");
+  const devCountRulesList = document.getElementById("devCountRulesList");
+  const devCountMinInput = document.getElementById("devCountMinInput");
+  const devCountOpSelect = document.getElementById("devCountOp");
+  const devCountColorInput = document.getElementById("devCountColorInput");
+  const devCountAddBtn = document.getElementById("devCountAddBtn");
+  const twHandleEnabled = document.getElementById("twHandleEnabled");
+  const twHandleRulesWrap = document.getElementById("twHandleRulesWrap");
+  const twHandleRulesList = document.getElementById("twHandleRulesList");
+  const twHandleInput = document.getElementById("twHandleInput");
+  const twHandleNoteInput = document.getElementById("twHandleNoteInput");
+  const twHandleColorInput = document.getElementById("twHandleColorInput");
+  const twHandleAddBtn = document.getElementById("twHandleAddBtn");
 
   /** @type {{ gmgn: {enabled:boolean,x:number,y:number}, debot: {enabled:boolean,x:number,y:number} }} */
   let offsets = {
@@ -414,6 +476,10 @@
   let vaultHideSaveTimer = null;
   let searchHideState = { ...DEFAULT_SEARCH_HIDE };
   let searchHideSaveTimer = null;
+  let devCountMarkState = { ...DEFAULT_DEV_COUNT_MARK };
+  let devCountSaveTimer = null;
+  let twHandleMarkState = { ...DEFAULT_TW_HANDLE_MARK };
+  let twHandleSaveTimer = null;
 
   function t(key) {
     const pack = I18N[uiLang] || I18N.zh;
@@ -512,6 +578,89 @@
 
   function normalizeSearchHide(raw) {
     return { enabled: raw && raw.enabled === true };
+  }
+
+  function normalizeHexColor(raw, fallback) {
+    const s = String(raw || "").trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
+    if (/^#[0-9a-fA-F]{3}$/.test(s)) {
+      return `#${s[1]}${s[1]}${s[2]}${s[2]}${s[3]}${s[3]}`.toLowerCase();
+    }
+    return fallback;
+  }
+
+  function normalizeDevCountOp(raw) {
+    const s = String(raw || "").trim().toLowerCase();
+    if (s === "lt" || s === "<") return "lt";
+    if (s === "lte" || s === "<=" || s === "≤") return "lte";
+    if (s === "eq" || s === "=" || s === "==" || s === "===") return "eq";
+    if (s === "gt" || s === ">") return "gt";
+    if (s === "gte" || s === ">=" || s === "≥") return "gte";
+    return "";
+  }
+
+  function devCountOpLabel(op) {
+    if (op === "lt") return "<";
+    if (op === "lte") return "≤";
+    if (op === "eq") return "=";
+    if (op === "gt") return ">";
+    return "≥";
+  }
+
+  function normalizeDevCountMark(raw) {
+    const out = { enabled: false, rules: [] };
+    if (!raw || typeof raw !== "object") return out;
+    out.enabled = raw.enabled === true;
+    const list = Array.isArray(raw.rules) ? raw.rules : [];
+    for (let i = 0; i < list.length && out.rules.length < DEV_COUNT_MARK_MAX; i += 1) {
+      const r = list[i] || {};
+      const min = Math.max(0, Math.min(999999, Math.floor(Number(r.min))));
+      if (!Number.isFinite(min)) continue;
+      const op = normalizeDevCountOp(r.op) || (r.op == null ? "gte" : "lt");
+      out.rules.push({
+        id: String(r.id || `d${Date.now().toString(36)}_${i}`),
+        op,
+        min,
+        color: normalizeHexColor(r.color, "#f59e0b"),
+        enabled: r.enabled !== false
+      });
+    }
+    return out;
+  }
+
+  function normalizeTwHandle(raw) {
+    return String(raw || "")
+      .trim()
+      .replace(/^https?:\/\/(www\.)?(twitter\.com|x\.com)\//i, "")
+      .replace(/^@/, "")
+      .split(/[/?#]/)[0]
+      .replace(/\u2026|\.{2,}$/g, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, "")
+      .slice(0, 32);
+  }
+
+  function normalizeTwHandleMark(raw) {
+    const out = { enabled: false, rules: [] };
+    if (!raw || typeof raw !== "object") return out;
+    out.enabled = raw.enabled === true;
+    const list = Array.isArray(raw.rules) ? raw.rules : [];
+    const seen = new Set();
+    for (let i = 0; i < list.length && out.rules.length < TW_HANDLE_MARK_MAX; i += 1) {
+      const r = list[i] || {};
+      const handle = normalizeTwHandle(r.handle);
+      if (!handle || handle.length < 2 || seen.has(handle)) continue;
+      seen.add(handle);
+      const note = String(r.note || "").trim().slice(0, 16);
+      out.rules.push({
+        id: String(r.id || `t${Date.now().toString(36)}_${i}`),
+        handle,
+        note,
+        color: normalizeHexColor(r.color, "#fbbf24"),
+        enabled: r.enabled !== false
+      });
+    }
+    return out;
   }
 
   function normalizeSuffixHide(raw) {
@@ -965,6 +1114,8 @@
             VAULT_HIDE_KEY,
             SEARCH_HIDE_KEY,
             LICENSE_KEY,
+            DEV_COUNT_MARK_KEY,
+            TW_HANDLE_MARK_KEY,
           ],
           (items) => {
             if (chrome.runtime.lastError) {
@@ -980,6 +1131,8 @@
                 vaultHide: { ...DEFAULT_VAULT_HIDE },
                 searchHide: { ...DEFAULT_SEARCH_HIDE },
                 license: { ...DEFAULT_LICENSE },
+                devCountMark: { ...DEFAULT_DEV_COUNT_MARK },
+                twHandleMark: { ...DEFAULT_TW_HANDLE_MARK },
               });
               return;
             }
@@ -1003,6 +1156,8 @@
               vaultHide: normalizeVaultHide(items?.[VAULT_HIDE_KEY]),
               searchHide: normalizeSearchHide(items?.[SEARCH_HIDE_KEY]),
               license: normalizeLicense(items?.[LICENSE_KEY]) || { ...DEFAULT_LICENSE },
+              devCountMark: normalizeDevCountMark(items?.[DEV_COUNT_MARK_KEY]),
+              twHandleMark: normalizeTwHandleMark(items?.[TW_HANDLE_MARK_KEY]),
             });
           }
         );
@@ -1019,6 +1174,8 @@
           vaultHide: { ...DEFAULT_VAULT_HIDE },
           searchHide: { ...DEFAULT_SEARCH_HIDE },
           license: { ...DEFAULT_LICENSE },
+          devCountMark: { ...DEFAULT_DEV_COUNT_MARK },
+          twHandleMark: { ...DEFAULT_TW_HANDLE_MARK },
         });
       }
     });
@@ -1312,6 +1469,240 @@
     suffixAddInput.value = "";
     suffixAddInput.placeholder = t("suffixAddPlaceholder");
     scheduleSaveSuffixHide();
+  }
+
+  function saveDevCountMark(state) {
+    const normalized = normalizeDevCountMark(state);
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.set({ [DEV_COUNT_MARK_KEY]: normalized }, () => {
+          void chrome.runtime?.lastError;
+          resolve(normalized);
+        });
+      } catch {
+        resolve(normalized);
+      }
+    });
+  }
+
+  function scheduleSaveDevCountMark() {
+    if (devCountSaveTimer) window.clearTimeout(devCountSaveTimer);
+    renderDevCountMarkUI(devCountMarkState);
+    devCountSaveTimer = window.setTimeout(() => {
+      devCountSaveTimer = null;
+      void saveDevCountMark(devCountMarkState);
+    }, 120);
+  }
+
+  function renderDevCountMarkUI(state) {
+    devCountMarkState = normalizeDevCountMark(state);
+    if (devCountEnabled) {
+      devCountEnabled.checked = devCountMarkState.enabled === true;
+    }
+    if (devCountRulesWrap) {
+      devCountRulesWrap.classList.toggle("is-disabled", devCountMarkState.enabled !== true);
+    }
+    if (!devCountRulesList) return;
+    devCountRulesList.innerHTML = "";
+    const rules = devCountMarkState.rules || [];
+    if (!rules.length) {
+      const empty = document.createElement("div");
+      empty.className = "suffix-empty";
+      empty.textContent = t("devCountEmpty");
+      devCountRulesList.appendChild(empty);
+      return;
+    }
+    for (const rule of rules) {
+      const row = document.createElement("div");
+      row.className = "suffix-rule-row";
+      row.dataset.id = rule.id;
+
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = rule.enabled !== false;
+      cb.addEventListener("change", () => {
+        const r = devCountMarkState.rules.find((x) => x.id === rule.id);
+        if (!r) return;
+        r.enabled = cb.checked === true;
+        scheduleSaveDevCountMark();
+      });
+
+      const swatch = document.createElement("span");
+      swatch.className = "mark-rule-swatch";
+      swatch.style.background = rule.color;
+
+      const color = document.createElement("input");
+      color.type = "color";
+      color.className = "mark-color-input";
+      color.value = rule.color;
+      color.addEventListener("input", () => {
+        const r = devCountMarkState.rules.find((x) => x.id === rule.id);
+        if (!r) return;
+        r.color = normalizeHexColor(color.value, r.color);
+        swatch.style.background = r.color;
+        scheduleSaveDevCountMark();
+      });
+
+      const text = document.createElement("span");
+      text.className = "suffix-rule-text mark-rule-label" + (rule.enabled === false ? " is-off" : "");
+      text.textContent = `${devCountOpLabel(rule.op)} ${rule.min}`;
+
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "suffix-rule-del";
+      del.textContent = t("suffixRuleDel");
+      del.addEventListener("click", () => {
+        devCountMarkState.rules = devCountMarkState.rules.filter((x) => x.id !== rule.id);
+        scheduleSaveDevCountMark();
+      });
+
+      row.append(cb, swatch, text, color, del);
+      devCountRulesList.appendChild(row);
+    }
+  }
+
+  function tryAddDevCountRule() {
+    const min = Math.max(0, Math.min(999999, Math.floor(Number(devCountMinInput?.value))));
+    if (!Number.isFinite(min)) return;
+    const op = normalizeDevCountOp(devCountOpSelect?.value) || "lt";
+    const color = normalizeHexColor(devCountColorInput?.value, "#f59e0b");
+    const exists = (devCountMarkState.rules || []).some((r) => r.min === min && r.op === op);
+    if (exists) return;
+    if ((devCountMarkState.rules || []).length >= DEV_COUNT_MARK_MAX) return;
+    devCountMarkState.rules = [
+      ...(devCountMarkState.rules || []),
+      { id: `d${Date.now().toString(36)}`, op, min, color, enabled: true }
+    ];
+    if (!devCountMarkState.enabled) {
+      devCountMarkState.enabled = true;
+      if (devCountEnabled) devCountEnabled.checked = true;
+    }
+    scheduleSaveDevCountMark();
+  }
+
+  function saveTwHandleMark(state) {
+    const normalized = normalizeTwHandleMark(state);
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.set({ [TW_HANDLE_MARK_KEY]: normalized }, () => {
+          void chrome.runtime?.lastError;
+          resolve(normalized);
+        });
+      } catch {
+        resolve(normalized);
+      }
+    });
+  }
+
+  function scheduleSaveTwHandleMark() {
+    if (twHandleSaveTimer) window.clearTimeout(twHandleSaveTimer);
+    renderTwHandleMarkUI(twHandleMarkState);
+    twHandleSaveTimer = window.setTimeout(() => {
+      twHandleSaveTimer = null;
+      void saveTwHandleMark(twHandleMarkState);
+    }, 120);
+  }
+
+  function renderTwHandleMarkUI(state) {
+    twHandleMarkState = normalizeTwHandleMark(state);
+    if (twHandleEnabled) {
+      twHandleEnabled.checked = twHandleMarkState.enabled === true;
+    }
+    if (twHandleRulesWrap) {
+      twHandleRulesWrap.classList.toggle("is-disabled", twHandleMarkState.enabled !== true);
+    }
+    if (!twHandleRulesList) return;
+    twHandleRulesList.innerHTML = "";
+    const rules = twHandleMarkState.rules || [];
+    if (!rules.length) {
+      const empty = document.createElement("div");
+      empty.className = "suffix-empty";
+      empty.textContent = t("twHandleEmpty");
+      twHandleRulesList.appendChild(empty);
+      return;
+    }
+    for (const rule of rules) {
+      const row = document.createElement("div");
+      row.className = "suffix-rule-row";
+      row.dataset.id = rule.id;
+
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = rule.enabled !== false;
+      cb.addEventListener("change", () => {
+        const r = twHandleMarkState.rules.find((x) => x.id === rule.id);
+        if (!r) return;
+        r.enabled = cb.checked === true;
+        scheduleSaveTwHandleMark();
+      });
+
+      const swatch = document.createElement("span");
+      swatch.className = "mark-rule-swatch";
+      swatch.style.background = rule.color;
+
+      const color = document.createElement("input");
+      color.type = "color";
+      color.className = "mark-color-input";
+      color.value = rule.color;
+      color.addEventListener("input", () => {
+        const r = twHandleMarkState.rules.find((x) => x.id === rule.id);
+        if (!r) return;
+        r.color = normalizeHexColor(color.value, r.color);
+        swatch.style.background = r.color;
+        scheduleSaveTwHandleMark();
+      });
+
+      const text = document.createElement("span");
+      text.className = "suffix-rule-text mark-rule-label" + (rule.enabled === false ? " is-off" : "");
+      const note = rule.note ? ` · ${rule.note}` : "";
+      text.textContent = `@${rule.handle}${note}`;
+      text.title = text.textContent;
+
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "suffix-rule-del";
+      del.textContent = t("suffixRuleDel");
+      del.addEventListener("click", () => {
+        twHandleMarkState.rules = twHandleMarkState.rules.filter((x) => x.id !== rule.id);
+        scheduleSaveTwHandleMark();
+      });
+
+      row.append(cb, swatch, text, color, del);
+      twHandleRulesList.appendChild(row);
+    }
+  }
+
+  function tryAddTwHandleRule() {
+    const handle = normalizeTwHandle(twHandleInput?.value);
+    if (!handle || handle.length < 2) {
+      if (twHandleInput) twHandleInput.placeholder = t("twHandleInvalid");
+      return;
+    }
+    const exists = (twHandleMarkState.rules || []).some((r) => r.handle === handle);
+    if (exists) {
+      if (twHandleInput) {
+        twHandleInput.placeholder = t("twHandleDup");
+        twHandleInput.value = "";
+      }
+      return;
+    }
+    if ((twHandleMarkState.rules || []).length >= TW_HANDLE_MARK_MAX) return;
+    const note = String(twHandleNoteInput?.value || "").trim().slice(0, 16);
+    const color = normalizeHexColor(twHandleColorInput?.value, "#fbbf24");
+    twHandleMarkState.rules = [
+      ...(twHandleMarkState.rules || []),
+      { id: `t${Date.now().toString(36)}`, handle, note, color, enabled: true }
+    ];
+    if (!twHandleMarkState.enabled) {
+      twHandleMarkState.enabled = true;
+      if (twHandleEnabled) twHandleEnabled.checked = true;
+    }
+    if (twHandleInput) {
+      twHandleInput.value = "";
+      twHandleInput.placeholder = t("twHandlePh");
+    }
+    if (twHandleNoteInput) twHandleNoteInput.value = "";
+    scheduleSaveTwHandleMark();
   }
 
   function savePrefs(prefs) {
@@ -1705,6 +2096,35 @@
     if (suffixAddInput.value !== cleaned) suffixAddInput.value = cleaned;
   });
 
+  devCountEnabled?.addEventListener("change", () => {
+    devCountMarkState.enabled = devCountEnabled.checked === true;
+    scheduleSaveDevCountMark();
+  });
+  devCountAddBtn?.addEventListener("click", () => tryAddDevCountRule());
+  devCountMinInput?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      tryAddDevCountRule();
+    }
+  });
+  twHandleEnabled?.addEventListener("change", () => {
+    twHandleMarkState.enabled = twHandleEnabled.checked === true;
+    scheduleSaveTwHandleMark();
+  });
+  twHandleAddBtn?.addEventListener("click", () => tryAddTwHandleRule());
+  twHandleInput?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      tryAddTwHandleRule();
+    }
+  });
+  twHandleNoteInput?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      tryAddTwHandleRule();
+    }
+  });
+
 
   for (const cb of offsetEnables) {
     cb.addEventListener("change", () => {
@@ -1782,6 +2202,8 @@
         renderSuffixHideUI(suffixHideState);
         renderVaultHideUI(vaultHideState);
         renderSearchHideUI(searchHideState);
+        renderDevCountMarkUI(devCountMarkState);
+        renderTwHandleMarkUI(twHandleMarkState);
       }
       if (changes[TAX_RECV_HIDE_KEY]) {
         taxRecvState = normalizeTaxRecvHide(changes[TAX_RECV_HIDE_KEY].newValue);
@@ -1798,6 +2220,14 @@
       if (changes[SEARCH_HIDE_KEY]) {
         searchHideState = normalizeSearchHide(changes[SEARCH_HIDE_KEY].newValue);
         renderSearchHideUI(searchHideState);
+      }
+      if (changes[DEV_COUNT_MARK_KEY]) {
+        devCountMarkState = normalizeDevCountMark(changes[DEV_COUNT_MARK_KEY].newValue);
+        renderDevCountMarkUI(devCountMarkState);
+      }
+      if (changes[TW_HANDLE_MARK_KEY]) {
+        twHandleMarkState = normalizeTwHandleMark(changes[TW_HANDLE_MARK_KEY].newValue);
+        renderTwHandleMarkUI(twHandleMarkState);
       }
       if (changes[PREFS_KEY]) {
         prefsState = normalizePrefs(changes[PREFS_KEY].newValue);
@@ -1821,6 +2251,8 @@
       vaultHide: loadedVaultHide,
       searchHide: loadedSearchHide,
       license: loadedLicense,
+      devCountMark: loadedDevCount,
+      twHandleMark: loadedTwHandle,
     }) => {
       uiLang = lang;
       solidDark = loadedSolid === true;
@@ -1833,6 +2265,8 @@
       suffixHideState = normalizeSuffixHide(loadedSuffixHide);
       vaultHideState = normalizeVaultHide(loadedVaultHide);
       searchHideState = normalizeSearchHide(loadedSearchHide);
+      devCountMarkState = normalizeDevCountMark(loadedDevCount);
+      twHandleMarkState = normalizeTwHandleMark(loadedTwHandle);
       applyStaticI18n();
       renderTheme(theme);
       renderPrefs(prefs);
@@ -1840,6 +2274,8 @@
       renderSuffixHideUI(suffixHideState);
       renderVaultHideUI(vaultHideState);
       renderSearchHideUI(searchHideState);
+      renderDevCountMarkUI(devCountMarkState);
+      renderTwHandleMarkUI(twHandleMarkState);
       renderLicenseUI(loadedLicense);
       void refreshStoredLicense();
       bindCollapseHeads();
@@ -1847,6 +2283,8 @@
       setSectionExpanded("taxRecv", false);
       setSectionExpanded("vaultHide", false);
       setSectionExpanded("suffixHide", false);
+      setSectionExpanded("devCount", false);
+      setSectionExpanded("twHandle", false);
       setSectionExpanded("pref", false);
       setSectionExpanded("pos", false);
       fillOffsetUI(offsets);

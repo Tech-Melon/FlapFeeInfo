@@ -483,6 +483,57 @@ body {
   border-color: var(--accent);
 }
 
+.mark-add-row {
+  flex-wrap: wrap;
+}
+
+.mark-op-select {
+  flex-shrink: 0;
+  width: 52px;
+  height: 28px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2, transparent);
+  color: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mark-min-input {
+  flex: 0 0 72px;
+  font-variant-numeric: tabular-nums;
+}
+
+.mark-note-input {
+  flex: 0 1 88px;
+  font-family: inherit;
+}
+
+.mark-color-input {
+  flex-shrink: 0;
+  width: 32px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.mark-rule-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.suffix-rule-text.mark-rule-label {
+  font-family: inherit;
+}
+
 .btn-sm {
   padding: 5px 10px;
   font-size: 11px;
