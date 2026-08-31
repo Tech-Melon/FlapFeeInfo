@@ -50,6 +50,16 @@
     zh: {
       appTitle: "技术瓜FlapFeeInfo",
       appSub: "税收徽章 · 许可证 · 设置",
+      backupBtn: "导入/导出",
+      backupTitle: "导入 / 导出配置",
+      backupHint:
+        "导出当前设置（徽章、过滤、标记、许可证、完整包工具）。换浏览器导入即可。不含徽章缓存和设备 ID；导入密钥后可能要换绑。",
+      backupExport: "导出",
+      backupImport: "导入",
+      backupExportOk: "已导出",
+      backupImportOk: "已导入，正在刷新",
+      backupImportBad: "文件无效，请选择本插件导出的 JSON",
+      backupFail: "操作失败",
       catTools: "增强工具",
       catToolsDesc: "剪切板 · 搜索 · 阅读",
       catBadge: "徽章外观",
@@ -62,15 +72,15 @@
       devCountHint:
         "仅 GMGN / Debot 战壕卡。GMGN 用 creator_created_count；Debot 用 ranks 的 dev_token_stats.created_count。左侧光条 + 「×次数」。比较符可选 < ≤ = ≥ >（默认 <）。多条命中时精确相等优先。",
       devCountEnableTitle: "启用发币次数标记",
-      devCountEnableDesc: "左侧光条颜色自定义；次数显示在头像旁",
+      devCountEnableDesc: "左侧光条颜色自定义；次数贴在左侧色条旁",
       devCountMinPh: "次数",
       devCountHint2: "例：<10 绿色、=1 蓝色、>100 红色。最多 12 条。",
       devCountEmpty: "暂无规则，填写次数并选色后添加",
       twHandleSection: "推特备注（右侧色条）",
       twHandleHint:
-        "仅 GMGN / Debot 战壕卡。扫一眼：左侧色条+×次数 = 发币次数；右侧色条 + 推特旁备注 = 关注的号。Debot 备注挂在指标行第 2 个小图标后面。",
+        "仅 GMGN / Debot 战壕卡。扫一眼：左侧色条+×次数 = 发币次数；右侧色条 = 关注的号。GMGN 备注挂在推特预览图标右侧；Debot 挂在指标行第 2 个小图标后面。",
       twHandleEnableTitle: "启用推特标记",
-      twHandleEnableDesc: "右侧色条颜色 + 链接旁备注名",
+      twHandleEnableDesc: "右侧色条颜色 + 预览图标旁备注名",
       twHandlePh: "@handle",
       twHandleNotePh: "备注·何一",
       twHandleHint2: "handle 不区分大小写，可带 @。最多 24 条。",
@@ -220,6 +230,16 @@
     en: {
       appTitle: "TechMelon FlapFeeInfo",
       appSub: "Tax badges · License · Settings",
+      backupBtn: "Backup",
+      backupTitle: "Import / export settings",
+      backupHint:
+        "Export badge, filter, mark, license, and full-pack tools. Import on another browser. Cache and device ID are skipped; you may need to rebind the license key.",
+      backupExport: "Export",
+      backupImport: "Import",
+      backupExportOk: "Exported",
+      backupImportOk: "Imported — refreshing",
+      backupImportBad: "Invalid file. Pick a JSON exported by this extension.",
+      backupFail: "Could not complete",
       catTools: "Productivity",
       catToolsDesc: "Clipboard · Search · Reading",
       catBadge: "Badge look",
@@ -232,15 +252,15 @@
       devCountHint:
         "GMGN and Debot trench cards. GMGN uses creator_created_count; Debot uses ranks dev_token_stats.created_count. Left bar + ×count. Choose < ≤ = ≥ > (default <). Exact match wins, then the tighter threshold.",
       devCountEnableTitle: "Mark by launch count",
-      devCountEnableDesc: "Custom bar color; count chip beside the avatar",
+      devCountEnableDesc: "Custom bar color; count chip beside the left bar",
       devCountMinPh: "count",
       devCountHint2: "e.g. <10 green, =1 blue, >100 red. Max 12 rules.",
       devCountEmpty: "No rules yet. Enter a count and pick a color.",
       twHandleSection: "Twitter note (right bar)",
       twHandleHint:
-        "GMGN and Debot trench cards. Left bar + ×count = launch count; right bar + note = watched handle. On Debot the note sits after the second small icon in the stats row.",
+        "GMGN and Debot trench cards. Left bar + ×count = launch count; right bar = watched handle. On GMGN the note sits after the Twitter preview icon; on Debot after the second small icon in the stats row.",
       twHandleEnableTitle: "Mark Twitter handles",
-      twHandleEnableDesc: "Right-bar color + note beside the link",
+      twHandleEnableDesc: "Right-bar color + note beside the preview icon",
       twHandlePh: "@handle",
       twHandleNotePh: "note",
       twHandleHint2: "Case-insensitive; @ optional. Max 24.",
@@ -1140,6 +1160,160 @@
     });
   }
 
+  const BACKUP_SKIP = new Set([
+    DEVICE_ID_KEY,
+    "flapFeeInfo.modeCache.v5",
+    "flapFeeInfo.symbolDupSeen.v1",
+    "flapFeeInfo.clipJump.chainCache.v2",
+    "flapFeeInfo.clipJump.seen.v1",
+    "flapFeeInfo.badgeDragEdit.v1",
+    "flapFeeInfo.ownedDisableShareWorker",
+    "flapFeeInfo.listFilterRefresh.v1",
+    "flapFeeInfo.listFilterReload.v1",
+    "flapFeeInfo.badgeDarkTransparent.v1"
+  ]);
+
+  function isBackupSettingKey(key) {
+    if (typeof key !== "string" || !key.startsWith("flapFeeInfo.")) return false;
+    if (BACKUP_SKIP.has(key)) return false;
+    if (key.startsWith("flapFeeInfo.modeCache")) return false;
+    return true;
+  }
+
+  function setBackupStatus(msg) {
+    const el = document.getElementById("backupStatus");
+    if (el) el.textContent = msg || "";
+  }
+
+  function backupStamp() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
+  }
+
+  function exportSettings() {
+    try {
+      chrome.storage.local.get(null, (all) => {
+        if (chrome.runtime.lastError) {
+          setBackupStatus(t("backupFail"));
+          return;
+        }
+        const settings = {};
+        const src = all && typeof all === "object" ? all : {};
+        for (const key of Object.keys(src)) {
+          if (!isBackupSettingKey(key)) continue;
+          settings[key] = src[key];
+        }
+        const payload = {
+          app: "FlapFeeInfo",
+          format: 1,
+          exportedAt: Date.now(),
+          settings
+        };
+        const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], {
+          type: "application/json"
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `FlapFeeInfo-settings-${backupStamp()}.json`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+        setBackupStatus(t("backupExportOk"));
+      });
+    } catch {
+      setBackupStatus(t("backupFail"));
+    }
+  }
+
+  function importSettingsFromText(text) {
+    let data;
+    try {
+      data = JSON.parse(String(text || ""));
+    } catch {
+      setBackupStatus(t("backupImportBad"));
+      return;
+    }
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      setBackupStatus(t("backupImportBad"));
+      return;
+    }
+    if (data.app && data.app !== "FlapFeeInfo") {
+      setBackupStatus(t("backupImportBad"));
+      return;
+    }
+    const settings =
+      data.settings && typeof data.settings === "object" && !Array.isArray(data.settings)
+        ? data.settings
+        : null;
+    if (!settings) {
+      setBackupStatus(t("backupImportBad"));
+      return;
+    }
+    const next = {};
+    for (const key of Object.keys(settings)) {
+      if (!isBackupSettingKey(key)) continue;
+      next[key] = settings[key];
+    }
+    if (!Object.keys(next).length) {
+      setBackupStatus(t("backupImportBad"));
+      return;
+    }
+    try {
+      chrome.storage.local.set(next, () => {
+        if (chrome.runtime.lastError) {
+          setBackupStatus(t("backupFail"));
+          return;
+        }
+        setBackupStatus(t("backupImportOk"));
+        window.setTimeout(() => window.location.reload(), 400);
+      });
+    } catch {
+      setBackupStatus(t("backupFail"));
+    }
+  }
+
+  const backupMenuBtn = document.getElementById("backupMenuBtn");
+  const backupMenu = document.getElementById("backupMenu");
+  const backupExportBtn = document.getElementById("backupExportBtn");
+  const backupImportBtn = document.getElementById("backupImportBtn");
+  const backupImportFile = document.getElementById("backupImportFile");
+
+  function setBackupMenuOpen(open) {
+    const next = open === true;
+    if (backupMenu) backupMenu.hidden = !next;
+    if (backupMenuBtn) backupMenuBtn.setAttribute("aria-expanded", next ? "true" : "false");
+  }
+
+  backupMenuBtn?.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    const open = backupMenuBtn.getAttribute("aria-expanded") !== "true";
+    setBackupMenuOpen(open);
+  });
+  document.addEventListener("click", (ev) => {
+    if (!backupMenu || backupMenu.hidden) return;
+    const node = ev.target;
+    if (backupMenu.contains(node) || backupMenuBtn?.contains(node)) return;
+    setBackupMenuOpen(false);
+  });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape") return;
+    if (backupMenu && !backupMenu.hidden) setBackupMenuOpen(false);
+  });
+  backupExportBtn?.addEventListener("click", () => exportSettings());
+  backupImportBtn?.addEventListener("click", () => backupImportFile?.click());
+  backupImportFile?.addEventListener("change", () => {
+    const file = backupImportFile.files && backupImportFile.files[0];
+    backupImportFile.value = "";
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => importSettingsFromText(String(reader.result || ""));
+    reader.onerror = () => setBackupStatus(t("backupFail"));
+    reader.readAsText(file, "utf-8");
+  });
+
   function loadAll() {
     return new Promise((resolve) => {
       try {
@@ -1892,6 +2066,11 @@
       const key = el.getAttribute("data-i18n-placeholder");
       if (!key) return;
       el.placeholder = t(key);
+    });
+    document.querySelectorAll("[data-i18n-title]").forEach((el) => {
+      const key = el.getAttribute("data-i18n-title");
+      if (!key) return;
+      el.title = t(key);
     });
     if (langToggle) langToggle.textContent = uiLang === "zh" ? "EN" : "中文";
     if (offsetHint) offsetHint.innerHTML = t("offsetHintHtml");

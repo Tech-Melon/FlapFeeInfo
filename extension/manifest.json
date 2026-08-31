@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.135",
-  "description": "FlapFeeInfo 0.8.135: Debot 推特备注挂到第 2 个小图标后面。",
+  "version": "0.8.142",
+  "description": "FlapFeeInfo 0.8.142: 弹窗导入导出；发币次数贴左色条；GMGN 推特备注挂预览图标右侧。",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

@@ -745,6 +745,7 @@ body .gmgn-fee-mode-icon {
 [data-sentry-source-file="TokenItem.tsx"].flap-card-mark,
 a[href*="/token/"].flap-card-mark {
   position: relative;
+  overflow: visible;
 }
 
 .flap-card-mark--dev {
@@ -786,15 +787,20 @@ a[href*="/token/"].flap-card-mark {
 
 .flap-dev-count-chip {
   position: absolute;
-  left: 6px;
-  top: 6px;
-  z-index: 6;
+  left: 4px;
+  top: 4px;
+  z-index: 50;
   padding: 1px 5px;
   border-radius: 4px;
   font-size: 10px;
   color: #111;
   background: var(--flap-chip-color, #f59e0b);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--flap-chip-color, #f59e0b) 55%, #000);
+}
+
+a[href*="/token/"] > .flap-dev-count-chip {
+  top: 50%;
+  transform: translateY(-50%);
 }
 
 .flap-tw-note-chip {

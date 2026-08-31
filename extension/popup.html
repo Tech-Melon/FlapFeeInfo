@@ -13,7 +13,34 @@
           <div class="title" data-i18n="appTitle">技术瓜FlapFeeInfo</div>
           <div class="sub" data-i18n="appSub">税收徽章 · 许可证 · 设置</div>
         </div>
-        <button type="button" class="lang-btn" id="langToggle" title="Language">EN</button>
+        <div class="head-actions">
+          <button
+            type="button"
+            class="backup-btn"
+            id="backupMenuBtn"
+            data-i18n-title="backupTitle"
+            title="导入 / 导出配置"
+            aria-expanded="false"
+            aria-haspopup="true"
+            aria-controls="backupMenu"
+          >
+            <span class="backup-btn-icon" aria-hidden="true">💾</span>
+            <span data-i18n="backupBtn">导入/导出</span>
+          </button>
+          <button type="button" class="lang-btn" id="langToggle" title="Language">EN</button>
+        </div>
+        <div class="backup-menu" id="backupMenu" hidden>
+          <div class="backup-title" data-i18n="backupTitle">导入 / 导出配置</div>
+          <p class="backup-hint" data-i18n="backupHint">
+            导出当前插件设置（徽章、过滤、标记、许可证、完整包工具）。换浏览器导入即可。不含徽章缓存和设备 ID，导入密钥后可能要换绑。
+          </p>
+          <div class="backup-actions">
+            <button type="button" class="btn btn-sm" id="backupExportBtn" data-i18n="backupExport">导出</button>
+            <button type="button" class="btn btn-sm" id="backupImportBtn" data-i18n="backupImport">导入</button>
+            <input type="file" id="backupImportFile" accept="application/json,.json" hidden />
+          </div>
+          <p class="status" id="backupStatus" aria-live="polite"></p>
+        </div>
       </div>
     </header>
 

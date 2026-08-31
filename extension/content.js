@@ -17,6 +17,11 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.141: GMGN 推特备注挂预览小图标右侧（不再跟 @handle 掉到下一行）。
+  // 0.8.140: ×N 贴卡片左侧色条旁（不挂头像、不挤排版）。
+  // 0.8.139: ×N 挂到头像容器左上（高 z-index），避免被头像盖住；不改卡片排版。
+  // 0.8.138: 发币次数贴头像左缘，不改卡片排版。
+  // 0.8.137: 发币次数 ×N 挪到头像左侧（卡片左内边距），不再叠在头像上。
   // 0.8.135: Debot 推特备注挂到指标行第 2 个小图标后，避开 overflow:auto/hidden 裁切。
   // 0.8.134: 三项卡片标记热路径降载 — 关闭时不扫 DOM；Debot 禁 fiber/innerText；Mutation 节流。
   // 0.8.133: 推特备注挂可跳转的 x.com/twitter 链接右侧（图标或 @handle 链都认，跳过 search）。
@@ -14707,17 +14712,20 @@
       if (!(el instanceof HTMLElement) || el === card) continue;
       const href = el.getAttribute("href") || "";
       if (!isTwitterJumpHref(href)) continue;
-      let score = 20;
-      const t = String(el.textContent || "").trim();
-      if (/^@[A-Za-z0-9_]{2,32}$/.test(t)) score += 40;
-      if (/\/status\//i.test(href)) score += 16;
+      let score = 10;
+      const t = String(el.textContent || "").replace(/\s+/g, "");
+      const isHandle = /^@[A-Za-z0-9_]{2,32}$/.test(t);
       try {
         const r = el.getBoundingClientRect();
         if (r.width < 4 || r.height < 4) continue;
-        if (r.width <= 32 && r.height <= 32) score += 12;
+        const iconish = r.width <= 28 && r.height <= 28;
+        if (iconish && !isHandle) score += 60;
+        else if (iconish) score += 18;
+        if (isHandle) score += 6;
       } catch (_br) {
-        // ignore
+        continue;
       }
+      if (/\/status\//i.test(href)) score += 18;
       if (score > bestScore) {
         bestScore = score;
         best = el;
@@ -14734,6 +14742,32 @@
       if (/^@[A-Za-z0-9_]{2,32}$/.test(t)) return el;
     }
     return null;
+  }
+
+  function twNoteInsertAfter(anchor, card) {
+    if (!(anchor instanceof HTMLElement)) return null;
+    let el = anchor;
+    const p = el.parentElement;
+    if (
+      p instanceof HTMLElement &&
+      p !== card &&
+      !p.matches?.('[data-sentry-source-file="TokenItem.tsx"]')
+    ) {
+      try {
+        const r = p.getBoundingClientRect();
+        if (p.children.length <= 2 && r.width <= 40 && r.height <= 36) el = p;
+      } catch (_wrap) {
+        // keep anchor
+      }
+    }
+    return el;
+  }
+
+  function placeGmgnTwNoteChip(card, chip, anchor) {
+    if (!(chip instanceof HTMLElement) || !(card instanceof HTMLElement)) return;
+    const host = twNoteInsertAfter(anchor, card);
+    if (!(host instanceof HTMLElement) || !host.parentNode) return;
+    if (chip.previousElementSibling !== host) host.insertAdjacentElement("afterend", chip);
   }
 
   function scrapeTwHandleFromDom(card) {
@@ -14824,6 +14858,9 @@
     card.removeAttribute("data-flap-mark-ca");
     try {
       card.querySelectorAll("[data-flap-dev-chip='1'], [data-flap-tw-chip='1']").forEach((n) => n.remove());
+      card.querySelectorAll(".flap-dev-count-host").forEach((n) => {
+        n.classList.remove("flap-dev-count-host");
+      });
     } catch (_rm) {
       // ignore
     }
@@ -14844,6 +14881,13 @@
     }
   }
 
+  function placeDevCountChip(card, chip) {
+    if (!(chip instanceof HTMLElement) || !(card instanceof HTMLElement)) return;
+    if (chip.parentNode !== card) card.appendChild(chip);
+    chip.style.removeProperty("left");
+    chip.style.removeProperty("top");
+  }
+
   function upsertMarkChip(card, kind, text, color, anchor) {
     const attr = kind === "dev" ? "data-flap-dev-chip" : "data-flap-tw-chip";
     const cls = kind === "dev" ? "flap-dev-count-chip" : "flap-tw-note-chip";
@@ -14860,23 +14904,19 @@
       if (kind === "tw" && isDebotHost()) {
         card.appendChild(chip);
       } else if (kind === "tw" && anchor instanceof HTMLElement && anchor.parentNode) {
-        anchor.insertAdjacentElement("afterend", chip);
+        placeGmgnTwNoteChip(card, chip, anchor);
       } else {
         card.appendChild(chip);
       }
     } else if (kind === "tw" && isDebotHost()) {
       if (chip.parentNode !== card) card.appendChild(chip);
-    } else if (
-      kind === "tw" &&
-      anchor instanceof HTMLElement &&
-      chip.previousElementSibling !== anchor &&
-      anchor.parentNode
-    ) {
-      anchor.insertAdjacentElement("afterend", chip);
+    } else if (kind === "tw" && anchor instanceof HTMLElement) {
+      placeGmgnTwNoteChip(card, chip, anchor);
     }
     if (chip.textContent !== text) chip.textContent = text;
     chip.style.setProperty("--flap-chip-color", color);
     chip.style.color = chipInkForHex(color);
+    if (kind === "dev") placeDevCountChip(card, chip);
     if (kind === "tw" && isDebotHost()) placeTwNoteChip(card, chip, anchor);
   }
 
@@ -14922,9 +14962,17 @@
       (!devRule || hasDevChip) &&
       (!twRule || hasTwChip)
     ) {
-      if (twRule && isDebotHost()) {
+      if (twRule) {
         const chip = card.querySelector("[data-flap-tw-chip='1']");
-        if (chip instanceof HTMLElement) placeTwNoteChip(card, chip, findTwNoteAnchor(card));
+        const anchor = findTwNoteAnchor(card);
+        if (chip instanceof HTMLElement) {
+          if (isDebotHost()) placeTwNoteChip(card, chip, anchor);
+          else placeGmgnTwNoteChip(card, chip, anchor);
+        }
+      }
+      if (devRule) {
+        const chip = card.querySelector("[data-flap-dev-chip='1']");
+        if (chip instanceof HTMLElement) placeDevCountChip(card, chip);
       }
       return;
     }

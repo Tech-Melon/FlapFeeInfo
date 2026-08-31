@@ -425,6 +425,7 @@ python tools/ctl.py watchdog-run
 | 开资金接收后新创建只剩很少卡 | 宿主 ~2 分钟轮出 + 屏蔽砍 👨‍🍳 + 无 SW 累积 | **0.7.4+** 保留池 10 分钟/40 卡；网页筛选+阈值配合 |
 | 抽样 feeMatch:false（行 CA≠徽章） | 虚拟列表复用短窗 | **0.7.4+** 无身份不 stable + scrub 后 cache 重画 |
 | 剪切板跳转不生效 | 未授权 / iOS 禁后台读 / 文本过长或不像地址 | 弹窗里确认开启；Windows 允许读取剪切板；iOS 用「立即检测」或粘贴框 |
+| 复制几遍才跳对 K 线 / 搜索不灵 | 0.8.138 点短地址 copy 先读到旧剪贴板并开跳 | 升到 **0.8.142+** 完整包；重载插件并硬刷 GMGN/Debot |
 | 复制短名没有弹出 GMGN 搜索 | 未开「复制即搜」/ 未授权 / 不在 GMGN 前台 / 字数超出或含空格 / 已搜过这段 | 完整包弹窗开启并刷新 GMGN；再复制一次才再搜 |
 | 文章重点样式没出现 | 未开开关 / 站点未加入 / 未授权 / 只加了路径但当前不在该路径 | 完整包弹窗添加主机名或 `debot.ai/popout/xTracker` 并允许访问；刷新目标页 |
 | GMGN 整页打不开 / 白屏 | 0.8.123 在 `Object.prototype` 上挂了 `onmessage` | **0.8.124+** 重载插件并硬刷页；不要停留在 0.8.123 |
@@ -701,7 +702,14 @@ python tools/ctl.py watchdog-run
  - `0.8.133`：推特备注挂可跳转的 x.com/twitter 链接右侧（Debot 是 14px 推文图标，不是下面的 @handle 文本；跳过 search）
  - `0.8.134`：三项卡片标记热路径降载 — 关闭时不扫 DOM；Debot 禁 fiber/innerText；Mutation 约 120ms 节流（href 换卡立刻重画）
  - `0.8.135`：Debot 推特备注改挂指标行第 2 个小图标后（避开 overflow 裁切，不再压住徽章）
-- 插件当前版本：见 `extension/manifest.json`（**0.8.135**，公开无剪切板）
+ - `0.8.136`：弹窗顶栏导入/导出全部设置；文章重点样式可改字体色/背景色并单独开关（专名、CAPS、$TICK、引号）
+ - `0.8.137`：发币次数 ×N 放到头像左侧，不再叠在头像角上
+ - `0.8.138`：发币次数贴头像左缘（不挤开排版）；复制 CA / 复制即搜不再被短地址 copy 事件挡住，页内已有代币链接时跳过 search_v3
+ - `0.8.139`：发币次数 ×N 挂到头像容器上（提高层级），修被头像盖住不显示
+ - `0.8.140`：发币次数 ×N 贴卡片左侧色条旁（不挂头像、不挤开排版）
+ - `0.8.141`：GMGN 推特备注挂到推特预览小图标右侧（不再跟 @handle 掉行）
+ - `0.8.142`：剪切板跳转/复制即搜 — 不再用 copy 时的旧剪贴板抢跳；writeText 优先；clipboardchange 新内容可搜；SPA 只认最新一次
+- 插件当前版本：见 `extension/manifest.json`（**0.8.142**，公开无剪切板）
 - page-hook：`HOOK_VER` **165**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
@@ -716,7 +724,7 @@ python tools/ctl.py watchdog-run
 - 剪切板跳转：`flapFeeInfo.clipJump.v1` = `{ enabled:false, target:"gmgn"|"debot", sites:"both"|"gmgn"|"debot", activeTabOnly:true, reuseSiteTab:false, pageMarkCa:false, overrideHostCa:false }`（默认关；开启需确认 + `clipboardRead` 可选权限）
 - 许可证（可选，默认免费）：`flapFeeInfo.license.v1` = `{ key:"" }`；有 key 时 content 带 `Authorization: Bearer`；Worker `REQUIRE_LICENSE` 默认 `0`（不强制）；开启付费时设 `1` 并写入 KV `license:<key>` → `{ exp, plan:"flap", flap_perm?:1 }`；**发卡**：TG Bot `flap_fee` **0.01 BNB/月**（动态尾数 0.009501~0.010100）；详见 `ENABLE_FLAP_MONETIZATION.md`
 - 复制即搜（仅完整包 / 仅 GMGN）：`flapFeeInfo.clipSearch.v1` = `{ enabled:false, minChars:2, maxChars:8 }`（默认关；开启需确认 + `clipboardRead`；与跳转共用 `clipJump.seen.v1` 去重）
-- 文章重点样式（仅完整包）：`flapFeeInfo.articleStyle.v1` = `{ enabled:false, theme:"dark"|"light", domains:[{id,host,path?,enabled}], nouns:[{id,word,enabled}], skips:[{id,word,enabled}] }`（默认关；`theme` 默认 `dark` 实心荧光笔，独立于徽章主题；`host` 可带路径如 `/popout/xTracker`；`skips` 屏蔽词最多 48 条）
+- 文章重点样式（仅完整包）：`flapFeeInfo.articleStyle.v1` = `{ enabled:false, theme:"dark"|"light", domains, nouns, skips, styles:{ noun|caps|ticker|quote: {enabled, fg, bg} } }`（默认关；`theme` 默认 `dark`；每种高亮可单独开关并改字体色/背景色）
 
 ---
 

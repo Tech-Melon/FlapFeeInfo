@@ -52,10 +52,22 @@ body {
 }
 
 .head-row {
+  position: relative;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
+}
+
+.head-row > div:first-child {
+  min-width: 0;
+}
+
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .title {
@@ -975,4 +987,72 @@ body {
   outline: none;
   border-color: var(--license-glow);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--license-glow) 22%, transparent);
+}
+
+.backup-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 8px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+  cursor: pointer;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.backup-btn-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.backup-btn:hover,
+.backup-btn[aria-expanded="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 22%, var(--card));
+  color: var(--text);
+}
+
+.backup-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 40;
+  width: 248px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.backup-title {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.backup-hint {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.backup-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.backup-menu .status {
+  min-height: 16px;
+  margin: 6px 0 0;
 }
