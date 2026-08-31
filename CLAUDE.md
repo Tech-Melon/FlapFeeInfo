@@ -271,9 +271,8 @@ if lpBps > 0:              💧
 
 跳转：
 
-- **主路径（推荐）**：GMGN/Debot 标签里的 content script 常驻。页可见且聚焦时轮询剪切板；切回该标签立刻读一次。定链可走同源 `search_v3`，再 `clip-spa.js` 站内跳。
-- **不要**把监听押在 MV3 Service Worker / offscreen 上：SW 会睡，隐藏页会被收，读剪切板还经常没焦点。
-- **offscreen 仅兜底**：人不在 GMGN/Debot 时，才尝试后台读并新开标签。
+- **主路径（推荐）**：GMGN/Debot 标签里的 content script 常驻。页可见且聚焦时轮询剪切板；切回该标签立刻读一次（未变则不跳）。定链可走同源 `search_v3`，再 `clip-spa.js` 站内跳。
+- **offscreen 后台**：人不在 GMGN/Debot 时轮询剪切板；读到新 CA 后**立刻激活已开站点标签并站内跳**（与复制即搜同一套 `forceFocus`），不必先点标签页。SW 用 offscreen 长连接保活。
 - **禁止** `chrome.tabs.update` 换地址栏（整页重载很慢）
 - 同一地址 2.5s 内不连跳
 
@@ -426,6 +425,7 @@ python tools/ctl.py watchdog-run
 | 抽样 feeMatch:false（行 CA≠徽章） | 虚拟列表复用短窗 | **0.7.4+** 无身份不 stable + scrub 后 cache 重画 |
 | 剪切板跳转不生效 | 未授权 / iOS 禁后台读 / 文本过长或不像地址 | 弹窗里确认开启；Windows 允许读取剪切板；iOS 用「立即检测」或粘贴框 |
 | 复制几遍才跳对 K 线 / 搜索不灵 | 0.8.138 点短地址 copy 先读到旧剪贴板并开跳 | 升到 **0.8.142+** 完整包；重载插件并硬刷 GMGN/Debot |
+| 别处复制 CA 要点 GMGN 标签才跳 | 后台读到后 SPA 仍要求页有焦点（`not-front`） | 升到 **0.8.143+** 完整包；重载插件并硬刷页 |
 | 复制短名没有弹出 GMGN 搜索 | 未开「复制即搜」/ 未授权 / 不在 GMGN 前台 / 字数超出或含空格 / 已搜过这段 | 完整包弹窗开启并刷新 GMGN；再复制一次才再搜 |
 | 文章重点样式没出现 | 未开开关 / 站点未加入 / 未授权 / 只加了路径但当前不在该路径 | 完整包弹窗添加主机名或 `debot.ai/popout/xTracker` 并允许访问；刷新目标页 |
 | GMGN 整页打不开 / 白屏 | 0.8.123 在 `Object.prototype` 上挂了 `onmessage` | **0.8.124+** 重载插件并硬刷页；不要停留在 0.8.123 |
@@ -709,7 +709,9 @@ python tools/ctl.py watchdog-run
  - `0.8.140`：发币次数 ×N 贴卡片左侧色条旁（不挂头像、不挤开排版）
  - `0.8.141`：GMGN 推特备注挂到推特预览小图标右侧（不再跟 @handle 掉行）
  - `0.8.142`：剪切板跳转/复制即搜 — 不再用 copy 时的旧剪贴板抢跳；writeText 优先；clipboardchange 新内容可搜；SPA 只认最新一次
-- 插件当前版本：见 `extension/manifest.json`（**0.8.142**，公开无剪切板）
+ - `0.8.143`：别处复制 CA 立即跳 K 线；多开 GMGN/Debot 时跳最近用过的那个标签（不用 sticky/最小 tabId）
+ - `0.8.144`：跳转提速 — search_v3 超时 2.5s→0.9s；定链与切标签并行；已在目标页不再空等 120ms
+- 插件当前版本：见 `extension/manifest.json`（**0.8.144**，公开无剪切板）
 - page-hook：`HOOK_VER` **165**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
