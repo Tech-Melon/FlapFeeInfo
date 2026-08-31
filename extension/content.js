@@ -17,6 +17,9 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.147: GMGN 推特短链 x.com/i/status/{id} 也能打备注（作者在链接文字里，旧逻辑把 /i/ 整段丢掉）。
+  // 0.8.146: 发币次数未拿到（0/缺字段）不上色，避免新卡先闪 <N 色条再改对。
+  // 0.8.145: 重复 symbol — 不用「2m」DOM 时间排序（同分钟会标反）；先见/列位决定先后；session 多标签合并而非整表覆盖。
   // 0.8.141: GMGN 推特备注挂预览小图标右侧（不再跟 @handle 掉到下一行）。
   // 0.8.140: ×N 贴卡片左侧色条旁（不挂头像、不挤排版）。
   // 0.8.139: ×N 挂到头像容器左上（高 z-index），避免被头像盖住；不改卡片排版。
@@ -559,7 +562,7 @@
   const DEV_COUNT_MARK_KEY = "flapFeeInfo.devCountMark.v1";
   const TW_HANDLE_MARK_KEY = "flapFeeInfo.twHandleMark.v1";
   const SYMBOL_DUP_MARK_KEY = "flapFeeInfo.symbolDupMark.v1";
-  const SYMBOL_DUP_SEEN_KEY = "flapFeeInfo.symbolDupSeen.v1";
+  const SYMBOL_DUP_SEEN_KEY = "flapFeeInfo.symbolDupSeen.v2";
   const DEFAULT_DEV_COUNT_MARK = { enabled: false, rules: [] };
   const DEFAULT_TW_HANDLE_MARK = { enabled: false, rules: [] };
   const DEFAULT_SYMBOL_DUP_MARK = {
@@ -2135,6 +2138,7 @@
   const symbolDupSigCache = new WeakMap();
   let symbolDupSeenSaveTimer = 0;
   let symbolDupPaintRaf = 0;
+  let symbolDupPersistSig = "";
   let cardMarkMutAt = 0;
   let cachedReactFiberKey = "";
   let searchOverlayDidHide = false;
@@ -14008,7 +14012,9 @@
 
   function pickDevCountRule(count) {
     if (!devCountMarkPrefs.enabled) return null;
-    const n = Math.max(0, Math.floor(Number(count) || 0));
+    const n = Math.floor(Number(count));
+    // 新卡首帧常缺 creator_created_count，会被当成 0，默认 <N 会先误上色再改对。
+    if (!Number.isFinite(n) || n <= 0) return null;
     const rules = devCountMarkPrefs.rules || [];
     const hits = [];
     for (let i = 0; i < rules.length; i += 1) {
@@ -14054,6 +14060,24 @@
       twHandleMarkPrefs.enabled === true ||
       symbolDupMarkPrefs.enabled === true
     );
+  }
+
+  function scheduleSymbolDupRepaint() {
+    if (symbolDupPaintRaf) return;
+    symbolDupPaintRaf = 1;
+    const kick = () => {
+      symbolDupPaintRaf = 0;
+      try {
+        paintSymbolDupMarks();
+      } catch (_p) {
+        // ignore
+      }
+    };
+    try {
+      window.queueMicrotask(kick);
+    } catch (_qm) {
+      window.setTimeout(kick, 0);
+    }
   }
 
   function trenchMarkCardSelector() {
@@ -14108,33 +14132,18 @@
     return Math.floor(n);
   }
 
-  function scrapeCardCreatedAt(card) {
-    if (!(card instanceof HTMLElement)) return 0;
-    const nodes = card.querySelectorAll("div, span, p");
-    const lim = Math.min(nodes.length, 40);
-    for (let i = 0; i < lim; i += 1) {
-      const el = nodes[i];
-      if (!(el instanceof HTMLElement)) continue;
-      if (el.querySelector?.("div, span, p")) continue;
-      const t = String(el.textContent || "").trim();
-      const m = t.match(/^(\d+)\s*([smhd])$/i);
-      if (!m) continue;
-      const n = Math.max(0, Number(m[1]) || 0);
-      const u = m[2].toLowerCase();
-      let ms = n * 1000;
-      if (u === "m") ms = n * 60000;
-      else if (u === "h") ms = n * 3600000;
-      else if (u === "d") ms = n * 86400000;
-      const created = Date.now() - ms;
-      if (created > 0) return created;
-    }
-    return 0;
-  }
-
   function sortSymbolDupCas(a, b) {
-    const ca = a.created > 0 ? a.created : a.at;
-    const cb = b.created > 0 ? b.created : b.at;
-    return ca - cb || a.at - b.at;
+    const ca = a.created > 0 ? a.created : 0;
+    const cb = b.created > 0 ? b.created : 0;
+    // 链上/API 常是秒级；同一秒的两个 CA 不能靠 created 分先后。
+    if (ca && cb && Math.abs(ca - cb) >= 1000) return ca - cb;
+    const ya = Number(a.y);
+    const yb = Number(b.y);
+    const aY = Number.isFinite(ya);
+    const bY = Number.isFinite(yb);
+    // 新创建列新币在上：列里越靠下越先出。只用相对位置，不用 Date.now()。
+    if (aY && bY && Math.abs(ya - yb) >= 4) return yb - ya;
+    return a.at - b.at || String(a.addr || "").localeCompare(String(b.addr || ""));
   }
 
   function symbolDupWindowMs() {
@@ -14163,8 +14172,7 @@
     }, 400);
   }
 
-  function persistSymbolDupSeen() {
-    if (!isExtensionContextValid() || !chrome.storage?.session) return;
+  function serializeSymbolDupSeen() {
     pruneSymbolDupMap(Date.now());
     const out = {};
     for (const [key, rec] of symbolDupByKey) {
@@ -14174,40 +14182,98 @@
         .filter((x) => x.a);
       if (cas.length) out[key] = cas;
     }
+    return out;
+  }
+
+  function mergeSymbolDupRows(key, rows) {
+    const nk = normalizeDupSymbol(key);
+    if (!nk || !Array.isArray(rows) || !rows.length) return false;
+    const now = Date.now();
+    const win = symbolDupWindowMs();
+    let rec = symbolDupByKey.get(nk);
+    if (!rec) rec = { cas: [] };
+    const byAddr = new Map(rec.cas.map((x) => [x.addr, x]));
+    let changed = false;
+    for (let i = 0; i < rows.length && byAddr.size < 24; i += 1) {
+      const row = rows[i] || {};
+      const addr = cardMarkMetaAddr(row.a || row.addr);
+      const at = Math.floor(Number(row.t || row.at) || 0);
+      const created = hostCreatedAtFromRaw(row.c || row.created);
+      if (!addr || now - at > win) continue;
+      const prev = byAddr.get(addr);
+      if (!prev) {
+        byAddr.set(addr, { addr, at: at || now, created });
+        changed = true;
+        continue;
+      }
+      if (at > 0 && at < prev.at) {
+        prev.at = at;
+        changed = true;
+      }
+      if (created > 0 && (!prev.created || created < prev.created)) {
+        prev.created = created;
+        changed = true;
+      }
+    }
+    if (!changed) return false;
+    rec.cas = Array.from(byAddr.values());
+    rec.cas.sort(sortSymbolDupCas);
+    symbolDupByKey.set(nk, rec);
+    return true;
+  }
+
+  function persistSymbolDupSeen() {
+    if (!isExtensionContextValid() || !chrome.storage?.session) return;
     try {
-      chrome.storage.session.set({ [SYMBOL_DUP_SEEN_KEY]: out });
-    } catch (_st) {
+      chrome.storage.session.get([SYMBOL_DUP_SEEN_KEY], (items) => {
+        if (!isExtensionContextValid() || chrome.runtime.lastError) return;
+        hydrateSymbolDupSeen(items?.[SYMBOL_DUP_SEEN_KEY]);
+        const out = serializeSymbolDupSeen();
+        const sig = JSON.stringify(out);
+        if (sig === symbolDupPersistSig) return;
+        symbolDupPersistSig = sig;
+        try {
+          chrome.storage.session.set({ [SYMBOL_DUP_SEEN_KEY]: out });
+        } catch (_st) {
+          // ignore
+        }
+      });
+    } catch (_sess) {
       // ignore
     }
   }
 
   function hydrateSymbolDupSeen(raw) {
-    if (!raw || typeof raw !== "object") return;
-    const now = Date.now();
-    const win = symbolDupWindowMs();
+    if (!raw || typeof raw !== "object") return false;
+    let changed = false;
     for (const key of Object.keys(raw)) {
-      const nk = normalizeDupSymbol(key);
-      if (!nk) continue;
-      const list = Array.isArray(raw[key]) ? raw[key] : [];
-      const cas = [];
-      const seen = new Set();
-      for (let i = 0; i < list.length && cas.length < 24; i += 1) {
-        const row = list[i] || {};
-        const addr = cardMarkMetaAddr(row.a || row.addr);
-        const at = Math.floor(Number(row.t || row.at) || 0);
-        const created = hostCreatedAtFromRaw(row.c || row.created);
-        if (!addr || seen.has(addr) || now - at > win) continue;
-        seen.add(addr);
-        cas.push({ addr, at, created });
-      }
-      if (cas.length) {
-        cas.sort(sortSymbolDupCas);
-        symbolDupByKey.set(nk, { cas });
+      if (mergeSymbolDupRows(key, raw[key])) changed = true;
+    }
+    return changed;
+  }
+
+  function applySymbolDupSeenFromStorage(raw) {
+    const sig = JSON.stringify(raw && typeof raw === "object" ? raw : {});
+    if (sig === symbolDupPersistSig) return;
+    const changed = hydrateSymbolDupSeen(raw);
+    const out = serializeSymbolDupSeen();
+    const outSig = JSON.stringify(out);
+    if (outSig !== sig) {
+      // 本页还有对方没写上的 CA，合并回去，避免后台标签整表覆盖。
+      schedulePersistSymbolDupSeen();
+    } else {
+      symbolDupPersistSig = outSig;
+    }
+    if (changed) {
+      try {
+        paintSymbolDupMarks();
+      } catch (_p) {
+        // ignore
       }
     }
   }
 
-  function noteSymbolDupSeen(addr, symbol, created) {
+  function noteSymbolDupSeen(addr, symbol, created, listY) {
     const key = normalizeDupSymbol(symbol);
     const a = cardMarkMetaAddr(addr);
     if (!key || !a) return;
@@ -14219,30 +14285,28 @@
       symbolDupByKey.set(key, rec);
     }
     const createdOk = created > 0 ? created : 0;
+    const y = Number(listY);
     const existing = rec.cas.find((x) => x.addr === a);
     let flipped = false;
     if (!existing) {
-      rec.cas.push({ addr: a, at: now, created: createdOk });
+      rec.cas.push({
+        addr: a,
+        at: now,
+        created: createdOk,
+        y: Number.isFinite(y) ? y : NaN
+      });
       flipped = true;
-    } else if (createdOk && (!existing.created || createdOk < existing.created)) {
-      existing.created = createdOk;
-      flipped = true;
-    }
-    if (flipped) {
-      rec.cas.sort(sortSymbolDupCas);
-      schedulePersistSymbolDupSeen();
-      if (rec.cas.length >= 2) {
-        if (!symbolDupPaintRaf) {
-          symbolDupPaintRaf = window.requestAnimationFrame(() => {
-            symbolDupPaintRaf = 0;
-            try {
-              paintSymbolDupMarks();
-            } catch (_p) {
-              // ignore
-            }
-          });
-        }
+    } else {
+      if (createdOk && (!existing.created || createdOk < existing.created)) {
+        existing.created = createdOk;
+        flipped = true;
       }
+      if (Number.isFinite(y)) existing.y = y;
+    }
+    rec.cas.sort(sortSymbolDupCas);
+    if (flipped) {
+      schedulePersistSymbolDupSeen();
+      if (rec.cas.length >= 2) scheduleSymbolDupRepaint();
     }
   }
 
@@ -14407,10 +14471,15 @@
     const created =
       (cached && cached.created) ||
       (fiber && (!fiber.address || fiber.address === addr) ? fiber.created : 0) ||
-      scrapeCardCreatedAt(card) ||
       0;
     if (created > 0 && cached && !cached.created) cached.created = created;
-    noteSymbolDupSeen(addr, symbol, created);
+    let listY = NaN;
+    try {
+      listY = card.getBoundingClientRect().top;
+    } catch (_vt) {
+      listY = NaN;
+    }
+    noteSymbolDupSeen(addr, symbol, created, listY);
     const { n, total } = lookupSymbolDup(addr, symbol);
     const waitDup = symbolDupMarkPrefs.waitDup !== false;
     const showFirst = n === 1 && (!waitDup || total >= 2);
@@ -14605,6 +14674,8 @@
     const s = String(href || "").trim();
     if (!s) return false;
     if (!/(?:^https?:\/\/)?(?:www\.)?(?:x\.com|twitter\.com)\//i.test(s)) return false;
+    // GMGN 新卡常用短链 x.com/i/status/{id}，作者只在链接文字里；勿把 /i/ 一律当内部页丢掉。
+    if (/\/i\/status\b/i.test(s)) return true;
     if (/\/(search|intent|i\/|home|share|explore|hashtag|compose)\b/i.test(s)) return false;
     return true;
   }
@@ -14733,7 +14804,7 @@
     }
     if (best) return best;
     const nodes = card.querySelectorAll("div, span, a");
-    const nlim = Math.min(nodes.length, 40);
+    const nlim = Math.min(nodes.length, 80);
     for (let i = 0; i < nlim; i += 1) {
       const el = nodes[i];
       if (!(el instanceof HTMLElement)) continue;
@@ -14778,14 +14849,14 @@
       const el = links[i];
       if (!(el instanceof HTMLElement)) continue;
       const href = el.getAttribute("href") || "";
+      const fromText = normalizeCardMarkHandle(el.textContent || "");
+      if (fromText) return fromText;
       if (!isTwitterJumpHref(href)) continue;
       const fromHref = normalizeCardMarkHandle(href);
       if (fromHref) return fromHref;
-      const fromText = normalizeCardMarkHandle(el.textContent || "");
-      if (fromText) return fromText;
     }
     const nodes = card.querySelectorAll("div, span, a");
-    const nlim = Math.min(nodes.length, 40);
+    const nlim = Math.min(nodes.length, 80);
     for (let i = 0; i < nlim; i += 1) {
       const el = nodes[i];
       if (!(el instanceof HTMLElement)) continue;
@@ -14939,17 +15010,20 @@
     const cached = cardMarkMetaByAddr.get(addr) || { count: 0, twitter: "" };
     const needFiber =
       isGmgnHost() &&
-      ((devCountMarkPrefs.enabled && !cached.count) ||
+      ((devCountMarkPrefs.enabled && !(cached.count > 0)) ||
         (twHandleMarkPrefs.enabled && !cached.twitter));
     const fiber = needFiber ? scrapeCardMarkFromFiber(card) : null;
     const fiberOk = Boolean(fiber) && (!fiber.address || fiber.address === addr);
-    const count = (fiberOk && fiber.count > 0 ? fiber.count : 0) || cached.count || 0;
+    const count =
+      (fiberOk && fiber.count > 0 ? fiber.count : 0) ||
+      (cached.count > 0 ? cached.count : 0) ||
+      0;
     const twitter =
       (fiberOk && fiber.twitter) ||
       cached.twitter ||
       (twHandleMarkPrefs.enabled ? scrapeTwHandleFromDom(card) : "") ||
       "";
-    const devRule = pickDevCountRule(count);
+    const devRule = count > 0 ? pickDevCountRule(count) : null;
     const twRule = pickTwHandleRule(twitter);
     const sig = `${addr}|${devRule ? `${devRule.op}:${devRule.min}:${devRule.color}:${count}` : ""}|${
       twRule ? `${twRule.handle}:${twRule.note}:${twRule.color}` : ""
@@ -16352,16 +16426,7 @@
         }
         if (data.type === "card-mark-meta") {
           if (mergeCardMarkMetaEntries(data.entries) && anyTrenchMarkOn()) {
-            if (!symbolDupPaintRaf) {
-              symbolDupPaintRaf = window.requestAnimationFrame(() => {
-                symbolDupPaintRaf = 0;
-                try {
-                  paintTrenchCardExtras();
-                } catch (_cm) {
-                  // ignore
-                }
-              });
-            }
+            scheduleSymbolDupRepaint();
           }
           return;
         }
@@ -17046,6 +17111,12 @@
     if (!isExtensionContextValid() || !chrome.storage?.onChanged) return;
     try {
       chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === "session") {
+          if (changes[SYMBOL_DUP_SEEN_KEY]) {
+            applySymbolDupSeenFromStorage(changes[SYMBOL_DUP_SEEN_KEY].newValue);
+          }
+          return;
+        }
         if (area !== "local") return;
         let dirty = false;
         if (changes[DISPLAY_PREFS_KEY]) {

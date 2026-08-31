@@ -1164,6 +1164,7 @@
     DEVICE_ID_KEY,
     "flapFeeInfo.modeCache.v5",
     "flapFeeInfo.symbolDupSeen.v1",
+    "flapFeeInfo.symbolDupSeen.v2",
     "flapFeeInfo.clipJump.chainCache.v2",
     "flapFeeInfo.clipJump.seen.v1",
     "flapFeeInfo.badgeDragEdit.v1",

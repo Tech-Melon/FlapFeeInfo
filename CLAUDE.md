@@ -432,7 +432,10 @@ python tools/ctl.py watchdog-run
 | 资金接收/金库我这边正常、部分用户没有 | GMGN 手机或 Worker 降级走 MAIN_THREAD：假 MessagePort + SNAP_SHOT，旧钩子只拦 SharedWorker PATCH | **0.8.124+**（勿用 0.8.123，会把 Object.prototype.onmessage 挂上导致打不开）；对方重载插件并硬刷 GMGN |
 | 刷新或多开 GMGN 新创建无法屏蔽 | SharedWorker 已有约 60 条，新页不打 HTTP，改走 `getFullFrame` RPC（`request_plugin.response.body`）；旧钩子不拆 `response` | **0.8.125+** 重载插件并硬刷每个 GMGN 标签 |
 | 卡片标记（发币次数/推特备注）没出现 | 未开开关 / 没加规则 / GMGN 新币 count 仍为 0 / 非战壕行卡 | **0.8.130+** 弹窗启用并加规则；Debot 看 ranks `created_count`；重载插件并硬刷 GMGN/Debot |
+| 推特备注只标部分同 handle 卡 | 新卡 twitter 常是 `i/status/{id}`，旧逻辑把 `/i/` 当无效链丢掉 | 升到 **0.8.147+**；重载插件并硬刷页 |
+| 新卡先闪一下发币次数色条/`×0` 再变对 | 缺次数时被当成 0，默认 `<N` 先命中 | 升到 **0.8.146+**；没拿到正数次数不上色 |
 | 新创建重复代号没高亮 | 未开开关 / 窗口内只有 1 个且开了「等相同代号」 / 不在新创建列 | **0.8.131+** 弹窗「卡片标记 → 新创建重复代号」；关「等相同」则首次立刻上色 |
+| 新创建重复代号标反（红泡在先出的那张） | 旧版用卡片「2m」/先扫到的当第 1 个；同秒 CA 分不开；多标签 session 整表覆盖 | 升到 **0.8.145+**；重载插件并硬刷页（会丢旧 session 计数） |
 | 卡片标记上下滑就消失 | 虚拟列表复用 TokenItem：改 href + 拆内部 DOM；旧版停滚只补徽章不重画标记 | **0.8.127+** 重载插件并硬刷 GMGN |
 | 开卡片标记后战壕卡顿 | 旧版关着也会 clearAll 全页扫；开着会 fiber + innerText 强制布局 | **0.8.134+** 关着不扫；Debot 禁 fiber/innerText；Mutation 节流 |
 
@@ -711,7 +714,10 @@ python tools/ctl.py watchdog-run
  - `0.8.142`：剪切板跳转/复制即搜 — 不再用 copy 时的旧剪贴板抢跳；writeText 优先；clipboardchange 新内容可搜；SPA 只认最新一次
  - `0.8.143`：别处复制 CA 立即跳 K 线；多开 GMGN/Debot 时跳最近用过的那个标签（不用 sticky/最小 tabId）
  - `0.8.144`：跳转提速 — search_v3 超时 2.5s→0.9s；定链与切标签并行；已在目标页不再空等 120ms
-- 插件当前版本：见 `extension/manifest.json`（**0.8.144**，公开无剪切板）
+ - `0.8.145`：新创建重复代号 — 不用 DOM「2m」排序；同秒 CA 按列里上下位置（下=先出）；session 多标签合并而非整表覆盖（`symbolDupSeen.v2`）
+ - `0.8.146`：新卡发币次数未到（0/缺字段）不上色，避免默认 `<N` 先闪错误色条
+ - `0.8.147`：GMGN 推特短链 `x.com/i/status/{id}` 也能打备注（作者在链接文字；旧逻辑误丢 `/i/`）
+- 插件当前版本：见 `extension/manifest.json`（**0.8.147**，公开无剪切板）
 - page-hook：`HOOK_VER` **165**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
@@ -722,7 +728,7 @@ python tools/ctl.py watchdog-run
 - 搜索框也屏蔽：`flapFeeInfo.searchHide.v1` = `{ enabled:false }`（默认关；开启后把已启用的资金接收/金库规则套到 GMGN 搜索弹层）
 - Dev 发币次数标记：`flapFeeInfo.devCountMark.v1` = `{ enabled, rules:[{id,op,min,color,enabled}] }`（`op` 为 `lt|lte|eq|gte|gt`，缺省按 `gte`；最多 12 条；默认关）
 - 推特备注描边：`flapFeeInfo.twHandleMark.v1` = `{ enabled, rules:[{id,handle,note,color,enabled}] }`（最多 24 条 handle，备注如「何一」；默认关）
-- 新创建重复代号：`flapFeeInfo.symbolDupMark.v1` = `{ enabled, waitDup:true, windowMin:5, color:"#facc15" }`（默认关；`waitDup` 默认开；session 计数 `symbolDupSeen.v1`）
+- 新创建重复代号：`flapFeeInfo.symbolDupMark.v1` = `{ enabled, waitDup:true, windowMin:5, color:"#facc15" }`（默认关；`waitDup` 默认开；session 计数 `symbolDupSeen.v2`，按 CA 合并；同秒不靠 created）
 - 剪切板跳转：`flapFeeInfo.clipJump.v1` = `{ enabled:false, target:"gmgn"|"debot", sites:"both"|"gmgn"|"debot", activeTabOnly:true, reuseSiteTab:false, pageMarkCa:false, overrideHostCa:false }`（默认关；开启需确认 + `clipboardRead` 可选权限）
 - 许可证（可选，默认免费）：`flapFeeInfo.license.v1` = `{ key:"" }`；有 key 时 content 带 `Authorization: Bearer`；Worker `REQUIRE_LICENSE` 默认 `0`（不强制）；开启付费时设 `1` 并写入 KV `license:<key>` → `{ exp, plan:"flap", flap_perm?:1 }`；**发卡**：TG Bot `flap_fee` **0.01 BNB/月**（动态尾数 0.009501~0.010100）；详见 `ENABLE_FLAP_MONETIZATION.md`
 - 复制即搜（仅完整包 / 仅 GMGN）：`flapFeeInfo.clipSearch.v1` = `{ enabled:false, minChars:2, maxChars:8 }`（默认关；开启需确认 + `clipboardRead`；与跳转共用 `clipJump.seen.v1` 去重）
