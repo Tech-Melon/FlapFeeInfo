@@ -10,7 +10,7 @@
  * ★ BSC 税币过滤 + GMGN Robinhood pons v2 host-fee（不打 /modes）；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 170;
+  const HOOK_VER = 173;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -883,16 +883,17 @@
   }
 
   /** WBNB / 零地址等常见分红代币 → 展示符号 */
-  function symbolFromKnownTokenAddress(addr) {
+  function symbolFromKnownTokenAddress(addr, rhHint) {
     const a = String(addr || "")
       .trim()
       .toLowerCase();
     if (!a) return "";
-    if (isRobinhoodPageContext() && ROBINHOOD_QUOTE_BY_ADDR[a]) {
+    // USDG/WETH 等 RH 专用 CA：按地址查，不看整页 chain（Debot 混合战壕）
+    if (ROBINHOOD_QUOTE_BY_ADDR[a]) {
       return ROBINHOOD_QUOTE_BY_ADDR[a];
     }
     if (a === "0x0000000000000000000000000000000000000000") {
-      return isRobinhoodPageContext() ? "ETH" : "BNB";
+      return rhHint || isRobinhoodPageContext() ? "ETH" : "BNB";
     }
     if (a === WBNB_ADDR) return "BNB";
     if (a === "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c") return "BTCB";
@@ -904,7 +905,7 @@
   }
 
   /** 只在明确知道分红代币时才给符号：地址=CA 用发射名；WBNB/TRX/… 用已知表；否则空，等 /modes。 */
-  function resolveKnownDividendSymbol(divAddr, tokenAddr, selfSym) {
+  function resolveKnownDividendSymbol(divAddr, tokenAddr, selfSym, rhHint) {
     const a = String(divAddr || "")
       .trim()
       .toLowerCase();
@@ -914,7 +915,7 @@
       .toLowerCase();
     if (tok && a === tok) return String(selfSym || "").trim();
     return (
-      symbolFromKnownTokenAddress(a) ||
+      symbolFromKnownTokenAddress(a, rhHint) ||
       symbolFromKnownStockAddress(a) ||
       ""
     );
@@ -1419,7 +1420,9 @@
   const WBNB_ADDR = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c";
   const ROBINHOOD_QUOTE_BY_ADDR = {
     "0x5fc5360d0400a0fd4f2af552add042d716f1d168": "USDG",
-    "0xc08751e47611f035b958889557edbbe33d4a8bce": "WETH"
+    "0xc08751e47611f035b958889557edbbe33d4a8bce": "WETH",
+    "0x117cc2133c37b721f49de2a7a74833232b3b4c0c": "SPY",
+    "0x4a0e65a3eccec6dbe60ae065f2e7bb85fae35eea": "SPCX"
   };
   let hostFeeQuotePatchTimer = 0;
   const hostFeeQuotePatchPending = [];
@@ -2119,8 +2122,61 @@
 
   function debotRowIsBsc(row) {
     const chain = debotRowChain(row);
-    if (chain) return chain === "bsc";
-    return isBscPageContext();
+    if (chain === "bsc") return true;
+    if (chain && chain !== "bsc") return false;
+    const href = String(row.href || row.url || row.path || row.token_url || row.link || "");
+    if (/\/token\/bsc\/|\/bsc\/token\//i.test(href)) return true;
+    if (/\/token\/robinhood\/|\/robinhood\/token\//i.test(href)) return false;
+    const addr = String(
+      row.contract || row.tokenAddress || row.token_address || row.address || ""
+    )
+      .trim()
+      .toLowerCase();
+    return TARGET_TOKEN_RE.test(addr);
+  }
+
+  function debotRowLaunchpad(row) {
+    if (!row || typeof row !== "object") return "";
+    const meta = row.meta && typeof row.meta === "object" ? row.meta : null;
+    return String((meta && meta.launchpad) || row.launchpad || "")
+      .trim()
+      .toLowerCase();
+  }
+
+  function debotRowIsPonsV2(row) {
+    const lp = debotRowLaunchpad(row);
+    return lp === "pons_v2" || lp.indexOf("pons_v2") !== -1;
+  }
+
+  const DEBOT_RH_SKIP_TTL_MS = 45000;
+  const debotRhSkipAt = new Map();
+
+  function debotRememberRhSkip(addr) {
+    const a = String(addr || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(a)) return;
+    debotRhSkipAt.set(a, Date.now());
+    if (debotRhSkipAt.size <= 400) return;
+    const now = Date.now();
+    for (const [k, t] of debotRhSkipAt) {
+      if (now - t > DEBOT_RH_SKIP_TTL_MS) debotRhSkipAt.delete(k);
+      if (debotRhSkipAt.size <= 300) break;
+    }
+  }
+
+  function debotRhSkipFresh(addr) {
+    const a = String(addr || "").toLowerCase();
+    const t = debotRhSkipAt.get(a);
+    if (!t) return false;
+    if (Date.now() - t > DEBOT_RH_SKIP_TTL_MS) {
+      debotRhSkipAt.delete(a);
+      return false;
+    }
+    return true;
+  }
+
+  function debotClearRhSkip(addr) {
+    const a = String(addr || "").toLowerCase();
+    if (a) debotRhSkipAt.delete(a);
   }
 
   const DEBOT_REAL_POOL_QUOTE = new Set([
@@ -2132,7 +2188,8 @@
     "BUSD",
     "BTCB",
     "WETH",
-    "ETH"
+    "ETH",
+    "USDG"
   ]);
 
   function debotRealPoolQuoteSymbol(raw) {
@@ -2146,13 +2203,19 @@
 
   function debotHostFeeFromRow(row) {
     if (!row || typeof row !== "object") return null;
-    if (!debotRowIsBsc(row)) return null;
+    const pons = debotRowIsPonsV2(row);
+    const rhRow = debotRowChain(row) === "robinhood" || pons;
+    if (!debotRowIsBsc(row) && !pons) return null;
     const addr = String(
       row.contract || row.tokenAddress || row.token_address || row.address || ""
     )
       .trim()
       .toLowerCase();
-    if (!TARGET_TOKEN_RE.test(addr)) return null;
+    if (pons) {
+      if (!/^0x[a-f0-9]{40}$/.test(addr)) return null;
+    } else if (!TARGET_TOKEN_RE.test(addr)) {
+      return null;
+    }
     const meta = row.meta && typeof row.meta === "object" ? row.meta : null;
     const extra = (meta && meta.launchpad_extra) || row.launchpad_extra;
     if (!extra || typeof extra !== "object") return null;
@@ -2201,9 +2264,18 @@
     let quote_symbol = String(row.quote_symbol || extra.quote_symbol || "").trim();
     if (!quote_symbol && /^0x[a-f0-9]{40}$/.test(quote_token)) {
       quote_symbol =
-        symbolFromKnownTokenAddress(quote_token) ||
+        (rhRow && ROBINHOOD_QUOTE_BY_ADDR[quote_token]) ||
+        symbolFromKnownTokenAddress(quote_token, rhRow) ||
         symbolFromKnownStockAddress(quote_token) ||
         "";
+    }
+    if (rhRow && !quote_symbol) {
+      const qn = String(quote_token || "")
+        .trim()
+        .toLowerCase();
+      if (!qn || qn === WBNB_ADDR || qn === "0x0000000000000000000000000000000000000000") {
+        quote_symbol = "ETH";
+      }
     }
     if (!quote_symbol) {
       const fromPair = debotRealPoolQuoteSymbol(
@@ -2217,7 +2289,7 @@
     if (is_stocks_vault && basket_assets.length >= 2) {
       dividend_symbol = "";
     } else {
-      dividend_symbol = resolveKnownDividendSymbol(divAddr, addr, selfSym);
+      dividend_symbol = resolveKnownDividendSymbol(divAddr, addr, selfSym, rhRow);
       if (!dividend_symbol) {
         const extraName = String(
           extra.dividend_token_symbol ||
@@ -2242,7 +2314,7 @@
       if (!dividend_symbol && basket_assets[0] && !is_stocks_vault) {
         const baddr = String(basket_assets[0].address || "").toLowerCase();
         const bsym = String(basket_assets[0].symbol || "").trim();
-        const fromAddr = symbolFromKnownTokenAddress(baddr);
+        const fromAddr = symbolFromKnownTokenAddress(baddr, rhRow);
         const selfCompact = compactBasketSymbol(selfSym);
         const nativeDiv =
           !divAddr ||
@@ -2253,6 +2325,9 @@
           dividend_symbol = bsym;
         }
       }
+    }
+    if (pons && dividend_bps > 0 && !dividend_symbol && quote_symbol) {
+      dividend_symbol = quote_symbol;
     }
     const totalBps =
       dividend_bps +
@@ -2324,7 +2399,8 @@
         quote_symbol,
         tax_symbol: selfSym
       }),
-      __needsChain: needsChain
+      __pons_v2: pons,
+      __needsChain: pons ? false : needsChain
     });
   }
 
@@ -2489,7 +2565,9 @@
 
   function collectHostFeesFromDebotRow(row) {
     try {
-      if (debotRowIsBsc(row)) queueCardMarkFromItem(row);
+      if (debotRowIsBsc(row) || debotRowChain(row) === "robinhood") {
+        queueCardMarkFromItem(row);
+      }
     } catch (_q) {
       // ignore
     }
@@ -3902,6 +3980,7 @@
           bag.quote_token || bag.quote_address || extra.quote_token || extra.base_token || ""
         ).toLowerCase(),
         chain: String(bag.chain || meta.chain || "").toLowerCase(),
+        launchpad: String(bag.launchpad || meta.launchpad || "").toLowerCase(),
         meta
       };
     }
@@ -3953,6 +4032,15 @@
 
   function resolveDebotCardElement(node) {
     if (!(node instanceof HTMLElement)) return null;
+    const hrefRow = node.closest?.('a[href*="/token/"]');
+    if (hrefRow instanceof HTMLElement) {
+      try {
+        const r = hrefRow.getBoundingClientRect();
+        if (r.width >= 280 && r.height >= 70 && r.height <= 200) return hrefRow;
+      } catch (_el) {
+        // ignore
+      }
+    }
     let cur = node;
     for (let depth = 0; cur && depth < 14; depth += 1) {
       if (
@@ -3974,7 +4062,7 @@
       card.dataset?.contract ||
       card.dataset?.address ||
       "";
-    if (TARGET_TOKEN_RE.test(fromAttr)) return String(fromAttr).toLowerCase();
+    if (/^0x[a-fA-F0-9]{40}$/i.test(fromAttr)) return String(fromAttr).toLowerCase();
     const href =
       card.querySelector?.("a[href*='0x']")?.getAttribute("href") ||
       card.getAttribute("href") ||
@@ -4076,10 +4164,22 @@
   function processDebotReactTaxCard(card) {
     if (!(card instanceof HTMLElement)) return;
     const scope = resolveDebotCardElement(card);
+    const href = String(scope?.getAttribute?.("href") || card.getAttribute("href") || "");
+    const hrefAddr = (href.match(/0x[a-fA-F0-9]{40}/i) || [])[0];
+    if (/\/token\/robinhood\//i.test(href) && debotRhSkipFresh(hrefAddr)) return;
     const scraped = scrapeDebotLaunchpadFromFiber(scope);
     const addr = debotAddrFromCard(scope) || String(scraped?.contract || "").toLowerCase();
-    if (!TARGET_TOKEN_RE.test(addr) || !scraped) return;
+    if (!scraped) return;
     const row = { ...scraped, contract: addr };
+    const pons = debotRowIsPonsV2(row);
+    if (!TARGET_TOKEN_RE.test(addr) && !pons) {
+      const lp = debotRowLaunchpad(row);
+      if (/\/token\/robinhood\//i.test(href) && addr && lp && !pons) {
+        debotRememberRhSkip(addr);
+      }
+      return;
+    }
+    if (pons && addr) debotClearRhSkip(addr);
     let entry = debotHostFeeFromRow(row);
     if (!entry) return;
     entry = applyDomSymbolsToHostFee(entry, scope, "debot");
@@ -4142,7 +4242,7 @@
         document.querySelectorAll(GMGN_HOST_FEE_ROOT_SEL).forEach((el) => push(el));
         if (!roots.length) {
           const sample = document.querySelector(
-            '[href*="/bsc/token/0x"], [href*="/robinhood/token/0x"]'
+            '[href*="/bsc/token/0x"], [href*="/robinhood/token/0x"], [href*="/token/bsc/0x"], [href*="/token/robinhood/0x"]'
           );
           const col = sample?.closest?.("div.flex.flex-col");
           if (col instanceof HTMLElement) push(col);
@@ -4200,11 +4300,18 @@
       const debot = hostIsDebot();
       let budget = HOST_FEE_SCAN_MAX_NODES;
       if (debot) {
-        const cards = root.matches?.("[data-contract], [href*='0x']")
+        const cards = root.matches?.(
+          "[data-contract], a[href*='/token/bsc/'], a[href*='/token/robinhood/']"
+        )
           ? [root]
-          : root.querySelectorAll?.("[data-contract], a[href*='0x']");
+          : root.querySelectorAll?.(
+              "[data-contract], a[href*='/token/bsc/'][href*='8888'], a[href*='/token/bsc/'][href*='7777'], a[href*='/token/bsc/'][href*='ffff'], a[href*='/token/robinhood/']"
+            );
         cards?.forEach?.((el) => {
           if (budget <= 0) return;
+          const href = String(el.getAttribute?.("href") || "");
+          const hrefAddr = (href.match(/0x[a-fA-F0-9]{40}/i) || [])[0];
+          if (/\/token\/robinhood\//i.test(href) && debotRhSkipFresh(hrefAddr)) return;
           budget -= 1;
           const card = resolveDebotCardElement(el);
           if (card instanceof HTMLElement) schedule(card, "debot");
@@ -4230,7 +4337,10 @@
           .trim()
           .toLowerCase();
         if (!/^0x[a-f0-9]{40}$/.test(token)) return;
-        if (!TARGET_TOKEN_RE.test(token) && !isRobinhoodPageContext()) return;
+        if (!TARGET_TOKEN_RE.test(token) && !isRobinhoodPageContext()) {
+          // Debot 混合战壕：pons CA 尾号随机，不能用页级 chain 挡掉
+          if (!/debot\.ai|gungnir\.bot/i.test(location.hostname || "")) return;
+        }
         const short = token.slice(-8);
         const roots = collectHostFeeObserveRoots();
         const scope = roots.length ? roots : [document.documentElement];

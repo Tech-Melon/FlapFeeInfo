@@ -207,7 +207,7 @@ if lpBps > 0:              💧
 | `*.debot.ai` | debot | 指标行挂载 |
 | `*.gungnir.bot` | debot | **与 Debot 同站不同域名**（同 Vite / 同 API）。测 Debot 即覆盖，不必单独开 Gungnir |
 
-Debot **不加** Robinhood。GMGN Robinhood 页面只有「新创建」+「已开盘」两列。
+Debot 混合战壕按**卡 href** 认链（`/token/bsc/` vs `/token/robinhood/`），不是整页一条链。扫卡必须同时收两种 href（不能只用 8888/7777/ffff 选择器）。Robinhood 列只画 **pons_v2**（不打 `/modes`）；同页 BSC 税币仍走 `/modes`。longxyz / bankr / pons v1 不画。Gungnir=Debot。
 
 底池前缀：Flap=🦋、Four=🖐️、pons v2 / 其它=🪙。Robinhood 默认报价 **ETH**（`icon_robinhoodeth` 或空地址）；QQQ/SPY 走 Tax 外 `/static/quotes` + `quotes.json` 的 `configs.robinhood`。
 
@@ -258,6 +258,9 @@ Debot **不加** Robinhood。GMGN Robinhood 页面只有「新创建」+「已�
 | GMGN Robinhood pons v2 + WETH 底池 | `🪙WETH \| …`（`qa=0xc08751e4…`，不要收成 ETH 或藏箭头） |
 | GMGN Robinhood pons v2 + ETH 厨师 | `🪙ETH \| 👨‍🍳`（已开盘列仍是 `pons_v2`） |
 | GMGN Robinhood longxyz / bankr / pons v1 | **不画徽章** |
+| Debot `?chain=bsc` 或 `?chain=robinhood` 混合三列 `/token/bsc/…7777` | 现有 BSC 徽章，打 `/modes`；底池 🦋/BNB 等跟卡走 |
+| Debot 同页 `/token/robinhood/` + `meta.launchpad=pons_v2` | 💎/👨‍🍳 + 🪙ETH/USDG/SPY；**不打** `/modes` |
+| Debot 同页 robinhood long / bankr / pons v1 | **不画** |
 
 #### 卡片标记（Robinhood）
 
@@ -460,6 +463,9 @@ python tools/ctl.py watchdog-run
 | Robinhood 💎→USDG / 🪙WETH 不显示 | quotes.json 无 USDG/WETH；0x0 当 BNB 把 ETH 分红藏掉 | 升到 **0.8.151+**；重载完整包并硬刷页 |
 | Robinhood 底池总是 🪙ETH | 每张卡都有 `IconRobinhoodeth` 链标，旧逻辑当底池，盖住 QQQ/SPY quotes 图 | 升到 **0.8.152+**；重载完整包并硬刷页 |
 | Robinhood 改完 BSC 底池/分红变了 | USDG/WETH 地址表曾写入共用 quotes 目录 | 升到 **0.8.153+**；BSC 与 RH 目录按链隔离 |
+| Debot `?chain=robinhood` 无徽章 | 旧版整页当非 BSC 清掉；混合战壕要按卡 `/token/robinhood/` + pons_v2 | 升到 **0.8.154+**；重载完整包并硬刷 Debot |
+| Debot 混合战壕只有 BSC 徽章、RH 卡空白 | 扫卡选择器仍只认 8888/7777/ffff，随机尾号 pons 进不了种子 | 升到 **0.8.155+**；重载完整包并硬刷 Debot |
+| Debot 混合战壕卡顿 / 源站变慢 | 0.8.155 把 long/bankr 也推进扫卡并反复扒 fiber | 升到 **0.8.156+**；重载完整包并硬刷 Debot |
 | 卡片标记（发币次数/推特备注）没出现 | 未开开关 / 没加规则 / GMGN 新币 count 仍为 0 / 非战壕行卡 | **0.8.130+** 弹窗启用并加规则；Debot 看 ranks `created_count`；Robinhood 战壕 **0.8.148+** 与 BSC 同套字段 |
 | 推特备注只标部分同 handle 卡 | 新卡 twitter 常是 `i/status/{id}`，旧逻辑把 `/i/` 当无效链丢掉 | 升到 **0.8.147+**；重载插件并硬刷页 |
 | 新卡先闪一下发币次数色条/`×0` 再变对 | 缺次数时被当成 0，默认 `<N` 先命中 | 升到 **0.8.146+**；没拿到正数次数不上色 |
@@ -752,8 +758,11 @@ python tools/ctl.py watchdog-run
  - `0.8.151`：Robinhood 底池/分红显示 USDG、WETH；ETH/USDG 分红不再被当成 BNB 藏掉
  - `0.8.152`：Robinhood 底池认 `quote_address` / quotes.png；`IconRobinhoodeth` 是链标不是底池
  - `0.8.153`：Robinhood USDG/WETH 地址表、quotes 种子、链标匹配只在 `?chain=robinhood`；BSC `pickStablePoolQuote` leftover / `/modes` 齐套不动
-- 插件当前版本：见 `extension/manifest.json`（**0.8.153**，公开无剪切板）
-- page-hook：`HOOK_VER` **170**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.154`：Debot 混合战壕按卡 href 认链；Robinhood 只画 pons_v2 host-fee；同页 BSC 7777/8888/ffff 仍打 `/modes`
+ - `0.8.155`：Debot 混合三列按 href 收 BSC+Robinhood 卡（不再用尾号选择器漏 pons）；`0x0` 原生报价跟卡（RH=ETH / BSC=BNB），不看整页 `?chain=`
+ - `0.8.156`：混合战壕降载 — 非 pons 负缓存、Debot 跳过叶扫与 O(n²) contains、稳定卡不再每轮 enrich DOM
+- 插件当前版本：见 `extension/manifest.json`（**0.8.156**，公开无剪切板）
+- page-hook：`HOOK_VER` **173**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  
