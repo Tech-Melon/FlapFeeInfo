@@ -10,10 +10,11 @@
 
 ## 1. 项目目标
 
-在 **GMGN / Debot / Gungnir** 等 meme 列表页上，给 BSC 上税收代币展示 **税收分配徽章**，并尽量附带 **底池/报价** 文字：
+在 **GMGN / Debot / Gungnir** 等 meme 列表页上，给税收代币展示 **税收分配徽章**，并尽量附带 **底池/报价** 文字：
 
-- **Flap**：尾号 **`8888` / `7777`** → Helper `getTaxTokenInfoV2`
-- **Four.meme**：尾号 **`ffff`** → token 链上 Multicall（`feeRateBuy/Sell` + `rate*` + `quote`）
+- **Flap**（BSC）：尾号 **`8888` / `7777`** → Helper `getTaxTokenInfoV2`
+- **Four.meme**（BSC）：尾号 **`ffff`** → token 链上 Multicall（`feeRateBuy/Sell` + `rate*` + `quote`）
+- **Pons V2**（GMGN `?chain=robinhood`）：`launchpad`/`launchpad_platform` = **`pons_v2`**（尾号随机）→ 只用 GMGN host-fee，**不打 `/modes`** / 不查 BSC Helper
 
 | 展示 | 含义 | 数据来源 |
 |------|------|----------|
@@ -112,13 +113,15 @@ FlapFeeInfo/
 
 ### 4.1 Token 过滤
 
-三层统一正则（概念上）：
+三层统一正则（BSC Flap/Four，概念上）：
 
 ```text
 ^0x[a-fA-F0-9]{36}(8888|7777|ffff)$
 ```
 
 改尾号规则时：**extension + worker + fee_mode_server + fee_mode** 必须同步。
+
+GMGN Robinhood **pons v2 不走这条正则**（CA 尾号随机）。识别：`chain=robinhood` 且 `launchpad`/`launchpad_platform` 含 `pons_v2`（含已开盘列；旧 id `pons` 是 v1，不要当 v2）。Worker / Python **不要改**。
 
 ### 4.2 链上 Helper
 
@@ -200,9 +203,13 @@ if lpBps > 0:              💧
 
 | 域名 | 策略名 | 说明 |
 |------|--------|------|
-| `*.gmgn.ai` | gmgn | 找 Tax 芯片，徽章挂外侧（防裁切） |
+| `*.gmgn.ai` | gmgn | BSC 税币徽章；**Robinhood pons v2** 同挂 Tax 外侧（不打 `/modes`） |
 | `*.debot.ai` | debot | 指标行挂载 |
 | `*.gungnir.bot` | debot | **与 Debot 同站不同域名**（同 Vite / 同 API）。测 Debot 即覆盖，不必单独开 Gungnir |
+
+Debot **不加** Robinhood。GMGN Robinhood 页面只有「新创建」+「已开盘」两列。
+
+底池前缀：Flap=🦋、Four=🖐️、pons v2 / 其它=🪙。Robinhood 默认报价 **ETH**（`icon_robinhoodeth` 或空地址）；QQQ/SPY 走 Tax 外 `/static/quotes` + `quotes.json` 的 `configs.robinhood`。
 
 新增站点：
 
@@ -218,8 +225,9 @@ if lpBps > 0:              💧
 |------|----------|
 | Debot / Gungnir | 战壕 `[aria-label*="流动池"]` / `img[alt]`（如 `BNB 流动池`）；**搜索弹层不走 host-fee / tokenPair 快路径，只等 `/modes`**。已画出的非 BNB 底池不得被空 DOM 默认 BNB 回退 |
 | GMGN RWA/美股 | `img[alt$=" quote icon"]` 或 `/static/quotes/{sym}.png` |
-| GMGN 特殊报价 | `data-icon` / `/static/icons/icon_usd1_*` 等 → `USD1` / `USDT` / `USDC` / `WETH` |
+| GMGN 特殊报价 | `data-icon` / `/static/icons/icon_usd1_*` 等 → `USD1` / `USDT` / `USDC` / `WETH`；Robinhood `icon_robinhoodeth` → `ETH` |
 | GMGN 默认 BNB 池 | **常无图标**（`quote_address=0x0`）；BSC 上无特殊报价时默认 `BNB` |
+| GMGN Robinhood 默认 ETH 池 | 空地址 / 仅 ETH 小标 → `ETH`（`GMGN_CHAIN_NATIVE_QUOTE.robinhood`） |
 | GMGN 税收分红图 | `TaxDividendTokenIcon`（`TaxDividendTokenIcons.tsx`）：`/static/quotes/{title}.png` 或 `external-res` logo；fiber `tokenInfo.{address,symbol}` |
 | GMGN 底池图 | Tax **外** `LaunchpadImageIcon` 的 `/static/quotes/`；**不是** `/static/lpp/` 发射台 logo |
 | GMGN 报价目录 | 同源 `/static/config/quotes.json`（`v`+`configs.{chain}[]`：`ca/title/iconSrcDark`）；新池子随 GMGN 更新，插件启动拉取 |
@@ -245,6 +253,22 @@ if lpBps > 0:              💧
 | `0x28b8aa38bbcb083a481383151c03074463ceffff` | Four v2 慈善 `🎓50%💛50%` hybrid；有报价时 `🖐️GMEB \| 🎓50%→GMEB💛50%` |
 | GMGN BSC 默认 BNB 池 7777/8888 | `🪙BNB \| …` |
 | GMGN USD1 池（`IconUsd116pxS`） | `🪙USD1 \| …` |
+| GMGN Robinhood pons v2 + QQQ 分红 | `🪙QQQ \| 💎→QQQ`（`launchpad=pons_v2`，不打 `/modes`；底池不要画成 ETH） |
+| GMGN Robinhood pons v2 + USDG 分红 | `🪙USDG \| 💎→USDG`（`qa=0x5fc5360…`，不要画成 `🪙ETH`） |
+| GMGN Robinhood pons v2 + WETH 底池 | `🪙WETH \| …`（`qa=0xc08751e4…`，不要收成 ETH 或藏箭头） |
+| GMGN Robinhood pons v2 + ETH 厨师 | `🪙ETH \| 👨‍🍳`（已开盘列仍是 `pons_v2`） |
+| GMGN Robinhood longxyz / bankr / pons v1 | **不画徽章** |
+
+#### 卡片标记（Robinhood）
+
+TokenItem 字段与 BSC 同套，开 Robinhood 扫卡门禁后三项都能用（不限 pons_v2，战壕行卡即可）：
+
+| 功能 | 数据 | 兼容 |
+|------|------|------|
+| Dev 发币次数 | `creator_created_count`（见过 1 / 7 / 473） | **可**。缺/0 仍不上色 |
+| 推特备注 | fiber `twitter` 或 DOM `x.com/{handle}` / `@handle` | **可**。`normalizeCardMarkHandle` 取 path 第一段 |
+| 新创建重复代号 | `symbol`/`s`；仅「新创建」列 | **可**。已开盘列不标 |
+| 资金接收 / 自定义尾号屏蔽 | 仍仅 BSC | **不扩** Robinhood |
 
 ### 4.6 剪切板跳转 K 线（本机 overlay，不进公开仓）
 
@@ -431,7 +455,12 @@ python tools/ctl.py watchdog-run
 | GMGN 整页打不开 / 白屏 | 0.8.123 在 `Object.prototype` 上挂了 `onmessage` | **0.8.124+** 重载插件并硬刷页；不要停留在 0.8.123 |
 | 资金接收/金库我这边正常、部分用户没有 | GMGN 手机或 Worker 降级走 MAIN_THREAD：假 MessagePort + SNAP_SHOT，旧钩子只拦 SharedWorker PATCH | **0.8.124+**（勿用 0.8.123，会把 Object.prototype.onmessage 挂上导致打不开）；对方重载插件并硬刷 GMGN |
 | 刷新或多开 GMGN 新创建无法屏蔽 | SharedWorker 已有约 60 条，新页不打 HTTP，改走 `getFullFrame` RPC（`request_plugin.response.body`）；旧钩子不拆 `response` | **0.8.125+** 重载插件并硬刷每个 GMGN 标签 |
-| 卡片标记（发币次数/推特备注）没出现 | 未开开关 / 没加规则 / GMGN 新币 count 仍为 0 / 非战壕行卡 | **0.8.130+** 弹窗启用并加规则；Debot 看 ranks `created_count`；重载插件并硬刷 GMGN/Debot |
+| Robinhood 徽章一直 ⏳待加载 | 0.8.148 把缺 quote/分红名的 host-fee 当 pending，又不能打 `/modes` | 升到 **0.8.149+**；重载完整包并硬刷页 |
+| Robinhood 新创建 👨‍🍳/💎 闪变 | BSC leftover💎 / dividendBecameReal 把 JSON 半包盖到 fiber 厨师上 | 升到 **0.8.150+**；Robinhood 禁止类型对打，BSC 合并逻辑不动 |
+| Robinhood 💎→USDG / 🪙WETH 不显示 | quotes.json 无 USDG/WETH；0x0 当 BNB 把 ETH 分红藏掉 | 升到 **0.8.151+**；重载完整包并硬刷页 |
+| Robinhood 底池总是 🪙ETH | 每张卡都有 `IconRobinhoodeth` 链标，旧逻辑当底池，盖住 QQQ/SPY quotes 图 | 升到 **0.8.152+**；重载完整包并硬刷页 |
+| Robinhood 改完 BSC 底池/分红变了 | USDG/WETH 地址表曾写入共用 quotes 目录 | 升到 **0.8.153+**；BSC 与 RH 目录按链隔离 |
+| 卡片标记（发币次数/推特备注）没出现 | 未开开关 / 没加规则 / GMGN 新币 count 仍为 0 / 非战壕行卡 | **0.8.130+** 弹窗启用并加规则；Debot 看 ranks `created_count`；Robinhood 战壕 **0.8.148+** 与 BSC 同套字段 |
 | 推特备注只标部分同 handle 卡 | 新卡 twitter 常是 `i/status/{id}`，旧逻辑把 `/i/` 当无效链丢掉 | 升到 **0.8.147+**；重载插件并硬刷页 |
 | 新卡先闪一下发币次数色条/`×0` 再变对 | 缺次数时被当成 0，默认 `<N` 先命中 | 升到 **0.8.146+**；没拿到正数次数不上色 |
 | 新创建重复代号没高亮 | 未开开关 / 窗口内只有 1 个且开了「等相同代号」 / 不在新创建列 | **0.8.131+** 弹窗「卡片标记 → 新创建重复代号」；关「等相同」则首次立刻上色 |
@@ -717,8 +746,14 @@ python tools/ctl.py watchdog-run
  - `0.8.145`：新创建重复代号 — 不用 DOM「2m」排序；同秒 CA 按列里上下位置（下=先出）；session 多标签合并而非整表覆盖（`symbolDupSeen.v2`）
  - `0.8.146`：新卡发币次数未到（0/缺字段）不上色，避免默认 `<N` 先闪错误色条
  - `0.8.147`：GMGN 推特短链 `x.com/i/status/{id}` 也能打备注（作者在链接文字；旧逻辑误丢 `/i/`）
-- 插件当前版本：见 `extension/manifest.json`（**0.8.147**，公开无剪切板）
-- page-hook：`HOOK_VER` **165**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.148`：GMGN Robinhood **pons v2** 徽章（host-fee，不打 `/modes`）；底池 🪙ETH/QQQ/SPY；卡片标记三项可兼容
+ - `0.8.149`：Robinhood 有 host-fee 分配即画，不再因缺 quote/分红名卡 ⏳（无 `/modes` 可等）
+ - `0.8.150`：Robinhood 厨师/分红闪变 — 只拦 RH 类型对打；BSC `hostFeePaintComplete` / leftover 启发式不动
+ - `0.8.151`：Robinhood 底池/分红显示 USDG、WETH；ETH/USDG 分红不再被当成 BNB 藏掉
+ - `0.8.152`：Robinhood 底池认 `quote_address` / quotes.png；`IconRobinhoodeth` 是链标不是底池
+ - `0.8.153`：Robinhood USDG/WETH 地址表、quotes 种子、链标匹配只在 `?chain=robinhood`；BSC `pickStablePoolQuote` leftover / `/modes` 齐套不动
+- 插件当前版本：见 `extension/manifest.json`（**0.8.153**，公开无剪切板）
+- page-hook：`HOOK_VER` **170**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  

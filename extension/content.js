@@ -17,6 +17,12 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.153: Robinhood 底池/地址表只在 ?chain=robinhood 生效，不写进 BSC quotes 目录。
+  // 0.8.152: Robinhood 底池优先 quote_address / quotes.png；IconRobinhoodeth 是链标不是底池。
+  // 0.8.151: Robinhood 底池/分红显示 USDG、WETH；ETH/USD 分红不再被当成 BNB 藏掉。
+  // 0.8.150: Robinhood 只开「缺字段直接画」；厨师/分红对打被 BSC leftover 启发式闪变则丢 JSON 半包。
+  // 0.8.149: Robinhood pons v2 禁止用 ⏳ 卡死（无 /modes）；host-fee 有分配即画。
+  // 0.8.148: GMGN Robinhood pons v2 徽章（不打 /modes）+ 卡片标记兼容。
   // 0.8.147: GMGN 推特短链 x.com/i/status/{id} 也能打备注（作者在链接文字里，旧逻辑把 /i/ 整段丢掉）。
   // 0.8.146: 发币次数未拿到（0/缺字段）不上色，避免新卡先闪 <N 色条再改对。
   // 0.8.145: 重复 symbol — 不用「2m」DOM 时间排序（同分钟会标反）；先见/列位决定先后；session 多标签合并而非整表覆盖。
@@ -632,9 +638,11 @@
   // GMGN special quote icons (not in /static/quotes/*.png RWA list).
   const GMGN_ICON_QUOTE_RULES = [
     [/usd1/i, "USD1"],
+    [/usdg/i, "USDG"],
     [/usdt/i, "USDT"],
     [/usdc/i, "USDC"],
     [/weth/i, "WETH"],
+    [/robinhoodeth|icon_robinhood/i, "ETH"],
     [/wbnb|bnbball|\bbnb\b/i, "BNB"]
   ];
   // js-mcp: Tax 分红图 = TaxDividendTokenIcon；底池图 = Tax 外 /static/quotes（LaunchpadImageIcon）。
@@ -650,6 +658,7 @@
   const gmgnQuoteByAddr = new Map();
   let gmgnQuotesLoadedAt = 0;
   let gmgnQuotesInflight = false;
+  let gmgnQuotesCatalogChain = "";
   // Native default quote when GMGN shows no quote chip (standard BNB pair has no icon).
   const REAL_POOL_QUOTE_SYMS = new Set([
     "BNB",
@@ -660,7 +669,8 @@
     "BUSD",
     "BTCB",
     "WETH",
-    "ETH"
+    "ETH",
+    "USDG"
   ]);
   const GMGN_CHAIN_NATIVE_QUOTE = {
     bsc: "BNB",
@@ -669,8 +679,11 @@
     blast: "WETH",
     arbitrum: "WETH",
     sol: "SOL",
-    tron: "TRX"
+    tron: "TRX",
+    robinhood: "ETH"
   };
+  const ponsV2AddrSet = new Set();
+  const ponsV2FiberCache = new WeakMap();
   // GMGN TokenItem is often div[href="/bsc/token/0x…7777"] (not always <a>) — include bare [href*].
   const SUFFIX_SELECTORS =
     "[href*='8888'], [href*='7777'], [href*='ffff'], [href*='FFFF'], " +
@@ -719,7 +732,7 @@
     }
     try {
       const marked = (card.dataset[CARD_MARK] || "").toLowerCase();
-      if (marked && TARGET_TOKEN_RE.test(marked)) {
+      if (marked && isFeeTargetToken(marked, card)) {
         const existing =
           card.querySelector?.(`[${ICON_DATA}="1"][data-fee-token="${marked}"]`) ||
           card.querySelector?.(`[${ICON_DATA}="1"]`);
@@ -776,7 +789,7 @@
         // 无完整 CA：任何实心徽章都不可信（⏳ 也拆，避免挂在错误行上）
         return true;
       }
-      if (!TARGET_TOKEN_RE.test(idCa)) return true;
+      if (!isFeeTargetToken(idCa, card)) return true;
       // fee 空或与行 CA 不一致 → 错徽章
       return !fee || fee !== idCa;
     };
@@ -831,7 +844,7 @@
       return { idCa: null, allowed: false, wiped };
     }
 
-    if (!TARGET_TOKEN_RE.test(idCa)) {
+    if (!isFeeTargetToken(idCa, card)) {
       wipeNonTargetCardBadges(card, idCa);
       return { idCa, allowed: false, wiped: true };
     }
@@ -851,6 +864,11 @@
   }
 
   const WBNB_ADDRESS = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c";
+  // js-mcp: quotes.json 的 robinhood 只有股票/QQQ/SPY，没有 USDG/WETH。
+  const ROBINHOOD_QUOTE_BY_ADDR = {
+    "0x5fc5360d0400a0fd4f2af552add042d716f1d168": "USDG",
+    "0xc08751e47611f035b958889557edbbe33d4a8bce": "WETH"
+  };
   /** 本页已解析的分红地址 → 符号（新创建连发同一分红币可秒出 →景甜） */
   const payoutSymbolByAddr = new Map();
 
@@ -861,7 +879,16 @@
     const s = compactDisplaySymbol(sym);
     if (!/^0x[a-f0-9]{40}$/.test(a) || !s) return;
     if (s === "BNB" || s === "WBNB") return;
+    if (a === "0x0000000000000000000000000000000000000000") return;
     payoutSymbolByAddr.set(a, s);
+  }
+
+  function robinhoodQuoteSymbolFromAddr(addr) {
+    if (!isGmgnRobinhoodPage()) return "";
+    const a = String(addr || "")
+      .trim()
+      .toLowerCase();
+    return ROBINHOOD_QUOTE_BY_ADDR[a] || "";
   }
 
   function symbolFromKnownPayoutAddress(addr) {
@@ -869,10 +896,12 @@
       .trim()
       .toLowerCase();
     if (!a) return "";
-    if (
-      a === WBNB_ADDRESS ||
-      a === "0x0000000000000000000000000000000000000000"
-    ) {
+    const rh = robinhoodQuoteSymbolFromAddr(a);
+    if (rh) return rh;
+    if (a === "0x0000000000000000000000000000000000000000") {
+      return isGmgnRobinhoodPage() ? "ETH" : "BNB";
+    }
+    if (a === WBNB_ADDRESS) {
       return "BNB";
     }
     if (a === "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c") return "BTCB";
@@ -1109,7 +1138,7 @@
     if (!(img instanceof Element)) return "";
     const src = img.currentSrc || img.getAttribute("src") || "";
     if (!src || isGmgnLaunchpadLogoSrc(src)) return "";
-    if (/\/static\/icons\//i.test(src) && !/icon_usd|icon_usdt|icon_usdc|icon_weth/i.test(src)) {
+    if (/\/static\/icons\//i.test(src) && !/icon_usd|icon_usdt|icon_usdc|icon_weth|icon_robinhood/i.test(src)) {
       return "";
     }
     const m = src.match(/\/(?:static\/)?quotes\/([^./?#]+)/i);
@@ -1419,7 +1448,7 @@
 
   function trySeedHostFeeForCard(card, token) {
     const tok = String(token || "").toLowerCase();
-    if (!TARGET_TOKEN_RE.test(tok) || !pageHookHostFeeReady()) return;
+    if (!isFeeTargetToken(tok, card) || !pageHookHostFeeReady()) return;
     try {
       window.dispatchEvent(
         new CustomEvent("flap-fee-scan-card", { detail: { token: tok } })
@@ -1565,6 +1594,10 @@
 
   function hostFeeCanSkipModes(entry) {
     if (!entry || isFeeLoadingEntry(entry)) return false;
+    // Robinhood 无 /modes：有分配就画。BSC 仍要求 hostFeePaintComplete（报价地址+分红名）。
+    if (isGmgnRobinhoodPage()) {
+      return hostFeeAllocationBps(entry) > 0;
+    }
     if (entry.source_host) return hostFeePaintComplete(entry);
     if (entry.__needsChain === true) return false;
     return hostFeeAllocationBps(entry) > 0;
@@ -1605,6 +1638,7 @@
 
   function tokenNeedsModesFetch(token) {
     const tok = String(token || "").toLowerCase();
+    if (isGmgnRobinhoodPage()) return false;
     if (!TARGET_TOKEN_RE.test(tok)) return false;
     if (shouldHideByCustomSuffix(tok)) return false;
     if (searchOverlayModesTokens.has(tok)) return true;
@@ -1667,6 +1701,7 @@
 
   function forceModesForWaitingToken(tok) {
     const token = String(tok || "").toLowerCase();
+    if (isGmgnRobinhoodPage()) return;
     if (!TARGET_TOKEN_RE.test(token) || !isExtensionContextValid()) return;
     if (!isBadgeAccessAllowed() || !isAllowedScanChain()) return;
     if (releaseQueuedTokenIfHostFeeReady(token)) return;
@@ -1685,6 +1720,7 @@
 
   function scheduleIncompleteModes(tok) {
     const token = String(tok || "").toLowerCase();
+    if (isGmgnRobinhoodPage()) return;
     if (!TARGET_TOKEN_RE.test(token) || incompleteModesTimers.has(token)) return;
     if (!isBadgeAccessAllowed() || !isAllowedScanChain()) return;
     if (releaseQueuedTokenIfHostFeeReady(token)) return;
@@ -1709,7 +1745,7 @@
 
   function paintLoadingBadgeAndQueue(card, token, options = {}) {
     const tok = String(token || "").toLowerCase();
-    if (!(card instanceof HTMLElement) || !TARGET_TOKEN_RE.test(tok)) return false;
+    if (!(card instanceof HTMLElement) || !isFeeTargetToken(tok, card)) return false;
     if (!isBadgeAccessAllowed()) return false;
     if (shouldDeferGmgnTrenchResizeWork()) return false;
     // 钱包追踪 / 顶 ticker / 搜索「钱包」区：禁止任何徽章
@@ -1730,6 +1766,23 @@
         scheduleIncompleteModes(tok);
         return false;
       }
+    }
+    // Robinhood 没有 /modes：有 host-fee 就画真徽章，绝不长期 ⏳。
+    if (isGmgnRobinhoodPage()) {
+      trySeedHostFeeForCard(card, tok);
+      const rhEntry = getEntryForCard(card, tok);
+      if (rhEntry && !isFeeLoadingEntry(rhEntry) && hostFeeAllocationBps(rhEntry) > 0) {
+        return paintListCardFromCacheFast(card, tok, rhEntry);
+      }
+      try {
+        const keep = card.querySelector(`[${ICON_DATA}="1"]`);
+        if (keep instanceof HTMLElement && keep.dataset.feeLoading === "1") {
+          keep.remove();
+        }
+      } catch (_rh) {
+        // ignore
+      }
+      return false;
     }
     // 有正式缓存时绝不画 ⏳（调用方应走真徽章路径；未稳定仍算待加载）
     if (isEntryReadyForDisplay(card, tok)) return false;
@@ -1831,10 +1884,10 @@
             continue;
           }
           const href = card.getAttribute("href") || "";
-          if (!TARGET_TOKEN_RE.test(extractAnyToken(href) || "")) {
+          if (!isFeeTargetToken(extractAnyToken(href) || "", card)) {
             const inner = card.querySelector(hrefSel);
             const h2 = inner ? inner.getAttribute("href") || "" : "";
-            if (!TARGET_TOKEN_RE.test(extractAnyToken(h2) || "")) continue;
+            if (!isFeeTargetToken(extractAnyToken(h2) || "", card)) continue;
           }
           sawViewportTarget = true;
           if (!card.querySelector(`[${ICON_DATA}="1"]`)) {
@@ -1987,7 +2040,7 @@
           card.querySelector?.("[href]")?.getAttribute("href") ||
           "";
         const ca = extractAnyToken(raw);
-        if (!ca || !TARGET_TOKEN_RE.test(ca)) continue;
+        if (!ca || !isFeeTargetToken(ca, card)) continue;
         // 已有正确徽章（含 ⏳）
         try {
           const good = findLocalBadgeForCard(card, ca);
@@ -3246,6 +3299,87 @@
     return "";
   }
 
+  /** GMGN Robinhood 列表 `?chain=robinhood` 或 K 线 `/robinhood/token/0x…` */
+  function isGmgnRobinhoodPage() {
+    if (!isGmgnHost()) return false;
+    const chain = resolvePageChain();
+    if (chain === "robinhood") return true;
+    return /\/robinhood\/token\//i.test(location.pathname || "");
+  }
+
+  function isRobinhoodTokenRouteHref(href) {
+    const h = String(href || "").toLowerCase();
+    if (!h || h.indexOf("/token/") === -1) return false;
+    return h.includes("/robinhood/token/") || /[?&]chain=robinhood(?:&|$)/i.test(h);
+  }
+
+  function rememberPonsV2Addr(addr) {
+    const a = String(addr || "").toLowerCase();
+    if (/^0x[a-f0-9]{40}$/.test(a)) ponsV2AddrSet.add(a);
+  }
+
+  function isPonsV2LaunchpadRaw(raw) {
+    const s = String(raw || "").toLowerCase();
+    return s === "pons_v2" || s.indexOf("pons_v2") !== -1;
+  }
+
+  /** TokenItem fiber：Robinhood 只认 pons_v2，不认尾号 / pons v1。 */
+  function scrapePonsV2FromCard(card) {
+    if (!(card instanceof HTMLElement) || !isGmgnRobinhoodPage()) return false;
+    const cached = ponsV2FiberCache.get(card);
+    if (cached && Date.now() - cached.at < 4000) return cached.ok;
+    let ok = false;
+    try {
+      let f = reactFiberOfCard(card);
+      for (let i = 0; i < 16 && f; i += 1) {
+        const p = f.memoizedProps;
+        if (p && typeof p === "object") {
+          const bags = [p.data, p.token, p.item, p.row, p];
+          for (let j = 0; j < bags.length; j += 1) {
+            const d = bags[j];
+            if (!d || typeof d !== "object") continue;
+            if (
+              isPonsV2LaunchpadRaw(
+                d.launchpad_platform || d.lpp || d.launchpad_platform_name || d.launchpad
+              )
+            ) {
+              ok = true;
+              const addr = extractAnyToken(
+                d.address || d.a || d.contract || card.getAttribute("href") || ""
+              );
+              if (addr) rememberPonsV2Addr(addr);
+              break;
+            }
+          }
+          if (ok) break;
+        }
+        f = f.return;
+      }
+    } catch (_e) {
+      ok = false;
+    }
+    ponsV2FiberCache.set(card, { ok, at: Date.now() });
+    return ok;
+  }
+
+  /**
+   * 徽章目标：BSC 仍是 8888/7777/ffff；GMGN Robinhood 只认 pons_v2（随机尾号）。
+   * 不扩三层尾号正则，也不打 /modes。
+   */
+  function isFeeTargetToken(addr, card) {
+    const a = String(addr || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(a)) return false;
+    if (isGmgnRobinhoodPage()) {
+      if (ponsV2AddrSet.has(a)) return true;
+      if (card && scrapePonsV2FromCard(card)) {
+        rememberPonsV2Addr(a);
+        return true;
+      }
+      return false;
+    }
+    return TARGET_TOKEN_RE.test(a);
+  }
+
   /** 非 BSC 链名（query/path/href 命中即拒绝） */
   const NON_BSC_CHAIN_RE =
     /(?:^|[/?&=_])(robinhood|rh|sol|eth|base|tron|monad|blast|op|arb|polygon|matic|avax|sui|ape)(?:$|[/?&=_])/i;
@@ -3294,23 +3428,29 @@
     const href = readCardTokenHref(card);
     if (!href) return isAllowedScanChain();
     if (String(href).toLowerCase().indexOf("/token/") === -1) return isAllowedScanChain();
-    return isBscTokenRouteHref(href);
+    if (isBscTokenRouteHref(href)) return true;
+    if (isGmgnRobinhoodPage() && isRobinhoodTokenRouteHref(href)) return true;
+    return false;
   }
 
   /**
-   * 仅 BSC：战壕/弹层/K 线/内嵌战壕。
+   * BSC 税币战壕 + GMGN Robinhood pons v2。
    * - 允许: ?chain=bsc | /bsc/token | /token/bsc | DOM 明确 BSC
-   * - 拒绝: 任何显式他链（robinhood/sol/eth/…），无「默认放行他链」
+   * - GMGN ?chain=robinhood | /robinhood/token（只画 pons_v2，不打 /modes）
+   * - 拒绝: 其它显式他链（sol/eth/…）
    */
   function isAllowedScanChain() {
     const chain = resolvePageChain();
     if (chain === "bsc") return true;
-    // 显式非 BSC 一律拒绝（不只 robinhood）；all/multi = Debot 融合战壕，改走卡级 /token/bsc
+    if (chain === "robinhood" && isGmgnHost()) return true;
+    // 显式非 BSC 一律拒绝；all/multi = Debot 融合战壕，改走卡级 /token/bsc
     if (chain && chain !== "all" && chain !== "multi") return false;
 
-    // 无 query chain：K 线必须路径含 bsc
+    // 无 query chain：K 线必须路径含 bsc 或 robinhood
     if (isGmgnTokenPage()) {
-      return /\/bsc\/token\//i.test(location.pathname || "");
+      const path = location.pathname || "";
+      if (/\/robinhood\/token\//i.test(path)) return true;
+      return /\/bsc\/token\//i.test(path);
     }
     if (isDebotTokenPage()) {
       return /\/token\/bsc(?:\/|$)/i.test(location.pathname || "");
@@ -3475,11 +3615,12 @@
     return false;
   }
 
-  /** CA from URL path (GMGN/Debot token detail). Only 8888/7777/ffff tax tokens. */
+  /** CA from URL path (GMGN/Debot token detail). BSC 税币尾号；Robinhood K 线任意 0x，画不画再看 pons_v2。 */
   function extractTokenFromUrl() {
     const m = String(location.pathname || "").match(/0x[a-fA-F0-9]{40}/i);
     if (!m) return null;
     const token = m[0].toLowerCase();
+    if (isGmgnRobinhoodPage()) return token;
     return TARGET_TOKEN_RE.test(token) ? token : null;
   }
 
@@ -3645,12 +3786,14 @@
     return found;
   }
 
-  /** Token detail URL with a CA that is NOT 8888/7777/ffff — no fee badge work needed. */
+  /** Token detail URL with a CA that is NOT a fee target — no fee badge work needed. */
   function isNonTargetTokenPage() {
     if (!isTokenDetailRoute()) return false;
     const m = String(location.pathname || "").match(/0x[a-fA-F0-9]{40}/i);
     if (!m) return false;
-    return !TARGET_TOKEN_RE.test(m[0].toLowerCase());
+    const token = m[0].toLowerCase();
+    if (isGmgnRobinhoodPage()) return false;
+    return !TARGET_TOKEN_RE.test(token);
   }
 
   /**
@@ -5858,7 +6001,7 @@
           siteStrategy?.extractToken?.(card) ||
           null;
         if (token) token = String(token).toLowerCase();
-        if (!token || !TARGET_TOKEN_RE.test(token)) {
+        if (!token || !isFeeTargetToken(token, card)) {
           if (card.dataset[CARD_MARK] || card.querySelector?.(`[${ICON_DATA}="1"]`)) {
             clearCardIcon(card);
           }
@@ -5924,7 +6067,7 @@
           extractCardTokenFromAttrs(card) ||
           extractCardHrefToken(card) ||
           normalizeToken(candidate.getAttribute("href") || "");
-        if (!TARGET_TOKEN_RE.test(token || "")) continue;
+        if (!isFeeTargetToken(token || "", card)) continue;
         seen.add(card);
         discovered += 1;
         const prevMark = (card.dataset[CARD_MARK] || "").toLowerCase();
@@ -6297,7 +6440,9 @@
   function routeKeyHasNonTargetToken(routeKey) {
     if (!routeKeyWasTokenDetail(routeKey)) return false;
     const token = extractAnyToken(routeKey);
-    return !!token && !TARGET_TOKEN_RE.test(token);
+    if (!token) return false;
+    if (/\/robinhood\/token\//i.test(String(routeKey || ""))) return !isFeeTargetToken(token);
+    return !TARGET_TOKEN_RE.test(token);
   }
 
   /**
@@ -6379,7 +6524,7 @@
           el.getAttribute("data-contract")
         ];
         const token = values.map((value) => extractAnyToken(value)).find(Boolean);
-        if (!token || (targetOnly && !TARGET_TOKEN_RE.test(token))) continue;
+        if (!token || (targetOnly && !isFeeTargetToken(token))) continue;
         push(el);
       }
 
@@ -6432,6 +6577,18 @@
       const attrs = root.querySelectorAll(SUFFIX_SELECTORS);
       const attrMax = Math.min(attrs.length, 120);
       for (let i = 0; i < attrMax && out.length < cap; i += 1) add(attrs[i]);
+
+      if (isGmgnRobinhoodPage() && out.length < cap) {
+        const items = root.querySelectorAll('[data-sentry-source-file="TokenItem.tsx"]');
+        const itemMax = Math.min(items.length, 40);
+        for (let i = 0; i < itemMax && out.length < cap; i += 1) {
+          const el = items[i];
+          if (!(el instanceof HTMLElement)) continue;
+          const tok = extractAnyToken(el.getAttribute("href") || "");
+          if (!tok) continue;
+          if (isFeeTargetToken(tok, el) || scrapePonsV2FromCard(el)) add(el);
+        }
+      }
 
       if (out.length < cap) {
         const leaves = root.querySelectorAll("span, a, p");
@@ -6572,7 +6729,9 @@
       // Skip external explorer icons (flap.sh) — climb to wrong thin hosts.
       const href = (el.getAttribute && el.getAttribute("href")) || "";
       if (/flap\.sh|bscscan|etherscan/i.test(href) && !(key instanceof HTMLElement)) return;
-      if (href && href.indexOf("/token/") !== -1 && !isBscTokenRouteHref(href)) return;
+      if (href && href.indexOf("/token/") !== -1 && !isBscTokenRouteHref(href)) {
+        if (!(isGmgnRobinhoodPage() && isRobinhoodTokenRouteHref(href))) return;
+      }
       seenKey.add(k);
       buckets[listColumnBucket(el)].push(el);
     };
@@ -6863,7 +7022,7 @@
     // 行 CA 必须匹配 token，禁止用缓存画错行
     const idCa = extractCardHrefToken(card);
     if (idCa && idCa !== token) return false;
-    if (idCa && !TARGET_TOKEN_RE.test(idCa)) return false;
+    if (idCa && !isFeeTargetToken(idCa, card)) return false;
     try {
       // 与 renderMode 一致：API → DOM → 链默认，禁止硬编码 BNB 造成先错后对
       const q = resolveQuoteSymbol(card, entry);
@@ -7157,11 +7316,12 @@
     }
   }
 
-  /** CA from a route key or path string (8888/7777/ffff only). */
+  /** CA from a route key or path string (BSC 税币尾号；Robinhood K 线任意 0x). */
   function extractTokenFromRouteKey(keyOrPath) {
     const m = String(keyOrPath || "").match(/0x[a-fA-F0-9]{40}/i);
     if (!m) return null;
     const token = m[0].toLowerCase();
+    if (/\/robinhood\/token\//i.test(String(keyOrPath || ""))) return token;
     return TARGET_TOKEN_RE.test(token) ? token : null;
   }
 
@@ -7206,7 +7366,7 @@
     });
   }
 
-  const PAGE_HOOK_VER = "165";
+  const PAGE_HOOK_VER = "170";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -7634,7 +7794,7 @@
           if (!href) return;
           if (!/\/token\//i.test(href) && !/0x[a-fA-F0-9]{40}/i.test(href)) return;
           const m = href.match(/0x[a-fA-F0-9]{40}/i);
-          if (m && !TARGET_TOKEN_RE.test(m[0].toLowerCase())) return;
+          if (m && !isFeeTargetToken(m[0].toLowerCase()) && !isRobinhoodTokenRouteHref(href)) return;
           armTokenPaint("click-arm");
         } catch (_err) {
           // ignore
@@ -7844,7 +8004,7 @@
           }
           if (!href || !/\/token\//i.test(href)) return;
           const m = href.match(/0x[a-fA-F0-9]{40}/i);
-          if (m && !TARGET_TOKEN_RE.test(m[0].toLowerCase())) return;
+          if (m && !isFeeTargetToken(m[0].toLowerCase()) && !isRobinhoodTokenRouteHref(href)) return;
           armTokenEnterTransition();
           window.setTimeout(() => {
             if (!isExtensionContextValid() || !isTabVisible()) return;
@@ -9373,7 +9533,7 @@
         if (!hrefTok) return false;
         if (hrefTok !== marked) return false;
         if (existing.dataset.feeToken !== hrefTok) return false;
-        if (!TARGET_TOKEN_RE.test(hrefTok)) return false;
+        if (!TARGET_TOKEN_RE.test(hrefTok) && !isFeeTargetToken(hrefTok, card)) return false;
       }
       return true;
     }
@@ -9631,7 +9791,7 @@
           // href 已是新 CA / 非目标：立刻清旧徽章，禁止「先错后对」
           if (
             liveHref &&
-            (!TARGET_TOKEN_RE.test(liveHref) ||
+            (!isFeeTargetToken(liveHref, card) ||
               (existingToken && liveHref !== existingToken))
           ) {
             clearCardIcon(card);
@@ -9714,28 +9874,28 @@
       // 身份 CA 唯一：优先行自身 href，禁止 hint/short 覆盖成别的 CA
       // GMGN：TokenItem href 优先；瞬时无 href 时允许 extractToken（ffff/7777 同权，勿直接 continue 饿死）
       let token = extractCardHrefToken(card);
-      if (!token || !TARGET_TOKEN_RE.test(token)) {
+      if (!token || !isFeeTargetToken(token, card)) {
         if (isGmgnHost()) {
           const rawHref = card.getAttribute?.("href") || "";
           if (rawHref && rawHref.indexOf("/token/") !== -1) {
             const any = extractAnyToken(rawHref);
-            if (any && !TARGET_TOKEN_RE.test(any)) {
+            if (any && !isFeeTargetToken(any, card)) {
               // 4444 等非目标：拆残留 7777 徽章
               wipeNonTargetCardBadges(card, any);
               continue;
             }
-            if (any && TARGET_TOKEN_RE.test(any)) {
+            if (any && isFeeTargetToken(any, card)) {
               token = any;
             }
           }
-          if (!token || !TARGET_TOKEN_RE.test(token)) {
+          if (!token || !isFeeTargetToken(token, card)) {
             // 回退 extract（仍受 identityTokenFromValue 禁社交链接约束）
             const fb = siteStrategy.extractToken(card);
-            if (fb && TARGET_TOKEN_RE.test(fb)) {
+            if (fb && isFeeTargetToken(fb, card)) {
               token = fb;
             } else {
               if (!listReturnSoft && !token) clearCardIcon(card);
-              if (!token || !TARGET_TOKEN_RE.test(token)) continue;
+              if (!token || !isFeeTargetToken(token, card)) continue;
             }
           }
         } else {
@@ -9752,7 +9912,7 @@
       if (!token) {
         // 非目标 CA（4444 等，ffff 是目标）：始终拆徽章，即使 soft 路径
         const idCa = extractCardHrefToken(card);
-        if (idCa && !TARGET_TOKEN_RE.test(idCa)) {
+        if (idCa && !isFeeTargetToken(idCa, card)) {
           wipeNonTargetCardBadges(card, idCa);
           continue;
         }
@@ -10908,6 +11068,11 @@
           if (/flap\.sh|bscscan|etherscan|lens\.google/i.test(href)) addNode(n, 1);
           else addNode(n, 2);
         });
+        if (isGmgnRobinhoodPage()) {
+          root.querySelectorAll('[data-sentry-source-file="TokenItem.tsx"]').forEach((n) => {
+            addNode(n, 2);
+          });
+        }
         return;
       }
       // list-return: href-only — skip SUFFIX + leaf walks.
@@ -11249,7 +11414,7 @@
   function wipeNonTargetCardBadges(card, identityCa) {
     if (!(card instanceof HTMLElement)) return;
     const id = identityCa || readHostRowToken(card) || extractCardHrefToken(card);
-    if (id && TARGET_TOKEN_RE.test(id)) return;
+    if (id && isFeeTargetToken(id, card)) return;
     try {
       card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
         try {
@@ -11377,7 +11542,7 @@
         }
         const idCa = readHostRowToken(host);
         // 宿主已是非目标尾号（4444 等）→ 必须拆（不论 fee 是什么）
-        if (idCa && !TARGET_TOKEN_RE.test(idCa)) {
+        if (idCa && !isFeeTargetToken(idCa, host)) {
           wipeNonTargetCardBadges(host, idCa);
           try {
             if (icon.isConnected) icon.remove();
@@ -11430,7 +11595,7 @@
   function tryRepaintCardAfterIdentityWipe(host, idCa) {
     if (!(host instanceof HTMLElement)) return;
     const tok = String(idCa || "").toLowerCase();
-    if (!TARGET_TOKEN_RE.test(tok)) return;
+    if (!isFeeTargetToken(tok, host)) return;
     if (isBadgeMountForbidden(host)) {
       wipeForbiddenMountBadges(host, true);
       return;
@@ -11438,7 +11603,7 @@
     // 再读一次宿主，防止 wipe 后 React 已换行
     const live = readHostRowToken(host) || extractCardHrefToken(host);
     if (live && live !== tok) return;
-    if (live && !TARGET_TOKEN_RE.test(live)) return;
+    if (live && !isFeeTargetToken(live, host)) return;
     try {
       host.dataset[CARD_MARK] = tok;
       host.setAttribute(CARD_DATA, tok);
@@ -11508,7 +11673,7 @@
           }
           continue;
         }
-        if (!TARGET_TOKEN_RE.test(idCa)) {
+        if (!isFeeTargetToken(idCa, host)) {
           wipeNonTargetCardBadges(host, idCa);
           continue;
         }
@@ -11570,7 +11735,7 @@
     // GMGN TokenItem 自身 div[href=/bsc/token/0x…] 是唯一身份（0.6.5）；
     // short 滞后时仍信 href，禁止再扫社交/邻行 CA 覆盖 ffff。
     if (hrefToken) {
-      if (!TARGET_TOKEN_RE.test(hrefToken)) {
+      if (!isFeeTargetToken(hrefToken, card)) {
         // 非目标尾号：清缓存 + 清残留徽章
         cardTokenCache.delete(card);
         wipeNonTargetCardBadges(card, hrefToken);
@@ -11748,7 +11913,7 @@
   function normalizeToken(value) {
     const token = extractAnyToken(value);
     if (!token) return null;
-    return TARGET_TOKEN_RE.test(token) ? token : null;
+    return isFeeTargetToken(token) ? token : null;
   }
 
   function hasFeeTag(text) {
@@ -11814,7 +11979,7 @@
     if (!card || !token) return false;
     const want = String(token).toLowerCase();
     // 徽章 token 本身必须是 7777/8888/ffff
-    if (!TARGET_TOKEN_RE.test(want)) return false;
+    if (!isFeeTargetToken(want, card)) return false;
 
     // 1) Token-route / any 0x href — authoritative identity during recycle.
     // Prefer raw host href (bypass short TTL cache) when available.
@@ -11829,7 +11994,7 @@
     }
     if (!hrefToken) hrefToken = extractCardHrefToken(card);
     if (hrefToken) {
-      if (!TARGET_TOKEN_RE.test(hrefToken)) return false;
+      if (!isFeeTargetToken(hrefToken, card)) return false;
       return hrefToken === want;
     }
 
@@ -11842,7 +12007,7 @@
     ]) {
       const dataToken = extractAnyToken(value);
       if (dataToken) {
-        if (!TARGET_TOKEN_RE.test(dataToken)) return false;
+        if (!TARGET_TOKEN_RE.test(dataToken) && !isFeeTargetToken(dataToken, card)) return false;
         return dataToken === want;
       }
     }
@@ -12131,6 +12296,7 @@
 
   function queueToken(token, options = {}) {
     const tok = String(token || "").toLowerCase();
+    if (isGmgnRobinhoodPage()) return;
     if (!TARGET_TOKEN_RE.test(tok)) return;
     // 非 BSC 页禁止入队（双保险）
     if (!isAllowedScanChain()) return;
@@ -12808,9 +12974,10 @@
     );
   }
 
-  /** 宿主首帧未齐套：一直 ⏳ 直到 /modes。链上结果不当 pending。 */
+  /** BSC 宿主首帧未齐套：一直 ⏳ 直到 /modes。Robinhood 单独短路，不改 BSC 齐套判断。 */
   function isHostFeeEntryPending(entry) {
     if (!entry || isFeeLoadingEntry(entry)) return false;
+    if (isGmgnRobinhoodPage()) return false;
     if (entry.source_host) return !hostFeeCanSkipModes(entry);
     return false;
   }
@@ -12885,7 +13052,7 @@
 
   function applyModeToKnownCards(token, entry, knownCards = null) {
     const tok = String(token || "").toLowerCase();
-    if (!TARGET_TOKEN_RE.test(tok)) return;
+    if (!isFeeTargetToken(tok)) return;
     // 0.6.5: CA 定位 — mark + href 含完整 CA 的行（不靠 climb 猜）
     const fromCa = findCardsByCa(tok);
     const fromMark = knownCards
@@ -12910,7 +13077,7 @@
       // 行身份 CA 必须就是 tok；否则拆掉误挂
       const idCa = extractCardHrefToken(card);
       if (idCa && idCa !== tok) {
-        if (!TARGET_TOKEN_RE.test(idCa)) wipeNonTargetCardBadges(card, idCa);
+        if (!isFeeTargetToken(idCa, card)) wipeNonTargetCardBadges(card, idCa);
         else clearCardIcon(card);
         return;
       }
@@ -13140,13 +13307,8 @@
   }
 
   function getGmgnChainKey() {
-    try {
-      const chain = new URL(location.href).searchParams.get("chain");
-      if (chain) return String(chain).toLowerCase();
-    } catch (_err) {
-      // ignore
-    }
-    // Host-only path may still be BSC home.
+    const chain = resolvePageChain();
+    if (chain) return chain;
     if (location.hostname.endsWith("gmgn.ai")) return "bsc";
     return "";
   }
@@ -13156,9 +13318,12 @@
     const dataIcon = img.getAttribute("data-icon") || "";
     const src = img.currentSrc || img.getAttribute("src") || "";
     const hay = `${dataIcon} ${src}`;
+    const rh = isGmgnRobinhoodPage();
     for (let i = 0; i < GMGN_ICON_QUOTE_RULES.length; i += 1) {
       const [re, symbol] = GMGN_ICON_QUOTE_RULES[i];
-      if (re.test(hay)) return symbol;
+      if (!re.test(hay)) continue;
+      if (/robinhoodeth|icon_robinhood/i.test(hay) && !rh) continue;
+      return symbol;
     }
     return "";
   }
@@ -13206,6 +13371,8 @@
     const configs = json && json.configs && typeof json.configs === "object" ? json.configs : null;
     if (!configs) return 0;
     const chainKey = getGmgnChainKey() || "bsc";
+    gmgnQuoteByStem.clear();
+    gmgnQuoteByAddr.clear();
     const rows = []
       .concat(Array.isArray(configs[chainKey]) ? configs[chainKey] : [])
       .concat(chainKey === "bsc" ? [] : Array.isArray(configs.bsc) ? configs.bsc : []);
@@ -13227,12 +13394,26 @@
       }
       if (ca && /^0x[a-f0-9]{40}$/.test(ca) && title) gmgnQuoteByAddr.set(ca, title);
     }
+    if (chainKey === "robinhood") {
+      Object.keys(ROBINHOOD_QUOTE_BY_ADDR).forEach((a) => {
+        gmgnQuoteByAddr.set(a, ROBINHOOD_QUOTE_BY_ADDR[a]);
+      });
+    }
+    gmgnQuotesCatalogChain = chainKey;
     if (n) gmgnQuotesLoadedAt = Date.now();
     return n;
   }
 
   function ensureGmgnQuotesCatalog() {
     if (!isGmgnHost()) return;
+    const chain = getGmgnChainKey() || "bsc";
+    if (gmgnQuotesCatalogChain && gmgnQuotesCatalogChain !== chain) {
+      gmgnQuotesLoadedAt = 0;
+      gmgnQuoteByStem.clear();
+      gmgnQuoteByAddr.clear();
+      payoutSymbolByAddr.clear();
+      gmgnQuotesCatalogChain = "";
+    }
     const now = Date.now();
     if (gmgnQuotesInflight) return;
     if (gmgnQuotesLoadedAt && now - gmgnQuotesLoadedAt < GMGN_QUOTES_TTL_MS) return;
@@ -13329,6 +13510,27 @@
       if (fromApi && isRealPoolQuoteSymbol(fromApi)) return formatPoolQuoteSymbol(fromApi);
       if (fromAddr && isRealPoolQuoteSymbol(fromAddr)) return formatPoolQuoteSymbol(fromAddr);
       return vaultDefaultPoolQuote();
+    }
+
+    if (isGmgnRobinhoodPage()) {
+      const rh = robinhoodQuoteSymbolFromAddr(qTok);
+      if (rh) return formatPoolQuoteSymbol(rh);
+      if (fromAddr) return formatPoolQuoteSymbol(fromAddr);
+      if (fromApi && !/^(ETH|WETH|BNB|WBNB)$/i.test(fromApi)) {
+        return formatPoolQuoteSymbol(fromApi);
+      }
+      const fromDomRh = card ? extractQuoteSymbolFromDom(card) : "";
+      if (fromDomRh && !/^(ETH|WETH)$/i.test(fromDomRh)) {
+        return formatPoolQuoteSymbol(fromDomRh);
+      }
+      if (quoteTokenLooksNative(qTok)) {
+        if (fromDomRh && /^(ETH|WETH)$/i.test(fromDomRh)) {
+          return formatPoolQuoteSymbol(fromDomRh);
+        }
+        return "ETH";
+      }
+      if (fromDomRh) return formatPoolQuoteSymbol(fromDomRh);
+      return fromApi ? formatPoolQuoteSymbol(fromApi) : "";
     }
 
     const fromDom = card ? extractQuoteSymbolFromDom(card) : "";
@@ -13430,38 +13632,58 @@
     const hasTaxSentry = Boolean(
       taxWrap || quoteRoot.querySelector('[data-sentry-component="TaxDividendTokenIcon"]')
     );
+    const rh = isGmgnRobinhoodPage();
 
-    const specialImgs = quoteRoot.querySelectorAll(
-      'img[data-icon], img[src*="/static/icons/icon_usd"], img[src*="/static/icons/icon_usdt"], img[src*="/static/icons/icon_usdc"], img[src*="/static/icons/icon_weth"]'
-    );
-    for (let i = 0; i < specialImgs.length; i += 1) {
-      const img = specialImgs[i];
-      if (isGmgnTaxInnerQuoteImg(img)) continue;
-      const src = img.currentSrc || img.getAttribute("src") || "";
-      if (isGmgnLaunchpadLogoSrc(src)) continue;
-      const special = matchGmgnSpecialQuoteIcon(img);
+    const readQuotesPng = () => {
+      const quoteImgs = quoteRoot.querySelectorAll(
+        'img[alt$=" quote icon"], img[alt*=" quote icon"], img[src*="/static/quotes/"], img[src*="/quotes/"]'
+      );
+      for (let i = 0; i < quoteImgs.length; i += 1) {
+        const quoteImg = quoteImgs[i];
+        if (isGmgnTaxInnerQuoteImg(quoteImg)) continue;
+        if (!hasTaxSentry) continue;
+        const src = quoteImg.currentSrc || quoteImg.getAttribute("src") || "";
+        if (isGmgnLaunchpadLogoSrc(src)) continue;
+        const fromFile = gmgnQuotesStemFromImg(quoteImg);
+        const alt = quoteImg.getAttribute("alt") || "";
+        const fromAlt = /quote icon/i.test(alt)
+          ? normalizeQuoteSymbol(alt.replace(/\s*quote\s*icon\s*$/i, ""), { allowCjk: true })
+          : "";
+        const sym = fromFile || fromAlt;
+        if (sym) return sym;
+      }
+      return "";
+    };
+
+    const readSpecial = (allowRobinhoodEth) => {
+      const specialImgs = quoteRoot.querySelectorAll(
+        'img[data-icon], img[src*="/static/icons/icon_usd"], img[src*="/static/icons/icon_usdt"], img[src*="/static/icons/icon_usdc"], img[src*="/static/icons/icon_weth"], img[src*="icon_robinhood"]'
+      );
+      for (let i = 0; i < specialImgs.length; i += 1) {
+        const img = specialImgs[i];
+        if (isGmgnTaxInnerQuoteImg(img)) continue;
+        const src = img.currentSrc || img.getAttribute("src") || "";
+        if (isGmgnLaunchpadLogoSrc(src)) continue;
+        const special = matchGmgnSpecialQuoteIcon(img);
+        if (!special) continue;
+        if (!allowRobinhoodEth && rh && /^(ETH|WETH)$/i.test(special)) continue;
+        return special;
+      }
+      return "";
+    };
+
+    // Robinhood：每张卡都有 IconRobinhoodeth（链标）。底池是 Tax 外 /static/quotes/*.png。
+    if (rh) {
+      const fromFile = readQuotesPng();
+      if (fromFile) return fromFile;
+      const special = readSpecial(false);
       if (special) return special;
+      return readSpecial(true) || "";
     }
 
-    const quoteImgs = quoteRoot.querySelectorAll(
-      'img[alt$=" quote icon"], img[alt*=" quote icon"], img[src*="/static/quotes/"], img[src*="/quotes/"]'
-    );
-    for (let i = 0; i < quoteImgs.length; i += 1) {
-      const quoteImg = quoteImgs[i];
-      if (isGmgnTaxInnerQuoteImg(quoteImg)) continue;
-      // Tax 哨兵未齐时第一张 quotes 几乎总是分红内图，宁可不写底池也不要 🦋AAPL
-      if (!hasTaxSentry) continue;
-      const src = quoteImg.currentSrc || quoteImg.getAttribute("src") || "";
-      if (isGmgnLaunchpadLogoSrc(src)) continue;
-      const fromFile = gmgnQuotesStemFromImg(quoteImg);
-      const alt = quoteImg.getAttribute("alt") || "";
-      const fromAlt = /quote icon/i.test(alt)
-        ? normalizeQuoteSymbol(alt.replace(/\s*quote\s*icon\s*$/i, ""), { allowCjk: true })
-        : "";
-      const sym = fromFile || fromAlt;
-      if (sym) return sym;
-    }
-    return "";
+    const specialFirst = readSpecial(true);
+    if (specialFirst) return specialFirst;
+    return readQuotesPng();
   }
 
   function extractDebotPoolQuoteFromDom(card) {
@@ -15084,7 +15306,7 @@
     if (!(card instanceof HTMLElement)) return "";
     const href =
       card.getAttribute("href") ||
-      card.querySelector?.("[href*='/bsc/token/0x'], [href*='/token/bsc/0x']")?.getAttribute("href") ||
+      card.querySelector?.("[href*='/bsc/token/0x'], [href*='/robinhood/token/0x'], [href*='/token/bsc/0x']")?.getAttribute("href") ||
       "";
     const m = String(href).match(/0x[a-fA-F0-9]{40}/i);
     return m ? m[0].toLowerCase() : "";
@@ -15397,7 +15619,12 @@
   }
 
   function isSearchHideEnabled() {
-    return Boolean(searchHidePrefs && searchHidePrefs.enabled === true && isAllowedScanChain());
+    return Boolean(
+      searchHidePrefs &&
+        searchHidePrefs.enabled === true &&
+        isAllowedScanChain() &&
+        !isGmgnRobinhoodPage()
+    );
   }
 
   function vaultKindFromFeeOrBadge(token, card) {
@@ -16113,8 +16340,31 @@
     return prevUnresolved && !nextUnresolved;
   }
 
+  function robinhoodExclusiveKind(entry) {
+    if (!entry) return "";
+    const d = Number(entry.dividend_bps) || 0;
+    const m = Number(entry.market_bps) || 0;
+    if (d > 0 && m <= 0) return "holder";
+    if (m > 0 && d <= 0) return "creator";
+    if (d > 0 && m > 0) return "hybrid";
+    return "";
+  }
+
+  /** Robinhood 无 /modes 纠偏：禁止 BSC leftover💎 / dividendBecameReal 把厨师↔分红打成闪变。 */
+  function robinhoodHostFeeShouldApply(prev, entry) {
+    if (!prev) return true;
+    const prevKind = robinhoodExclusiveKind(prev);
+    const nextKind = robinhoodExclusiveKind(entry);
+    if (prevKind && nextKind && prevKind !== nextKind) {
+      // TokenItem fiber 可纠正 JSON/残留内图半包；JSON 不能把已定案类型改成对面。
+      return entry.__fromFiber === true && prev.__fromFiber !== true;
+    }
+    return true;
+  }
+
   function hostFeeEntryShouldApply(prev, entry) {
     if (!prev) return true;
+    if (isGmgnRobinhoodPage()) return robinhoodHostFeeShouldApply(prev, entry);
     if (
       dividendPayoutLooksNative(entry) &&
       !dividendPayoutLooksNative(prev) &&
@@ -16235,7 +16485,7 @@
       const token = String(raw.address || "")
         .trim()
         .toLowerCase();
-      if (!TARGET_TOKEN_RE.test(token)) continue;
+      if (!isFeeTargetToken(token)) continue;
       const prev = resolveEntry(token);
       if (!prev) continue;
       if (forceVaultNativePoolQuote(prev) && !isRealPoolQuoteSymbol(raw.quote_symbol || "")) {
@@ -16268,7 +16518,8 @@
       const token = String(raw.address || "")
         .trim()
         .toLowerCase();
-      if (!TARGET_TOKEN_RE.test(token)) continue;
+      if (raw.__pons_v2 === true) rememberPonsV2Addr(token);
+      if (!isFeeTargetToken(token)) continue;
       const derived = deriveHostFeeMode(raw);
       const tax_symbol = String(raw.tax_symbol || "").trim();
       const top_payout_symbol =
@@ -16311,6 +16562,8 @@
       entry.source_host = raw.source === "debot" ? "debot" : "gmgn";
       entry.__paintComplete = raw.__paintComplete === true || hostFeePaintComplete(entry);
       entry.__needsChain = raw.__needsChain === true;
+      entry.__fromFiber = raw.__fromFiber === true;
+      if (raw.__pons_v2 === true || isGmgnRobinhoodPage()) entry.__needsChain = false;
       entry.__awaitSecurity = raw.__awaitSecurity === true;
       entry.__basketPendingUntil =
         typeof raw.__basketPendingUntil === "number" ? raw.__basketPendingUntil : 0;
@@ -17364,6 +17617,11 @@
           topSym = "BNB";
         } else if (src && !guessedNative) {
           topSym = tickerSymbolForArrow(src);
+        } else if (isGmgnRobinhoodPage() && (Number(entry.dividend_bps) || 0) > 0) {
+          topSym =
+            tickerSymbolForArrow(src) ||
+            robinhoodQuoteSymbolFromAddr(entry.dividend_token) ||
+            (quoteTokenLooksNative(entry.dividend_token) ? "ETH" : "");
         } else if (!entry.source_host) {
           topSym = tickerSymbolForArrow(src || entry.quote_symbol || domQuote || "");
         } else {
@@ -17800,6 +18058,7 @@
   /** 仅 BSC：地址是否命中自定义尾号屏蔽 */
   function shouldHideByCustomSuffix(token) {
     if (!suffixHidePrefs || suffixHidePrefs.enabled !== true) return false;
+    if (isGmgnRobinhoodPage()) return false;
     if (!isAllowedScanChain()) return false;
     const addr = String(token || "")
       .trim()
@@ -18098,7 +18357,7 @@
     if (shouldDeferGmgnTrenchResizeWork()) return false;
     // 仅 7777/8888/ffff 挂徽章；其它尾号直接清掉误挂
     const tok = String(token || "").toLowerCase();
-    if (!TARGET_TOKEN_RE.test(tok)) {
+    if (!isFeeTargetToken(tok, card)) {
       try {
         removeAllBadgesForCard(card, tok);
       } catch (_e) {
@@ -18123,7 +18382,7 @@
     try {
       const idCa = extractCardHrefToken(card);
       if (idCa) {
-        if (!TARGET_TOKEN_RE.test(idCa)) {
+        if (!isFeeTargetToken(idCa, card)) {
           wipeNonTargetCardBadges(card, idCa);
           return false;
         }
@@ -18484,7 +18743,7 @@
       const tok = String(icon.dataset.feeToken || card.dataset[CARD_MARK] || "")
         .trim()
         .toLowerCase();
-      if (!TARGET_TOKEN_RE.test(tok)) continue;
+      if (!isFeeTargetToken(tok, card)) continue;
       const misplaced = isGmgnTrenchMisplacedBadge(card, icon);
       if (!misplaced) continue;
       removeAllBadgesForCard(card, tok);

@@ -7,10 +7,10 @@
  *     （XHR/fetch/WS/MessagePort/SharedWorker/JSON.parse）
  *   · 从不改 GMGN disableShareWorker（保持站点默认 SharedWorker）
  *   · 禁止改 Object.prototype（0.8.123 挂 onmessage 导致 GMGN 打不开）
- * ★ 仅 BSC；禁止 DOM reflow / 乱包 dedicated Worker
+ * ★ BSC 税币过滤 + GMGN Robinhood pons v2 host-fee（不打 /modes）；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 165;
+  const HOOK_VER = 170;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -503,6 +503,23 @@
     }
   }
 
+  /** GMGN Robinhood：host-fee / 卡片标记要跑；列表过滤（资金接收/尾号）仍只认 BSC。 */
+  function isRobinhoodPageContext() {
+    try {
+      const u = new URL(location.href);
+      const q = String(u.searchParams.get("chain") || "").toLowerCase();
+      if (q === "robinhood") return true;
+      const path = String(u.pathname || "");
+      return /\/robinhood\/token\//i.test(path) || /^\/robinhood(\/|$)/i.test(path);
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  function isFeePageContext() {
+    return isBscPageContext() || isRobinhoodPageContext();
+  }
+
   function applyVaultHideObject(p) {
     vaultHidePrefs = {
       enabled: p?.enabled === true,
@@ -637,6 +654,13 @@
     return TARGET_TOKEN_RE.test(a);
   }
 
+  function isHostFeeTargetItem(item) {
+    const addr = gmgnAddr(item);
+    if (!addr) return false;
+    if (isRobinhoodPageContext()) return gmgnIsPonsV2(item);
+    return TARGET_TOKEN_RE.test(addr);
+  }
+
   function isGmgnTokenItem(item) {
     if (!item || typeof item !== "object") return false;
     const addr = gmgnAddr(item);
@@ -721,6 +745,11 @@
       item?.f?.launchpad ||
       "";
     return String(raw || "").toLowerCase();
+  }
+
+  function gmgnIsPonsV2(item) {
+    const lp = gmgnLaunchpadFamily(item);
+    return lp === "pons_v2" || lp.indexOf("pons_v2") !== -1;
   }
 
   function gmgnIsFlapStocksLaunchpad(item) {
@@ -859,12 +888,13 @@
       .trim()
       .toLowerCase();
     if (!a) return "";
-    if (
-      a === "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c" ||
-      a === "0x0000000000000000000000000000000000000000"
-    ) {
-      return "BNB";
+    if (isRobinhoodPageContext() && ROBINHOOD_QUOTE_BY_ADDR[a]) {
+      return ROBINHOOD_QUOTE_BY_ADDR[a];
     }
+    if (a === "0x0000000000000000000000000000000000000000") {
+      return isRobinhoodPageContext() ? "ETH" : "BNB";
+    }
+    if (a === WBNB_ADDR) return "BNB";
     if (a === "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c") return "BTCB";
     if (a === "0xce7de646e7208a4ef112cb6ed5038fa6cc6b12e3") return "TRX";
     if (a === "0x55d398326f99059ff775485246999027b3197955") return "USDT";
@@ -1199,7 +1229,16 @@
       const s = String(cands[i] || "").trim();
       if (!s || s.length > 16) continue;
       if (/^(BNB|WBNB)$/i.test(s)) {
+        if (isRobinhoodPageContext()) continue;
         if (!nativeHit) nativeHit = s === "WBNB" ? "BNB" : s;
+        continue;
+      }
+      if (/^WETH$/i.test(s) && isRobinhoodPageContext()) {
+        if (!nativeHit) nativeHit = "WETH";
+        continue;
+      }
+      if (/^ETH$/i.test(s) && isRobinhoodPageContext()) {
+        if (!nativeHit) nativeHit = "ETH";
         continue;
       }
       if (/^[A-Za-z][A-Za-z0-9]{1,15}$/.test(s)) {
@@ -1378,6 +1417,10 @@
   }
 
   const WBNB_ADDR = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c";
+  const ROBINHOOD_QUOTE_BY_ADDR = {
+    "0x5fc5360d0400a0fd4f2af552add042d716f1d168": "USDG",
+    "0xc08751e47611f035b958889557edbbe33d4a8bce": "WETH"
+  };
   let hostFeeQuotePatchTimer = 0;
   const hostFeeQuotePatchPending = [];
   const hostFeeQuotePatchDedupe = new Map();
@@ -1385,7 +1428,11 @@
   function gmgnQuoteLooksNative(sym, addr) {
     const s = String(sym || "").trim().toUpperCase();
     const a = String(addr || "").trim().toLowerCase();
-    const nativeSym = !s || s === "BNB" || s === "WBNB";
+    const nativeSym =
+      !s ||
+      s === "BNB" ||
+      s === "WBNB" ||
+      (isRobinhoodPageContext() && (s === "ETH" || s === "WETH"));
     const nativeAddr =
       !a ||
       a === WBNB_ADDR ||
@@ -1396,7 +1443,7 @@
   function gmgnQuotePatchFromItem(item) {
     if (!item || typeof item !== "object") return null;
     const addr = gmgnAddr(item);
-    if (!TARGET_TOKEN_RE.test(addr)) return null;
+    if (!isHostFeeTargetItem(item)) return null;
     const q = gmgnItemQuoteFields(item);
     const quote_symbol = q.symbol;
     const quote_token = q.address;
@@ -1779,6 +1826,7 @@
       entry.__basketPendingUntil = 0;
     }
     entry.__paintComplete = hostFeePaintComplete(entry);
+    if (entry.__pons_v2 === true) entry.__needsChain = false;
     return entry;
   }
 
@@ -1837,7 +1885,9 @@
   }
 
   function queueHostFeeEntry(entry) {
-    if (!entry || !entry.address || !TARGET_TOKEN_RE.test(entry.address)) return;
+    if (!entry || !entry.address) return;
+    const pons = entry.__pons_v2 === true;
+    if (!TARGET_TOKEN_RE.test(entry.address) && !pons) return;
     const addr = String(entry.address).toLowerCase();
     const sig = hostFeeSig(entry);
     const prev = hostFeeDedupe.get(addr);
@@ -1875,7 +1925,12 @@
 
   function gmgnHostFeeFromItem(item) {
     const addr = gmgnAddr(item);
-    if (!TARGET_TOKEN_RE.test(addr)) return null;
+    const pons = isRobinhoodPageContext() && gmgnIsPonsV2(item);
+    if (pons) {
+      if (!addr) return null;
+    } else if (!TARGET_TOKEN_RE.test(addr)) {
+      return null;
+    }
     const tal = gmgnTal(item);
     if (!tal || typeof tal !== "object") return null;
     let dividend_bps = ratioToBps(
@@ -1979,17 +2034,18 @@
     const dividendNeedsChain =
       dividend_bps > 0 && !is_vault && !is_stocks_vault && !dividend_symbol;
     const vaultNeedsBasket = is_stocks_vault && !basketSymbolsReady(basket_assets);
-    const needsChain =
-      totalBps <= 0 ||
-      dividendNeedsChain ||
-      vaultNeedsBasket ||
-      ask ||
-      hostFeeBasketNeedsHydration(basket_assets, isStockVault, {
-        is_vault,
-        is_stocks_vault,
-        market_bps,
-        dividend_bps
-      });
+    const needsChain = pons
+      ? false
+      : totalBps <= 0 ||
+        dividendNeedsChain ||
+        vaultNeedsBasket ||
+        ask ||
+        hostFeeBasketNeedsHydration(basket_assets, isStockVault, {
+          is_vault,
+          is_stocks_vault,
+          market_bps,
+          dividend_bps
+        });
     return finalizeHostFeeEntry({
       address: addr,
       source: "gmgn",
@@ -2024,7 +2080,8 @@
         quote_symbol,
         tax_symbol: selfSym
       }),
-      __needsChain: needsChain
+      __needsChain: needsChain,
+      __pons_v2: pons
     });
   }
 
@@ -3210,7 +3267,7 @@
   /** 只扫已知宿主路径，避免全树 walk（HTTP/WS 热路径降载）。 */
   function collectHostFeesFromJson(json, depth) {
     const d = depth || 0;
-    if (!isBscPageContext() || !json || typeof json !== "object") return;
+    if (!isFeePageContext() || !json || typeof json !== "object") return;
     if (d > 4) return;
     if (d === 0) {
       if (hostFeeJsonSeen.has(json)) return;
@@ -3354,7 +3411,16 @@
         const ca = String(
           json?.data?.address || sec?.address || lp?.address || ""
         ).toLowerCase();
-        if (tal && TARGET_TOKEN_RE.test(ca)) {
+        if (
+          tal &&
+          (TARGET_TOKEN_RE.test(ca) ||
+            gmgnIsPonsV2({
+              launchpad: typeof lp === "string" ? lp : lp && lp.launchpad,
+              launchpad_platform:
+                (lp && typeof lp === "object" && (lp.launchpad_platform || lp.lpp || lp.launchpad)) ||
+                ""
+            }))
+        ) {
           collectHostFeesFromGmgnItem({
             a: ca,
             s_tal: tal,
@@ -3387,7 +3453,8 @@
       text.indexOf("trenches_rank") !== -1 ||
       text.indexOf("new_creations") !== -1 ||
       text.indexOf("socket-event") !== -1 ||
-      text.indexOf("meme:new") !== -1
+      text.indexOf("meme:new") !== -1 ||
+      text.indexOf("pons_v2") !== -1
     );
   }
 
@@ -3402,7 +3469,7 @@
   }
 
   function tapHostFeePortData(data) {
-    if (!isBscPageContext() || data == null) return;
+    if (!isFeePageContext() || data == null) return;
     try {
       try {
         window.__flapFeeLastPortTap = {
@@ -3703,16 +3770,22 @@
     return null;
   }
 
-  /** 战壕 TokenItem 的 tax_allocation 在祖先 fiber 的 props.data 上，不在子节点。 */
-  function scrapeGmgnTokenRowFromFiber(root) {
+  /** 战壕 TokenItem 的 tax_allocation 在祖先 fiber 的 props.data 上，不在子节点。
+   *  Robinhood 虚拟列表：父行可能还是上一张卡的 s_tal，必须跟 href CA 对齐。 */
+  function scrapeGmgnTokenRowFromFiber(root, wantAddr) {
+    const want = String(wantAddr || "").toLowerCase();
     let f = reactFiberOf(root);
     for (let i = 0; i < 24 && f; i += 1) {
       const p = f.memoizedProps;
       if (p && typeof p === "object") {
-        const d = p.data && typeof p.data === "object" ? p.data : null;
-        if (d && (d.tax_allocation || d.s_tal || d.taxAllocation)) return d;
-        if (p.token && typeof p.token === "object" && (p.token.tax_allocation || p.token.s_tal)) {
-          return p.token;
+        const bags = [p.data, p.token];
+        for (let j = 0; j < bags.length; j += 1) {
+          const d = bags[j];
+          if (!d || typeof d !== "object") continue;
+          if (!(d.tax_allocation || d.s_tal || d.taxAllocation)) continue;
+          const a = gmgnAddr(d);
+          if (want && a && a !== want) continue;
+          return d;
         }
       }
       f = f.return;
@@ -3851,6 +3924,7 @@
     return (
       node.closest?.('[data-sentry-source-file="TokenItem.tsx"]') ||
       node.closest?.('[href*="/bsc/token/0x"]') ||
+      node.closest?.('[href*="/robinhood/token/0x"]') ||
       null
     );
   }
@@ -3871,7 +3945,7 @@
     }
     const href =
       card.getAttribute("href") ||
-      card.querySelector?.("[href*='/bsc/token/0x']")?.getAttribute("href") ||
+      card.querySelector?.("[href*='/bsc/token/0x'], [href*='/robinhood/token/0x']")?.getAttribute("href") ||
       "";
     const m = href.match(/0x[a-fA-F0-9]{40}/i);
     return m ? m[0].toLowerCase() : "";
@@ -3921,13 +3995,20 @@
     if (!(card instanceof HTMLElement)) return;
     noteGmgnTransport("fiber");
     const addr = gmgnAddrFromCard(card);
-    const loose = scrapeGmgnTokenDataLoose(card) || scrapeGmgnTokenRowFromFiber(card);
+    const loose = scrapeGmgnTokenDataLoose(card) || scrapeGmgnTokenRowFromFiber(card, addr);
     if (addr) queueCardMarkFromItem(loose, addr);
-    if (!TARGET_TOKEN_RE.test(addr)) return;
-    const row = scrapeGmgnTokenRowFromFiber(card);
+    if (!TARGET_TOKEN_RE.test(addr) && !(isRobinhoodPageContext() && gmgnIsPonsV2(loose || {}))) {
+      const lp = scrapeGmgnLaunchpadFromFiber(card);
+      if (!(isRobinhoodPageContext() && String(lp || "").toLowerCase().indexOf("pons_v2") !== -1)) {
+        return;
+      }
+    }
+    const row = scrapeGmgnTokenRowFromFiber(card, addr);
+    const rowAddr = gmgnAddr(row);
+    if (isRobinhoodPageContext() && rowAddr && addr && rowAddr !== addr) return;
     const tal =
       (row && (row.tax_allocation || row.s_tal || row.taxAllocation)) ||
-      scrapeGmgnTaxAllocationFromFiber(card);
+      (isRobinhoodPageContext() ? null : scrapeGmgnTaxAllocationFromFiber(card));
     if (!tal) return;
     const pool = row && row.pool && typeof row.pool === "object" ? row.pool : null;
     let launchpad_platform = String(
@@ -3988,6 +4069,7 @@
     if (!entry) return;
     entry = applyDomSymbolsToHostFee(entry, card, "gmgn");
     entry = hydrateHostFeeBasket(entry, card, "gmgn");
+    entry.__fromFiber = true;
     queueHostFeeEntry(finalizeHostFeeEntry(entry));
   }
 
@@ -4059,7 +4141,9 @@
       } else {
         document.querySelectorAll(GMGN_HOST_FEE_ROOT_SEL).forEach((el) => push(el));
         if (!roots.length) {
-          const sample = document.querySelector('[href*="/bsc/token/0x"]');
+          const sample = document.querySelector(
+            '[href*="/bsc/token/0x"], [href*="/robinhood/token/0x"]'
+          );
           const col = sample?.closest?.("div.flex.flex-col");
           if (col instanceof HTMLElement) push(col);
         }
@@ -4070,7 +4154,7 @@
 
   function installDomHostFeeReactTap() {
     if (window.__flapFeeDomReactTap === HOOK_VER) return;
-    if (!isBscPageContext()) return;
+    if (!isFeePageContext()) return;
     window.__flapFeeDomReactTap = HOOK_VER;
     const pendingGmgn = new Set();
     const pendingDebot = new Set();
@@ -4131,7 +4215,7 @@
       if (card) schedule(card, "gmgn");
       root
         .querySelectorAll?.(
-          '[data-sentry-source-file="TokenItem.tsx"], [href*="/bsc/token/0x"]'
+          '[data-sentry-source-file="TokenItem.tsx"], [href*="/bsc/token/0x"], [href*="/robinhood/token/0x"]'
         )
         .forEach((el) => {
           if (budget <= 0) return;
@@ -4145,7 +4229,8 @@
         const token = String(ev?.detail?.token || "")
           .trim()
           .toLowerCase();
-        if (!TARGET_TOKEN_RE.test(token)) return;
+        if (!/^0x[a-f0-9]{40}$/.test(token)) return;
+        if (!TARGET_TOKEN_RE.test(token) && !isRobinhoodPageContext()) return;
         const short = token.slice(-8);
         const roots = collectHostFeeObserveRoots();
         const scope = roots.length ? roots : [document.documentElement];
@@ -7141,12 +7226,12 @@
   }
 
   /**
-   * BSC 页始终安装：从 GMGN s_tal / Debot launchpad_extra 提取徽章快路径数据。
+   * BSC / GMGN Robinhood 页安装：s_tal host-fee（Robinhood pons v2 不打 /modes）。
    * 与列表过滤钩子独立；过滤关闭时仍可减少 /modes。
    */
   function installHostFeeNetworkHooks() {
     if (window.__flapFeeHostFeeHooks === HOOK_VER) return;
-    if (!isBscPageContext()) return;
+    if (!isFeePageContext()) return;
     window.__flapFeeHostFeeHooks = HOOK_VER;
     try {
       document.documentElement?.setAttribute("data-flap-host-fee-ver", String(HOOK_VER));
@@ -7248,7 +7333,7 @@
     // ignore
   }
   try {
-    if (isBscPageContext()) {
+    if (isFeePageContext()) {
       installHostFeePortTap();
       installHostFeeWebSocketTap();
       installHostFeeXhrTap();

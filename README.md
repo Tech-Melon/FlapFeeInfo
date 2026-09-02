@@ -30,7 +30,7 @@
 - **币股 vault** 底池是 BNB，不会把 NVDAB / FXION 等分红股票当成底池；股票只出现在 📈 段
 - 不隐藏原网站的底池小图标；读不到报价时仍只显示 fee
 
-支持尾号 `8888` / `7777`（Flap）与 `ffff`（Four.meme）税币。
+支持尾号 `8888` / `7777`（Flap）与 `ffff`（Four.meme）税币。GMGN **Robinhood** 链上 **Pons V2**（`pons_v2`）也显示徽章（底池 🪙ETH / QQQ 等，不查 BSC 链）。
 
 **点击浏览器工具栏的插件图标**，可：
 
@@ -107,7 +107,7 @@ FlapFeeInfo\extension
 ## 使用方法
 
 1. 打开 GMGN：
-   `https://gmgn.ai/?chain=bsc`
+   `https://gmgn.ai/?chain=bsc`（Robinhood：`https://gmgn.ai/?chain=robinhood`，仅 Pons V2）
 2. 或者打开 Debot / Gungnir（同一前端的不同域名）：
    `https://debot.ai/meme?chain=bsc`
    `https://gungnir.bot/meme?chain=bsc`
@@ -138,10 +138,11 @@ FlapFeeInfo\extension
 3. 点当前插件的 `重新加载`（或重新「加载已解压」指向 `extension/`）。
 4. **硬刷新** GMGN / Debot 目标页（否则可能仍是旧 content script）。
 
-当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.71**）。
+当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.153**）。
 
 ### 0.8.x 要点（近期）
 
+- **0.8.153**：GMGN Robinhood **Pons V2** 徽章（host-fee，不打 `/modes`）；底池认 `quote_address` / quotes 图，不把链标 `IconRobinhoodeth` 当底池；USDG/WETH 只在 Robinhood 生效，BSC 逻辑不变
 - **0.8.71**：Debot 徽章贴 Tax 列外侧，不再挤掉 MC/买；战壕扫卡间隔对齐 GMGN
 - **0.8.70**：Debot 从 K 线回战壕首波铺满三列视口
 - **0.8.69**：Debot 只扫 BSC 卡；K→战壕走列根 cache-first
