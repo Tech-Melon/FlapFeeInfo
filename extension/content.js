@@ -17,6 +17,8 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.158: 混合战壕 — ranks 先标非 pons 跳过；扫卡只收已确认 Pons，不再每轮扒 long/bankr。
+  // 0.8.157: 完整包剪切板 — 钱包地址先定链再切标签，避免切走其它页又被拽回 GMGN/Debot。
   // 0.8.156: 混合战壕降载 — 非 pons 负缓存、Debot 跳过叶扫/O(n²)、稳定卡不再 enrich DOM。
   // 0.8.155: Debot 混合战壕扫卡按 href 收 BSC+Robinhood，不再用 8888/7777 选择器漏掉 pons。
   // 0.8.154: Debot 混合战壕按卡 href 认链；Robinhood 只画 pons_v2，BSC 税币仍走 /modes。
@@ -690,6 +692,8 @@
   /** Robinhood 已确认非 pons_v2（long/bankr/v1）：禁止反复 fiber 扒卡 */
   const PONS_SKIP_TTL_MS = 45000;
   const ponsSkipAddrAt = new Map();
+  let ponsFiberWindowAt = 0;
+  let ponsFiberWindowN = 0;
   // GMGN TokenItem is often div[href="/bsc/token/0x…7777"] (not always <a>) — include bare [href*].
   const SUFFIX_SELECTORS =
     "[href*='8888'], [href*='7777'], [href*='ffff'], [href*='FFFF'], " +
@@ -3404,6 +3408,31 @@
     return Boolean(tok && isPonsSkipAddr(tok));
   }
 
+  /** 热扫只收已确认 Pons；未知 RH 等 ranks/host-fee，避免 long/bankr 进种子。 */
+  function rhHrefAllowedInScan(href) {
+    if (!isRobinhoodTokenRouteHref(href)) return true;
+    const tok = extractAnyToken(href);
+    if (!tok) return false;
+    if (isPonsSkipAddr(tok)) return false;
+    return ponsV2AddrSet.has(tok);
+  }
+
+  function takePonsFiberSlot() {
+    const now = Date.now();
+    if (now - ponsFiberWindowAt > 200) {
+      ponsFiberWindowAt = now;
+      ponsFiberWindowN = 0;
+    }
+    if (ponsFiberWindowN >= 2) return false;
+    ponsFiberWindowN += 1;
+    return true;
+  }
+
+  function applyPonsSkipAddrs(addrs) {
+    if (!Array.isArray(addrs) || !addrs.length) return;
+    for (let i = 0; i < addrs.length; i += 1) rememberPonsSkipAddr(addrs[i]);
+  }
+
   function isPonsV2LaunchpadRaw(raw) {
     const s = String(raw || "").toLowerCase();
     return s === "pons_v2" || s.indexOf("pons_v2") !== -1;
@@ -3418,8 +3447,11 @@
     const hrefTok = extractAnyToken(readCardTokenHref(card) || card.getAttribute("href") || "");
     if (hrefTok && ponsV2AddrSet.has(hrefTok)) return true;
     if (hrefTok && isPonsSkipAddr(hrefTok)) return false;
+    // Debot content 读不到 fiber；未知 RH 交给 page-hook ranks / host-fee。
+    if (isDebotHost()) return false;
     const cached = ponsV2FiberCache.get(card);
     if (cached && Date.now() - cached.at < 4000) return cached.ok;
+    if (!takePonsFiberSlot()) return false;
     let ok = false;
     let sawLaunchpad = "";
     try {
@@ -6695,7 +6727,7 @@
           if (!(el instanceof HTMLElement)) continue;
           const tok = extractAnyToken(el.getAttribute("href") || "");
           if (!tok) continue;
-          if (isFeeTargetToken(tok, el) || scrapePonsV2FromCard(el)) add(el);
+          if (ponsV2AddrSet.has(tok) || scrapePonsV2FromCard(el)) add(el);
         }
       }
 
@@ -6844,9 +6876,9 @@
       if (/flap\.sh|bscscan|etherscan/i.test(href) && !(key instanceof HTMLElement)) return;
       if (href && href.indexOf("/token/") !== -1 && !isBscTokenRouteHref(href)) {
         if (isGmgnRobinhoodPage() && isRobinhoodTokenRouteHref(href)) {
-          // GMGN Robinhood 页
+          if (!rhHrefAllowedInScan(href)) return;
         } else if (isDebotRobinhoodTokenHref(href)) {
-          if (rhHrefLooksSkipped(href)) return;
+          if (!rhHrefAllowedInScan(href)) return;
         } else {
           return;
         }
@@ -7487,7 +7519,7 @@
     });
   }
 
-  const PAGE_HOOK_VER = "173";
+  const PAGE_HOOK_VER = "174";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -11187,6 +11219,7 @@
           }
           const href = (n.getAttribute && n.getAttribute("href")) || "";
           if (rhHrefLooksSkipped(href)) return;
+          if (!rhHrefAllowedInScan(href)) return;
           addNode(n, 2);
         });
       // 0.4.42 GMGN: also CA hrefs (flap/site) but NEVER leaf textContent walks.
@@ -11200,7 +11233,7 @@
           root.querySelectorAll('[data-sentry-source-file="TokenItem.tsx"]').forEach((n) => {
             const href = (n.getAttribute && n.getAttribute("href")) || "";
             if (rhHrefLooksSkipped(href)) return;
-            addNode(n, 2);
+            if (rhHrefAllowedInScan(href) || scrapePonsV2FromCard(n)) addNode(n, 2);
           });
         }
         return;
@@ -12500,7 +12533,7 @@
           siteStrategy?.extractToken?.(card) ||
           "";
         const tok = String(token || "").toLowerCase();
-        if (!TARGET_TOKEN_RE.test(tok)) continue;
+        if (!TARGET_TOKEN_RE.test(tok) && !ponsV2AddrSet.has(tok)) continue;
         const existing = findLocalBadgeForCard(card, tok);
         if (
           existing instanceof HTMLElement &&
@@ -16835,6 +16868,10 @@
           if (mergeCardMarkMetaEntries(data.entries) && anyTrenchMarkOn()) {
             scheduleSymbolDupRepaint();
           }
+          return;
+        }
+        if (data.type === "pons-skip-map") {
+          applyPonsSkipAddrs(data.addrs);
           return;
         }
         if (data.type !== "host-fee-map") return;

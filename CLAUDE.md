@@ -299,7 +299,7 @@ TokenItem 字段与 BSC 同套，开 Robinhood 扫卡门禁后三项都能用（
 跳转：
 
 - **主路径（推荐）**：GMGN/Debot 标签里的 content script 常驻。页可见且聚焦时轮询剪切板；切回该标签立刻读一次（未变则不跳）。定链可走同源 `search_v3`，再 `clip-spa.js` 站内跳。
-- **offscreen 后台**：人不在 GMGN/Debot 时轮询剪切板；读到新 CA 后**立刻激活已开站点标签并站内跳**（与复制即搜同一套 `forceFocus`），不必先点标签页。SW 用 offscreen 长连接保活。
+- **offscreen 后台**：人不在 GMGN/Debot 时轮询剪切板；`search_v3` **确认是代币后**才激活已开站点标签并站内跳（与复制即搜同一套 `forceFocus`），不必先点标签页。钱包 / 超时 / 非代币**禁止**抢焦点。SW 用 offscreen 长连接保活。
 - **禁止** `chrome.tabs.update` 换地址栏（整页重载很慢）
 - 同一地址 2.5s 内不连跳
 
@@ -465,7 +465,8 @@ python tools/ctl.py watchdog-run
 | Robinhood 改完 BSC 底池/分红变了 | USDG/WETH 地址表曾写入共用 quotes 目录 | 升到 **0.8.153+**；BSC 与 RH 目录按链隔离 |
 | Debot `?chain=robinhood` 无徽章 | 旧版整页当非 BSC 清掉；混合战壕要按卡 `/token/robinhood/` + pons_v2 | 升到 **0.8.154+**；重载完整包并硬刷 Debot |
 | Debot 混合战壕只有 BSC 徽章、RH 卡空白 | 扫卡选择器仍只认 8888/7777/ffff，随机尾号 pons 进不了种子 | 升到 **0.8.155+**；重载完整包并硬刷 Debot |
-| Debot 混合战壕卡顿 / 源站变慢 | 0.8.155 把 long/bankr 也推进扫卡并反复扒 fiber | 升到 **0.8.156+**；重载完整包并硬刷 Debot |
+| Debot 混合战壕卡顿 / 源站变慢 | 0.8.155 把 long/bankr 也推进扫卡并反复扒 fiber | 升到 **0.8.158+**；重载完整包并硬刷 Debot |
+| 复制钱包地址后切走标签又被拽回 GMGN/Debot | 0.8.144 定链未完成就 warmup 切标签；钱包 `not-token` 不记 seen，offscreen 每 200ms 再抢焦点 | 升到 **0.8.157+** 完整包；重载插件（公开包无此功能） |
 | 卡片标记（发币次数/推特备注）没出现 | 未开开关 / 没加规则 / GMGN 新币 count 仍为 0 / 非战壕行卡 | **0.8.130+** 弹窗启用并加规则；Debot 看 ranks `created_count`；Robinhood 战壕 **0.8.148+** 与 BSC 同套字段 |
 | 推特备注只标部分同 handle 卡 | 新卡 twitter 常是 `i/status/{id}`，旧逻辑把 `/i/` 当无效链丢掉 | 升到 **0.8.147+**；重载插件并硬刷页 |
 | 新卡先闪一下发币次数色条/`×0` 再变对 | 缺次数时被当成 0，默认 `<N` 先命中 | 升到 **0.8.146+**；没拿到正数次数不上色 |
@@ -761,8 +762,10 @@ python tools/ctl.py watchdog-run
  - `0.8.154`：Debot 混合战壕按卡 href 认链；Robinhood 只画 pons_v2 host-fee；同页 BSC 7777/8888/ffff 仍打 `/modes`
  - `0.8.155`：Debot 混合三列按 href 收 BSC+Robinhood 卡（不再用尾号选择器漏 pons）；`0x0` 原生报价跟卡（RH=ETH / BSC=BNB），不看整页 `?chain=`
  - `0.8.156`：混合战壕降载 — 非 pons 负缓存、Debot 跳过叶扫与 O(n²) contains、稳定卡不再每轮 enrich DOM
-- 插件当前版本：见 `extension/manifest.json`（**0.8.156**，公开无剪切板）
-- page-hook：`HOOK_VER` **173**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.157`：完整包剪切板 — 未确认代币不提前切标签；钱包 `not-token` 记 seen，避免切走其它页被拽回 GMGN/Debot
+ - `0.8.158`：混合战壕 — ranks 先标非 Pons 跳过；扫卡只收已确认 Pons，host-fee 定向画卡；GMGN fiber 每 200ms 最多 2 张
+- 插件当前版本：见 `extension/manifest.json`（**0.8.158**，公开无剪切板）
+- page-hook：`HOOK_VER` **174**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  

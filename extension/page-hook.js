@@ -10,7 +10,7 @@
  * ★ BSC 税币过滤 + GMGN Robinhood pons v2 host-fee（不打 /modes）；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 173;
+  const HOOK_VER = 174;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -1892,6 +1892,13 @@
     const pons = entry.__pons_v2 === true;
     if (!TARGET_TOKEN_RE.test(entry.address) && !pons) return;
     const addr = String(entry.address).toLowerCase();
+    if (pons) {
+      rhFeeDone.add(addr);
+      if (rhFeeDone.size > 400) {
+        const first = rhFeeDone.keys().next().value;
+        if (first) rhFeeDone.delete(first);
+      }
+    }
     const sig = hostFeeSig(entry);
     const prev = hostFeeDedupe.get(addr);
     const now = Date.now();
@@ -2150,6 +2157,39 @@
 
   const DEBOT_RH_SKIP_TTL_MS = 45000;
   const debotRhSkipAt = new Map();
+  /** ranks/host-fee 已处理过的 RH 卡：DOM tap 不再扒 fiber */
+  const rhFeeDone = new Set();
+  const ponsSkipPending = [];
+  const ponsSkipPendingSeen = new Set();
+  let ponsSkipFlushTimer = 0;
+
+  function flushPonsSkipPending() {
+    ponsSkipFlushTimer = 0;
+    if (!ponsSkipPending.length) return;
+    const addrs = ponsSkipPending.splice(0, 64);
+    try {
+      window.postMessage(
+        { source: "flap-fee-info", type: "pons-skip-map", addrs },
+        "*"
+      );
+    } catch (_pm) {
+      // ignore
+    }
+    if (ponsSkipPending.length) {
+      ponsSkipFlushTimer = window.setTimeout(flushPonsSkipPending, 0);
+    }
+  }
+
+  function queuePonsSkipAddr(addr) {
+    const a = String(addr || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(a) || rhFeeDone.has(a)) return;
+    debotRememberRhSkip(addr);
+    if (ponsSkipPendingSeen.has(a)) return;
+    ponsSkipPendingSeen.add(a);
+    ponsSkipPending.push(a);
+    if (ponsSkipFlushTimer) return;
+    ponsSkipFlushTimer = window.setTimeout(flushPonsSkipPending, 0);
+  }
 
   function debotRememberRhSkip(addr) {
     const a = String(addr || "").toLowerCase();
@@ -2176,7 +2216,9 @@
 
   function debotClearRhSkip(addr) {
     const a = String(addr || "").toLowerCase();
-    if (a) debotRhSkipAt.delete(a);
+    if (!a) return;
+    debotRhSkipAt.delete(a);
+    ponsSkipPendingSeen.delete(a);
   }
 
   const DEBOT_REAL_POOL_QUOTE = new Set([
@@ -2406,6 +2448,18 @@
 
   function collectHostFeesFromGmgnItem(item) {
     try {
+      if (isRobinhoodPageContext()) {
+        const addr = gmgnAddr(item);
+        const lp = gmgnLaunchpadFamily(item);
+        if (addr && lp) {
+          if (gmgnIsPonsV2(item)) debotClearRhSkip(addr);
+          else queuePonsSkipAddr(addr);
+        }
+      }
+    } catch (_skip) {
+      // ignore
+    }
+    try {
       const entry = gmgnHostFeeFromItem(item);
       if (entry) queueHostFeeEntry(entry);
     } catch (_e) {
@@ -2569,6 +2623,24 @@
         queueCardMarkFromItem(row);
       }
     } catch (_q) {
+      // ignore
+    }
+    try {
+      const addr = String(
+        row.contract || row.tokenAddress || row.token_address || row.address || ""
+      )
+        .trim()
+        .toLowerCase();
+      const href = String(row.href || row.url || row.path || row.token_url || row.link || "");
+      const rh =
+        debotRowChain(row) === "robinhood" || /\/token\/robinhood\/|\/robinhood\/token\//i.test(href);
+      const lp = debotRowLaunchpad(row);
+      const pons = debotRowIsPonsV2(row);
+      if (rh && addr) {
+        if (pons) debotClearRhSkip(addr);
+        else if (lp) queuePonsSkipAddr(addr);
+      }
+    } catch (_skip) {
       // ignore
     }
     try {
@@ -4087,6 +4159,9 @@
     if (addr) queueCardMarkFromItem(loose, addr);
     if (!TARGET_TOKEN_RE.test(addr) && !(isRobinhoodPageContext() && gmgnIsPonsV2(loose || {}))) {
       const lp = scrapeGmgnLaunchpadFromFiber(card);
+      if (isRobinhoodPageContext() && addr && lp && String(lp).toLowerCase().indexOf("pons_v2") === -1) {
+        queuePonsSkipAddr(addr);
+      }
       if (!(isRobinhoodPageContext() && String(lp || "").toLowerCase().indexOf("pons_v2") !== -1)) {
         return;
       }
@@ -4175,7 +4250,7 @@
     if (!TARGET_TOKEN_RE.test(addr) && !pons) {
       const lp = debotRowLaunchpad(row);
       if (/\/token\/robinhood\//i.test(href) && addr && lp && !pons) {
-        debotRememberRhSkip(addr);
+        queuePonsSkipAddr(addr);
       }
       return;
     }
@@ -4311,7 +4386,10 @@
           if (budget <= 0) return;
           const href = String(el.getAttribute?.("href") || "");
           const hrefAddr = (href.match(/0x[a-fA-F0-9]{40}/i) || [])[0];
-          if (/\/token\/robinhood\//i.test(href) && debotRhSkipFresh(hrefAddr)) return;
+          if (/\/token\/robinhood\//i.test(href)) {
+            const a = String(hrefAddr || "").toLowerCase();
+            if (debotRhSkipFresh(hrefAddr) || (a && rhFeeDone.has(a))) return;
+          }
           budget -= 1;
           const card = resolveDebotCardElement(el);
           if (card instanceof HTMLElement) schedule(card, "debot");
@@ -4326,6 +4404,12 @@
         )
         .forEach((el) => {
           if (budget <= 0) return;
+          if (isRobinhoodPageContext()) {
+            const href = String(el.getAttribute?.("href") || "");
+            const hrefAddr = (href.match(/0x[a-fA-F0-9]{40}/i) || [])[0];
+            const a = String(hrefAddr || "").toLowerCase();
+            if (a && (debotRhSkipFresh(a) || rhFeeDone.has(a))) return;
+          }
           budget -= 1;
           const c = resolveGmgnCardElement(el);
           if (c) schedule(c, "gmgn");

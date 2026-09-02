@@ -138,10 +138,12 @@ FlapFeeInfo\extension
 3. 点当前插件的 `重新加载`（或重新「加载已解压」指向 `extension/`）。
 4. **硬刷新** GMGN / Debot 目标页（否则可能仍是旧 content script）。
 
-当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.156**）。
+当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.158**）。
 
 ### 0.8.x 要点（近期）
 
+- **0.8.158**：混合战壕降载 — 只扫已确认 Pons V2，long/bankr 不再进热路径
+- **0.8.157**：完整包剪切板 — 复制纯钱包地址不再把其它标签拽回 GMGN/Debot
 - **0.8.156**：Debot 混合战壕降载（long/bankr 不再反复扒 fiber；稳定卡少扫 DOM）
 - **0.8.155**：Debot `?chain=bsc` / `?chain=robinhood` 混合战壕按卡片 href 显示（BSC 税币打链，Pons V2 只画宿主分配）
 - **0.8.154**：Debot 混合战壕按卡认链（`/token/bsc` 税币仍打 `/modes`，`/token/robinhood` 只画 Pons V2）；GMGN Robinhood 逻辑不变
