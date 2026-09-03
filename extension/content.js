@@ -17,6 +17,19 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.171: 混链 page-hook 按卡认 RH，禁止整页 pons-skip 误伤 BSC 税币。
+  // 0.8.170: 混链热路径降载 — 混链判断走缓存；仅厨师首帧 4s 内再扫；无 RH 列不扫 TokenItem。
+  // 0.8.169: 0.8.167 去掉 rhFeeDone 跳过导致徽章 Mutation 反馈环卡死；短窗节流后再扫分红迟到。
+  // 0.8.168: GMGN 多链混选 — 不再用整页 ?chain= 当唯一门禁，按卡 /bsc/token vs /robinhood/token 认链。
+  // 0.8.167: Pons v2 分红被画成 👨‍🍳 — fiber 必须对齐 href CA，禁止上一张 Dev 的 s_tal 写到新卡。
+  // 0.8.166: 完整包 — 页内点 CA 不再开左上角抢焦点小窗；前台跳转不再空等。
+  // 0.8.165: 完整包 — CA 定链改走 GMGN 页内 token_info_brief；search_v3 失败冷却，避免 429 打爆 Cloudflare。
+  // 0.8.164: 完整包 — Chrome 在后台时从其它应用复制 CA 仍跳 K 线（offscreen 保活 + 抢前台）。
+  // 0.8.163: 完整包 — 别处复制 CA 切到 GMGN 后立刻 SPA（不要等鼠标移入；未聚焦时禁止合成 click）。
+  // 0.8.162: 完整包 — 复制 CA 在 GMGN/Debot 页内先 SPA，不依赖休眠的 Service Worker。
+  // 0.8.161: 完整包 — 复制即搜不再只认 copy 事件；失败不记 seen；切页仍不重复跳。
+  // 0.8.160: 完整包剪切板 — 确认代币后聚焦站点标签；切标签/同一段 CA 不重复跳。
+  // 0.8.159: 完整包剪切板 — 搜索失败可重试，不再把超时当成钱包记 seen。
   // 0.8.158: 混合战壕 — ranks 先标非 pons 跳过；扫卡只收已确认 Pons，不再每轮扒 long/bankr。
   // 0.8.157: 完整包剪切板 — 钱包地址先定链再切标签，避免切走其它页又被拽回 GMGN/Debot。
   // 0.8.156: 混合战壕降载 — 非 pons 负缓存、Debot 跳过叶扫/O(n²)、稳定卡不再 enrich DOM。
@@ -1623,7 +1636,7 @@
     if (entry.__pons_v2 === true) {
       return hostFeeAllocationBps(entry) > 0;
     }
-    if (isGmgnRobinhoodPage()) {
+    if (isGmgnRobinhoodPage() && !isGmgnMixedChainPage()) {
       return hostFeeAllocationBps(entry) > 0;
     }
     if (entry.source_host) return hostFeePaintComplete(entry);
@@ -1666,7 +1679,7 @@
 
   function tokenNeedsModesFetch(token) {
     const tok = String(token || "").toLowerCase();
-    if (isGmgnRobinhoodPage()) return false;
+    if (isGmgnRobinhoodPage() && !isGmgnMixedChainPage()) return false;
     const cached =
       modeCache.get(tok) ||
       (isPersistentCacheHit(tok) ? persistentCache.get(tok) : null);
@@ -1732,7 +1745,9 @@
 
   function forceModesForWaitingToken(tok) {
     const token = String(tok || "").toLowerCase();
-    if (isGmgnRobinhoodPage()) return;
+    if (ponsV2AddrSet.has(token) || (isGmgnRobinhoodPage() && !isGmgnMixedChainPage())) {
+      return;
+    }
     if (!TARGET_TOKEN_RE.test(token) || !isExtensionContextValid()) return;
     if (!isBadgeAccessAllowed() || !isAllowedScanChain()) return;
     if (releaseQueuedTokenIfHostFeeReady(token)) return;
@@ -1751,7 +1766,9 @@
 
   function scheduleIncompleteModes(tok) {
     const token = String(tok || "").toLowerCase();
-    if (isGmgnRobinhoodPage()) return;
+    if (ponsV2AddrSet.has(token) || (isGmgnRobinhoodPage() && !isGmgnMixedChainPage())) {
+      return;
+    }
     if (!TARGET_TOKEN_RE.test(token) || incompleteModesTimers.has(token)) return;
     if (!isBadgeAccessAllowed() || !isAllowedScanChain()) return;
     if (releaseQueuedTokenIfHostFeeReady(token)) return;
@@ -3305,6 +3322,72 @@
     }
   }
 
+  function splitChainTokens(raw) {
+    return String(raw || "")
+      .toLowerCase()
+      .split(/[,|+]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  /** GMGN 多链混选：localStorage chain-multi-select.selections.global；URL ?chain= 只是当前条。 */
+  let gmgnChainSetCache = { at: 0, href: "", set: null };
+
+  function readGmgnMultiSelectChains() {
+    if (!isGmgnHost()) return [];
+    try {
+      const raw = localStorage.getItem("chain-multi-select");
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      const g = parsed && parsed.selections && parsed.selections.global;
+      if (!Array.isArray(g) || !g.length) return [];
+      return g.map((s) => String(s || "").toLowerCase()).filter(Boolean);
+    } catch (_err) {
+      return [];
+    }
+  }
+
+  function getActiveChainSet() {
+    const href = String(location.href || "");
+    const now = Date.now();
+    if (
+      gmgnChainSetCache.set &&
+      gmgnChainSetCache.href === href &&
+      now - gmgnChainSetCache.at < 400
+    ) {
+      return gmgnChainSetCache.set;
+    }
+    const set = new Set();
+    for (const c of splitChainTokens(getUrlChain())) set.add(c);
+    for (const c of readGmgnMultiSelectChains()) set.add(c);
+    try {
+      const path = String(location.pathname || "");
+      let m = path.match(/^\/([a-z0-9_-]+)\/token\//i);
+      if (m) set.add(m[1].toLowerCase());
+      m = path.match(/\/token\/([a-z0-9_-]+)(?:\/|$)/i);
+      if (m) set.add(m[1].toLowerCase());
+    } catch (_path) {
+      // ignore
+    }
+    gmgnChainSetCache = { at: now, href, set };
+    return set;
+  }
+
+  function isGmgnMixedChainPage() {
+    if (!isGmgnHost()) return false;
+    if (isTokenDetailRoute()) return false;
+    return getActiveChainSet().size > 1;
+  }
+
+  function rootHasRobinhoodTokenHref(root) {
+    if (!(root instanceof HTMLElement) || !root.querySelector) return false;
+    try {
+      return Boolean(root.querySelector('[href*="/robinhood/token/"]'));
+    } catch (_err) {
+      return false;
+    }
+  }
+
   /**
    * Debot 双站：debot.ai 与 gungnir.bot 同前端（同 Vite/MUI/API），门控与策略共用.
    */
@@ -3338,12 +3421,15 @@
     return "";
   }
 
-  /** GMGN Robinhood 列表 `?chain=robinhood` 或 K 线 `/robinhood/token/0x…` */
+  /** GMGN 纯 Robinhood 页（K 线或单选 RH）。混合战壕按卡 href，不把整页当 RH。 */
   function isGmgnRobinhoodPage() {
     if (!isGmgnHost()) return false;
+    if (/\/robinhood\/token\//i.test(location.pathname || "")) return true;
+    if (isGmgnMixedChainPage()) return false;
+    const set = getActiveChainSet();
+    if (set.has("robinhood") && set.size === 1) return true;
     const chain = resolvePageChain();
-    if (chain === "robinhood") return true;
-    return /\/robinhood\/token\//i.test(location.pathname || "");
+    return chain === "robinhood";
   }
 
   function isRobinhoodTokenRouteHref(href) {
@@ -3441,9 +3527,12 @@
   /** TokenItem fiber：Robinhood 只认 pons_v2，不认尾号 / pons v1。Debot 读 meta.launchpad。 */
   function scrapePonsV2FromCard(card) {
     if (!(card instanceof HTMLElement)) return false;
-    if (!isGmgnRobinhoodPage() && !(isDebotLikeHost() && isRobinhoodTokenRouteHref(readCardTokenHref(card)))) {
+    const href = readCardTokenHref(card);
+    const rhCard = isRobinhoodTokenRouteHref(href);
+    if (!rhCard && !isGmgnRobinhoodPage()) {
       return false;
     }
+    if (!rhCard && isDebotLikeHost()) return false;
     const hrefTok = extractAnyToken(readCardTokenHref(card) || card.getAttribute("href") || "");
     if (hrefTok && ponsV2AddrSet.has(hrefTok)) return true;
     if (hrefTok && isPonsSkipAddr(hrefTok)) return false;
@@ -3503,7 +3592,14 @@
     if (ponsV2AddrSet.has(a)) return true;
     if (isPonsSkipAddr(a)) return false;
     const rhCard = card && isRobinhoodTokenRouteHref(readCardTokenHref(card));
-    if (rhCard || isGmgnRobinhoodPage()) {
+    if (rhCard) {
+      if (card && scrapePonsV2FromCard(card)) {
+        rememberPonsV2Addr(a);
+        return true;
+      }
+      return false;
+    }
+    if (isGmgnRobinhoodPage() && !isGmgnMixedChainPage()) {
       if (card && scrapePonsV2FromCard(card)) {
         rememberPonsV2Addr(a);
         return true;
@@ -3573,6 +3669,8 @@
    * - 拒绝: 其它显式他链（sol/eth/…）
    */
   function isAllowedScanChain() {
+    const set = getActiveChainSet();
+    if (set.has("bsc") || set.has("robinhood")) return true;
     const chain = resolvePageChain();
     if (chain === "bsc") return true;
     if (chain === "robinhood" && (isGmgnHost() || isDebotLikeHost())) return true;
@@ -6719,13 +6817,19 @@
       const attrMax = Math.min(attrs.length, 120);
       for (let i = 0; i < attrMax && out.length < cap; i += 1) add(attrs[i]);
 
-      if (isGmgnRobinhoodPage() && out.length < cap) {
+      if (
+        out.length < cap &&
+        (isGmgnRobinhoodPage() ||
+          (isGmgnMixedChainPage() && rootHasRobinhoodTokenHref(root)))
+      ) {
         const items = root.querySelectorAll('[data-sentry-source-file="TokenItem.tsx"]');
         const itemMax = Math.min(items.length, 40);
         for (let i = 0; i < itemMax && out.length < cap; i += 1) {
           const el = items[i];
           if (!(el instanceof HTMLElement)) continue;
-          const tok = extractAnyToken(el.getAttribute("href") || "");
+          const href = el.getAttribute("href") || "";
+          if (!isRobinhoodTokenRouteHref(href)) continue;
+          const tok = extractAnyToken(href);
           if (!tok) continue;
           if (ponsV2AddrSet.has(tok) || scrapePonsV2FromCard(el)) add(el);
         }
@@ -6875,9 +6979,7 @@
       const href = (el.getAttribute && el.getAttribute("href")) || "";
       if (/flap\.sh|bscscan|etherscan/i.test(href) && !(key instanceof HTMLElement)) return;
       if (href && href.indexOf("/token/") !== -1 && !isBscTokenRouteHref(href)) {
-        if (isGmgnRobinhoodPage() && isRobinhoodTokenRouteHref(href)) {
-          if (!rhHrefAllowedInScan(href)) return;
-        } else if (isDebotRobinhoodTokenHref(href)) {
+        if (isRobinhoodTokenRouteHref(href) && (isGmgnHost() || isDebotLikeHost())) {
           if (!rhHrefAllowedInScan(href)) return;
         } else {
           return;
@@ -11229,9 +11331,13 @@
           if (/flap\.sh|bscscan|etherscan|lens\.google/i.test(href)) addNode(n, 1);
           else addNode(n, 2);
         });
-        if (isGmgnRobinhoodPage()) {
+        if (
+          isGmgnRobinhoodPage() ||
+          (isGmgnMixedChainPage() && rootHasRobinhoodTokenHref(root))
+        ) {
           root.querySelectorAll('[data-sentry-source-file="TokenItem.tsx"]').forEach((n) => {
             const href = (n.getAttribute && n.getAttribute("href")) || "";
+            if (!isRobinhoodTokenRouteHref(href)) return;
             if (rhHrefLooksSkipped(href)) return;
             if (rhHrefAllowedInScan(href) || scrapePonsV2FromCard(n)) addNode(n, 2);
           });
@@ -12463,7 +12569,9 @@
 
   function queueToken(token, options = {}) {
     const tok = String(token || "").toLowerCase();
-    if (isGmgnRobinhoodPage()) return;
+    if (ponsV2AddrSet.has(tok) || (isGmgnRobinhoodPage() && !isGmgnMixedChainPage())) {
+      return;
+    }
     if (!TARGET_TOKEN_RE.test(tok)) return;
     // 非 BSC 页禁止入队（双保险）
     if (!isAllowedScanChain()) return;
@@ -13144,7 +13252,7 @@
   /** BSC 宿主首帧未齐套：一直 ⏳ 直到 /modes。Robinhood 单独短路，不改 BSC 齐套判断。 */
   function isHostFeeEntryPending(entry) {
     if (!entry || isFeeLoadingEntry(entry)) return false;
-    if (isGmgnRobinhoodPage()) return false;
+    if (isGmgnRobinhoodPage() && !isGmgnMixedChainPage()) return false;
     if (entry && entry.__pons_v2 === true) return false;
     if (entry.source_host) return !hostFeeCanSkipModes(entry);
     return false;
@@ -13486,7 +13594,12 @@
     const dataIcon = img.getAttribute("data-icon") || "";
     const src = img.currentSrc || img.getAttribute("src") || "";
     const hay = `${dataIcon} ${src}`;
-    const rh = isGmgnRobinhoodPage();
+    const rh =
+      payoutContextIsRobinhood(img) ||
+      isRobinhoodTokenRouteHref(
+        readCardTokenHref(img.closest?.("[href*='/token/']") || img)
+      ) ||
+      (!isGmgnMixedChainPage() && isGmgnRobinhoodPage());
     for (let i = 0; i < GMGN_ICON_QUOTE_RULES.length; i += 1) {
       const [re, symbol] = GMGN_ICON_QUOTE_RULES[i];
       if (!re.test(hay)) continue;
@@ -13541,9 +13654,12 @@
     const chainKey = getGmgnChainKey() || "bsc";
     gmgnQuoteByStem.clear();
     gmgnQuoteByAddr.clear();
-    const rows = []
-      .concat(Array.isArray(configs[chainKey]) ? configs[chainKey] : [])
-      .concat(chainKey === "bsc" ? [] : Array.isArray(configs.bsc) ? configs.bsc : []);
+    const chainKeys = new Set([chainKey, "bsc"]);
+    if (getActiveChainSet().has("robinhood")) chainKeys.add("robinhood");
+    const rows = [];
+    chainKeys.forEach((k) => {
+      if (Array.isArray(configs[k])) rows.push(...configs[k]);
+    });
     let n = 0;
     for (let i = 0; i < rows.length; i += 1) {
       const item = rows[i];
@@ -13562,7 +13678,7 @@
       }
       if (ca && /^0x[a-f0-9]{40}$/.test(ca) && title) gmgnQuoteByAddr.set(ca, title);
     }
-    if (chainKey === "robinhood") {
+    if (chainKeys.has("robinhood")) {
       Object.keys(ROBINHOOD_QUOTE_BY_ADDR).forEach((a) => {
         gmgnQuoteByAddr.set(a, ROBINHOOD_QUOTE_BY_ADDR[a]);
       });
@@ -13650,8 +13766,11 @@
     return Boolean(div && s === div);
   }
 
-  function vaultDefaultPoolQuote() {
+  function vaultDefaultPoolQuote(card) {
     if (siteStrategy.name === "gmgn") {
+      const href = card ? readCardTokenHref(card) : "";
+      if (isRobinhoodTokenRouteHref(href)) return "ETH";
+      if (isBscTokenRouteHref(href)) return "BNB";
       return GMGN_CHAIN_NATIVE_QUOTE[getGmgnChainKey()] || "BNB";
     }
     return "BNB";
@@ -13677,7 +13796,7 @@
     if (forceVaultNativePoolQuote(entry)) {
       if (fromApi && isRealPoolQuoteSymbol(fromApi)) return formatPoolQuoteSymbol(fromApi);
       if (fromAddr && isRealPoolQuoteSymbol(fromAddr)) return formatPoolQuoteSymbol(fromAddr);
-      return vaultDefaultPoolQuote();
+      return vaultDefaultPoolQuote(card);
     }
 
     const rhPool =
@@ -13725,6 +13844,9 @@
     if (fromApi && isRealPoolQuoteSymbol(fromApi)) return formatPoolQuoteSymbol(fromApi);
     if (siteStrategy.name === "gmgn") {
       if (quoteTokenConfirmedNative(qTok)) {
+        const href = card ? readCardTokenHref(card) : "";
+        if (isRobinhoodTokenRouteHref(href)) return "ETH";
+        if (isBscTokenRouteHref(href)) return "BNB";
         return GMGN_CHAIN_NATIVE_QUOTE[getGmgnChainKey()] || "BNB";
       }
       return fromApi ? formatPoolQuoteSymbol(fromApi) : "";
@@ -13803,7 +13925,9 @@
     const hasTaxSentry = Boolean(
       taxWrap || quoteRoot.querySelector('[data-sentry-component="TaxDividendTokenIcon"]')
     );
-    const rh = isGmgnRobinhoodPage();
+    const rh =
+      isRobinhoodTokenRouteHref(readCardTokenHref(card)) ||
+      (!isGmgnMixedChainPage() && isGmgnRobinhoodPage());
 
     const readQuotesPng = () => {
       const quoteImgs = quoteRoot.querySelectorAll(
@@ -16534,14 +16658,14 @@
     return "";
   }
 
-  /** Robinhood 无 /modes 纠偏：禁止 BSC leftover💎 / dividendBecameReal 把厨师↔分红打成闪变。 */
+  /** Robinhood 无 /modes 纠偏：禁止 JSON 半包把厨师↔分红打成闪变；fiber 可纠正虚拟列表残留。 */
   function robinhoodHostFeeShouldApply(prev, entry) {
     if (!prev) return true;
     const prevKind = robinhoodExclusiveKind(prev);
     const nextKind = robinhoodExclusiveKind(entry);
     if (prevKind && nextKind && prevKind !== nextKind) {
-      // TokenItem fiber 可纠正 JSON/残留内图半包；JSON 不能把已定案类型改成对面。
-      return entry.__fromFiber === true && prev.__fromFiber !== true;
+      // fiber 纠正 JSON 或旧 fiber（TokenItem 复用）；JSON 不能把已定案类型改成对面。
+      return entry.__fromFiber === true;
     }
     return true;
   }

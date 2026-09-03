@@ -10,7 +10,7 @@
  * ★ BSC 税币过滤 + GMGN Robinhood pons v2 host-fee（不打 /modes）；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 174;
+  const HOOK_VER = 179;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -466,9 +466,45 @@
 
   let lastAttrSyncAt = 0;
 
+  let gmgnSelectedChainsCache = { at: 0, href: "", list: null };
+
+  function gmgnSelectedChains() {
+    const href = String(location.href || "");
+    const now = Date.now();
+    if (
+      gmgnSelectedChainsCache.list &&
+      gmgnSelectedChainsCache.href === href &&
+      now - gmgnSelectedChainsCache.at < 400
+    ) {
+      return gmgnSelectedChainsCache.list;
+    }
+    let list = [];
+    try {
+      const raw = localStorage.getItem("chain-multi-select");
+      if (raw) {
+        const g = JSON.parse(raw)?.selections?.global;
+        if (Array.isArray(g) && g.length) {
+          list = g.map((s) => String(s || "").toLowerCase()).filter(Boolean);
+        }
+      }
+    } catch (_ls) {
+      // ignore
+    }
+    if (!list.length) {
+      try {
+        const q = String(new URL(href).searchParams.get("chain") || "").toLowerCase();
+        if (q) list = q.split(/[,|]/).map((s) => s.trim()).filter(Boolean);
+      } catch (_url) {
+        // ignore
+      }
+    }
+    gmgnSelectedChainsCache = { at: now, href, list };
+    return list;
+  }
+
   /**
    * 仅 BSC 过滤列表/WS.
-   * - GMGN: ?chain=bsc | /bsc/token/…
+   * - GMGN: ?chain=bsc | 混选含 bsc | /bsc/token/…
    * - Debot 双站 debot.ai / gungnir.bot: /meme?chain=bsc | /token/bsc/…
    * - robinhood / sol 等：完全不碰
    */
@@ -476,10 +512,12 @@
     try {
       const u = new URL(location.href);
       const q = String(u.searchParams.get("chain") || "").toLowerCase();
+      const selected = gmgnSelectedChains();
+      if (selected.indexOf("bsc") !== -1) return true;
       // Debot 战壕主入口 /meme?chain=bsc（双站同 query）
       if (q === "bsc") return true;
       // all/multi = 融合战壕：页级仍处理，行上 row.chain / /token/bsc 再筛
-      if (q && q !== "all" && q !== "multi") return false;
+      if (q && q !== "all" && q !== "multi" && selected.length <= 1) return false;
       const path = String(u.pathname || "");
       // GMGN K 线
       if (/^\/bsc(\/|$)/i.test(path) || /\/bsc\/token\//i.test(path)) return true;
@@ -508,6 +546,8 @@
     try {
       const u = new URL(location.href);
       const q = String(u.searchParams.get("chain") || "").toLowerCase();
+      const selected = gmgnSelectedChains();
+      if (selected.indexOf("robinhood") !== -1) return true;
       if (q === "robinhood") return true;
       const path = String(u.pathname || "");
       return /\/robinhood\/token\//i.test(path) || /^\/robinhood(\/|$)/i.test(path);
@@ -657,7 +697,7 @@
   function isHostFeeTargetItem(item) {
     const addr = gmgnAddr(item);
     if (!addr) return false;
-    if (isRobinhoodPageContext()) return gmgnIsPonsV2(item);
+    if (gmgnItemIsRobinhood(item)) return gmgnIsPonsV2(item);
     return TARGET_TOKEN_RE.test(addr);
   }
 
@@ -750,6 +790,24 @@
   function gmgnIsPonsV2(item) {
     const lp = gmgnLaunchpadFamily(item);
     return lp === "pons_v2" || lp.indexOf("pons_v2") !== -1;
+  }
+
+  /** 这条 token 是不是 Robinhood。混链不能用整页 isRobinhoodPageContext。 */
+  function gmgnItemIsRobinhood(item) {
+    if (!item || typeof item !== "object") return false;
+    const chain = String(
+      item.chain || item.network || (item.f && (item.f.chain || item.f.network)) || ""
+    ).toLowerCase();
+    if (chain === "robinhood" || chain === "rh") return true;
+    if (chain) return false;
+    const href = String(item.href || item.url || item.link || "");
+    if (/\/robinhood\/token\//i.test(href) || /\/token\/robinhood\//i.test(href)) return true;
+    if (/\/bsc\/token\//i.test(href) || /\/token\/bsc\//i.test(href)) return false;
+    if (gmgnIsPonsV2(item)) return true;
+    const lp = gmgnLaunchpadFamily(item);
+    if (lp.indexOf("flap") !== -1 || lp.indexOf("four") !== -1) return false;
+    if (gmgnSelectedChains().length > 1) return false;
+    return isRobinhoodPageContext();
   }
 
   function gmgnIsFlapStocksLaunchpad(item) {
@@ -893,7 +951,7 @@
       return ROBINHOOD_QUOTE_BY_ADDR[a];
     }
     if (a === "0x0000000000000000000000000000000000000000") {
-      return rhHint || isRobinhoodPageContext() ? "ETH" : "BNB";
+      return rhHint ? "ETH" : "BNB";
     }
     if (a === WBNB_ADDR) return "BNB";
     if (a === "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c") return "BTCB";
@@ -1230,15 +1288,15 @@
       const s = String(cands[i] || "").trim();
       if (!s || s.length > 16) continue;
       if (/^(BNB|WBNB)$/i.test(s)) {
-        if (isRobinhoodPageContext()) continue;
+        if (gmgnItemIsRobinhood(item)) continue;
         if (!nativeHit) nativeHit = s === "WBNB" ? "BNB" : s;
         continue;
       }
-      if (/^WETH$/i.test(s) && isRobinhoodPageContext()) {
+      if (/^WETH$/i.test(s) && gmgnItemIsRobinhood(item)) {
         if (!nativeHit) nativeHit = "WETH";
         continue;
       }
-      if (/^ETH$/i.test(s) && isRobinhoodPageContext()) {
+      if (/^ETH$/i.test(s) && gmgnItemIsRobinhood(item)) {
         if (!nativeHit) nativeHit = "ETH";
         continue;
       }
@@ -1249,7 +1307,9 @@
     }
     if (!symbol && /^0x[a-f0-9]{40}$/.test(address)) {
       symbol =
-        symbolFromKnownTokenAddress(address) || symbolFromKnownStockAddress(address) || "";
+        symbolFromKnownTokenAddress(address, gmgnItemIsRobinhood(item)) ||
+        symbolFromKnownStockAddress(address) ||
+        "";
     }
     if (!symbol) symbol = nativeHit;
     return { symbol, address };
@@ -1428,14 +1488,14 @@
   const hostFeeQuotePatchPending = [];
   const hostFeeQuotePatchDedupe = new Map();
 
-  function gmgnQuoteLooksNative(sym, addr) {
+  function gmgnQuoteLooksNative(sym, addr, rh) {
     const s = String(sym || "").trim().toUpperCase();
     const a = String(addr || "").trim().toLowerCase();
     const nativeSym =
       !s ||
       s === "BNB" ||
       s === "WBNB" ||
-      (isRobinhoodPageContext() && (s === "ETH" || s === "WETH"));
+      (rh && (s === "ETH" || s === "WETH"));
     const nativeAddr =
       !a ||
       a === WBNB_ADDR ||
@@ -1450,7 +1510,9 @@
     const q = gmgnItemQuoteFields(item);
     const quote_symbol = q.symbol;
     const quote_token = q.address;
-    if (gmgnQuoteLooksNative(quote_symbol, quote_token)) return null;
+    if (gmgnQuoteLooksNative(quote_symbol, quote_token, gmgnItemIsRobinhood(item))) {
+      return null;
+    }
     if (!quote_symbol && !/^0x[a-f0-9]{40}$/.test(quote_token)) return null;
     return { address: addr, quote_symbol, quote_token };
   }
@@ -1868,6 +1930,15 @@
     ].join("|");
   }
 
+  function hostFeeKind(entry) {
+    const d = Number(entry && entry.dividend_bps) || 0;
+    const m = Number(entry && entry.market_bps) || 0;
+    if (d > 0 && m <= 0) return "holder";
+    if (m > 0 && d <= 0) return "creator";
+    if (d > 0 && m > 0) return "hybrid";
+    return "";
+  }
+
   function flushHostFeePendingNow() {
     if (hostFeeFlushTimer) {
       window.clearTimeout(hostFeeFlushTimer);
@@ -1903,7 +1974,7 @@
     const prev = hostFeeDedupe.get(addr);
     const now = Date.now();
     if (prev && prev.sig === sig && now - prev.at < HOST_FEE_DEDUPE_MS) return;
-    hostFeeDedupe.set(addr, { sig, at: now });
+    hostFeeDedupe.set(addr, { sig, at: now, kind: hostFeeKind(entry) });
     hostFeePending.push(entry);
     try {
       if (hostFeeEntryShouldHide(entry)) {
@@ -1935,7 +2006,7 @@
 
   function gmgnHostFeeFromItem(item) {
     const addr = gmgnAddr(item);
-    const pons = isRobinhoodPageContext() && gmgnIsPonsV2(item);
+    const pons = gmgnIsPonsV2(item);
     if (pons) {
       if (!addr) return null;
     } else if (!TARGET_TOKEN_RE.test(addr)) {
@@ -2004,7 +2075,12 @@
     const selfSym = gmgnItemSelfSymbol(item);
     let dividend_symbol = "";
     if (!is_stocks_vault) {
-      dividend_symbol = resolveKnownDividendSymbol(divAddr, addr, selfSym);
+      dividend_symbol = resolveKnownDividendSymbol(
+        divAddr,
+        addr,
+        selfSym,
+        gmgnItemIsRobinhood(item)
+      );
       if (!dividend_symbol) {
         const fromTal = gmgnResolveDividendSymbol(item, tal, basket_assets);
         const fromTalCompact = compactBasketSymbol(fromTal);
@@ -2159,6 +2235,19 @@
   const debotRhSkipAt = new Map();
   /** ranks/host-fee 已处理过的 RH 卡：DOM tap 不再扒 fiber */
   const rhFeeDone = new Set();
+  /** 已处理则跳过。仅首帧厨师在 4s 内再扫，接住 marketing→dividend。 */
+  function rhFeeScanSkip(addr) {
+    const a = String(addr || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(a) || !rhFeeDone.has(a)) return false;
+    const prev = hostFeeDedupe.get(a);
+    if (!prev || prev.kind !== "creator") return true;
+    const at = typeof prev.at === "number" ? prev.at : 0;
+    if (!at) return true;
+    const age = Date.now() - at;
+    if (age < 500) return true;
+    if (age > 4000) return true;
+    return false;
+  }
   const ponsSkipPending = [];
   const ponsSkipPendingSeen = new Set();
   let ponsSkipFlushTimer = 0;
@@ -2448,7 +2537,7 @@
 
   function collectHostFeesFromGmgnItem(item) {
     try {
-      if (isRobinhoodPageContext()) {
+      if (gmgnItemIsRobinhood(item)) {
         const addr = gmgnAddr(item);
         const lp = gmgnLaunchpadFamily(item);
         if (addr && lp) {
@@ -3838,7 +3927,7 @@
       const poolSym = compactBasketSymbol(
         entry.quote_symbol || gmgnSymbolFromPoolDom(scopeEl) || ""
       );
-      const tal = scrapeGmgnTaxAllocationFromFiber(scopeEl);
+      const tal = scrapeGmgnTaxAllocationFromFiber(scopeEl, entry.address);
       const innerMatchesTal = gmgnInnerInfosMatchTal(infos, tal);
       // 虚拟列表复用：Tax 内图可能仍是上一张卡。fiber 对不上或外图已换时不写分红。
       if (!entry.dividend_symbol && entry.dividend_bps > 0 && divSym) {
@@ -3921,7 +4010,8 @@
   }
 
   /** 战壕 TokenItem 的 tax_allocation 在祖先 fiber 的 props.data 上，不在子节点。
-   *  Robinhood 虚拟列表：父行可能还是上一张卡的 s_tal，必须跟 href CA 对齐。 */
+   *  Robinhood 虚拟列表：父行可能还是上一张卡的 s_tal，必须跟 href CA 对齐。
+   *  wantAddr 有值时，缺地址或地址不一致都丢掉（否则会把上一张 Dev 的 marketing 写到新卡上）。 */
   function scrapeGmgnTokenRowFromFiber(root, wantAddr) {
     const want = String(wantAddr || "").toLowerCase();
     let f = reactFiberOf(root);
@@ -3934,7 +4024,7 @@
           if (!d || typeof d !== "object") continue;
           if (!(d.tax_allocation || d.s_tal || d.taxAllocation)) continue;
           const a = gmgnAddr(d);
-          if (want && a && a !== want) continue;
+          if (want && a !== want) continue;
           return d;
         }
       }
@@ -3943,8 +4033,8 @@
     return null;
   }
 
-  function scrapeGmgnLaunchpadFromFiber(root) {
-    const row = scrapeGmgnTokenRowFromFiber(root);
+  function scrapeGmgnLaunchpadFromFiber(root, wantAddr) {
+    const row = scrapeGmgnTokenRowFromFiber(root, wantAddr);
     const fromRow = String(
       (row &&
         (row.launchpad_platform ||
@@ -4016,12 +4106,13 @@
     return null;
   }
 
-  function scrapeGmgnTaxAllocationFromFiber(root) {
-    const row = scrapeGmgnTokenRowFromFiber(root);
+  function scrapeGmgnTaxAllocationFromFiber(root, wantAddr) {
+    const row = scrapeGmgnTokenRowFromFiber(root, wantAddr);
     if (row) {
       const tal = row.tax_allocation || row.taxAllocation || row.s_tal;
       if (tal && typeof tal === "object") return tal;
     }
+    if (wantAddr) return null;
     let f = reactFiberOf(root);
     for (let i = 0; i < 24 && f; i += 1) {
       const tal = pickGmgnTalFromProps(f.memoizedProps);
@@ -4155,23 +4246,30 @@
     if (!(card instanceof HTMLElement)) return;
     noteGmgnTransport("fiber");
     const addr = gmgnAddrFromCard(card);
-    const loose = scrapeGmgnTokenDataLoose(card) || scrapeGmgnTokenRowFromFiber(card, addr);
-    if (addr) queueCardMarkFromItem(loose, addr);
-    if (!TARGET_TOKEN_RE.test(addr) && !(isRobinhoodPageContext() && gmgnIsPonsV2(loose || {}))) {
-      const lp = scrapeGmgnLaunchpadFromFiber(card);
-      if (isRobinhoodPageContext() && addr && lp && String(lp).toLowerCase().indexOf("pons_v2") === -1) {
+    const row = scrapeGmgnTokenRowFromFiber(card, addr);
+    const loose = scrapeGmgnTokenDataLoose(card);
+    if (addr) queueCardMarkFromItem(row || loose, addr);
+    const rhHref = /\/robinhood\/token\//i.test(String(card.getAttribute?.("href") || ""));
+    if (!TARGET_TOKEN_RE.test(addr) && !(rhHref && gmgnIsPonsV2(row || {}))) {
+      const lp = scrapeGmgnLaunchpadFromFiber(card, addr);
+      if (
+        rhHref &&
+        addr &&
+        gmgnAddr(row) === addr &&
+        lp &&
+        String(lp).toLowerCase().indexOf("pons_v2") === -1
+      ) {
         queuePonsSkipAddr(addr);
       }
-      if (!(isRobinhoodPageContext() && String(lp || "").toLowerCase().indexOf("pons_v2") !== -1)) {
+      if (!(rhHref && String(lp || "").toLowerCase().indexOf("pons_v2") !== -1)) {
         return;
       }
     }
-    const row = scrapeGmgnTokenRowFromFiber(card, addr);
     const rowAddr = gmgnAddr(row);
-    if (isRobinhoodPageContext() && rowAddr && addr && rowAddr !== addr) return;
+    if (rhHref && (!addr || !rowAddr || rowAddr !== addr)) return;
     const tal =
       (row && (row.tax_allocation || row.s_tal || row.taxAllocation)) ||
-      (isRobinhoodPageContext() ? null : scrapeGmgnTaxAllocationFromFiber(card));
+      scrapeGmgnTaxAllocationFromFiber(card, addr);
     if (!tal) return;
     const pool = row && row.pool && typeof row.pool === "object" ? row.pool : null;
     let launchpad_platform = String(
@@ -4180,7 +4278,7 @@
           row.lpp ||
           row.launchpad_platform_name ||
           row.launchpad)) ||
-        scrapeGmgnLaunchpadFromFiber(card) ||
+        scrapeGmgnLaunchpadFromFiber(card, addr) ||
         ""
     ).trim();
     if (
@@ -4245,6 +4343,9 @@
     const scraped = scrapeDebotLaunchpadFromFiber(scope);
     const addr = debotAddrFromCard(scope) || String(scraped?.contract || "").toLowerCase();
     if (!scraped) return;
+    const scrapedAddr = String(scraped.contract || "").toLowerCase();
+    if (/\/token\/robinhood\//i.test(href) && (!scrapedAddr || scrapedAddr !== addr)) return;
+    if (scrapedAddr && addr && scrapedAddr !== addr) return;
     const row = { ...scraped, contract: addr };
     const pons = debotRowIsPonsV2(row);
     if (!TARGET_TOKEN_RE.test(addr) && !pons) {
@@ -4363,6 +4464,11 @@
     };
     const schedule = (card, kind) => {
       if (!(card instanceof HTMLElement)) return;
+      if (kind === "gmgn") {
+        const href = String(card.getAttribute?.("href") || "");
+        const hrefAddr = (href.match(/0x[a-fA-F0-9]{40}/i) || [])[0];
+        if (rhFeeScanSkip(hrefAddr)) return;
+      }
       if (kind === "debot") pendingDebot.add(card);
       else pendingGmgn.add(card);
       if (!pendingFlushTimer) {
@@ -4387,8 +4493,7 @@
           const href = String(el.getAttribute?.("href") || "");
           const hrefAddr = (href.match(/0x[a-fA-F0-9]{40}/i) || [])[0];
           if (/\/token\/robinhood\//i.test(href)) {
-            const a = String(hrefAddr || "").toLowerCase();
-            if (debotRhSkipFresh(hrefAddr) || (a && rhFeeDone.has(a))) return;
+            if (debotRhSkipFresh(hrefAddr)) return;
           }
           budget -= 1;
           const card = resolveDebotCardElement(el);
@@ -4404,11 +4509,17 @@
         )
         .forEach((el) => {
           if (budget <= 0) return;
-          if (isRobinhoodPageContext()) {
-            const href = String(el.getAttribute?.("href") || "");
-            const hrefAddr = (href.match(/0x[a-fA-F0-9]{40}/i) || [])[0];
-            const a = String(hrefAddr || "").toLowerCase();
-            if (a && (debotRhSkipFresh(a) || rhFeeDone.has(a))) return;
+          const href = String(el.getAttribute?.("href") || "");
+          const hrefAddr = (href.match(/0x[a-fA-F0-9]{40}/i) || [])[0];
+          if (rhFeeScanSkip(hrefAddr)) return;
+          if (/\/robinhood\/token\//i.test(href) && debotRhSkipFresh(hrefAddr)) return;
+          if (
+            href &&
+            /\/token\//i.test(href) &&
+            !/\/bsc\/token\//i.test(href) &&
+            !/\/robinhood\/token\//i.test(href)
+          ) {
+            return;
           }
           budget -= 1;
           const c = resolveGmgnCardElement(el);

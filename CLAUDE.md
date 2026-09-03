@@ -298,10 +298,10 @@ TokenItem 字段与 BSC 同套，开 Robinhood 扫卡门禁后三项都能用（
 
 跳转：
 
-- **主路径（推荐）**：GMGN/Debot 标签里的 content script 常驻。页可见且聚焦时轮询剪切板；切回该标签立刻读一次（未变则不跳）。定链可走同源 `search_v3`，再 `clip-spa.js` 站内跳。
-- **offscreen 后台**：人不在 GMGN/Debot 时轮询剪切板；`search_v3` **确认是代币后**才激活已开站点标签并站内跳（与复制即搜同一套 `forceFocus`），不必先点标签页。钱包 / 超时 / 非代币**禁止**抢焦点。SW 用 offscreen 长连接保活。
+- **主路径（推荐）**：GMGN/Debot 标签里的 content script 常驻。页可见且聚焦时轮询剪切板；切回该标签立刻读一次（未变则不跳）。定链可走同源 `search_v3`，真正导航交给后台（负责聚焦标签）。
+- **offscreen 后台**：人不在 GMGN/Debot 时轮询剪切板；`search_v3` **确认是代币后**才激活已开站点标签并站内跳，不必先点标签页。钱包 / 超时 / 非代币**禁止**抢焦点。SW 用 offscreen 长连接保活。
 - **禁止** `chrome.tabs.update` 换地址栏（整页重载很慢）
-- 同一地址 2.5s 内不连跳
+- 同一地址：切标签 / 轮询 / `clipboardchange` **不重复跳**；仅页内 copy/cut/writeText 可再跳，且 2.5s 内不连跳
 
 可选「复制即搜」（默认关，完整包独立区块，**仅 GMGN**）：与跳转 K 线**共用一条剪切板通道**（页内 copy/cut + `clipboardchange` + 前台轮询；**offscreen 同样分流**）。读到内容后三分流：文中第一个 EVM/Sol 地址且 search_v3 确认为代币 → 跳 K 线（若已开）；整段短文本且字数在设定范围内 → 切到已开的 GMGN 标签并打开搜索、填入 `input[name=new-search-input]`；钱包地址 / 超范围 / 含空格 / 网址 → **不跳不搜**。不必先点 GMGN。两个开关独立，但只挂一套监听。同一段只处理一次，再复制才再动。默认 2–8 字，上下限可单独改（1–32）。字数按 Unicode 字形计：**中文一字 = 英文一字母 = 1**（`生米`=2，`PEPE`=4）。剥前缀 `$`/`@`/包裹引号。开启同样要确认 + `clipboardRead`；与跳转共用权限、offscreen 与 `clipJump.seen.v1` 去重，两个都关才撤回权限 / 关掉 offscreen。
 
@@ -467,6 +467,19 @@ python tools/ctl.py watchdog-run
 | Debot 混合战壕只有 BSC 徽章、RH 卡空白 | 扫卡选择器仍只认 8888/7777/ffff，随机尾号 pons 进不了种子 | 升到 **0.8.155+**；重载完整包并硬刷 Debot |
 | Debot 混合战壕卡顿 / 源站变慢 | 0.8.155 把 long/bankr 也推进扫卡并反复扒 fiber | 升到 **0.8.158+**；重载完整包并硬刷 Debot |
 | 复制钱包地址后切走标签又被拽回 GMGN/Debot | 0.8.144 定链未完成就 warmup 切标签；钱包 `not-token` 不记 seen，offscreen 每 200ms 再抢焦点 | 升到 **0.8.157+** 完整包；重载插件（公开包无此功能） |
+| 复制代币 CA 有时不跳 K 线 | 0.8.157 把 search_v3 超时/空包也当成钱包记 seen | 升到 **0.8.159+** 完整包；重载插件并硬刷 GMGN |
+| 复制 CA 后台跳了 K 线但不切到 GMGN/Debot | 0.8.159 轮询把 forceFocus 关了，确认后也不激活标签 | 升到 **0.8.160+** 完整包；重载插件 |
+| 切到其它标签又跳回同一条 K 线 | 把 clipboardchange / 切页当成再次复制 | 升到 **0.8.160+**；同一段 CA 切页不跳 |
+| 复制即搜不弹 GMGN 搜索 | 0.8.160 只认页内 copy；失败还把内容记 seen，offscreen 不再搜 | 升到 **0.8.161+** 完整包；重载并硬刷 GMGN |
+| 复制 CA 不跳 K 线（页已在 GMGN） | 0.8.160 去掉页内 SPA，全走 MV3 Service Worker，休眠后 sendMessage 丢 | 升到 **0.8.162+** 完整包；重载并硬刷页 |
+| 别处复制 CA 已切到 GMGN，K 线要等鼠标移入才变 | 标签已激活但文档无焦点，合成 click / 过早 router.push 被挂起 | 升到 **0.8.163+** 完整包；重载并硬刷页 |
+| 浏览器在后台、其它应用复制 CA 不跳 | 页内无焦点读不了剪贴板；offscreen 被冻住；Windows 不允许后台抢前台 | 升到 **0.8.164+** 完整包；重载插件（不必开着 GMGN 标签在前台） |
+| 复制 CA 后 GMGN `search_v3` 429 / Just a moment | 后台 Worker 用 `credentials:omit` 且失败后每 200ms 连打 | 升到 **0.8.165+** 完整包；定链改走页内 `token_info_brief_multi_chain` |
+| 点 CA 跳转变慢、左上角小窗连闪 | 0.8.164 抢前台小窗被 offscreen 连开多次 | 升到 **0.8.166+** 完整包；页内/已前台不再开小窗 |
+| Pons v2 宿主写「分红 / WETH」徽章却是 👨‍🍳 | TokenItem 复用：父 fiber 还是上一张 Dev 的 `s_tal`，缺地址也被当成当前卡；`rhFeeDone` 不再重扫 | 升到 **0.8.167+**；重载插件并硬刷 Robinhood |
+| GMGN 勾了 BSC+Robinhood 徽章全没 / 只对一条链 | 混选后 URL 仍是 `?chain=` 单条，整页当单一链 | 升到 **0.8.168+**；按卡 `/bsc/token` 与 `/robinhood/token` |
+| 升 0.8.167/168 后 GMGN 卡死崩溃 | 去掉 `rhFeeDone` 跳过，徽章 Mutation 反复扒全部 fiber | 升到 **0.8.169+**；重载插件并硬刷页 |
+| 混选 BSC+RH 后 BSC 7777 没徽章 / 底池变 ETH | page-hook 整页当 Robinhood，非 pons 进 skip、0x0 当 ETH | 升到 **0.8.171+**；按卡认链 |
 | 卡片标记（发币次数/推特备注）没出现 | 未开开关 / 没加规则 / GMGN 新币 count 仍为 0 / 非战壕行卡 | **0.8.130+** 弹窗启用并加规则；Debot 看 ranks `created_count`；Robinhood 战壕 **0.8.148+** 与 BSC 同套字段 |
 | 推特备注只标部分同 handle 卡 | 新卡 twitter 常是 `i/status/{id}`，旧逻辑把 `/i/` 当无效链丢掉 | 升到 **0.8.147+**；重载插件并硬刷页 |
 | 新卡先闪一下发币次数色条/`×0` 再变对 | 缺次数时被当成 0，默认 `<N` 先命中 | 升到 **0.8.146+**；没拿到正数次数不上色 |
@@ -764,8 +777,21 @@ python tools/ctl.py watchdog-run
  - `0.8.156`：混合战壕降载 — 非 pons 负缓存、Debot 跳过叶扫与 O(n²) contains、稳定卡不再每轮 enrich DOM
  - `0.8.157`：完整包剪切板 — 未确认代币不提前切标签；钱包 `not-token` 记 seen，避免切走其它页被拽回 GMGN/Debot
  - `0.8.158`：混合战壕 — ranks 先标非 Pons 跳过；扫卡只收已确认 Pons，host-fee 定向画卡；GMGN fiber 每 200ms 最多 2 张
-- 插件当前版本：见 `extension/manifest.json`（**0.8.158**，公开无剪切板）
-- page-hook：`HOOK_VER` **174**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.159`：完整包剪切板 — search_v3 超时/空包可重试；不再误判钱包后 10 分钟不跳
+ - `0.8.160`：完整包剪切板 — 确认代币后聚焦 GMGN/Debot；切标签/同一段 CA 不重复跳（仅页内 copy 可再跳）
+ - `0.8.161`：完整包 — 复制即搜：新内容（含 clipboardchange/轮询）即可搜；失败不记 seen；只开搜索时页内也会轮询
+ - `0.8.162`：完整包 — 已在 GMGN/Debot 时复制 CA 先页内 SPA（js-mcp：`clip-spa-nav` + `next.router.push` 可用；不依赖休眠 SW）
+ - `0.8.163`：完整包 — 别处复制后标签已前台、K 线等鼠标才变：未聚焦不用合成 click，唤醒后再 `router.push`，并在 pointerenter 补一次
+ - `0.8.164`：完整包 — Chrome 在后台时从其它应用复制 CA：offscreen 心跳保活 + 最小化恢复 + 小窗抢 Windows 前台锁
+ - `0.8.165`：完整包 — CA 定链优先 GMGN 页内 `POST /api/v1/token_info_brief_multi_chain`（js-mcp：无 chain 也能返回 bsc/sol；钱包空数组）；`search_v3` 仅兜底且 429 冷却 20s
+ - `0.8.166`：完整包 — 页内点 CA 不再闪抢焦点小窗（只在 Chrome 确在后台时开一次）；前台跳转不再空等切窗
+ - `0.8.167`：Pons v2 持有人分红被画成 👨‍🍳 — fiber `s_tal` 必须对齐 href CA；fiber 可纠正旧类型；扫卡不再因 `rhFeeDone` 跳过已见 CA
+ - `0.8.168`：GMGN 多链混选 — 整页 `?chain=` 只是当前条；按卡 `/bsc/token` vs `/robinhood/token` 认链（对齐 Debot 混合战壕）
+ - `0.8.169`：修 0.8.167 扫卡反馈环卡死 — 已处理 CA 恢复跳过，仅 0.5–10s 窗口再扫分红迟到
+ - `0.8.170`：混链热路径降载 — 链集合 400ms 缓存；仅厨师首帧 4s 内再扫；无 RH 列不扫 TokenItem；BSC 单选不灌 RH quotes
+ - `0.8.171`：混链 page-hook 按卡认 RH，禁止整页 pons-skip / 0x0→ETH 误伤 BSC 税币
+- 插件当前版本：见 `extension/manifest.json`（**0.8.171**，公开无剪切板）
+- page-hook：`HOOK_VER` **179**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  

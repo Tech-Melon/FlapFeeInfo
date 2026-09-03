@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.158",
-  "description": "FlapFeeInfo 0.8.158: Scan only confirmed Pons V2 cards in mixed trenches.",
+  "version": "0.8.171",
+  "description": "FlapFeeInfo 0.8.171: Mixed-chain per-card RH vs BSC, no page-wide Pons skip.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",
