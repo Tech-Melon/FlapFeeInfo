@@ -75,14 +75,21 @@
   padding: 1px 5px;
 }
 
-/* 弹窗「底池着色」：按展示名（截断后）覆盖主题色 */
-.gmgn-fee-mode-icon--pool-custom {
-  color: var(--flap-pool-fg) !important;
-  border-color: var(--flap-pool-fg) !important;
-  background-color: var(--flap-pool-bg) !important;
-  box-shadow:
-    0 0 0 1px var(--flap-pool-ring),
-    0 0 8px var(--flap-pool-ring) !important;
+.gmgn-fee-mode-icon__sep {
+  opacity: 0.55;
+  padding: 0;
+}
+
+.gmgn-fee-mode-icon--pool-tint .gmgn-fee-mode-icon__pool {
+  color: var(--flap-pool-fg);
+}
+
+.gmgn-fee-mode-icon--div-tint .gmgn-fee-mode-icon__fee {
+  color: var(--flap-div-fg);
+}
+
+.gmgn-fee-mode-icon--border-tint {
+  border-color: var(--flap-border-fg) !important;
 }
 
 .gmgn-fee-mode-icon--debot {

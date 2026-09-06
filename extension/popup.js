@@ -14,6 +14,8 @@
   const TW_HANDLE_MARK_KEY = "flapFeeInfo.twHandleMark.v1";
   const SYMBOL_DUP_MARK_KEY = "flapFeeInfo.symbolDupMark.v1";
   const POOL_COLOR_KEY = "flapFeeInfo.poolColor.v1";
+  const DIV_COLOR_KEY = "flapFeeInfo.divColor.v1";
+  const SYMBOL_STYLE_KEY = "flapFeeInfo.symbolStyle.v1";
   const LICENSE_KEY = "flapFeeInfo.license.v1";
   const DEVICE_ID_KEY = "flapFeeInfo.deviceId.v1";
   const LICENSE_API_BASE = "https://flap-fee-info.tech-melon.workers.dev";
@@ -30,7 +32,7 @@
   const DEFAULT_SEARCH_HIDE = { enabled: false };
   const DEFAULT_DEV_COUNT_MARK = { enabled: false, rules: [] };
   const DEFAULT_TW_HANDLE_MARK = { enabled: false, rules: [] };
-  const DEFAULT_POOL_COLOR = { enabled: false, rules: [] };
+  const DEFAULT_POOL_COLOR = { enabled: false, syncBorder: false, rules: [] };
   const POOL_COLOR_MAX = 24;
   const DEFAULT_SYMBOL_DUP_MARK = {
     enabled: false,
@@ -66,7 +68,7 @@
       catTools: "增强工具",
       catToolsDesc: "剪切板 · 搜索 · 阅读",
       catBadge: "徽章外观",
-      catBadgeDesc: "主题、显示项、底池着色",
+      catBadgeDesc: "主题、显示项、底池/分红着色",
       catFilter: "列表过滤",
       catFilterDesc: "首页与 K 线左侧「新创建」",
       catMark: "卡片标记",
@@ -137,16 +139,19 @@
       statusReset: "已恢复默认（贴税率旁）",
       pref_pool_title: "底池报价",
       pref_pool_desc: "🦋Flap / 🖐️Four / 🪙其它",
-      poolColorSection: "底池着色",
+      poolColorSection: "底池与分红着色",
       poolColorHint:
-        "按徽章上的底池名着色（GMGN / Debot 都生效）。与徽章同一套截断：拉丁/中文最多 6 字，WBNB→BNB，SPCXB→SPCX。例如 USD1、ETH、BNB、SPCX。",
-      poolColorEnableTitle: "启用底池着色",
-      poolColorEnableDesc: "命中规则后整枚徽章改成该颜色",
-      poolColorNamePh: "BNB / USD1 / ETH",
-      poolColorHint2: "最多 24 条。同名只保留一条。关掉「底池报价」显示项则不着色。",
-      poolColorEmpty: "暂无规则，输入底池名并选颜色后添加",
-      poolColorInvalid: "输入 BNB、USD1、ETH 等底池名",
-      poolColorDup: "该底池名已添加",
+        "一条规则同时用于底池（左）和分红（右）。同一代币共用颜色。BNB / ETH / USD* 底池且分红是别的币时，整枚跟分红色；分红没设色则仍用底池色。",
+      poolColorSyncBorderTitle: "边框颜色一起变更",
+      poolColorSyncBorderDesc: "默认关：外框仍跟 💎/👨‍🍳。开启后边框跟代币色，底色仍跟类型",
+      poolColorEnableTitle: "启用着色",
+      poolColorEnableDesc: "命中后改显示名，并给对应半边文字上色",
+      poolColorNamePh: "QQQB / BNB",
+      poolColorLabelPh: "纳指（可空）",
+      poolColorHint2: "最多 24 条。同名只保留一条。QQQ 这类特色底池仍用底池色。关掉「底池报价」则不改左边。",
+      poolColorEmpty: "暂无规则，输入原名、可选显示名并选颜色后添加",
+      poolColorInvalid: "输入 QQQB、BNB、USD1 等代币原名",
+      poolColorDup: "该名称已添加",
       pref_holder_title: "持有人分红",
       pref_holder_desc: "dividend 分配",
       pref_creator_title: "创作者/营销",
@@ -256,7 +261,7 @@
       catTools: "Productivity",
       catToolsDesc: "Clipboard · Search · Reading",
       catBadge: "Badge look",
-      catBadgeDesc: "Theme, display, pool colors",
+      catBadgeDesc: "Theme, display, pool/dividend colors",
       catFilter: "List filters",
       catFilterDesc: "Home & K-line left New creation",
       catMark: "Card marks",
@@ -329,16 +334,19 @@
       statusReset: "Reset to default (beside Tax)",
       pref_pool_title: "Pool quote",
       pref_pool_desc: "🦋Flap / 🖐️Four / 🪙other",
-      poolColorSection: "Pool colors",
+      poolColorSection: "Pool & dividend colors",
       poolColorHint:
-        "Color the whole badge by the on-badge pool name (GMGN and Debot). Same truncation as the badge: up to 6 chars, WBNB→BNB, SPCXB→SPCX. Examples: USD1, ETH, BNB, SPCX.",
-      poolColorEnableTitle: "Enable pool colors",
-      poolColorEnableDesc: "Matching pool quote recolors the entire badge",
-      poolColorNamePh: "BNB / USD1 / ETH",
-      poolColorHint2: "Max 24 rules. Duplicate names are ignored. No color if Pool quote display is off.",
-      poolColorEmpty: "No rules yet — type a pool name, pick a color, then add",
-      poolColorInvalid: "Enter a pool name such as BNB, USD1, ETH",
-      poolColorDup: "That pool name is already added",
+        "One rule covers pool (left) and dividend (right). Same token shares color. BNB / ETH / USD* pools with a different payout take the dividend color; if that payout has no color, fall back to the pool color.",
+      poolColorSyncBorderTitle: "Also change border color",
+      poolColorSyncBorderDesc: "Off: frame stays 💎/👨‍🍳. On: border follows token color; fill still follows fee type",
+      poolColorEnableTitle: "Enable coloring",
+      poolColorEnableDesc: "Rename and tint the matching half of the badge",
+      poolColorNamePh: "QQQB / BNB",
+      poolColorLabelPh: "alias (optional)",
+      poolColorHint2: "Max 24 rules. Duplicate match names are ignored. Distinctive pools such as QQQ still use the pool color. Off if Pool quote display is hidden.",
+      poolColorEmpty: "No rules yet — original name, optional alias, then color",
+      poolColorInvalid: "Enter a ticker such as QQQB, BNB, USD1",
+      poolColorDup: "That name is already added",
       pref_holder_title: "Holder dividend",
       pref_holder_desc: "dividend share",
       pref_creator_title: "Creator / marketing",
@@ -522,12 +530,14 @@
   const twHandleNoteInput = document.getElementById("twHandleNoteInput");
   const twHandleColorInput = document.getElementById("twHandleColorInput");
   const twHandleAddBtn = document.getElementById("twHandleAddBtn");
+  const poolColorSyncBorder = document.getElementById("poolColorSyncBorder");
   const poolColorEnabled = document.getElementById("poolColorEnabled");
   const poolColorRulesWrap = document.getElementById("poolColorRulesWrap");
   const poolColorRulesList = document.getElementById("poolColorRulesList");
   const poolColorNameInput = document.getElementById("poolColorNameInput");
   const poolColorPicker = document.getElementById("poolColorPicker");
   const poolColorAddBtn = document.getElementById("poolColorAddBtn");
+  const poolColorLabelInput = document.getElementById("poolColorLabelInput");
   const symbolDupEnabled = document.getElementById("symbolDupEnabled");
   const symbolDupRulesWrap = document.getElementById("symbolDupRulesWrap");
   const symbolDupWait = document.getElementById("symbolDupWait");
@@ -723,25 +733,61 @@
     return s.slice(0, 6);
   }
 
+  function normalizeStyleAlias(raw) {
+    const s = String(raw || "")
+      .trim()
+      .replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "");
+    if (!s) return "";
+    if (/[\u4e00-\u9fff]/.test(s)) return s.slice(0, 6);
+    return s.toUpperCase().slice(0, 6);
+  }
+
   function normalizePoolColor(raw) {
-    const out = { enabled: false, rules: [] };
+    const out = { enabled: false, syncBorder: false, rules: [] };
     if (!raw || typeof raw !== "object") return out;
     out.enabled = raw.enabled === true;
+    out.syncBorder = raw.syncBorder === true;
     const list = Array.isArray(raw.rules) ? raw.rules : [];
     const seen = new Set();
     for (let i = 0; i < list.length && out.rules.length < POOL_COLOR_MAX; i += 1) {
       const r = list[i] || {};
-      const name = normalizePoolColorName(r.name);
-      if (!name || seen.has(name)) continue;
-      seen.add(name);
+      const match = normalizePoolColorName(r.match || r.name);
+      if (!match || seen.has(match)) continue;
+      seen.add(match);
       out.rules.push({
         id: String(r.id || `p${Date.now().toString(36)}_${i}`),
-        name,
+        match,
+        label: normalizeStyleAlias(r.label),
         color: normalizeHexColor(r.color, "#f0b90b"),
         enabled: r.enabled !== false
       });
     }
     return out;
+  }
+
+  function mergeSymbolStyleFromStorage(items) {
+    if (
+      items &&
+      Object.prototype.hasOwnProperty.call(items, SYMBOL_STYLE_KEY) &&
+      items[SYMBOL_STYLE_KEY] != null
+    ) {
+      return normalizePoolColor(items[SYMBOL_STYLE_KEY]);
+    }
+    const pool = normalizePoolColor(items?.[POOL_COLOR_KEY]);
+    const div = normalizePoolColor(items?.[DIV_COLOR_KEY]);
+    const seen = new Set((pool.rules || []).map((r) => r.match));
+    const rules = [...(pool.rules || [])];
+    for (let i = 0; i < (div.rules || []).length; i += 1) {
+      const r = div.rules[i];
+      if (!r || seen.has(r.match)) continue;
+      seen.add(r.match);
+      rules.push(r);
+    }
+    return {
+      enabled: pool.enabled === true || div.enabled === true,
+      syncBorder: false,
+      rules
+    };
   }
 
   function normalizeTwHandle(raw) {
@@ -1399,7 +1445,9 @@
             DEV_COUNT_MARK_KEY,
             TW_HANDLE_MARK_KEY,
             SYMBOL_DUP_MARK_KEY,
+            SYMBOL_STYLE_KEY,
             POOL_COLOR_KEY,
+            DIV_COLOR_KEY,
           ],
           (items) => {
             if (chrome.runtime.lastError) {
@@ -1445,7 +1493,7 @@
               devCountMark: normalizeDevCountMark(items?.[DEV_COUNT_MARK_KEY]),
               twHandleMark: normalizeTwHandleMark(items?.[TW_HANDLE_MARK_KEY]),
               symbolDupMark: normalizeSymbolDupMark(items?.[SYMBOL_DUP_MARK_KEY]),
-              poolColor: normalizePoolColor(items?.[POOL_COLOR_KEY]),
+              poolColor: mergeSymbolStyleFromStorage(items),
             });
           }
         );
@@ -1999,7 +2047,7 @@
     const normalized = normalizePoolColor(state);
     return new Promise((resolve) => {
       try {
-        chrome.storage.local.set({ [POOL_COLOR_KEY]: normalized }, () => {
+        chrome.storage.local.set({ [SYMBOL_STYLE_KEY]: normalized }, () => {
           void chrome.runtime?.lastError;
           resolve(normalized);
         });
@@ -2020,6 +2068,9 @@
 
   function renderPoolColorUI(state) {
     poolColorState = normalizePoolColor(state);
+    if (poolColorSyncBorder) {
+      poolColorSyncBorder.checked = poolColorState.syncBorder === true;
+    }
     if (poolColorEnabled) {
       poolColorEnabled.checked = poolColorState.enabled === true;
     }
@@ -2069,8 +2120,8 @@
 
       const text = document.createElement("span");
       text.className = "suffix-rule-text mark-rule-label" + (rule.enabled === false ? " is-off" : "");
-      text.textContent = rule.name;
-      text.title = rule.name;
+      text.textContent = rule.label ? `${rule.match} → ${rule.label}` : rule.match;
+      text.title = text.textContent;
 
       const del = document.createElement("button");
       del.type = "button";
@@ -2087,12 +2138,12 @@
   }
 
   function tryAddPoolColorRule() {
-    const name = normalizePoolColorName(poolColorNameInput?.value);
-    if (!name) {
+    const match = normalizePoolColorName(poolColorNameInput?.value);
+    if (!match) {
       if (poolColorNameInput) poolColorNameInput.placeholder = t("poolColorInvalid");
       return;
     }
-    const exists = (poolColorState.rules || []).some((r) => r.name === name);
+    const exists = (poolColorState.rules || []).some((r) => r.match === match);
     if (exists) {
       if (poolColorNameInput) {
         poolColorNameInput.placeholder = t("poolColorDup");
@@ -2102,9 +2153,10 @@
     }
     if ((poolColorState.rules || []).length >= POOL_COLOR_MAX) return;
     const color = normalizeHexColor(poolColorPicker?.value, "#f0b90b");
+    const label = normalizeStyleAlias(poolColorLabelInput?.value);
     poolColorState.rules = [
       ...(poolColorState.rules || []),
-      { id: `p${Date.now().toString(36)}`, name, color, enabled: true }
+      { id: `p${Date.now().toString(36)}`, match, label, color, enabled: true }
     ];
     if (!poolColorState.enabled) {
       poolColorState.enabled = true;
@@ -2114,6 +2166,7 @@
       poolColorNameInput.value = "";
       poolColorNameInput.placeholder = t("poolColorNamePh");
     }
+    if (poolColorLabelInput) poolColorLabelInput.value = "";
     scheduleSavePoolColor();
   }
 
@@ -2565,12 +2618,22 @@
     scheduleSaveTwHandleMark();
   });
   twHandleAddBtn?.addEventListener("click", () => tryAddTwHandleRule());
+  poolColorSyncBorder?.addEventListener("change", () => {
+    poolColorState.syncBorder = poolColorSyncBorder.checked === true;
+    scheduleSavePoolColor();
+  });
   poolColorEnabled?.addEventListener("change", () => {
     poolColorState.enabled = poolColorEnabled.checked === true;
     scheduleSavePoolColor();
   });
   poolColorAddBtn?.addEventListener("click", () => tryAddPoolColorRule());
   poolColorNameInput?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      tryAddPoolColorRule();
+    }
+  });
+  poolColorLabelInput?.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") {
       ev.preventDefault();
       tryAddPoolColorRule();
@@ -2716,9 +2779,31 @@
         symbolDupMarkState = normalizeSymbolDupMark(changes[SYMBOL_DUP_MARK_KEY].newValue);
         renderSymbolDupMarkUI(symbolDupMarkState);
       }
-      if (changes[POOL_COLOR_KEY]) {
-        poolColorState = normalizePoolColor(changes[POOL_COLOR_KEY].newValue);
+      if (changes[SYMBOL_STYLE_KEY]) {
+        poolColorState = normalizePoolColor(changes[SYMBOL_STYLE_KEY].newValue);
         renderPoolColorUI(poolColorState);
+      } else if (changes[POOL_COLOR_KEY] || changes[DIV_COLOR_KEY]) {
+        if (!(poolColorState.enabled || (poolColorState.rules && poolColorState.rules.length))) {
+          try {
+            chrome.storage.local.get(
+              [SYMBOL_STYLE_KEY, POOL_COLOR_KEY, DIV_COLOR_KEY],
+              (items) => {
+                if (chrome.runtime.lastError) return;
+                if (
+                  items &&
+                  Object.prototype.hasOwnProperty.call(items, SYMBOL_STYLE_KEY) &&
+                  items[SYMBOL_STYLE_KEY] != null
+                ) {
+                  return;
+                }
+                poolColorState = mergeSymbolStyleFromStorage(items);
+                renderPoolColorUI(poolColorState);
+              }
+            );
+          } catch (_st) {
+            // ignore
+          }
+        }
       }
       if (changes[PREFS_KEY]) {
         prefsState = normalizePrefs(changes[PREFS_KEY].newValue);

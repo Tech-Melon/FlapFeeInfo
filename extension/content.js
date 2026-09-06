@@ -17,6 +17,11 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.179: GMGN 刷新降载 — JSON.parse 过滤后直接返回对象，禁止 stringify 再 parse；Port 先过滤再抽 host-fee。
+  // 0.8.178: 标准底池跟分红色；分红未设色则回退底池色。
+  // 0.8.177: 标准底池（BNB/ETH/USD*）且分红是别的代币时，整枚跟分红色，不用底池色当身份。
+  // 0.8.176: 底池与分红共用规则；同名代币沿用底池色；边框变色可选。
+  // 0.8.175: 底池/分红可自定义显示名；颜色只涂左底池/右分红，外框仍跟税收类型。
   // 0.8.174: Debot `/token/robinhood` 与 GMGN 一样按卡 href；底池名可自定义徽章颜色（与截断后展示名匹配）。
   // 0.8.173: 点 RH K 线不得把整页当 Robinhood — 侧栏 BSC 7777 仍按卡 href 画，禁止写入 pons-skip。
   // 0.8.172: 已开盘 Pons href 换卡立刻拆错徽章；TaxAllocationIcon 对打；fiber 可强制再扫 chef→holder。
@@ -547,6 +552,8 @@
   // Popup toggles: which badge parts to show (default all true).
   const DISPLAY_PREFS_KEY = "flapFeeInfo.displayPrefs.v1";
   const POOL_COLOR_KEY = "flapFeeInfo.poolColor.v1";
+  const DIV_COLOR_KEY = "flapFeeInfo.divColor.v1";
+  const SYMBOL_STYLE_KEY = "flapFeeInfo.symbolStyle.v1";
   const POOL_COLOR_MAX_RULES = 24;
   const DEFAULT_DISPLAY_PREFS = {
     pool: true,
@@ -694,6 +701,14 @@
     "WETH",
     "ETH",
     "USDG"
+  ]);
+  /** 着色：这些底池对应太多不同分红，不能当徽章身份色。 */
+  const GENERIC_STYLE_QUOTES = new Set([
+    "BNB",
+    "WBNB",
+    "ETH",
+    "WETH",
+    "BUSD"
   ]);
   const GMGN_CHAIN_NATIVE_QUOTE = {
     bsc: "BNB",
@@ -2357,7 +2372,7 @@
   /** Until this timestamp, always remount badges (skip idempotent short-circuit). */
   /** Live display toggles from popup (chrome.storage). */
   let displayPrefs = { ...DEFAULT_DISPLAY_PREFS };
-  let poolColorPrefs = { enabled: false, rules: [] };
+  let symbolStylePrefs = { enabled: false, syncBorder: false, rules: [] };
   /** dark | light — badge chrome colors */
   let badgeTheme = DEFAULT_BADGE_THEME;
   /** dark theme: solid card-like bg (#0d1110) when true */
@@ -7780,7 +7795,7 @@
     });
   }
 
-  const PAGE_HOOK_VER = "182";
+  const PAGE_HOOK_VER = "183";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -14289,28 +14304,41 @@
     return fallback || "";
   }
 
-  /** 与徽章底池文案同一套：formatPoolQuoteSymbol（WBNB→BNB、剥尾 B、CJK/拉丁≤6）。 */
-  function normalizePoolColorName(raw) {
-    return formatPoolQuoteSymbol(raw) || normalizeQuoteSymbol(raw, { allowCjk: true });
+  /** 匹配键：保留 QQQB；WBNB→BNB；CJK/拉丁截到徽章用量。 */
+  function normalizeStyleMatch(raw) {
+    const shown = formatPoolQuoteSymbol(raw);
+    if (shown) return shown;
+    return normalizeQuoteSymbol(raw, { allowCjk: true });
   }
 
-  function normalizePoolColorPrefs(raw) {
-    const out = { enabled: false, rules: [] };
+  function normalizeStyleAlias(raw) {
+    const s = String(raw || "")
+      .trim()
+      .replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "");
+    if (!s) return "";
+    if (/[\u4e00-\u9fff]/.test(s)) return s.slice(0, 6);
+    return s.toUpperCase().slice(0, 6);
+  }
+
+  function normalizeSymbolStylePrefs(raw) {
+    const out = { enabled: false, syncBorder: false, rules: [] };
     if (!raw || typeof raw !== "object") return out;
     out.enabled = raw.enabled === true;
+    out.syncBorder = raw.syncBorder === true;
     const list = Array.isArray(raw.rules) ? raw.rules : [];
     const seen = new Set();
     for (let i = 0; i < list.length && out.rules.length < POOL_COLOR_MAX_RULES; i += 1) {
       const row = list[i];
       if (!row || typeof row !== "object") continue;
-      const name = normalizePoolColorName(row.name);
-      if (!name || seen.has(name)) continue;
-      seen.add(name);
+      const match = normalizeStyleMatch(row.match || row.name);
+      if (!match || seen.has(match)) continue;
+      seen.add(match);
       const color = normalizePoolColorHex(row.color, "#62adff");
       if (!color) continue;
       out.rules.push({
         id: String(row.id || `p${i}`).slice(0, 24),
-        name,
+        match,
+        label: normalizeStyleAlias(row.label),
         color,
         enabled: row.enabled !== false
       });
@@ -14318,7 +14346,7 @@
     return out;
   }
 
-  function poolColorLookupKeys(sym) {
+  function symbolStyleLookupKeys(sym) {
     const keys = new Set();
     const shown = formatPoolQuoteSymbol(sym);
     if (shown) keys.add(shown);
@@ -14328,42 +14356,174 @@
     if (d) keys.add(d);
     const b = compactBasketSymbol(sym);
     if (b) keys.add(b);
+    if (keys.has("WETH") || keys.has("ETH")) {
+      keys.add("ETH");
+      keys.add("WETH");
+    }
+    if (keys.has("WBNB") || keys.has("BNB")) {
+      keys.add("BNB");
+      keys.add("WBNB");
+    }
     return keys;
   }
 
-  function findPoolColor(quoteSymbol) {
-    if (!poolColorPrefs || poolColorPrefs.enabled !== true) return "";
-    if (displayPrefs && displayPrefs.pool === false) return "";
-    const keys = poolColorLookupKeys(quoteSymbol);
-    if (!keys.size) return "";
-    const rules = poolColorPrefs.rules || [];
+  function findSymbolStyle(prefs, symbols, extraGate) {
+    if (!prefs || prefs.enabled !== true) return null;
+    if (extraGate === false) return null;
+    const keys = new Set();
+    const list = Array.isArray(symbols) ? symbols : [symbols];
+    for (let i = 0; i < list.length; i += 1) {
+      const s = list[i];
+      if (!s) continue;
+      const ks = symbolStyleLookupKeys(s);
+      ks.forEach((k) => keys.add(k));
+    }
+    if (!keys.size) return null;
+    const rules = prefs.rules || [];
     for (let i = 0; i < rules.length; i += 1) {
       const r = rules[i];
       if (!r || r.enabled === false) continue;
-      const name = normalizePoolColorName(r.name);
-      if (name && keys.has(name)) return r.color || "";
+      const match = normalizeStyleMatch(r.match || r.name);
+      if (match && keys.has(match)) return r;
     }
-    return "";
+    return null;
   }
 
-  function hexToRgba(hex, alpha) {
-    const s = normalizePoolColorHex(hex, "");
-    if (!s) return "";
-    const n = parseInt(s.slice(1), 16);
-    const r = (n >> 16) & 255;
-    const g = (n >> 8) & 255;
-    const b = n & 255;
-    const a = Number(alpha);
-    return `rgba(${r},${g},${b},${Number.isFinite(a) ? a : 0.22})`;
+  function mergeSymbolStyleFromStorage(items) {
+    if (
+      items &&
+      Object.prototype.hasOwnProperty.call(items, SYMBOL_STYLE_KEY) &&
+      items[SYMBOL_STYLE_KEY] != null
+    ) {
+      return normalizeSymbolStylePrefs(items[SYMBOL_STYLE_KEY]);
+    }
+    const pool = normalizeSymbolStylePrefs(items?.[POOL_COLOR_KEY]);
+    const div = normalizeSymbolStylePrefs(items?.[DIV_COLOR_KEY]);
+    const seen = new Set((pool.rules || []).map((r) => r.match));
+    const rules = [...(pool.rules || [])];
+    for (let i = 0; i < (div.rules || []).length; i += 1) {
+      const r = div.rules[i];
+      if (!r || seen.has(r.match)) continue;
+      seen.add(r.match);
+      rules.push(r);
+    }
+    return {
+      enabled: pool.enabled === true || div.enabled === true,
+      syncBorder: false,
+      rules
+    };
+  }
+
+  function stylesShareTicker(a, b) {
+    if (!a || !b) return false;
+    const kb = symbolStyleLookupKeys(b);
+    if (!kb.size) return false;
+    const ka = symbolStyleLookupKeys(a);
+    for (const k of ka) {
+      if (kb.has(k)) return true;
+    }
+    return false;
+  }
+
+  function findPoolStyle(quoteSymbol) {
+    if (displayPrefs && displayPrefs.pool === false) return null;
+    return findSymbolStyle(symbolStylePrefs, quoteSymbol);
+  }
+
+  function findDivStyle(symbols, quoteSymbol) {
+    const list = Array.isArray(symbols) ? symbols : [symbols];
+    const distinct = [];
+    const shared = [];
+    for (let i = 0; i < list.length; i += 1) {
+      const s = list[i];
+      if (!s) continue;
+      if (quoteSymbol && stylesShareTicker(s, quoteSymbol)) shared.push(s);
+      else distinct.push(s);
+    }
+    const ownDistinct = findSymbolStyle(symbolStylePrefs, distinct);
+    if (ownDistinct) return ownDistinct;
+    if (isGenericStyleQuote(quoteSymbol) && distinct.length) return null;
+    const ownShared = findSymbolStyle(symbolStylePrefs, shared);
+    if (ownShared) return ownShared;
+    if (!quoteSymbol || !symbolStylePrefs || symbolStylePrefs.enabled !== true) return null;
+    if (shared.length) return findSymbolStyle(symbolStylePrefs, quoteSymbol);
+    return null;
+  }
+
+  function isGenericStyleQuote(sym) {
+    if (!sym) return false;
+    const keys = symbolStyleLookupKeys(sym);
+    for (const k of keys) {
+      const u = String(k || "").toUpperCase();
+      if (!u) continue;
+      if (GENERIC_STYLE_QUOTES.has(u)) return true;
+      if (/^USD[A-Z0-9]*$/.test(u)) return true;
+    }
+    return false;
+  }
+
+  function collectDivStyleSymbols(entry, extra) {
+    const out = [];
+    const push = (s) => {
+      if (!s) return;
+      out.push(s);
+    };
+    if (Array.isArray(extra)) {
+      for (let i = 0; i < extra.length; i += 1) push(extra[i]);
+    } else if (extra) {
+      push(extra);
+    }
+    if (entry && typeof entry === "object") {
+      push(entry.dividend_symbol);
+      push(entry.top_payout_symbol);
+    }
+    return out;
+  }
+
+  function hasDistinctDividendTicker(quoteSymbol, divSymbols) {
+    const list = Array.isArray(divSymbols) ? divSymbols : [divSymbols];
+    for (let i = 0; i < list.length; i += 1) {
+      const s = list[i];
+      if (!s) continue;
+      if (!stylesShareTicker(s, quoteSymbol)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 标准底池（BNB/ETH/USD*）配上别的分红时，整枚跟分红色；
+   * 分红未设色则回退底池色。同名或 QQQ 这类特色底池仍用底池色。
+   */
+  function resolveBadgeTint(quoteSymbol, poolStyle, divStyle, divSymbols) {
+    const poolColor = (poolStyle && poolStyle.color) || "";
+    const divColor = (divStyle && divStyle.color) || "";
+    if (
+      isGenericStyleQuote(quoteSymbol) &&
+      hasDistinctDividendTicker(quoteSymbol, divSymbols)
+    ) {
+      const mark = divColor || poolColor;
+      return {
+        poolColor: mark,
+        divColor: mark,
+        borderColor: mark
+      };
+    }
+    return {
+      poolColor,
+      divColor,
+      borderColor: poolColor || divColor
+    };
   }
 
   function hydrateDisplayPrefs() {
     if (!isExtensionContextValid() || !chrome.storage?.local) return;
     try {
-      chrome.storage.local.get([DISPLAY_PREFS_KEY, UI_LANG_KEY, POOL_COLOR_KEY], (items) => {
+      chrome.storage.local.get(
+        [DISPLAY_PREFS_KEY, UI_LANG_KEY, SYMBOL_STYLE_KEY, POOL_COLOR_KEY, DIV_COLOR_KEY],
+        (items) => {
         if (!isExtensionContextValid() || chrome.runtime.lastError) return;
         displayPrefs = normalizeDisplayPrefs(items?.[DISPLAY_PREFS_KEY]);
-        poolColorPrefs = normalizePoolColorPrefs(items?.[POOL_COLOR_KEY]);
+        symbolStylePrefs = mergeSymbolStyleFromStorage(items);
         uiLang = items?.[UI_LANG_KEY] === "en" ? "en" : "zh";
         rerenderAllBadges();
       });
@@ -17935,9 +18095,32 @@
           if (!isHoverTipEnabled()) hideFeeTooltip();
           dirty = true;
         }
-        if (changes[POOL_COLOR_KEY]) {
-          poolColorPrefs = normalizePoolColorPrefs(changes[POOL_COLOR_KEY].newValue);
+        if (changes[SYMBOL_STYLE_KEY]) {
+          symbolStylePrefs = normalizeSymbolStylePrefs(changes[SYMBOL_STYLE_KEY].newValue);
           dirty = true;
+        } else if (
+          (changes[POOL_COLOR_KEY] || changes[DIV_COLOR_KEY]) &&
+          !(symbolStylePrefs.enabled || (symbolStylePrefs.rules && symbolStylePrefs.rules.length))
+        ) {
+          try {
+            chrome.storage.local.get(
+              [SYMBOL_STYLE_KEY, POOL_COLOR_KEY, DIV_COLOR_KEY],
+              (items) => {
+                if (!isExtensionContextValid() || chrome.runtime.lastError) return;
+                if (
+                  items &&
+                  Object.prototype.hasOwnProperty.call(items, SYMBOL_STYLE_KEY) &&
+                  items[SYMBOL_STYLE_KEY] != null
+                ) {
+                  return;
+                }
+                symbolStylePrefs = mergeSymbolStyleFromStorage(items);
+                rerenderAllBadges();
+              }
+            );
+          } catch (_st) {
+            // ignore
+          }
         }
         if (changes[UI_LANG_KEY]) {
           uiLang = changes[UI_LANG_KEY].newValue === "en" ? "en" : "zh";
@@ -18232,6 +18415,12 @@
       }
     }
 
+    const divStyle = findDivStyle(
+      collectDivStyleSymbols(entry, [topSym]),
+      domQuoteSymbol
+    );
+    if (divStyle && divStyle.label && topSym) topSym = divStyle.label;
+
     // Highest share first (leftmost); tie-break matches server SEGMENT_PRIORITY.
     candidates.sort((a, b) => b.bps - a.bps || a.pri - b.pri);
 
@@ -18252,13 +18441,32 @@
    * Returns empty string when everything is toggled off.
    */
   function buildDisplayLabel(entry, quoteSymbol, token) {
+    return buildDisplayParts(entry, quoteSymbol, token).label;
+  }
+
+  function buildDisplayParts(entry, quoteSymbol, token) {
     const prefs = displayPrefs || DEFAULT_DISPLAY_PREFS;
     const fee = buildFeeLabel(entry, quoteSymbol, token);
     const showPool = prefs.pool !== false && Boolean(quoteSymbol);
     const prefix = poolPrefixForToken(token || "");
-    if (showPool && fee) return `${prefix}${quoteSymbol} | ${fee}`;
-    if (showPool) return `${prefix}${quoteSymbol}`;
-    return fee;
+    const poolStyle = showPool ? findPoolStyle(quoteSymbol) : null;
+    const poolShown = (poolStyle && poolStyle.label) || quoteSymbol || "";
+    const poolPart = showPool && poolShown ? `${prefix}${poolShown}` : "";
+    const feePart = fee || "";
+    let label = "";
+    if (poolPart && feePart) label = `${poolPart} | ${feePart}`;
+    else label = poolPart || feePart;
+    const divSymbols = collectDivStyleSymbols(entry);
+    const divStyle = findDivStyle(divSymbols, quoteSymbol);
+    const tint = resolveBadgeTint(quoteSymbol, poolStyle, divStyle, divSymbols);
+    return {
+      label,
+      poolPart,
+      feePart,
+      poolColor: tint.poolColor,
+      divColor: tint.divColor,
+      borderColor: tint.borderColor
+    };
   }
 
   function tipT(key) {
@@ -18328,13 +18536,14 @@
       };
     }
     const meta = modeMeta[entry.mode] || modeMeta.unknown;
-    const label = buildDisplayLabel(entry, quoteSymbol, tok);
+    const parts = buildDisplayParts(entry, quoteSymbol, tok);
+    const label = parts.label;
     const basketAssets = getBasketAssetsForDisplay(entry);
     const basketCount = basketAssets.length;
     // For muted "&" between first two symbols (e.g. SPCX&TSLA).
     const pairSyms = basketDisplaySymbols(basketAssets);
     const basketPair =
-      pairSyms.length >= 2 && label.includes(`${pairSyms[0]}&${pairSyms[1]}`)
+      pairSyms.length >= 2 && (parts.feePart || label).includes(`${pairSyms[0]}&${pairSyms[1]}`)
         ? { left: pairSyms[0], right: pairSyms[1] }
         : null;
     const segmentCount =
@@ -18344,10 +18553,9 @@
       Number((entry.binance_charity_bps || 0) > 0) +
       Number((entry.deflation_bps || 0) > 0) +
       Number((entry.lp_bps || 0) > 0);
-    // Light: never translucent / never honor solidDark toggle — CSS forces solid dark chip.
-    // Dark: optional solid-dark class when user checks 深色背景.
-    const poolColor =
-      quoteSymbol && displayPrefs.pool !== false ? findPoolColor(quoteSymbol) : "";
+    const poolColor = parts.poolColor || "";
+    const divColor = parts.divColor || "";
+    const borderColor = parts.borderColor || poolColor || divColor;
     const className = [
       "gmgn-fee-mode-icon",
       `gmgn-fee-mode-icon--theme-${theme}`,
@@ -18359,7 +18567,11 @@
       quoteSymbol && displayPrefs.pool !== false ? "gmgn-fee-mode-icon--with-pool" : "",
       basketCount >= 3 ? "gmgn-fee-mode-icon--has-count" : "",
       basketCount > 0 ? "gmgn-fee-mode-icon--basket" : "",
-      poolColor ? "gmgn-fee-mode-icon--pool-custom" : ""
+      poolColor ? "gmgn-fee-mode-icon--pool-tint" : "",
+      divColor ? "gmgn-fee-mode-icon--div-tint" : "",
+      symbolStylePrefs.syncBorder && borderColor
+        ? "gmgn-fee-mode-icon--border-tint"
+        : ""
     ]
       .filter(Boolean)
       .join(" ");
@@ -18374,7 +18586,11 @@
       basketCount,
       tipModel,
       basketPair,
+      poolPart: parts.poolPart,
+      feePart: parts.feePart,
       poolColor,
+      divColor,
+      borderColor,
       isLoading: false
     };
   }
@@ -18829,15 +19045,19 @@
       : className;
     icon.className = finalClass;
     const poolColor = presentation.poolColor || "";
-    if (poolColor) {
-      icon.style.setProperty("--flap-pool-fg", poolColor);
-      icon.style.setProperty("--flap-pool-bg", hexToRgba(poolColor, 0.22));
-      icon.style.setProperty("--flap-pool-ring", hexToRgba(poolColor, 0.18));
-    } else {
-      icon.style.removeProperty("--flap-pool-fg");
-      icon.style.removeProperty("--flap-pool-bg");
-      icon.style.removeProperty("--flap-pool-ring");
-    }
+    const divColor = presentation.divColor || "";
+    if (poolColor) icon.style.setProperty("--flap-pool-fg", poolColor);
+    else icon.style.removeProperty("--flap-pool-fg");
+    if (divColor) icon.style.setProperty("--flap-div-fg", divColor);
+    else icon.style.removeProperty("--flap-div-fg");
+    const borderFg =
+      symbolStylePrefs.syncBorder
+        ? presentation.borderColor || poolColor || divColor
+        : "";
+    if (borderFg) icon.style.setProperty("--flap-border-fg", borderFg);
+    else icon.style.removeProperty("--flap-border-fg");
+    icon.style.removeProperty("--flap-pool-bg");
+    icon.style.removeProperty("--flap-pool-ring");
     icon.dataset.feeToken = token || icon.dataset.feeToken || "";
     icon.dataset.feeSig = label || "";
     icon.dataset.feeBasketCount = String(basketCount || 0);
@@ -18861,7 +19081,30 @@
     icon.textContent = "";
     const textEl = document.createElement("span");
     textEl.className = "gmgn-fee-mode-icon__text";
-    fillBadgeLabelText(textEl, label || "", presentation.basketPair || null);
+    const poolPart = presentation.poolPart || "";
+    const feePart = presentation.feePart || "";
+    if (poolPart && feePart) {
+      const poolEl = document.createElement("span");
+      poolEl.className = "gmgn-fee-mode-icon__pool";
+      poolEl.textContent = poolPart;
+      const sepEl = document.createElement("span");
+      sepEl.className = "gmgn-fee-mode-icon__sep";
+      sepEl.textContent = " | ";
+      const feeEl = document.createElement("span");
+      feeEl.className = "gmgn-fee-mode-icon__fee";
+      fillBadgeLabelText(feeEl, feePart, presentation.basketPair || null);
+      textEl.append(poolEl, sepEl, feeEl);
+    } else if (poolPart) {
+      const poolEl = document.createElement("span");
+      poolEl.className = "gmgn-fee-mode-icon__pool";
+      poolEl.textContent = poolPart;
+      textEl.appendChild(poolEl);
+    } else {
+      const feeEl = document.createElement("span");
+      feeEl.className = "gmgn-fee-mode-icon__fee";
+      fillBadgeLabelText(feeEl, label || "", presentation.basketPair || null);
+      textEl.appendChild(feeEl);
+    }
     icon.appendChild(textEl);
     if ((basketCount || 0) >= 3) {
       const countEl = document.createElement("span");

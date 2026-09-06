@@ -10,7 +10,9 @@
  * ★ BSC 税币过滤 + GMGN Robinhood pons v2 host-fee（不打 /modes）；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 182;
+  const HOOK_VER = 183;
+  /** 钩子安装前的原生 parse；内部 clone 禁止走已包装的 JSON.parse。 */
+  const NATIVE_JSON_PARSE = JSON.parse.bind(JSON);
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -3620,9 +3622,9 @@
   }
 
   function nativeJsonParse(text, reviver) {
-    const native =
-      (JSON.parse && JSON.parse.__flapFeeNative) || JSON.parse.bind(JSON);
-    return reviver !== undefined ? native(text, reviver) : native(text);
+    return reviver !== undefined
+      ? NATIVE_JSON_PARSE(text, reviver)
+      : NATIVE_JSON_PARSE(text);
   }
 
   function collectHostFeesFromHttp(url, text) {
@@ -3767,8 +3769,7 @@
       } catch (_meta) {
         // ignore
       }
-      const NativeJSONParse =
-        (JSON.parse && JSON.parse.__flapFeeNative) || JSON.parse.bind(JSON);
+      const NativeJSONParse = NATIVE_JSON_PARSE;
       if (typeof data === "string") {
         if (
           !textMightBeHostFeeFeed(data) &&
@@ -4673,17 +4674,13 @@
       if (wrapped) return wrapped;
       wrapped = function flapFeeHostPortTap(ev) {
         try {
-          if (ev && ev.data != null) tapHostFeePortData(ev.data);
-        } catch (_e) {
-          // ignore
-        }
-        try {
           if (prefsOn() && ev && ev.data && typeof ev.data === "object") {
             const r = filterLiveObject(ev.data, "host-port");
             if (r.drop) return undefined;
             if (r.changed && r.data !== ev.data) {
               if (!patchEventData(ev, r.data)) {
                 try {
+                  tapHostFeePortData(r.data);
                   return fn.call(this, { data: r.data, type: "message" });
                 } catch (_d) {
                   // fallthrough
@@ -4692,6 +4689,11 @@
             }
           }
         } catch (_flt) {
+          // ignore
+        }
+        try {
+          if (ev && ev.data != null) tapHostFeePortData(ev.data);
+        } catch (_e) {
           // ignore
         }
         return fn.apply(this, arguments);
@@ -5567,7 +5569,7 @@
 
   function cloneNcItem(item) {
     try {
-      return JSON.parse(JSON.stringify(item));
+      return NATIVE_JSON_PARSE(JSON.stringify(item));
     } catch (_e) {
       return item;
     }
@@ -6173,7 +6175,7 @@
       }
     } catch (_e) {
       try {
-        const clone = JSON.parse(JSON.stringify(data));
+        const clone = NATIVE_JSON_PARSE(JSON.stringify(data));
         const removed = filterJsonInPlace(clone, "auto");
         const padded =
           (window.__flapFeeNcKeep && Number(window.__flapFeeNcKeep.padded)) || 0;
@@ -6399,7 +6401,7 @@
     if (!prefsOn()) return null;
     let json;
     try {
-      json = JSON.parse(text);
+      json = NATIVE_JSON_PARSE(text);
     } catch (_e) {
       return null;
     }
@@ -6740,33 +6742,40 @@
       if (wrapped) return wrapped;
       wrapped = function flapFeePortOm(ev) {
         try {
-          if (ev && ev.data != null) tapHostFeePortData(ev.data);
-        } catch (_hft) {
-          // ignore
-        }
-        try {
           if (!prefsOn() || !ev || ev.data == null) {
+            try {
+              if (ev && ev.data != null) tapHostFeePortData(ev.data);
+            } catch (_hft0) {
+              // ignore
+            }
             return fn.apply(this, arguments);
           }
           // SharedWorker 可能推 string(JSON) 或 object
           if (typeof ev.data === "string") {
             const next = filterLiveText(ev.data, channel || "port-str");
             if (next !== ev.data) {
-              if (patchEventData(ev, next)) return fn.apply(this, arguments);
+              if (patchEventData(ev, next)) {
+                try {
+                  tapHostFeePortData(ev.data);
+                } catch (_hft1) {
+                  // ignore
+                }
+                return fn.apply(this, arguments);
+              }
               try {
+                tapHostFeePortData(next);
                 return fn.call(this, { data: next, type: "message" });
               } catch (_s) {
                 // fallthrough
               }
             }
-            return fn.apply(this, arguments);
-          }
-          if (typeof ev.data === "object") {
+          } else if (typeof ev.data === "object") {
             const r = filterLiveObject(ev.data, channel || "port");
             if (r.drop) return undefined;
             if (r.changed && r.data !== ev.data) {
               if (!patchEventData(ev, r.data)) {
                 try {
+                  tapHostFeePortData(r.data);
                   return fn.call(this, { data: r.data, type: "message" });
                 } catch (_d) {
                   // fallthrough
@@ -6776,6 +6785,11 @@
           }
         } catch (_fe) {
           // ignore — 原样交给业务
+        }
+        try {
+          if (ev && ev.data != null) tapHostFeePortData(ev.data);
+        } catch (_hft) {
+          // ignore
         }
         return fn.apply(this, arguments);
       };
@@ -6965,7 +6979,7 @@
         return null;
       }
       try {
-        const clone = NativeJSONParse(JSON.stringify(parsed));
+        const clone = NATIVE_JSON_PARSE(JSON.stringify(parsed));
         let removed = 0;
         let shape = "feed";
         let padded = 0;
@@ -7076,10 +7090,10 @@
                 thr: taxRecvPrefs.thresholdPct,
                 shape: "pumpRank"
               });
-              const out = JSON.stringify(obj);
-              return reviver !== undefined
-                ? NativeJSONParse(out, reviver)
-                : NativeJSONParse(out);
+              if (reviver !== undefined) {
+                return NATIVE_JSON_PARSE(JSON.stringify(obj), reviver);
+              }
+              return obj;
             }
             let removed = filterGmgnTrenchesDeltaInPlace(obj);
             let padded = 0;
@@ -7101,19 +7115,20 @@
                     ? "delta"
                     : "feed"
               });
-              const out = JSON.stringify(obj);
-              return reviver !== undefined
-                ? NativeJSONParse(out, reviver)
-                : NativeJSONParse(out);
+              if (reviver !== undefined) {
+                return NATIVE_JSON_PARSE(JSON.stringify(obj), reviver);
+              }
+              return obj;
             }
             return reviver !== undefined
-              ? NativeJSONParse(JSON.stringify(obj), reviver)
+              ? NATIVE_JSON_PARSE(JSON.stringify(obj), reviver)
               : obj;
           } catch (_fe) {
             return NativeJSONParse(text, reviver);
           }
         };
         wrappedParse.__flapFeeTaxRecv = HOOK_VER;
+        wrappedParse.__flapFeeNative = NativeJSONParse;
         JSON.parse = wrappedParse;
       }
     } catch (_jp) {
@@ -7429,7 +7444,7 @@
                 const f = filteredText(this);
                 if (f != null) {
                   try {
-                    return JSON.parse(f);
+                    return NATIVE_JSON_PARSE(f);
                   } catch (_p) {
                     // fallthrough
                   }
