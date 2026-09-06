@@ -123,7 +123,7 @@
       <div class="cat-head">
         <span class="cat-icon" aria-hidden="true">💎</span>
         <span class="cat-title" data-i18n="catBadge">徽章外观</span>
-        <span class="cat-desc" data-i18n="catBadgeDesc">主题与显示项</span>
+        <span class="cat-desc" data-i18n="catBadgeDesc">主题、显示项、底池着色</span>
       </div>
       <div class="cat-body">
         <section class="section">
@@ -179,6 +179,53 @@
             <div class="pref-actions">
               <button type="button" id="btnAllOn" class="btn" data-i18n="btnAllOn">全部开启</button>
               <button type="button" id="btnAllOff" class="btn btn-muted" data-i18n="btnAllOff">全部关闭</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="section">
+          <button type="button" class="collapse-head" data-collapse="poolColor" aria-expanded="false">
+            <span class="collapse-head-left">
+              <span class="collapse-icon" aria-hidden="true">🪙</span>
+              <span class="collapse-title" data-i18n="poolColorSection">底池着色</span>
+            </span>
+            <span class="collapse-chevron">▸</span>
+          </button>
+          <div class="collapse-body" id="poolColorCollapseBody" hidden>
+            <div class="tax-recv-section" id="poolColorSection">
+              <p class="theme-hint" data-i18n="poolColorHint">
+                按徽章上的底池名着色（GMGN / Debot 都生效）。与徽章同一套截断：拉丁/中文最多 6 字，WBNB→BNB，SPCXB→SPCX。例如 USD1、ETH、BNB、SPCX。
+              </p>
+              <label class="row drag-row" for="poolColorEnabled">
+                <input type="checkbox" id="poolColorEnabled" />
+                <span class="emoji">🎨</span>
+                <div class="label">
+                  <strong data-i18n="poolColorEnableTitle">启用底池着色</strong>
+                  <span data-i18n="poolColorEnableDesc">命中规则后整枚徽章改成该颜色</span>
+                </div>
+              </label>
+              <div class="suffix-rules-wrap" id="poolColorRulesWrap">
+                <div class="suffix-rules" id="poolColorRulesList"></div>
+                <div class="suffix-add-row mark-add-row">
+                  <input
+                    type="text"
+                    id="poolColorNameInput"
+                    class="suffix-add-input"
+                    maxlength="12"
+                    spellcheck="false"
+                    autocomplete="off"
+                    data-i18n-placeholder="poolColorNamePh"
+                    placeholder="BNB / USD1 / ETH"
+                  />
+                  <input type="color" id="poolColorPicker" class="mark-color-input" value="#f0b90b" title="color" />
+                  <button type="button" class="btn btn-sm" id="poolColorAddBtn" data-i18n="suffixAddBtn">
+                    添加
+                  </button>
+                </div>
+                <p class="theme-hint" data-i18n="poolColorHint2">
+                  最多 24 条。同名只保留一条。关掉「底池报价」显示项则不着色。
+                </p>
+              </div>
             </div>
           </div>
         </section>

@@ -10,7 +10,7 @@
  * ★ BSC 税币过滤 + GMGN Robinhood pons v2 host-fee（不打 /modes）；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 179;
+  const HOOK_VER = 182;
   try {
     if (window.__flapFeeInfoPageHook !== HOOK_VER) {
       window.__flapFeeInfoPageHook = HOOK_VER;
@@ -550,7 +550,11 @@
       if (selected.indexOf("robinhood") !== -1) return true;
       if (q === "robinhood") return true;
       const path = String(u.pathname || "");
-      return /\/robinhood\/token\//i.test(path) || /^\/robinhood(\/|$)/i.test(path);
+      return (
+        /\/robinhood\/token\//i.test(path) ||
+        /^\/robinhood(\/|$)/i.test(path) ||
+        /\/token\/robinhood(?:\/|$)/i.test(path)
+      );
     } catch (_e) {
       return false;
     }
@@ -2235,7 +2239,8 @@
   const debotRhSkipAt = new Map();
   /** ranks/host-fee 已处理过的 RH 卡：DOM tap 不再扒 fiber */
   const rhFeeDone = new Set();
-  /** 已处理则跳过。仅首帧厨师在 4s 内再扫，接住 marketing→dividend。 */
+  /** 已处理则跳过。仅首帧厨师在 4s 内再扫，接住 marketing→dividend。
+   *  content 发现 TaxAllocationIcon 与 kind 对打时可 force 清 rhFeeDone 再扫。 */
   function rhFeeScanSkip(addr) {
     const a = String(addr || "").toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(a) || !rhFeeDone.has(a)) return false;
@@ -2272,6 +2277,7 @@
   function queuePonsSkipAddr(addr) {
     const a = String(addr || "").toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(a) || rhFeeDone.has(a)) return;
+    if (TARGET_TOKEN_RE.test(a)) return;
     debotRememberRhSkip(addr);
     if (ponsSkipPendingSeen.has(a)) return;
     ponsSkipPendingSeen.add(a);
@@ -4532,6 +4538,9 @@
           .trim()
           .toLowerCase();
         if (!/^0x[a-f0-9]{40}$/.test(token)) return;
+        if (ev?.detail?.force === true) {
+          rhFeeDone.delete(token);
+        }
         if (!TARGET_TOKEN_RE.test(token) && !isRobinhoodPageContext()) {
           // Debot 混合战壕：pons CA 尾号随机，不能用页级 chain 挡掉
           if (!/debot\.ai|gungnir\.bot/i.test(location.hostname || "")) return;

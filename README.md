@@ -138,10 +138,13 @@ FlapFeeInfo\extension
 3. 点当前插件的 `重新加载`（或重新「加载已解压」指向 `extension/`）。
 4. **硬刷新** GMGN / Debot 目标页（否则可能仍是旧 content script）。
 
-当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.171**）。
+当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.174**）。
 
 ### 0.8.x 要点（近期）
 
+- **0.8.174**：Debot 点进 Robinhood K 线同样按卡片认链；弹窗可按底池名给徽章自定义颜色
+- **0.8.173**：点进 Robinhood K 线后，左侧战壕的 BSC 税币徽章不再被清掉
+- **0.8.172**：已开盘 Pons 滚动换卡不再把上一张的 💎/👨‍🍳 留在新卡上；宿主分红图标可纠正已锁死的厨师徽章
 - **0.8.171**：GMGN 混链按卡片认 BSC / Robinhood，避免 BSC 税币被当成非 Pons 跳过
 - **0.8.170**：混链热路径降载（单链负担接近混链前；厨师首帧才短窗再扫）
 - **0.8.169**：修复 0.8.167/168 扫卡反馈环导致 GMGN 卡死

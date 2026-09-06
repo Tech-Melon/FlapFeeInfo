@@ -13,6 +13,7 @@
   const DEV_COUNT_MARK_KEY = "flapFeeInfo.devCountMark.v1";
   const TW_HANDLE_MARK_KEY = "flapFeeInfo.twHandleMark.v1";
   const SYMBOL_DUP_MARK_KEY = "flapFeeInfo.symbolDupMark.v1";
+  const POOL_COLOR_KEY = "flapFeeInfo.poolColor.v1";
   const LICENSE_KEY = "flapFeeInfo.license.v1";
   const DEVICE_ID_KEY = "flapFeeInfo.deviceId.v1";
   const LICENSE_API_BASE = "https://flap-fee-info.tech-melon.workers.dev";
@@ -29,6 +30,8 @@
   const DEFAULT_SEARCH_HIDE = { enabled: false };
   const DEFAULT_DEV_COUNT_MARK = { enabled: false, rules: [] };
   const DEFAULT_TW_HANDLE_MARK = { enabled: false, rules: [] };
+  const DEFAULT_POOL_COLOR = { enabled: false, rules: [] };
+  const POOL_COLOR_MAX = 24;
   const DEFAULT_SYMBOL_DUP_MARK = {
     enabled: false,
     waitDup: true,
@@ -63,7 +66,7 @@
       catTools: "增强工具",
       catToolsDesc: "剪切板 · 搜索 · 阅读",
       catBadge: "徽章外观",
-      catBadgeDesc: "主题与显示项",
+      catBadgeDesc: "主题、显示项、底池着色",
       catFilter: "列表过滤",
       catFilterDesc: "首页与 K 线左侧「新创建」",
       catMark: "卡片标记",
@@ -134,6 +137,16 @@
       statusReset: "已恢复默认（贴税率旁）",
       pref_pool_title: "底池报价",
       pref_pool_desc: "🦋Flap / 🖐️Four / 🪙其它",
+      poolColorSection: "底池着色",
+      poolColorHint:
+        "按徽章上的底池名着色（GMGN / Debot 都生效）。与徽章同一套截断：拉丁/中文最多 6 字，WBNB→BNB，SPCXB→SPCX。例如 USD1、ETH、BNB、SPCX。",
+      poolColorEnableTitle: "启用底池着色",
+      poolColorEnableDesc: "命中规则后整枚徽章改成该颜色",
+      poolColorNamePh: "BNB / USD1 / ETH",
+      poolColorHint2: "最多 24 条。同名只保留一条。关掉「底池报价」显示项则不着色。",
+      poolColorEmpty: "暂无规则，输入底池名并选颜色后添加",
+      poolColorInvalid: "输入 BNB、USD1、ETH 等底池名",
+      poolColorDup: "该底池名已添加",
       pref_holder_title: "持有人分红",
       pref_holder_desc: "dividend 分配",
       pref_creator_title: "创作者/营销",
@@ -243,7 +256,7 @@
       catTools: "Productivity",
       catToolsDesc: "Clipboard · Search · Reading",
       catBadge: "Badge look",
-      catBadgeDesc: "Theme & display",
+      catBadgeDesc: "Theme, display, pool colors",
       catFilter: "List filters",
       catFilterDesc: "Home & K-line left New creation",
       catMark: "Card marks",
@@ -316,6 +329,16 @@
       statusReset: "Reset to default (beside Tax)",
       pref_pool_title: "Pool quote",
       pref_pool_desc: "🦋Flap / 🖐️Four / 🪙other",
+      poolColorSection: "Pool colors",
+      poolColorHint:
+        "Color the whole badge by the on-badge pool name (GMGN and Debot). Same truncation as the badge: up to 6 chars, WBNB→BNB, SPCXB→SPCX. Examples: USD1, ETH, BNB, SPCX.",
+      poolColorEnableTitle: "Enable pool colors",
+      poolColorEnableDesc: "Matching pool quote recolors the entire badge",
+      poolColorNamePh: "BNB / USD1 / ETH",
+      poolColorHint2: "Max 24 rules. Duplicate names are ignored. No color if Pool quote display is off.",
+      poolColorEmpty: "No rules yet — type a pool name, pick a color, then add",
+      poolColorInvalid: "Enter a pool name such as BNB, USD1, ETH",
+      poolColorDup: "That pool name is already added",
       pref_holder_title: "Holder dividend",
       pref_holder_desc: "dividend share",
       pref_creator_title: "Creator / marketing",
@@ -499,6 +522,12 @@
   const twHandleNoteInput = document.getElementById("twHandleNoteInput");
   const twHandleColorInput = document.getElementById("twHandleColorInput");
   const twHandleAddBtn = document.getElementById("twHandleAddBtn");
+  const poolColorEnabled = document.getElementById("poolColorEnabled");
+  const poolColorRulesWrap = document.getElementById("poolColorRulesWrap");
+  const poolColorRulesList = document.getElementById("poolColorRulesList");
+  const poolColorNameInput = document.getElementById("poolColorNameInput");
+  const poolColorPicker = document.getElementById("poolColorPicker");
+  const poolColorAddBtn = document.getElementById("poolColorAddBtn");
   const symbolDupEnabled = document.getElementById("symbolDupEnabled");
   const symbolDupRulesWrap = document.getElementById("symbolDupRulesWrap");
   const symbolDupWait = document.getElementById("symbolDupWait");
@@ -529,6 +558,8 @@
   let devCountMarkState = { ...DEFAULT_DEV_COUNT_MARK };
   let devCountSaveTimer = null;
   let twHandleMarkState = { ...DEFAULT_TW_HANDLE_MARK };
+  let poolColorState = { ...DEFAULT_POOL_COLOR };
+  let poolColorSaveTimer = null;
   let twHandleSaveTimer = null;
   let symbolDupMarkState = { ...DEFAULT_SYMBOL_DUP_MARK };
   let symbolDupSaveTimer = null;
@@ -674,6 +705,39 @@
         op,
         min,
         color: normalizeHexColor(r.color, "#f59e0b"),
+        enabled: r.enabled !== false
+      });
+    }
+    return out;
+  }
+
+  function normalizePoolColorName(raw) {
+    let s = String(raw || "").trim().replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "");
+    if (!s) return "";
+    if (/[\u4e00-\u9fff]/.test(s)) return s.slice(0, 6);
+    s = s.toUpperCase();
+    if (s === "WBNB") s = "BNB";
+    if (s.length >= 5 && s.endsWith("B") && s !== "BNB") s = s.slice(0, -1);
+    const ver = s.match(/^([A-Z]{2,8})\d+$/);
+    if (ver) s = ver[1];
+    return s.slice(0, 6);
+  }
+
+  function normalizePoolColor(raw) {
+    const out = { enabled: false, rules: [] };
+    if (!raw || typeof raw !== "object") return out;
+    out.enabled = raw.enabled === true;
+    const list = Array.isArray(raw.rules) ? raw.rules : [];
+    const seen = new Set();
+    for (let i = 0; i < list.length && out.rules.length < POOL_COLOR_MAX; i += 1) {
+      const r = list[i] || {};
+      const name = normalizePoolColorName(r.name);
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      out.rules.push({
+        id: String(r.id || `p${Date.now().toString(36)}_${i}`),
+        name,
+        color: normalizeHexColor(r.color, "#f0b90b"),
         enabled: r.enabled !== false
       });
     }
@@ -1335,6 +1399,7 @@
             DEV_COUNT_MARK_KEY,
             TW_HANDLE_MARK_KEY,
             SYMBOL_DUP_MARK_KEY,
+            POOL_COLOR_KEY,
           ],
           (items) => {
             if (chrome.runtime.lastError) {
@@ -1353,6 +1418,7 @@
                 devCountMark: { ...DEFAULT_DEV_COUNT_MARK },
                 twHandleMark: { ...DEFAULT_TW_HANDLE_MARK },
                 symbolDupMark: { ...DEFAULT_SYMBOL_DUP_MARK },
+                poolColor: { ...DEFAULT_POOL_COLOR },
               });
               return;
             }
@@ -1379,6 +1445,7 @@
               devCountMark: normalizeDevCountMark(items?.[DEV_COUNT_MARK_KEY]),
               twHandleMark: normalizeTwHandleMark(items?.[TW_HANDLE_MARK_KEY]),
               symbolDupMark: normalizeSymbolDupMark(items?.[SYMBOL_DUP_MARK_KEY]),
+              poolColor: normalizePoolColor(items?.[POOL_COLOR_KEY]),
             });
           }
         );
@@ -1398,6 +1465,7 @@
           devCountMark: { ...DEFAULT_DEV_COUNT_MARK },
           twHandleMark: { ...DEFAULT_TW_HANDLE_MARK },
           symbolDupMark: { ...DEFAULT_SYMBOL_DUP_MARK },
+          poolColor: { ...DEFAULT_POOL_COLOR },
         });
       }
     });
@@ -1927,6 +1995,128 @@
     scheduleSaveTwHandleMark();
   }
 
+  function savePoolColor(state) {
+    const normalized = normalizePoolColor(state);
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.set({ [POOL_COLOR_KEY]: normalized }, () => {
+          void chrome.runtime?.lastError;
+          resolve(normalized);
+        });
+      } catch {
+        resolve(normalized);
+      }
+    });
+  }
+
+  function scheduleSavePoolColor() {
+    if (poolColorSaveTimer) window.clearTimeout(poolColorSaveTimer);
+    renderPoolColorUI(poolColorState);
+    poolColorSaveTimer = window.setTimeout(() => {
+      poolColorSaveTimer = null;
+      void savePoolColor(poolColorState);
+    }, 120);
+  }
+
+  function renderPoolColorUI(state) {
+    poolColorState = normalizePoolColor(state);
+    if (poolColorEnabled) {
+      poolColorEnabled.checked = poolColorState.enabled === true;
+    }
+    if (poolColorRulesWrap) {
+      poolColorRulesWrap.classList.toggle("is-disabled", poolColorState.enabled !== true);
+    }
+    if (!poolColorRulesList) return;
+    poolColorRulesList.innerHTML = "";
+    const rules = poolColorState.rules || [];
+    if (!rules.length) {
+      const empty = document.createElement("div");
+      empty.className = "suffix-empty";
+      empty.textContent = t("poolColorEmpty");
+      poolColorRulesList.appendChild(empty);
+      return;
+    }
+    for (const rule of rules) {
+      const row = document.createElement("div");
+      row.className = "suffix-rule-row";
+      row.dataset.id = rule.id;
+
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = rule.enabled !== false;
+      cb.addEventListener("change", () => {
+        const r = poolColorState.rules.find((x) => x.id === rule.id);
+        if (!r) return;
+        r.enabled = cb.checked === true;
+        scheduleSavePoolColor();
+      });
+
+      const swatch = document.createElement("span");
+      swatch.className = "mark-rule-swatch";
+      swatch.style.background = rule.color;
+
+      const color = document.createElement("input");
+      color.type = "color";
+      color.className = "mark-color-input";
+      color.value = rule.color;
+      color.addEventListener("input", () => {
+        const r = poolColorState.rules.find((x) => x.id === rule.id);
+        if (!r) return;
+        r.color = normalizeHexColor(color.value, r.color);
+        swatch.style.background = r.color;
+        scheduleSavePoolColor();
+      });
+
+      const text = document.createElement("span");
+      text.className = "suffix-rule-text mark-rule-label" + (rule.enabled === false ? " is-off" : "");
+      text.textContent = rule.name;
+      text.title = rule.name;
+
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "suffix-rule-del";
+      del.textContent = t("suffixRuleDel");
+      del.addEventListener("click", () => {
+        poolColorState.rules = poolColorState.rules.filter((x) => x.id !== rule.id);
+        scheduleSavePoolColor();
+      });
+
+      row.append(cb, swatch, text, color, del);
+      poolColorRulesList.appendChild(row);
+    }
+  }
+
+  function tryAddPoolColorRule() {
+    const name = normalizePoolColorName(poolColorNameInput?.value);
+    if (!name) {
+      if (poolColorNameInput) poolColorNameInput.placeholder = t("poolColorInvalid");
+      return;
+    }
+    const exists = (poolColorState.rules || []).some((r) => r.name === name);
+    if (exists) {
+      if (poolColorNameInput) {
+        poolColorNameInput.placeholder = t("poolColorDup");
+        poolColorNameInput.value = "";
+      }
+      return;
+    }
+    if ((poolColorState.rules || []).length >= POOL_COLOR_MAX) return;
+    const color = normalizeHexColor(poolColorPicker?.value, "#f0b90b");
+    poolColorState.rules = [
+      ...(poolColorState.rules || []),
+      { id: `p${Date.now().toString(36)}`, name, color, enabled: true }
+    ];
+    if (!poolColorState.enabled) {
+      poolColorState.enabled = true;
+      if (poolColorEnabled) poolColorEnabled.checked = true;
+    }
+    if (poolColorNameInput) {
+      poolColorNameInput.value = "";
+      poolColorNameInput.placeholder = t("poolColorNamePh");
+    }
+    scheduleSavePoolColor();
+  }
+
   function saveSymbolDupMark(state) {
     const normalized = normalizeSymbolDupMark(state);
     return new Promise((resolve) => {
@@ -2375,6 +2565,17 @@
     scheduleSaveTwHandleMark();
   });
   twHandleAddBtn?.addEventListener("click", () => tryAddTwHandleRule());
+  poolColorEnabled?.addEventListener("change", () => {
+    poolColorState.enabled = poolColorEnabled.checked === true;
+    scheduleSavePoolColor();
+  });
+  poolColorAddBtn?.addEventListener("click", () => tryAddPoolColorRule());
+  poolColorNameInput?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      tryAddPoolColorRule();
+    }
+  });
   twHandleInput?.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") {
       ev.preventDefault();
@@ -2485,6 +2686,7 @@
         renderDevCountMarkUI(devCountMarkState);
         renderTwHandleMarkUI(twHandleMarkState);
         renderSymbolDupMarkUI(symbolDupMarkState);
+        renderPoolColorUI(poolColorState);
       }
       if (changes[TAX_RECV_HIDE_KEY]) {
         taxRecvState = normalizeTaxRecvHide(changes[TAX_RECV_HIDE_KEY].newValue);
@@ -2514,6 +2716,10 @@
         symbolDupMarkState = normalizeSymbolDupMark(changes[SYMBOL_DUP_MARK_KEY].newValue);
         renderSymbolDupMarkUI(symbolDupMarkState);
       }
+      if (changes[POOL_COLOR_KEY]) {
+        poolColorState = normalizePoolColor(changes[POOL_COLOR_KEY].newValue);
+        renderPoolColorUI(poolColorState);
+      }
       if (changes[PREFS_KEY]) {
         prefsState = normalizePrefs(changes[PREFS_KEY].newValue);
         if (prefsExpanded) renderPrefs(prefsState);
@@ -2539,6 +2745,7 @@
       devCountMark: loadedDevCount,
       twHandleMark: loadedTwHandle,
       symbolDupMark: loadedSymbolDup,
+      poolColor: loadedPoolColor,
     }) => {
       uiLang = lang;
       solidDark = loadedSolid === true;
@@ -2554,6 +2761,7 @@
       devCountMarkState = normalizeDevCountMark(loadedDevCount);
       twHandleMarkState = normalizeTwHandleMark(loadedTwHandle);
       symbolDupMarkState = normalizeSymbolDupMark(loadedSymbolDup);
+      poolColorState = normalizePoolColor(loadedPoolColor);
       applyStaticI18n();
       renderTheme(theme);
       renderPrefs(prefs);
@@ -2564,6 +2772,7 @@
       renderDevCountMarkUI(devCountMarkState);
       renderTwHandleMarkUI(twHandleMarkState);
       renderSymbolDupMarkUI(symbolDupMarkState);
+      renderPoolColorUI(poolColorState);
       renderLicenseUI(loadedLicense);
       void refreshStoredLicense();
       bindCollapseHeads();
@@ -2575,6 +2784,7 @@
       setSectionExpanded("twHandle", false);
       setSectionExpanded("symbolDup", false);
       setSectionExpanded("pref", false);
+      setSectionExpanded("poolColor", false);
       setSectionExpanded("pos", false);
       fillOffsetUI(offsets);
       updateStatus();

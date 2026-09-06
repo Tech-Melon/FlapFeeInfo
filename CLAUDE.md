@@ -480,6 +480,9 @@ python tools/ctl.py watchdog-run
 | GMGN 勾了 BSC+Robinhood 徽章全没 / 只对一条链 | 混选后 URL 仍是 `?chain=` 单条，整页当单一链 | 升到 **0.8.168+**；按卡 `/bsc/token` 与 `/robinhood/token` |
 | 升 0.8.167/168 后 GMGN 卡死崩溃 | 去掉 `rhFeeDone` 跳过，徽章 Mutation 反复扒全部 fiber | 升到 **0.8.169+**；重载插件并硬刷页 |
 | 混选 BSC+RH 后 BSC 7777 没徽章 / 底池变 ETH | page-hook 整页当 Robinhood，非 pons 进 skip、0x0 当 ETH | 升到 **0.8.171+**；按卡认链 |
+| 已开盘 Pons Dev 闪 💎 / 分红闪 👨‍🍳 | 滚动冷却不处理 TokenItem href 换卡，虚拟列表残留上一张徽章；毕业后 JSON 不能把厨师改成分红 | 升到 **0.8.172+**；重载插件并硬刷 Robinhood |
+| 点 RH K 线后侧栏 BSC 7777 徽章消失 | URL `/robinhood/token` 把整页当 RH，BSC 卡被当非目标拆掉，还可能写入 pons-skip | 升到 **0.8.173+**；按卡 href 认链 |
+| Debot 点 `/token/robinhood` 后 BSC 徽章消失 | page-hook 不认 Debot RH K 线路径，整页 host-fee/门禁偏掉 | 升到 **0.8.174+** |
 | 卡片标记（发币次数/推特备注）没出现 | 未开开关 / 没加规则 / GMGN 新币 count 仍为 0 / 非战壕行卡 | **0.8.130+** 弹窗启用并加规则；Debot 看 ranks `created_count`；Robinhood 战壕 **0.8.148+** 与 BSC 同套字段 |
 | 推特备注只标部分同 handle 卡 | 新卡 twitter 常是 `i/status/{id}`，旧逻辑把 `/i/` 当无效链丢掉 | 升到 **0.8.147+**；重载插件并硬刷页 |
 | 新卡先闪一下发币次数色条/`×0` 再变对 | 缺次数时被当成 0，默认 `<N` 先命中 | 升到 **0.8.146+**；没拿到正数次数不上色 |
@@ -790,8 +793,12 @@ python tools/ctl.py watchdog-run
  - `0.8.169`：修 0.8.167 扫卡反馈环卡死 — 已处理 CA 恢复跳过，仅 0.5–10s 窗口再扫分红迟到
  - `0.8.170`：混链热路径降载 — 链集合 400ms 缓存；仅厨师首帧 4s 内再扫；无 RH 列不扫 TokenItem；BSC 单选不灌 RH quotes
  - `0.8.171`：混链 page-hook 按卡认 RH，禁止整页 pons-skip / 0x0→ETH 误伤 BSC 税币
-- 插件当前版本：见 `extension/manifest.json`（**0.8.171**，公开无剪切板）
-- page-hook：`HOOK_VER` **179**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.172`：已开盘 Pons 虚拟列表换卡立刻拆错徽章；`TaxAllocationIcon` 与 host-fee 类型对打时可强制再扫 fiber（JSON 仍不能 chef↔holder 对打）
+ - `0.8.173`：点进 RH K 线不得整页当 Robinhood — 侧栏 BSC 税币仍按卡 href 画/打 `/modes`；7777 禁止写入 pons-skip
+ - `0.8.174`：Debot `/token/robinhood` 与 GMGN 一样按卡 href；弹窗「底池着色」按截断后的底池名给整枚徽章自定义颜色
+- 插件当前版本：见 `extension/manifest.json`（**0.8.174**，公开无剪切板）
+- page-hook：`HOOK_VER` **182**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+- 底池着色：`flapFeeInfo.poolColor.v1` = `{ enabled, rules:[{id,name,color,enabled}] }`（最多 24 条；name 与徽章展示截断一致：拉丁/中文≤6、WBNB→BNB、SPCXB→SPCX；默认关）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  
