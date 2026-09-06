@@ -10,7 +10,7 @@
  * ★ BSC 税币过滤 + GMGN Robinhood pons v2 host-fee（不打 /modes）；禁止 DOM reflow / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 183;
+  const HOOK_VER = 184;
   /** 钩子安装前的原生 parse；内部 clone 禁止走已包装的 JSON.parse。 */
   const NATIVE_JSON_PARSE = JSON.parse.bind(JSON);
   try {
@@ -4674,13 +4674,17 @@
       if (wrapped) return wrapped;
       wrapped = function flapFeeHostPortTap(ev) {
         try {
+          if (ev && ev.data != null) tapHostFeePortData(ev.data);
+        } catch (_e) {
+          // ignore
+        }
+        try {
           if (prefsOn() && ev && ev.data && typeof ev.data === "object") {
             const r = filterLiveObject(ev.data, "host-port");
             if (r.drop) return undefined;
             if (r.changed && r.data !== ev.data) {
               if (!patchEventData(ev, r.data)) {
                 try {
-                  tapHostFeePortData(r.data);
                   return fn.call(this, { data: r.data, type: "message" });
                 } catch (_d) {
                   // fallthrough
@@ -4689,11 +4693,6 @@
             }
           }
         } catch (_flt) {
-          // ignore
-        }
-        try {
-          if (ev && ev.data != null) tapHostFeePortData(ev.data);
-        } catch (_e) {
           // ignore
         }
         return fn.apply(this, arguments);
@@ -6742,28 +6741,20 @@
       if (wrapped) return wrapped;
       wrapped = function flapFeePortOm(ev) {
         try {
+          if (ev && ev.data != null) tapHostFeePortData(ev.data);
+        } catch (_hft) {
+          // ignore
+        }
+        try {
           if (!prefsOn() || !ev || ev.data == null) {
-            try {
-              if (ev && ev.data != null) tapHostFeePortData(ev.data);
-            } catch (_hft0) {
-              // ignore
-            }
             return fn.apply(this, arguments);
           }
           // SharedWorker 可能推 string(JSON) 或 object
           if (typeof ev.data === "string") {
             const next = filterLiveText(ev.data, channel || "port-str");
             if (next !== ev.data) {
-              if (patchEventData(ev, next)) {
-                try {
-                  tapHostFeePortData(ev.data);
-                } catch (_hft1) {
-                  // ignore
-                }
-                return fn.apply(this, arguments);
-              }
+              if (patchEventData(ev, next)) return fn.apply(this, arguments);
               try {
-                tapHostFeePortData(next);
                 return fn.call(this, { data: next, type: "message" });
               } catch (_s) {
                 // fallthrough
@@ -6775,7 +6766,6 @@
             if (r.changed && r.data !== ev.data) {
               if (!patchEventData(ev, r.data)) {
                 try {
-                  tapHostFeePortData(r.data);
                   return fn.call(this, { data: r.data, type: "message" });
                 } catch (_d) {
                   // fallthrough
@@ -6785,11 +6775,6 @@
           }
         } catch (_fe) {
           // ignore — 原样交给业务
-        }
-        try {
-          if (ev && ev.data != null) tapHostFeePortData(ev.data);
-        } catch (_hft) {
-          // ignore
         }
         return fn.apply(this, arguments);
       };

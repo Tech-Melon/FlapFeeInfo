@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.179",
-  "description": "FlapFeeInfo 0.8.179: Faster GMGN refresh — skip JSON clone on first pumpRank snapshot.",
+  "version": "0.8.180",
+  "description": "FlapFeeInfo 0.8.180: Stop new-creation flicker from heartbeat host-fee ingest.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

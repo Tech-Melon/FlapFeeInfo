@@ -138,10 +138,11 @@ FlapFeeInfo\extension
 3. 点当前插件的 `重新加载`（或重新「加载已解压」指向 `extension/`）。
 4. **硬刷新** GMGN / Debot 目标页（否则可能仍是旧 content script）。
 
-当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.179**）。
+当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.180**）。
 
 ### 0.8.x 要点（近期）
 
+- **0.8.180**：修复新创建列跳闪（心跳帧不再当新卡 host-fee 重推）
 - **0.8.179**：GMGN 刷新降载（首包过滤不再 stringify 回炉）
 - **0.8.178**：BNB / ETH / USD* 底池跟分红色；分红没设色则回退底池色
 - **0.8.177**：BNB / ETH / USD* 底池配上别的分红时，徽章跟分红色，避免一堆 BNB 卡同色

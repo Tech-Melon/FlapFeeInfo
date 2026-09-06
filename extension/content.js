@@ -17,7 +17,8 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
-  // 0.8.179: GMGN 刷新降载 — JSON.parse 过滤后直接返回对象，禁止 stringify 再 parse；Port 先过滤再抽 host-fee。
+  // 0.8.180: 新创建跳闪 — Port 仍先 tap 原文再过滤；禁止把心跳 reseat 当新卡 host-fee 狂推。
+  // 0.8.179: GMGN 刷新降载 — JSON.parse 过滤后直接返回对象，禁止 stringify 再 parse。
   // 0.8.178: 标准底池跟分红色；分红未设色则回退底池色。
   // 0.8.177: 标准底池（BNB/ETH/USD*）且分红是别的代币时，整枚跟分红色，不用底池色当身份。
   // 0.8.176: 底池与分红共用规则；同名代币沿用底池色；边框变色可选。
@@ -7795,7 +7796,7 @@
     });
   }
 
-  const PAGE_HOOK_VER = "183";
+  const PAGE_HOOK_VER = "184";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 

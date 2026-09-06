@@ -800,9 +800,10 @@ python tools/ctl.py watchdog-run
  - `0.8.176`：底池与分红合成一套规则；同名代币共用底池色/显示名；可选「边框颜色一起变更」（默认关）
  - `0.8.177`：BNB / ETH / USD* 底池且分红是别的代币时，整枚徽章跟分红色（含边框），不再用底池色当身份
  - `0.8.178`：分红未设色时回退底池色（`BNB | →ASTE` 未配 ASTE 仍跟 BNB）
- - `0.8.179`：GMGN 刷新降载 — 首包 pumpRank 过滤后不再 JSON.stringify 回炉；Port 先过滤再抽 host-fee（合成 MessageEvent 也 tap）；内部 clone 走原生 parse
-- 插件当前版本：见 `extension/manifest.json`（**0.8.179**，公开无剪切板）
-- page-hook：`HOOK_VER` **183**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.179`：GMGN 刷新降载 — 首包 pumpRank 过滤后不再 JSON.stringify 回炉；内部 clone 走原生 parse
+ - `0.8.180`：新创建跳闪 — Port 恢复先 tap 原文再过滤，避免心跳 reseat 把 2 张卡当新 host-fee 狂推
+- 插件当前版本：见 `extension/manifest.json`（**0.8.180**，公开无剪切板）
+- page-hook：`HOOK_VER` **184**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
