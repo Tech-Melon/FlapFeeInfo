@@ -290,8 +290,9 @@ TokenItem 字段与 BSC 同套，开 Robinhood 扫卡门禁后三项都能用（
 - 文中**第一个** EVM / Solana 地址才作为跳转候选（句子/推文中间可以）
 - EVM：`0x` + 40 hex；Solana：32 字节 base58（含 `…pump`）
 - 已知代币 URL 带链名时尊重链（`gmgn.ai/base/token/...` → base）；`fromUrl` 直接当代币
-- 裸地址必须经 GMGN `GET /vas/api/v1/search_v3?q={ca}` 确认：`data.coins` **精确匹配该地址**才是代币并定链；只出现在 `wallets`、或 coins 是「拿钱包地址当名字的山寨币」→ **不开 K 线**
-- 搜索失败 / 超时同样不开 K 线（避免钱包被默认成 BSC 代币）
+- BSC 税币尾号 `8888` / `7777` / `ffff`：裸地址直接当 `bsc` 代币，**不打** GMGN 定链
+- 其它裸 EVM：优先已开 GMGN 页内 `POST /api/v1/token_info_brief_multi_chain`（最多 3 标签并行），再 SW 同接口（空包当 fail 不当钱包），最后 `search_v3`；`coins` **精确匹配**才当代币；只出现在 `wallets`、或 coins 是「拿钱包地址当名字的山寨币」→ **不开 K 线**
+- 搜索失败 / 超时同样不开 K 线（避免钱包被默认成 BSC 代币）；普通 fail **2s** 退避，429/403 **20s**
 - 定链缓存 `chainCache.v2` 只存已确认代币（`kind=token`）；非代币仅内存记 10 分钟
 - 只把 `{kind,address,chain}` 传给后台，**原文不进 SW / storage / 日志**
 - 复制即搜仍要求整段短文本且字数在范围内；文中已有 CA 时走跳转分流（再由 search_v3 过滤钱包）
@@ -299,7 +300,7 @@ TokenItem 字段与 BSC 同套，开 Robinhood 扫卡门禁后三项都能用（
 跳转：
 
 - **主路径（推荐）**：GMGN/Debot 标签里的 content script 常驻。页可见且聚焦时轮询剪切板；切回该标签立刻读一次（未变则不跳）。定链可走同源 `search_v3`，真正导航交给后台（负责聚焦标签）。
-- **offscreen 后台**：人不在 GMGN/Debot 时轮询剪切板；`search_v3` **确认是代币后**才激活已开站点标签并站内跳，不必先点标签页。钱包 / 超时 / 非代币**禁止**抢焦点。SW 用 offscreen 长连接保活。
+- **offscreen 后台**：人不在 GMGN/Debot 时轮询剪切板；先 `execCommand('paste')`（offscreen 不能聚焦，`readText` 常失败）。确认是代币后才激活已开站点标签并站内跳，不必先点标签页。钱包 / 超时 / 非代币**禁止**抢焦点。SW 用 offscreen 长连接保活。页内定链 `fail` 不否决整次查找。
 - **禁止** `chrome.tabs.update` 换地址栏（整页重载很慢）
 - 同一地址：切标签 / 轮询 / `clipboardchange` **不重复跳**；仅页内 copy/cut/writeText 可再跳，且 2.5s 内不连跳
 
@@ -451,6 +452,8 @@ python tools/ctl.py watchdog-run
 | 开资金接收后新创建只剩很少卡 | 宿主 ~2 分钟轮出 + 屏蔽砍 👨‍🍳 + 无 SW 累积 | **0.7.4+** 保留池 10 分钟/40 卡；网页筛选+阈值配合 |
 | 抽样 feeMatch:false（行 CA≠徽章） | 虚拟列表复用短窗 | **0.7.4+** 无身份不 stable + scrub 后 cache 重画 |
 | 剪切板跳转不生效 | 未授权 / iOS 禁后台读 / 文本过长或不像地址 | 弹窗里确认开启；Windows 允许读取剪切板；iOS 用「立即检测」或粘贴框 |
+| 别处复制 CA 很慢 / 不跳 / 战壕跟着卡 | 定链串行超时、SW 空包当钱包、失败每 200ms 扫 GMGN 标签 | 升到 **0.8.182+** 完整包；重载插件。Chrome 完全最小化时系统仍可能不让后台读剪贴板 |
+| GMGN 在后台、当前在 X 等标签复制 CA 不跳，切回 GMGN 才跳 | 页内监听要求 GMGN 有焦点；其它标签没有复制中继 | 升到 **0.8.183+** 完整包；打开弹窗允许访问所有网站；重载插件并硬刷 X/GMGN |
 | 复制几遍才跳对 K 线 / 搜索不灵 | 0.8.138 点短地址 copy 先读到旧剪贴板并开跳 | 升到 **0.8.142+** 完整包；重载插件并硬刷 GMGN/Debot |
 | 别处复制 CA 要点 GMGN 标签才跳 | 后台读到后 SPA 仍要求页有焦点（`not-front`） | 升到 **0.8.143+** 完整包；重载插件并硬刷页 |
 | 复制短名没有弹出 GMGN 搜索 | 未开「复制即搜」/ 未授权 / 不在 GMGN 前台 / 字数超出或含空格 / 已搜过这段 | 完整包弹窗开启并刷新 GMGN；再复制一次才再搜 |
@@ -459,6 +462,7 @@ python tools/ctl.py watchdog-run
 | 资金接收/金库我这边正常、部分用户没有 | GMGN 手机或 Worker 降级走 MAIN_THREAD：假 MessagePort + SNAP_SHOT，旧钩子只拦 SharedWorker PATCH | **0.8.124+**（勿用 0.8.123，会把 Object.prototype.onmessage 挂上导致打不开）；对方重载插件并硬刷 GMGN |
 | 刷新或多开 GMGN 新创建无法屏蔽 | SharedWorker 已有约 60 条，新页不打 HTTP，改走 `getFullFrame` RPC（`request_plugin.response.body`）；旧钩子不拆 `response` | **0.8.125+** 重载插件并硬刷每个 GMGN 标签 |
 | Robinhood 徽章一直 ⏳待加载 | 0.8.148 把缺 quote/分红名的 host-fee 当 pending，又不能打 `/modes` | 升到 **0.8.149+**；重载完整包并硬刷页 |
+| RH K 线 Long.xyz / bankr 挂 ⏳ | 顶栏在确认 pons 前就画待加载 | 升到 **0.8.185+**；非 pons 不画，未知也不占位 |
 | Robinhood 新创建 👨‍🍳/💎 闪变 | BSC leftover💎 / dividendBecameReal 把 JSON 半包盖到 fiber 厨师上 | 升到 **0.8.150+**；Robinhood 禁止类型对打，BSC 合并逻辑不动 |
 | Robinhood 💎→USDG / 🪙WETH 不显示 | quotes.json 无 USDG/WETH；0x0 当 BNB 把 ETH 分红藏掉 | 升到 **0.8.151+**；重载完整包并硬刷页 |
 | Robinhood 底池总是 🪙ETH | 每张卡都有 `IconRobinhoodeth` 链标，旧逻辑当底池，盖住 QQQ/SPY quotes 图 | 升到 **0.8.152+**；重载完整包并硬刷页 |
@@ -802,12 +806,17 @@ python tools/ctl.py watchdog-run
  - `0.8.178`：分红未设色时回退底池色（`BNB | →ASTE` 未配 ASTE 仍跟 BNB）
  - `0.8.179`：GMGN 刷新降载 — 首包 pumpRank 过滤后不再 JSON.stringify 回炉；内部 clone 走原生 parse
  - `0.8.180`：新创建跳闪 — Port 恢复先 tap 原文再过滤，避免心跳 reseat 把 2 张卡当新 host-fee 狂推
-- 插件当前版本：见 `extension/manifest.json`（**0.8.180**，公开无剪切板）
+ - `0.8.181`：完整包复制即搜 — 只填 GMGN 可见搜索弹层，覆盖 `/` 快捷键残留，避免填进顶栏旧内容
+ - `0.8.182`：完整包剪切板 — 别处复制跳 K 线提速：税币尾号跳过定链、页内查找并行、SW 空包不当钱包、失败 2s 退避；offscreen 先 paste
+ - `0.8.183`：完整包剪切板 — GMGN 在后台时，X/其它标签复制 CA 立刻跳（全站 copy 中继 + 读失败短时补读）；不再等切回 GMGN
+ - `0.8.184`：显示项可单独开关 BSC / Robinhood 链 CA 徽章（默认都开；关掉立刻拆该链徽章）
+ - `0.8.185`：RH K 线非 pons（Long.xyz / bankr / pons v1）不挂 ⏳；顶栏只画已确认 pons_v2
+- 插件当前版本：见 `extension/manifest.json`（**0.8.185**，公开无剪切板）
 - page-hook：`HOOK_VER` **184**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
-- 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`）  
+- 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`；`chainBsc`/`chainRh` 默认 `true`，关则不画该链 CA 徽章）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  
 - 尾号屏蔽：`flapFeeInfo.suffixHide.v1` = `{ enabled, rules:[{id,suffix,enabled}] }`（最多 24 条 hex 1–12 位）
 - 资金接收：`flapFeeInfo.taxRecvHide.v1` = `{ enabled, thresholdPct, allow:[{id,address,enabled}] }`（白名单最多 24 个 0x 地址）

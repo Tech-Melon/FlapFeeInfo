@@ -68,7 +68,7 @@
       catTools: "增强工具",
       catToolsDesc: "剪切板 · 搜索 · 阅读",
       catBadge: "徽章外观",
-      catBadgeDesc: "主题、显示项、底池/分红着色",
+      catBadgeDesc: "主题、显示项、链、底池/分红着色",
       catFilter: "列表过滤",
       catFilterDesc: "首页与 K 线左侧「新创建」",
       catMark: "卡片标记",
@@ -120,6 +120,10 @@
       prefSectionCollapse: "显示项 · 点击收起",
       btnAllOn: "全部开启",
       btnAllOff: "全部关闭",
+      pref_chainBsc_title: "BSC 链徽章",
+      pref_chainBsc_desc: "Flap 8888/7777、Four.meme ffff 税币",
+      pref_chainRh_title: "Robinhood 链徽章",
+      pref_chainRh_desc: "GMGN / Debot 的 pons v2",
       posSection: "徽章位置",
       offsetHintHtml:
         "<strong>默认</strong>：贴合税率（Tax）旁，无需配置。<br />" +
@@ -261,7 +265,7 @@
       catTools: "Productivity",
       catToolsDesc: "Clipboard · Search · Reading",
       catBadge: "Badge look",
-      catBadgeDesc: "Theme, display, pool/dividend colors",
+      catBadgeDesc: "Theme, display, chains, pool/dividend colors",
       catFilter: "List filters",
       catFilterDesc: "Home & K-line left New creation",
       catMark: "Card marks",
@@ -332,6 +336,10 @@
       statusDebotCoord: "Debot coords",
       statusDragging: "dragging",
       statusReset: "Reset to default (beside Tax)",
+      pref_chainBsc_title: "BSC badges",
+      pref_chainBsc_desc: "Flap 8888/7777 and Four.meme ffff tax tokens",
+      pref_chainRh_title: "Robinhood badges",
+      pref_chainRh_desc: "pons v2 on GMGN / Debot",
       pref_pool_title: "Pool quote",
       pref_pool_desc: "🦋Flap / 🖐️Four / 🪙other",
       poolColorSection: "Pool & dividend colors",
@@ -444,6 +452,8 @@
   };
 
   const PREF_KEYS = [
+    "chainBsc",
+    "chainRh",
     "pool",
     "holder",
     "creator",
@@ -459,6 +469,8 @@
     "unknown"
   ];
   const PREF_EMOJI = {
+    chainBsc: "🟡",
+    chainRh: "🟢",
     pool: "🦋",
     holder: "💎",
     creator: "👨‍🍳",

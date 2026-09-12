@@ -17,6 +17,11 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.185: RH K 线非 pons（longxyz/bankr/v1）不画 ⏳；顶栏只认已确认 pons_v2。
+  // 0.8.184: 显示项可单独开关 BSC / Robinhood 链徽章。
+  // 0.8.183: 完整包剪切板 — GMGN 后台时其它标签复制 CA 立刻跳（copy 中继）。
+  // 0.8.182: 完整包剪切板 — 别处复制跳 K 线：税币尾号免定链、页内并行查找、SW 空包不当钱包。
+  // 0.8.181: 完整包复制即搜 — 只填可见搜索弹层，清掉 `/` 快捷键残留，避免顶栏旧值。
   // 0.8.180: 新创建跳闪 — Port 仍先 tap 原文再过滤；禁止把心跳 reseat 当新卡 host-fee 狂推。
   // 0.8.179: GMGN 刷新降载 — JSON.parse 过滤后直接返回对象，禁止 stringify 再 parse。
   // 0.8.178: 标准底池跟分红色；分红未设色则回退底池色。
@@ -557,6 +562,8 @@
   const SYMBOL_STYLE_KEY = "flapFeeInfo.symbolStyle.v1";
   const POOL_COLOR_MAX_RULES = 24;
   const DEFAULT_DISPLAY_PREFS = {
+    chainBsc: true,
+    chainRh: true,
     pool: true,
     holder: true,
     creator: true,
@@ -726,6 +733,8 @@
   /** Robinhood 已确认非 pons_v2（long/bankr/v1）：禁止反复 fiber 扒卡 */
   const PONS_SKIP_TTL_MS = 45000;
   const ponsSkipAddrAt = new Map();
+  /** K 线页 launchpad 短缓存：addr → { lp, at } */
+  const tokenPageLaunchpadAt = new Map();
   let ponsFiberWindowAt = 0;
   let ponsFiberWindowN = 0;
   // GMGN TokenItem is often div[href="/bsc/token/0x…7777"] (not always <a>) — include bare [href*].
@@ -1905,8 +1914,12 @@
         return false;
       }
     }
-    // Robinhood 没有 /modes：有 host-fee 就画真徽章，绝不长期 ⏳。按卡 href，勿用整页 RH。
-    if (card && isRobinhoodTokenRouteHref(readCardTokenHref(card))) {
+    // Robinhood 没有 /modes：有 host-fee 就画真徽章，绝不 ⏳（K 线顶栏也没有 href）。
+    const hrefNow = readCardTokenHref(card);
+    const rhNoModes =
+      isRobinhoodTokenRouteHref(hrefNow) ||
+      (pageUrlIsRobinhoodToken() && !isBscTokenRouteHref(hrefNow));
+    if (rhNoModes) {
       trySeedHostFeeForCard(card, tok);
       const rhEntry = getEntryForCard(card, tok);
       if (rhEntry && !isFeeLoadingEntry(rhEntry) && hostFeeAllocationBps(rhEntry) > 0) {
@@ -3618,8 +3631,10 @@
   }
 
   function isPonsV2LaunchpadRaw(raw) {
-    const s = String(raw || "").toLowerCase();
-    return s === "pons_v2" || s.indexOf("pons_v2") !== -1;
+    const s = String(raw || "")
+      .toLowerCase()
+      .replace(/[\s-]+/g, "");
+    return s === "pons_v2" || s.indexOf("pons_v2") !== -1 || s === "ponsv2" || s.indexOf("ponsv2") !== -1;
   }
 
   /** TokenItem fiber：Robinhood 只认 pons_v2，不认尾号 / pons v1。Debot 读 meta.launchpad。 */
@@ -3682,6 +3697,196 @@
     return ok;
   }
 
+  function normalizeLaunchpadChip(raw) {
+    const s = String(raw || "")
+      .toLowerCase()
+      .replace(/\s+/g, "");
+    if (!s || s.length > 32) return "";
+    if (s.indexOf("pons_v2") !== -1 || s === "ponsv2") return "pons_v2";
+    if (s === "long.xyz" || s === "longxyz" || s.indexOf("long.xyz") !== -1) return "longxyz";
+    if (s === "bankr" || s.indexOf("bankr.") === 0) return "bankr";
+    return "";
+  }
+
+  function launchpadFromFiberBag(d, wantAddr) {
+    if (!d || typeof d !== "object") return "";
+    const a = extractAnyToken(
+      d.address || d.a || d.contract || d.token_address || d.tokenAddress || ""
+    );
+    if (wantAddr) {
+      if (!a || a !== wantAddr) return "";
+    }
+    const lp =
+      d.launchpad_platform ||
+      d.lpp ||
+      d.launchpad_platform_name ||
+      d.launchpad ||
+      (d.meta && d.meta.launchpad);
+    return lp ? String(lp) : "";
+  }
+
+  function scrapeLaunchpadFromTokenPageFiber(wantAddr) {
+    const want = String(wantAddr || "").toLowerCase();
+    const seeds = [];
+    try {
+      const idEl = document.querySelector("#token-base-address");
+      if (idEl instanceof HTMLElement) seeds.push(idEl);
+    } catch (_id) {
+      // ignore
+    }
+    try {
+      const short = findGmgnHeaderShortCaLeaf(want);
+      if (short instanceof HTMLElement) seeds.push(short);
+    } catch (_sh) {
+      // ignore
+    }
+    try {
+      const root = findGmgnTokenPageRoot();
+      if (root instanceof HTMLElement) seeds.push(root);
+    } catch (_rt) {
+      // ignore
+    }
+    const seen = new Set();
+    for (let s = 0; s < seeds.length; s += 1) {
+      const seed = seeds[s];
+      if (!seed || seen.has(seed)) continue;
+      seen.add(seed);
+      try {
+        let f = reactFiberOfCard(seed);
+        for (let i = 0; i < 36 && f; i += 1) {
+          const p = f.memoizedProps;
+          if (p && typeof p === "object") {
+            const bags = [p.data, p.token, p.tokenInfo, p.item, p.security, p];
+            for (let j = 0; j < bags.length; j += 1) {
+              const lp = launchpadFromFiberBag(bags[j], want);
+              if (lp) return lp;
+            }
+          }
+          f = f.return;
+        }
+      } catch (_fb) {
+        // ignore
+      }
+    }
+    return "";
+  }
+
+  function scrapeLaunchpadFromHeaderDom() {
+    let scope = null;
+    try {
+      const root = findGmgnTokenPageRoot();
+      scope = root instanceof HTMLElement ? root.parentElement || root : null;
+    } catch (_sc) {
+      scope = null;
+    }
+    if (!(scope instanceof HTMLElement)) {
+      try {
+        scope = document.body;
+      } catch (_bd) {
+        return "";
+      }
+    }
+    if (!scope || !scope.querySelectorAll) return "";
+    let nodes;
+    try {
+      nodes = scope.querySelectorAll("a, button, span");
+    } catch (_q) {
+      return "";
+    }
+    const lim = Math.min(nodes.length, 96);
+    for (let i = 0; i < lim; i += 1) {
+      const el = nodes[i];
+      if (!(el instanceof HTMLElement)) continue;
+      let r;
+      try {
+        r = el.getBoundingClientRect();
+      } catch (_r) {
+        continue;
+      }
+      if (r.top < 0 || r.top > 280 || r.height > 36 || r.width > 220) continue;
+      const t = String(el.textContent || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!t || t.length > 24) continue;
+      const lp = normalizeLaunchpadChip(t);
+      if (lp) return lp;
+    }
+    return "";
+  }
+
+  function scrapeLaunchpadFromTokenPage(addr) {
+    const want = String(addr || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(want)) return "";
+    const cached = tokenPageLaunchpadAt.get(want);
+    if (cached && Date.now() - cached.at < 1600) return cached.lp;
+    let lp = "";
+    try {
+      lp = scrapeLaunchpadFromTokenPageFiber(want) || scrapeLaunchpadFromHeaderDom();
+    } catch (_sc) {
+      lp = "";
+    }
+    tokenPageLaunchpadAt.set(want, { lp, at: Date.now() });
+    if (tokenPageLaunchpadAt.size > 80) {
+      const first = tokenPageLaunchpadAt.keys().next().value;
+      if (first) tokenPageLaunchpadAt.delete(first);
+    }
+    return lp;
+  }
+
+  /** RH K 线 URL 代币：只认已确认 pons_v2；longxyz/bankr/v1/未知都不画（含 ⏳）。 */
+  function isRhKlineFeeTarget(addr) {
+    const a = String(addr || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(a)) return false;
+    if (!isFeeBadgeChainPrefOn("rh")) return false;
+    if (ponsV2AddrSet.has(a)) return true;
+    if (isPonsSkipAddr(a)) return false;
+    const lp = scrapeLaunchpadFromTokenPage(a);
+    if (lp) {
+      if (isPonsV2LaunchpadRaw(lp)) {
+        rememberPonsV2Addr(a);
+        return true;
+      }
+      rememberPonsSkipAddr(a);
+      return false;
+    }
+    return false;
+  }
+
+  function stripTokenHeaderBadge(token) {
+    const tok = String(token || "").toLowerCase();
+    try {
+      document.querySelectorAll(`[${ICON_DATA}="1"][data-fee-header="1"]`).forEach((icon) => {
+        if (!(icon instanceof HTMLElement)) return;
+        if (tok && icon.dataset.feeToken && icon.dataset.feeToken !== tok) return;
+        try {
+          icon.remove();
+        } catch (_rm) {
+          // ignore
+        }
+      });
+    } catch (_q) {
+      // ignore
+    }
+  }
+
+  function isFeeBadgeChainPrefOn(kind) {
+    const prefs = displayPrefs || DEFAULT_DISPLAY_PREFS;
+    if (kind === "rh") return prefs.chainRh !== false;
+    return prefs.chainBsc !== false;
+  }
+
+  /** 徽章按卡 href / 尾号 / pons 集合认链，再套显示项开关。 */
+  function feeBadgeChainKind(addr, card) {
+    const href = card ? readCardTokenHref(card) : "";
+    if (isRobinhoodTokenRouteHref(href)) return "rh";
+    if (isBscTokenRouteHref(href)) return "bsc";
+    const a = String(addr || "").toLowerCase();
+    if (a && ponsV2AddrSet.has(a)) return "rh";
+    if (TARGET_TOKEN_RE.test(a)) return "bsc";
+    if (pageUrlIsRobinhoodToken()) return "rh";
+    return "bsc";
+  }
+
   /**
    * 徽章目标：BSC 仍是 8888/7777/ffff；GMGN Robinhood 只认 pons_v2（随机尾号）。
    * 不扩三层尾号正则，也不打 /modes。
@@ -3689,6 +3894,7 @@
   function isFeeTargetToken(addr, card) {
     const a = String(addr || "").toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(a)) return false;
+    if (!isFeeBadgeChainPrefOn(feeBadgeChainKind(a, card))) return false;
     if (ponsV2AddrSet.has(a)) return true;
     if (isPonsSkipAddr(a)) return false;
     const href = card ? readCardTokenHref(card) : "";
@@ -3702,15 +3908,9 @@
     if (isBscTokenRouteHref(href)) {
       return TARGET_TOKEN_RE.test(a);
     }
-    // 无卡 href：BSC 税币尾号仍有效（/modes 回包、host-fee 按 CA 分发）。
-    // 仅随机尾号才跟 RH K 线顶栏（pons 集合 / fiber）。
+    // 无卡 href：BSC 税币尾号仍有效。RH K 线 URL 代币只认 pons_v2，不要用 7777 尾号当 Flap。
     if (!href && pageUrlIsRobinhoodToken()) {
-      if (TARGET_TOKEN_RE.test(a)) return true;
-      if (card && scrapePonsV2FromCard(card)) {
-        rememberPonsV2Addr(a);
-        return true;
-      }
-      return ponsV2AddrSet.has(a);
+      return isRhKlineFeeTarget(a);
     }
     return TARGET_TOKEN_RE.test(a);
   }
@@ -3763,8 +3963,10 @@
     const href = readCardTokenHref(card);
     if (!href) return isAllowedScanChain();
     if (String(href).toLowerCase().indexOf("/token/") === -1) return isAllowedScanChain();
-    if (isBscTokenRouteHref(href)) return true;
-    if (isRobinhoodTokenRouteHref(href) && (isGmgnHost() || isDebotLikeHost())) return true;
+    if (isBscTokenRouteHref(href)) return isFeeBadgeChainPrefOn("bsc");
+    if (isRobinhoodTokenRouteHref(href) && (isGmgnHost() || isDebotLikeHost())) {
+      return isFeeBadgeChainPrefOn("rh");
+    }
     return false;
   }
 
@@ -3775,24 +3977,31 @@
    * - 拒绝: 其它显式他链（sol/eth/…）
    */
   function isAllowedScanChain() {
+    const bscOn = isFeeBadgeChainPrefOn("bsc");
+    const rhOn = isFeeBadgeChainPrefOn("rh");
+    if (!bscOn && !rhOn) return false;
     const set = getActiveChainSet();
-    if (set.has("bsc") || set.has("robinhood")) return true;
+    if (bscOn && set.has("bsc")) return true;
+    if (rhOn && set.has("robinhood")) return true;
+    if (set.has("bsc") || set.has("robinhood")) return false;
     const chain = resolvePageChain();
-    if (chain === "bsc") return true;
-    if (chain === "robinhood" && (isGmgnHost() || isDebotLikeHost())) return true;
+    if (chain === "bsc") return bscOn;
+    if (chain === "robinhood" && (isGmgnHost() || isDebotLikeHost())) return rhOn;
     // 显式非 BSC 一律拒绝；all/multi = Debot 融合战壕，改走卡级 href
     if (chain && chain !== "all" && chain !== "multi") return false;
 
     // 无 query chain：K 线必须路径含 bsc 或 robinhood
     if (isGmgnTokenPage()) {
       const path = location.pathname || "";
-      if (/\/robinhood\/token\//i.test(path)) return true;
-      return /\/bsc\/token\//i.test(path);
+      if (/\/robinhood\/token\//i.test(path)) return rhOn;
+      if (/\/bsc\/token\//i.test(path)) return bscOn;
+      return false;
     }
     if (isDebotTokenPage()) {
       const path = location.pathname || "";
-      if (/\/token\/robinhood(?:\/|$)/i.test(path)) return true;
-      return /\/token\/bsc(?:\/|$)/i.test(path);
+      if (/\/token\/robinhood(?:\/|$)/i.test(path)) return rhOn;
+      if (/\/token\/bsc(?:\/|$)/i.test(path)) return bscOn;
+      return false;
     }
     // Debot 融合列表：页级可无 chain=bsc，按卡 /token/bsc 与 /token/robinhood 扫
     if (isDebotLikeHost()) {
@@ -3823,7 +4032,7 @@
         }
       }
       if (sawForeign && !sawBsc) return false;
-      if (sawBsc) return true;
+      if (sawBsc) return bscOn;
     } catch (_err) {
       // ignore
     }
@@ -4498,14 +4707,29 @@
     if (!isGmgnTokenPage() || !isExtensionContextValid()) return false;
     const urlTok = extractTokenFromUrl();
     if (!urlTok) return false;
+    if (pageUrlIsRobinhoodToken()) {
+      if (!isRhKlineFeeTarget(urlTok)) {
+        stripTokenHeaderBadge(urlTok);
+        return false;
+      }
+    } else if (!isFeeTargetToken(urlTok)) {
+      stripTokenHeaderBadge(urlTok);
+      return false;
+    }
     if (shouldDeferGmgnTrenchResizeWork()) {
       return !!getCachedGmgnHeaderBadge(urlTok);
     }
 
-    queueToken(urlTok);
+    if (!pageUrlIsRobinhoodToken()) queueToken(urlTok);
 
     const existingGood = findGmgnHeaderBadgeEl(urlTok);
-    if (existingGood) {
+    if (
+      existingGood &&
+      pageUrlIsRobinhoodToken() &&
+      (existingGood.dataset.feeLoading === "1" || isFeeLoadingEntry(resolveEntry(urlTok)))
+    ) {
+      stripTokenHeaderBadge(urlTok);
+    } else if (existingGood) {
       const headerCard =
         existingGood.closest(`[${CARD_DATA}]`) ||
         climbGmgnHeaderCardFromLeaf(existingGood) ||
@@ -4514,7 +4738,7 @@
         headerCard instanceof HTMLElement ? headerCard : existingGood,
         urlTok
       );
-      if (entryHit) {
+      if (entryHit && !isFeeLoadingEntry(entryHit)) {
         try {
           const q =
             resolveQuoteSymbol(
@@ -4556,8 +4780,12 @@
       // ignore
     }
 
-    // 无缓存：顶栏也先 ⏳待加载，避免空白或乱闪
+    // RH 无 /modes：没有 host-fee 就不画（含 ⏳）。BSC 才用待加载占位。
     if (!entry) {
+      if (pageUrlIsRobinhoodToken()) {
+        stripTokenHeaderBadge(urlTok);
+        return false;
+      }
       recoverStuckBatch(false);
       scheduleBatchFlush({ immediate: true, delayMs: 0 });
       let okLoad = forceAppendGmgnHeaderBadge(
@@ -4683,6 +4911,10 @@
    */
   function forceAppendGmgnHeaderBadge(host, token, entry, shortHint) {
     if (!entry || !token) return false;
+    if (pageUrlIsRobinhoodToken()) {
+      if (!isRhKlineFeeTarget(token)) return false;
+      if (isFeeLoadingEntry(entry) || isHostFeeEntryPending(entry)) return false;
+    }
     try {
       let q = "";
       if (!isFeeLoadingEntry(entry)) {
@@ -9383,13 +9615,33 @@
     if (!isDebotTokenPage() || !isExtensionContextValid()) return false;
     const urlTok = extractTokenFromUrl();
     if (!urlTok) return false;
+    if (pageUrlIsRobinhoodToken()) {
+      if (!isRhKlineFeeTarget(urlTok)) {
+        stripTokenHeaderBadge(urlTok);
+        return false;
+      }
+    } else if (!isFeeTargetToken(urlTok)) {
+      stripTokenHeaderBadge(urlTok);
+      return false;
+    }
     if (hasDebotTokenHeaderBadge()) {
-      finishTokenEnterTransition();
-      return true;
+      if (pageUrlIsRobinhoodToken()) {
+        const icon = findDebotHeaderBadgeEl(urlTok);
+        const ent = resolveEntry(urlTok);
+        if (icon && icon.dataset.feeLoading === "1" && (!ent || isFeeLoadingEntry(ent))) {
+          stripTokenHeaderBadge(urlTok);
+        } else {
+          finishTokenEnterTransition();
+          return true;
+        }
+      } else {
+        finishTokenEnterTransition();
+        return true;
+      }
     }
 
     // Always ensure fee data is requested (js-mcp: SPA token often never hit /modes).
-    queueToken(urlTok);
+    if (!pageUrlIsRobinhoodToken()) queueToken(urlTok);
     const entry = resolveEntry(urlTok);
 
     let header = findDebotTokenHeaderCard();
@@ -9415,8 +9667,12 @@
     if (isLargeTokenLinkCardNode(header)) return false;
     removeStaleTokenHeaderBadges(urlTok);
 
-    // 无缓存：先 ⏳待加载，避免顶栏空白/乱闪
+    // RH 无 /modes：没有 host-fee 就不画（含 ⏳）。BSC 才用待加载占位。
     if (!entry) {
+      if (pageUrlIsRobinhoodToken()) {
+        stripTokenHeaderBadge(urlTok);
+        return false;
+      }
       recoverStuckBatch(false);
       scheduleBatchFlush({ immediate: true, delayMs: 0 });
       try {
@@ -18091,10 +18347,13 @@
         }
         if (area !== "local") return;
         let dirty = false;
+        let prefsChainDirty = false;
         if (changes[DISPLAY_PREFS_KEY]) {
           displayPrefs = normalizeDisplayPrefs(changes[DISPLAY_PREFS_KEY].newValue);
           if (!isHoverTipEnabled()) hideFeeTooltip();
+          stripDisabledChainBadges();
           dirty = true;
+          prefsChainDirty = true;
         }
         if (changes[SYMBOL_STYLE_KEY]) {
           symbolStylePrefs = normalizeSymbolStylePrefs(changes[SYMBOL_STYLE_KEY].newValue);
@@ -18246,10 +18505,45 @@
           if (licenseAccessKey) void refreshLicenseAccessState("device-id");
         }
         if (dirty) rerenderAllBadges();
+        if (prefsChainDirty) scheduleScan(80, { light: true });
       });
     } catch {
       // ignore
     }
+  }
+
+  function stripDisabledChainBadges() {
+    document.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((icon) => {
+      if (!(icon instanceof HTMLElement)) return;
+      const tok = String(icon.dataset.feeToken || "").toLowerCase();
+      let card = null;
+      try {
+        const marked = icon.closest?.(`[${CARD_DATA}]`);
+        const hrefHost = icon.closest?.('[href*="/token/"]');
+        card =
+          marked instanceof HTMLElement
+            ? marked
+            : hrefHost instanceof HTMLElement
+              ? hrefHost
+              : null;
+      } catch (_c) {
+        card = null;
+      }
+      if (tok && isFeeTargetToken(tok, card)) return;
+      try {
+        icon.remove();
+      } catch (_rm) {
+        // ignore
+      }
+      if (card) {
+        try {
+          delete card.dataset[CARD_MARK];
+          card.removeAttribute(CARD_DATA);
+        } catch (_clr) {
+          // ignore
+        }
+      }
+    });
   }
 
   /** Re-apply badge text after popup toggles change. */

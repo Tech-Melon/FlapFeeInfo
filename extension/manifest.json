@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.180",
-  "description": "FlapFeeInfo 0.8.180: Stop new-creation flicker from heartbeat host-fee ingest.",
+  "version": "0.8.185",
+  "description": "FlapFeeInfo 0.8.185: No loading badge on non-pons Robinhood K-line.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",
