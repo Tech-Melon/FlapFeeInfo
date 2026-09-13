@@ -138,10 +138,11 @@ FlapFeeInfo\extension
 3. 点当前插件的 `重新加载`（或重新「加载已解压」指向 `extension/`）。
 4. **硬刷新** GMGN / Debot 目标页（否则可能仍是旧 content script）。
 
-当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.185**）。
+当前插件版本见 `extension/manifest.json` 的 `version` 字段（**0.8.186**）。
 
 ### 0.8.x 要点（近期）
 
+- **0.8.186**：新创建税币有分配就先画徽章，不再因补分红名卡在「待加载」
 - **0.8.185**：Robinhood K 线非 pons 平台（如 Long.xyz）不再挂「待加载」徽章
 - **0.8.184**：弹窗显示项可单独开关 BSC / Robinhood 链 CA 徽章
 - **0.8.183**：完整包 — GMGN 在后台时，在 X / 其它标签复制 CA 也会立刻跳 K 线（需允许访问网站）

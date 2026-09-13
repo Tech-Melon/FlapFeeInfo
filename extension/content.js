@@ -17,6 +17,7 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.186: 新创建 7777 不再因 host-fee 缺 →QQQB 卡 ⏳；无 href 税币不走 RH 顶栏门禁。
   // 0.8.185: RH K 线非 pons（longxyz/bankr/v1）不画 ⏳；顶栏只认已确认 pons_v2。
   // 0.8.184: 显示项可单独开关 BSC / Robinhood 链徽章。
   // 0.8.183: 完整包剪切板 — GMGN 后台时其它标签复制 CA 立刻跳（copy 中继）。
@@ -1718,7 +1719,8 @@
     const token = String(tok || "").toLowerCase();
     const entry = modeCache.get(token) || resolveEntry(token);
     if (!entry || isFeeLoadingEntry(entry)) return true;
-    return isHostFeeEntryPending(entry);
+    if (isHostFeeEntryPending(entry)) return true;
+    return hostFeeStillNeedsModes(entry);
   }
 
   function hostFeePaintComplete(entry) {
@@ -1914,11 +1916,14 @@
         return false;
       }
     }
-    // Robinhood 没有 /modes：有 host-fee 就画真徽章，绝不 ⏳（K 线顶栏也没有 href）。
+    // Robinhood 没有 /modes：有 host-fee 就画真徽章，绝不 ⏳。
+    // 税币 7777/8888/ffff 即使人在 RH K 线侧栏，仍要 /modes，不能当 pons。
     const hrefNow = readCardTokenHref(card);
     const rhNoModes =
       isRobinhoodTokenRouteHref(hrefNow) ||
-      (pageUrlIsRobinhoodToken() && !isBscTokenRouteHref(hrefNow));
+      (pageUrlIsRobinhoodToken() &&
+        !isBscTokenRouteHref(hrefNow) &&
+        !TARGET_TOKEN_RE.test(tok));
     if (rhNoModes) {
       trySeedHostFeeForCard(card, tok);
       const rhEntry = getEntryForCard(card, tok);
@@ -3821,7 +3826,10 @@
     if (cached && Date.now() - cached.at < 1600) return cached.lp;
     let lp = "";
     try {
-      lp = scrapeLaunchpadFromTokenPageFiber(want) || scrapeLaunchpadFromHeaderDom();
+      lp = scrapeLaunchpadFromTokenPageFiber(want);
+      const urlTok = extractTokenFromUrl();
+      // 顶栏 Long.xyz 芯片只属于 URL 代币，不能套到侧栏/新创建其它 CA。
+      if (!lp && urlTok === want) lp = scrapeLaunchpadFromHeaderDom();
     } catch (_sc) {
       lp = "";
     }
@@ -3908,8 +3916,9 @@
     if (isBscTokenRouteHref(href)) {
       return TARGET_TOKEN_RE.test(a);
     }
-    // 无卡 href：BSC 税币尾号仍有效。RH K 线 URL 代币只认 pons_v2，不要用 7777 尾号当 Flap。
+    // 无卡 href：BSC 税币尾号仍走 /modes。RH K 线 URL 代币（随机尾号）只认 pons_v2。
     if (!href && pageUrlIsRobinhoodToken()) {
+      if (TARGET_TOKEN_RE.test(a)) return isFeeBadgeChainPrefOn("bsc");
       return isRhKlineFeeTarget(a);
     }
     return TARGET_TOKEN_RE.test(a);
@@ -10181,6 +10190,7 @@
       if (isGmgnTrenchMisplacedBadge(card, existing)) return false;
       const stableEntry = resolveEntry(marked);
       if (stableEntry && isHostFeeEntryPending(stableEntry)) return false;
+      if (stableEntry && hostFeeStillNeedsModes(stableEntry)) return false;
       if (stableEntry && isGmgnHostFeeDomMismatch(card, stableEntry)) return false;
       if (stableEntry && isGmgnPoolDomMismatch(card, existing, stableEntry)) return false;
       if (stableEntry && isTrustedStockVault(stableEntry)) {
@@ -13685,12 +13695,20 @@
     );
   }
 
-  /** BSC 宿主首帧未齐套：一直 ⏳ 直到 /modes。Pons 单独短路，不看整页 chain。 */
+  /** 没有分配才 ⏳。已有 💎/👨‍🍳 先画，缺 →QQQB 仍打 /modes，不要干等几十秒。 */
   function isHostFeeEntryPending(entry) {
     if (!entry || isFeeLoadingEntry(entry)) return false;
     if (entry && entry.__pons_v2 === true) return false;
-    if (entry.source_host) return !hostFeeCanSkipModes(entry);
+    if (entry.source_host) return hostFeeAllocationBps(entry) <= 0;
     return false;
+  }
+
+  /** 已能画类型，但分红名/底池地址未齐，还要等 /modes。 */
+  function hostFeeStillNeedsModes(entry) {
+    if (!entry || isFeeLoadingEntry(entry)) return false;
+    if (entry.__pons_v2 === true) return false;
+    if (entry.source_host) return !hostFeeCanSkipModes(entry);
+    return entry.__needsChain === true;
   }
 
   function normalizeBasketAssets(raw) {
@@ -13763,7 +13781,10 @@
 
   function applyModeToKnownCards(token, entry, knownCards = null) {
     const tok = String(token || "").toLowerCase();
-    if (!isFeeTargetToken(tok)) return;
+    // 无卡时不要用整页 RH 顶栏门禁把 BSC 税币挡掉（/modes 与 host-fee 都走这里）。
+    if (!isFeeTargetToken(tok) && !TARGET_TOKEN_RE.test(tok) && !ponsV2AddrSet.has(tok)) {
+      return;
+    }
     // 0.6.5: CA 定位 — mark + href 含完整 CA 的行（不靠 climb 猜）
     const fromCa = findCardsByCa(tok);
     const fromMark = knownCards

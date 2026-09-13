@@ -463,6 +463,7 @@ python tools/ctl.py watchdog-run
 | 刷新或多开 GMGN 新创建无法屏蔽 | SharedWorker 已有约 60 条，新页不打 HTTP，改走 `getFullFrame` RPC（`request_plugin.response.body`）；旧钩子不拆 `response` | **0.8.125+** 重载插件并硬刷每个 GMGN 标签 |
 | Robinhood 徽章一直 ⏳待加载 | 0.8.148 把缺 quote/分红名的 host-fee 当 pending，又不能打 `/modes` | 升到 **0.8.149+**；重载完整包并硬刷页 |
 | RH K 线 Long.xyz / bankr 挂 ⏳ | 顶栏在确认 pons 前就画待加载 | 升到 **0.8.185+**；非 pons 不画，未知也不占位 |
+| 新创建 7777 ⏳ 几十秒，鼠标移上去才出 💎→QQQB | 185 无 href 税币误走 RH 门禁；host-fee 缺分红名一直当 pending | 升到 **0.8.186+**；有分配先画，/modes 再补箭头 |
 | Robinhood 新创建 👨‍🍳/💎 闪变 | BSC leftover💎 / dividendBecameReal 把 JSON 半包盖到 fiber 厨师上 | 升到 **0.8.150+**；Robinhood 禁止类型对打，BSC 合并逻辑不动 |
 | Robinhood 💎→USDG / 🪙WETH 不显示 | quotes.json 无 USDG/WETH；0x0 当 BNB 把 ETH 分红藏掉 | 升到 **0.8.151+**；重载完整包并硬刷页 |
 | Robinhood 底池总是 🪙ETH | 每张卡都有 `IconRobinhoodeth` 链标，旧逻辑当底池，盖住 QQQ/SPY quotes 图 | 升到 **0.8.152+**；重载完整包并硬刷页 |
@@ -811,7 +812,8 @@ python tools/ctl.py watchdog-run
  - `0.8.183`：完整包剪切板 — GMGN 在后台时，X/其它标签复制 CA 立刻跳（全站 copy 中继 + 读失败短时补读）；不再等切回 GMGN
  - `0.8.184`：显示项可单独开关 BSC / Robinhood 链 CA 徽章（默认都开；关掉立刻拆该链徽章）
  - `0.8.185`：RH K 线非 pons（Long.xyz / bankr / pons v1）不挂 ⏳；顶栏只画已确认 pons_v2
-- 插件当前版本：见 `extension/manifest.json`（**0.8.185**，公开无剪切板）
+ - `0.8.186`：新创建 7777 有 host-fee 分配即画 💎，不再因缺 →QQQB 卡 ⏳ 几十秒；仍打 /modes 补箭头；无 href 税币不走 RH 顶栏门禁
+- 插件当前版本：见 `extension/manifest.json`（**0.8.186**，公开无剪切板）
 - page-hook：`HOOK_VER` **184**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
