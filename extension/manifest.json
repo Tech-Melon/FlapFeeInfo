@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.186",
-  "description": "FlapFeeInfo 0.8.186: New-creation tax badges paint without waiting for QQQB name.",
+  "version": "0.8.187",
+  "description": "FlapFeeInfo 0.8.187: Space no longer reopens tax info; license rebind trusts server OK.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

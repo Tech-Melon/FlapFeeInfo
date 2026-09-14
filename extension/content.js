@@ -17,6 +17,7 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.187: 点徽章开税收后 blur，空格不再二次打开；换绑成功不再被 KV 延迟误判失败。
   // 0.8.186: 新创建 7777 不再因 host-fee 缺 →QQQB 卡 ⏳；无 href 税币不走 RH 顶栏门禁。
   // 0.8.185: RH K 线非 pons（longxyz/bankr/v1）不画 ⏳；顶栏只认已确认 pons_v2。
   // 0.8.184: 显示项可单独开关 BSC / Robinhood 链徽章。
@@ -19298,7 +19299,7 @@
 
   /**
    * Click / Enter → Flap taxinfo 或 Four.meme token 页。
-   * Skip when drag-edit or pointer moved (drag). Bound once per badge node.
+   * 空格留给 GMGN 搜索；点击后立刻 blur，避免回页按空格再开税收。
    */
   function bindBadgeClick(icon) {
     if (!(icon instanceof HTMLElement) || icon.dataset.feeClickBound === "1") return;
@@ -19310,6 +19311,14 @@
       (e) => {
         if (e.button != null && e.button !== 0) return;
         ptrDown = { x: e.clientX, y: e.clientY };
+        // 阻止徽章抢焦点，否则切回 GMGN 按空格会再激活。拖拽定位时不要 preventDefault。
+        if (!badgeDragEdit && !badgeDragState) {
+          try {
+            e.preventDefault();
+          } catch (_pd) {
+            // ignore
+          }
+        }
       },
       true
     );
@@ -19330,6 +19339,11 @@
         if (!TARGET_TOKEN_RE.test(token)) return;
         e.preventDefault();
         e.stopPropagation();
+        try {
+          icon.blur();
+        } catch (_bl) {
+          // ignore
+        }
         openTaxDetail(token);
       },
       true
@@ -19338,11 +19352,16 @@
     icon.addEventListener("keydown", (e) => {
       if (!isOpenTaxinfoEnabled()) return;
       if (badgeDragEdit || badgeDragState) return;
-      if (e.key !== "Enter" && e.key !== " ") return;
+      if (e.key !== "Enter") return;
       const token = icon.dataset.feeToken || "";
       if (!TARGET_TOKEN_RE.test(token)) return;
       e.preventDefault();
       e.stopPropagation();
+      try {
+        icon.blur();
+      } catch (_bl) {
+        // ignore
+      }
       openTaxDetail(token);
     });
   }

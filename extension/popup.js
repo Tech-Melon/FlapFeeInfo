@@ -970,6 +970,13 @@
     if (code === "license_expired") return t("licenseExpired");
     if (code === "license_no_flap_perm") return t("licenseNoPerm");
     if (code === "license_device_mismatch") return t("licenseDeviceMismatch");
+    if (
+      code === "license_device_bind_failed" ||
+      code === "license_device_required" ||
+      code === "license_rebind_failed"
+    ) {
+      return t("licenseRebindFail");
+    }
     return t("licenseVerifyFail");
   }
 
@@ -1191,13 +1198,13 @@
         setLicenseStatus(mapLicenseError(rebound.error) || t("licenseRebindFail"));
         return;
       }
-      const verify = await verifyLicenseKey(next.key, deviceId);
-      if (!verify.ok) {
-        setLicenseStatus(t("licenseRebindFail"));
-        return;
-      }
+      // KV 读可能短暂落后于 put；换绑接口已成功就把本机当已绑定，避免误报失败。
       licenseDeviceMismatch = false;
-      await applyLicenseVerificationResult(next.key, verify, { collapseOnSuccess: true });
+      await applyLicenseVerificationResult(
+        next.key,
+        { ok: true, data: rebound.data || { device_rebound: true } },
+        { collapseOnSuccess: true }
+      );
       setLicenseStatus(t("licenseRebound"));
     } catch {
       setLicenseStatus(t("licenseRebindFail"));
