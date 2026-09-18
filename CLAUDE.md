@@ -842,7 +842,9 @@ python tools/ctl.py watchdog-run
  - `0.8.195`：第一刀流畅 — 过滤关时 Port/WS/JSON.parse 先给宿主再 ingest；content hello 前不 postMessage（2.5s 兜底）
  - `0.8.196`：资金接收 / 金库两处独立勾选 Genius.fun（默认不挡；厨师走阈值，🎁 走金库总开关）
  - `0.8.197`：SNAP_SHOT 只记 Genius CA 索引（不组 stub / 不扫三遍）；出卡后再画；PATCH 新卡仍走 host-fee
-- 插件当前版本：见 `extension/manifest.json`（**0.8.197**，公开无剪切板）
+ - `0.8.198`：Genius 仅底池不算就绪（`isHostFeeEntryPending`）；预览带 loading，`/modes` 后必换 🎁/👨‍🍳
+ - `0.8.199`：Flap/Four 与 Genius 同一套「预览≠齐套」：`quote_token=0x0` / 缺底池必须 `/modes`；BSC 7777/8888/ffff 无芯片才默认 BNB
+- 插件当前版本：见 `extension/manifest.json`（**0.8.199**，公开无剪切板）
 - page-hook：`HOOK_VER` **191**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）

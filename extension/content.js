@@ -18,6 +18,8 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.199: Flap/Four 缺底池/0x0 不算齐套，必须 /modes；预览≠就绪（与 Genius 同一套门禁）。
+  // 0.8.198: Genius 仅底池不算就绪；quote 预览必须带 loading，/modes 回包强制换 🎁/👨‍🍳。
   // 0.8.197: SNAP_SHOT 只建 Genius CA 索引（不组 stub）；出卡后再画 /modes。
   // 0.8.196: 资金接收 / 金库 两处独立勾选 Genius.fun 过滤（默认都不挡）。
   // 0.8.195: 第一刀 — 过滤关时 Port/JSON.parse 先交给宿主再 ingest；hello 前不 postMessage。
@@ -1637,7 +1639,9 @@
 
   function isEntryReadyForDisplay(card, token) {
     const entry = getEntryForCard(card, token);
-    return entry && !isHostFeeEntryPending(entry);
+    if (!entry || isHostFeeEntryPending(entry)) return false;
+    if (entry.__pons_v2 === true) return hostFeeAllocationBps(entry) > 0;
+    return hostFeeCanSkipModes(entry);
   }
 
   function isBadgeAccessAllowed() {
@@ -1739,13 +1743,32 @@
     return hostFeeStillNeedsModes(entry);
   }
 
+  function hostFeeQuoteReady(entry) {
+    const qTok = String(entry.quote_token || entry.quote_address || "").toLowerCase();
+    if (qTok === WBNB_ADDRESS) return true;
+    if (
+      /^0x[a-f0-9]{40}$/.test(qTok) &&
+      qTok !== "0x0000000000000000000000000000000000000000" &&
+      !quoteTokenLooksNative(qTok)
+    ) {
+      return true;
+    }
+    const qs = String(entry.quote_symbol || "").trim();
+    if (qs && !quoteSymbolLooksNative(qs) && isRealPoolQuoteSymbol(qs)) return true;
+    return false;
+  }
+
   function hostFeePaintComplete(entry) {
     if (!entry || isFeeLoadingEntry(entry)) return false;
     if (hostFeeAllocationBps(entry) <= 0) return false;
-    const qTok = String(entry.quote_token || entry.quote_address || "").toLowerCase();
-    if (!/^0x[a-f0-9]{40}$/.test(qTok)) return false;
-    if ((Number(entry.dividend_bps) || 0) > 0 && !String(entry.dividend_symbol || "").trim()) {
-      return false;
+    if (!hostFeeQuoteReady(entry)) return false;
+    if ((Number(entry.dividend_bps) || 0) > 0) {
+      if (
+        !String(entry.dividend_symbol || "").trim() &&
+        !dividendTokenIsConfirmedWbnb(entry)
+      ) {
+        return false;
+      }
     }
     if (entry.is_stocks_vault && !basketSymbolsReady(entry.basket_assets)) return false;
     return true;
@@ -1928,7 +1951,7 @@
         incompleteModesTimers.delete(oldest);
       }
     }
-    const delayMs = isGeniusFunToken(token) ? 0 : HOST_FEE_INCOMPLETE_DELAY_MS;
+    const delayMs = isGeniusFunToken(token) ? 80 : HOST_FEE_INCOMPLETE_DELAY_MS;
     const timerId = window.setTimeout(() => {
       incompleteModesTimers.delete(token);
       forceModesForWaitingToken(token);
@@ -7816,8 +7839,19 @@
       wipeForbiddenMountBadges(card, true);
       return false;
     }
-    // 加载占位 / host-fee 未稳定：画 ⏳，禁止用 preview 当真徽章
-    if (isFeeLoadingEntry(entry) || isHostFeeEntryPending(entry)) {
+    // 加载占位 / 未齐套：⏳。Genius 底池预览、Flap/Four 已有分配可先画，但仍 loading 等 /modes。
+    if (
+      isFeeLoadingEntry(entry) ||
+      isHostFeeEntryPending(entry) ||
+      (entry.__pons_v2 !== true && !hostFeeCanSkipModes(entry))
+    ) {
+      if (
+        entry.__pons_v2 !== true &&
+        (hostFeeAllocationBps(entry) > 0 ||
+          (isGeniusFeeEntry(entry, token) && String(entry.quote_symbol || "").trim()))
+      ) {
+        return renderMode(card, token, entry);
+      }
       return renderMode(card, token, FEE_LOADING_ENTRY);
     }
     // K→战壕 / 刷新后虚拟列表复用：强制重挂，避免 Tax 旁徽章漂到卡片中部
@@ -13898,8 +13932,8 @@
     if (!entry || isFeeLoadingEntry(entry)) return false;
     if (entry && entry.__pons_v2 === true) return false;
     if (isGeniusFeeEntry(entry)) {
-      if (hostFeeAllocationBps(entry) > 0) return false;
-      return !String(entry.quote_symbol || "").trim();
+      // 只有底池、没有 🎁/👨‍🍳 仍算未完成，必须继续 /modes。
+      return hostFeeAllocationBps(entry) <= 0;
     }
     if (entry.source_host) return hostFeeAllocationBps(entry) <= 0;
     return false;
@@ -13909,6 +13943,7 @@
   function hostFeeStillNeedsModes(entry) {
     if (!entry || isFeeLoadingEntry(entry)) return false;
     if (entry.__pons_v2 === true) return false;
+    if (isGeniusFeeEntry(entry) && hostFeeAllocationBps(entry) <= 0) return true;
     if (entry.source_host) return !hostFeeCanSkipModes(entry);
     return entry.__needsChain === true;
   }
@@ -14513,7 +14548,13 @@
         if (isBscTokenRouteHref(href)) return "BNB";
         return GMGN_CHAIN_NATIVE_QUOTE[getGmgnChainKey()] || "BNB";
       }
-      return fromApi ? formatPoolQuoteSymbol(fromApi) : "";
+      if (fromApi) return formatPoolQuoteSymbol(fromApi);
+      const href = card ? readCardTokenHref(card) : "";
+      const hrefTok = href ? extractAnyToken(href) : "";
+      if (isBscTokenRouteHref(href) && TARGET_TOKEN_RE.test(hrefTok || "")) {
+        return "BNB";
+      }
+      return "";
     }
     if (fromApi) return formatPoolQuoteSymbol(fromApi);
     return "";
@@ -19237,10 +19278,12 @@
     const tipModel = buildTipModel(entry, quoteSymbol, label, tok);
     // Legacy plain title kept for rare code paths; UI uses custom tooltip.
     const title = tipModel.titleLines.join("\n");
-    const geniusAwaitChain =
-      isGeniusFeeEntry(entry, tok) &&
-      hostFeeAllocationBps(entry) <= 0 &&
-      (entry.__needsChain === true || Boolean(entry.source_host));
+    const awaitChain =
+      entry.__pons_v2 !== true &&
+      !hostFeeCanSkipModes(entry) &&
+      (Boolean(entry.source_host) ||
+        entry.__needsChain === true ||
+        isGeniusFeeEntry(entry, tok));
     return {
       label,
       title,
@@ -19254,7 +19297,7 @@
       poolColor,
       divColor,
       borderColor,
-      isLoading: geniusAwaitChain
+      isLoading: awaitChain
     };
   }
 
