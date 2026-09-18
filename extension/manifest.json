@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.222",
-  "description": "FlapFeeInfo 0.8.222: Debot list filter on K-line new-creation and Genius search.",
+  "version": "0.8.224",
+  "description": "FlapFeeInfo 0.8.224: Hot path no launchpad scrape; Debot header no full-page leaf scan.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

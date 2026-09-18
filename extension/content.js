@@ -18,6 +18,8 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.224: 热路径不再刮 launchpad；Debot 顶栏禁止 body 全量 span/div；战壕列种子禁整列 textContent。
+  // 0.8.223: 点进非税币 K 线卡死 — scrapeLaunchpad 禁止再调 extractTokenFromUrl（递归把主线程打满）。
   // 0.8.222: Debot 列表过滤 — K 线左侧新创建 DOM hide；搜索弹层也滤 Genius；Genius deferFlush 不单卡立刷。
   // 0.8.220: Debot 对齐 187–219 — 扫卡只认 /token/bsc|/token/robinhood；钱包追踪禁整卡 textContent；loading 进热通道。
   // 0.8.219: 钱包追踪跟单卡（Tracking.tsx / 陆小果加仓）禁徽章；标题在工具栏不在虚拟列表行里。
@@ -3475,40 +3477,6 @@
     } catch (_err) {
       // ignore
     }
-
-    // 3) Fallback: scan leaves but do NOT use document-order cap only —
-    //    skip nodes outside top band without counting toward budget.
-    try {
-      const shorts = document.body
-        ? document.body.querySelectorAll("span, a, div, p, button")
-        : [];
-      const topShorts = [];
-      const max = Math.min(shorts.length, 900);
-      let checked = 0;
-      for (let i = 0; i < max && checked < 80; i += 1) {
-        const el = shorts[i];
-        if (!(el instanceof HTMLElement)) continue;
-        // Cheap reject before rect when possible.
-        const t = (el.textContent || "").trim();
-        if (t.length > 28 || t.length < 8) continue;
-        if (!TARGET_SHORT_TOKEN_RE.test(t) && !SHORT_TOKEN_RE.test(t)) continue;
-        if (el.children && el.children.length > 2) continue;
-        if (!inTopBand(el) || isLargeTokenLinkCardNode(el)) continue;
-        checked += 1;
-        if (t.length > 22) continue;
-        if (!TARGET_SHORT_TOKEN_RE.test(t)) continue;
-        if (urlTok && !tokenMatchesShort(urlTok, t)) continue;
-        topShorts.push(el);
-      }
-      if (topShorts.length) {
-        topShorts.sort(
-          (a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top
-        );
-        return topShorts[0];
-      }
-    } catch (_err) {
-      // ignore
-    }
     return null;
   }
 
@@ -4015,19 +3983,24 @@
     return "";
   }
 
+  let scrapeLaunchpadBusy = false;
   function scrapeLaunchpadFromTokenPage(addr) {
     const want = String(addr || "").toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(want)) return "";
     const cached = tokenPageLaunchpadAt.get(want);
     if (cached && Date.now() - cached.at < 1600) return cached.lp;
+    if (scrapeLaunchpadBusy) return cached ? cached.lp : "";
+    scrapeLaunchpadBusy = true;
     let lp = "";
     try {
       lp = scrapeLaunchpadFromTokenPageFiber(want);
-      const urlTok = extractTokenFromUrl();
+      const urlTok = extractAnyToken(location.pathname || "");
       // 顶栏 Long.xyz 芯片只属于 URL 代币，不能套到侧栏/新创建其它 CA。
       if (!lp && urlTok === want) lp = scrapeLaunchpadFromHeaderDom();
     } catch (_sc) {
       lp = "";
+    } finally {
+      scrapeLaunchpadBusy = false;
     }
     tokenPageLaunchpadAt.set(want, { lp, at: Date.now() });
     if (tokenPageLaunchpadAt.size > 80) {
@@ -4122,7 +4095,7 @@
     }
     if (!href && pageUrlIsBscToken()) {
       if (TARGET_TOKEN_RE.test(a)) return true;
-      return isBscKlineFeeTarget(a);
+      return isGeniusFunToken(a);
     }
     return TARGET_TOKEN_RE.test(a);
   }
@@ -4437,8 +4410,27 @@
     const token = m[0].toLowerCase();
     if (isGmgnRobinhoodPage()) return token;
     if (isDebotLikeHost() && /\/token\/robinhood\//i.test(location.pathname || "")) return token;
-    if (isGeniusFunToken(token) || TARGET_TOKEN_RE.test(token)) return token;
-    if (pageUrlIsBscToken() && isBscKlineFeeTarget(token)) return token;
+    if (isGeniusFunToken(token) || TARGET_TOKEN_RE.test(token) || ponsV2AddrSet.has(token)) {
+      return token;
+    }
+    return null;
+  }
+
+  /** 仅顶栏试画调用：可刮一次 launchpad。Mutation 热路径必须用 extractTokenFromUrl。 */
+  function resolveUrlFeeToken() {
+    const cheap = extractTokenFromUrl();
+    if (cheap) return cheap;
+    const m = String(location.pathname || "").match(/0x[a-fA-F0-9]{40}/i);
+    if (!m) return null;
+    const token = m[0].toLowerCase();
+    if (pageUrlIsBscToken() && isFeeBadgeChainPrefOn("bsc")) {
+      const lp = scrapeLaunchpadFromTokenPage(token);
+      if (isGeniusFunLaunchpadRaw(lp) || normalizeLaunchpadChip(lp) === "geniusfun") {
+        rememberGeniusFunAddr(token);
+        return token;
+      }
+    }
+    if (pageUrlIsRobinhoodToken() && isRhKlineFeeTarget(token)) return token;
     return null;
   }
 
@@ -4614,11 +4606,10 @@
     const m = String(location.pathname || "").match(/0x[a-fA-F0-9]{40}/i);
     if (!m) return false;
     const token = m[0].toLowerCase();
-    if (isGmgnRobinhoodPage()) return false;
-    if (isDebotLikeHost() && /\/token\/robinhood\//i.test(location.pathname || "")) {
+    if (TARGET_TOKEN_RE.test(token) || isGeniusFunToken(token) || ponsV2AddrSet.has(token)) {
       return false;
     }
-    return !isFeeTargetToken(token);
+    return true;
   }
 
   /**
@@ -4981,7 +4972,7 @@
    */
   function tryPaintGmgnTokenHeader(reason) {
     if (!isGmgnTokenPage() || !isExtensionContextValid()) return false;
-    const urlTok = extractTokenFromUrl();
+    const urlTok = resolveUrlFeeToken();
     if (!urlTok) return false;
     if (pageUrlIsRobinhoodToken()) {
       if (!isRhKlineFeeTarget(urlTok)) {
@@ -7687,7 +7678,15 @@
         ) {
           return;
         }
-        const head = (root.textContent || "").slice(0, 120);
+        let head = "";
+        try {
+          const kid = root.firstElementChild;
+          if (kid && kid.childElementCount <= 8) {
+            head = (kid.textContent || "").slice(0, 48);
+          }
+        } catch (_h) {
+          head = "";
+        }
         const titleRank = /新创建|即将打满|已开盘/.test(head) ? 1 : 0;
         candidates.push({
           root,
@@ -8598,7 +8597,7 @@
 
   function armGmgnHeaderDomWatch() {
     if (!isGmgnHost() || !isGmgnTokenPage()) return;
-    const urlTok = extractTokenFromUrl();
+    const urlTok = extractTokenFromUrl() || resolveUrlFeeToken();
     if (!urlTok) return;
     // The always-on document observer owns targeted header repair. Keeping a second
     // document-wide observer here doubled mutation delivery on chart-heavy token pages.
@@ -9630,7 +9629,7 @@
 
     // Entering Debot token: prime fee fetch + DOM watch (SPA activation chain).
     if (isDebotTokenPage()) {
-      const enterTok = extractTokenFromUrl();
+      const enterTok = resolveUrlFeeToken();
       if (enterTok) {
         debotHeaderMissStreak = 0;
         debotHeaderMissSince = Date.now();
@@ -9647,7 +9646,7 @@
 
     // Entering GMGN token: 顶栏 + 侧栏战壕立刻快补（对齐首页新卡）。
     if (isGmgnTokenPage()) {
-      const enterTok = extractTokenFromUrl();
+      const enterTok = resolveUrlFeeToken();
       if (enterTok) {
         recoverStuckBatch(false);
         queueToken(enterTok);
@@ -9996,7 +9995,7 @@
    */
   function tryPaintDebotTokenHeader(reason) {
     if (!isDebotTokenPage() || !isExtensionContextValid()) return false;
-    const urlTok = extractTokenFromUrl();
+    const urlTok = resolveUrlFeeToken();
     if (!urlTok) return false;
     if (pageUrlIsRobinhoodToken()) {
       if (!isRhKlineFeeTarget(urlTok)) {
@@ -11895,9 +11894,12 @@
       if (isDebotTokenPage()) {
         const header = findDebotTokenHeaderCard();
         if (header instanceof HTMLElement && !roots.includes(header)) roots.unshift(header);
-        const topShort = findDebotTopShortLeaf(extractTokenFromUrl(), document.body);
-        if (topShort?.parentElement instanceof HTMLElement) {
-          roots.unshift(topShort.parentElement);
+        const urlTok = extractTokenFromUrl();
+        if (urlTok) {
+          const topShort = findDebotTopShortLeaf(urlTok, header || null);
+          if (topShort?.parentElement instanceof HTMLElement) {
+            roots.unshift(topShort.parentElement);
+          }
         }
       }
     }
@@ -21766,7 +21768,7 @@
 
     // Header badges live inside React-owned rows. Repair only when the current address row
     // or an explicitly locked header badge was replaced; unrelated chart ticks are ignored.
-    if (isGmgnTokenPage()) {
+    if (isGmgnTokenPage() && !isNonTargetTokenPage()) {
       const token = extractTokenFromUrl();
       if (
         token &&
@@ -21776,7 +21778,7 @@
         scheduleGmgnHeaderRepair("document-mutation");
         scheduleGmgnObserverRefresh(40);
       }
-    } else if (isDebotTokenPage()) {
+    } else if (isDebotTokenPage() && !isNonTargetTokenPage()) {
       const token = extractTokenFromUrl();
       if (
         token &&
@@ -21788,7 +21790,12 @@
     }
     if (isGmgnTokenPage()) collectGmgnEmbeddedDirtyCards(records);
     // Debot header only (throttled). GMGN uses progressive/click-once — not every chart mut.
-    if (isDebotTokenPage() && extractTokenFromUrl() && !hasDebotTokenHeaderBadge()) {
+    if (
+      isDebotTokenPage() &&
+      !isNonTargetTokenPage() &&
+      extractTokenFromUrl() &&
+      !hasDebotTokenHeaderBadge()
+    ) {
       const now = Date.now();
       if (now - debotHeaderMutPaintAt >= 400) {
         debotHeaderMutPaintAt = now;
