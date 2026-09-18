@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.217",
-  "description": "FlapFeeInfo 0.8.217: Genius shows ⏳ until /modes; then paint full badge by CA.",
+  "version": "0.8.222",
+  "description": "FlapFeeInfo 0.8.222: Debot list filter on K-line new-creation and Genius search.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

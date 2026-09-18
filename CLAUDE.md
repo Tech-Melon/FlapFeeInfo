@@ -481,6 +481,9 @@ python tools/ctl.py watchdog-run
 | 刷新战壕 Genius 一直 `🪙BNCB`/`🪙QQQB` 约 1min | host-fee 先画底池；`/modes` 和 Flap 混批，Worker 把 Genius 丢 waitUntil 后台 | 升到 **0.8.215+**；Genius 单独成批；重载插件硬刷 |
 | K 线侧栏 Genius 几分钟仍只有 `🪙BNCB` | `/modes` 回了但找不到 TokenItem；预览卡不再入队 | 升到 **0.8.216+**；回包按徽章 token 盖；loading 立刻 forceModes |
 | Genius 刷新后像成品的 `🪙BNCB` 要等很久才出 🎁 | 未回包就把底池当徽章画了 | 升到 **0.8.217+**；未回包只显示 ⏳，回包再画完整 |
+| 混合战壕勾 SOL 后卡顿；SOL K 线侧栏也卡 | 扫卡/fiber 用全量 TokenItem，SOL 新卡+价格 Mutation 把主线程打满 | 升到 **0.8.218+**；只扫 BSC/RH href；SOL 页停扫 |
+| 钱包追踪「加仓」卡误挂徽章 | 新面板 Tracking.tsx，标题在工具栏，虚拟列表行读不到「钱包追踪」 | 升到 **0.8.219+**；认 Tracking/FollowWallet + 窄栏「钱包追踪」 |
+| Debot 混链/钱包追踪卡顿或漏对齐 Genius | 扫卡仍认全部 `/token/`；侧栏探测读整卡 textContent | 升到 **0.8.220+**；Debot 只扫 bsc/rh；侧栏用工具栏文案 |
 | K 线侧栏 Genius 5min 仍只有 `🪙BNCB` | `/modes` 回了但找不到 TokenItem（短 CA 16px）；预览卡不再入队 | 升到 **0.8.216+**；回包按徽章 token 盖；loading 立刻 forceModes |
 | 不同浏览器占用差很多 / 刷新卡顿 | Chrome 走 SharedWorker，其它走 MAIN_THREAD JSON.parse；旧钩子把全站 Port/WS 原型都包了 | 升到 **0.8.203+**；重载插件并硬刷页 |
 | 拖 K 线分隔条时卡顿 | 拖动中仍扫 DOM | **0.7.6+** 拖动 pause，松手 settle 再扫 |
@@ -880,8 +883,13 @@ python tools/ctl.py watchdog-run
  - `0.8.215`：刷新战壕 Genius 预览 1min — `/modes` 禁止与 Flap 混批（Worker 把 Genius miss 丢后台）；loading 预览当未画优先 + 热通道
  - `0.8.216`：刷新后 loading 预览立刻 force `/modes`；回包按 `data-fee-token` 盖徽章（K 线侧栏不依赖 findCardsByCa）
  - `0.8.217`：Genius 主路径认 CA→⏳→`/modes`→按 token 盖完整徽章；禁止 🪙BNCB 预览当成品
-- 插件当前版本：见 `extension/manifest.json`（**0.8.217**，公开无剪切板）
-- page-hook：`HOOK_VER` **196**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.218`：混合勾 SOL/ETH/Base 卡顿 — 禁止全量 TokenItem；只扫 `/bsc/token` `/robinhood/token`；SOL K 线停扫
+ - `0.8.219`：GMGN 钱包追踪跟单卡（Tracking.tsx / 加仓）禁徽章；标题在工具栏不在虚拟列表行
+ - `0.8.220`：Debot 对齐 0.8.187–219 — 扫卡只认 `/token/bsc` `/token/robinhood`；钱包追踪禁整卡 textContent；Genius loading 进热通道
+ - `0.8.221`：复查 Debot — host-fee 视口对 Genius pending 画 ⏳；行卡几何收全部 `/token/bsc`（随机尾号）；侧栏去掉易误伤战壕的宽卡几何
+ - `0.8.222`：Debot 列表过滤补齐 — K 线左侧「新创建」也能 DOM hide；搜索弹层滤 Genius
+- 插件当前版本：见 `extension/manifest.json`（**0.8.222**，公开无剪切板）
+- page-hook：`HOOK_VER` **197**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  

@@ -9,7 +9,7 @@
  * ★ 链+平台 host-fee：BSC Flap/Four 尾号、BSC geniusfun、RH pons_v2
  */
 (() => {
-  const HOOK_VER = 196;
+  const HOOK_VER = 197;
   /** @type {""|"shared-worker"|"main-thread"} */
   let gmgnLiveTransport = "";
   let gmgnFiberNoted = false;
@@ -4908,6 +4908,7 @@
     const hostIsDebot = () => /debot\.ai|gungnir\.bot/i.test(location.hostname || "");
     const scanRoot = (root) => {
       if (!(root instanceof HTMLElement)) return;
+      if (!isFeePageContext()) return;
       const debot = hostIsDebot();
       let budget = HOST_FEE_SCAN_MAX_NODES;
       if (debot) {
@@ -4944,7 +4945,7 @@
       }
       root
         .querySelectorAll?.(
-          '[data-sentry-source-file="TokenItem.tsx"], [href*="/bsc/token/0x"], [href*="/robinhood/token/0x"]'
+          '[href*="/bsc/token/0x"], [href*="/robinhood/token/0x"]'
         )
         .forEach((el) => {
           if (budget <= 0) return;
@@ -5038,7 +5039,7 @@
       let mutFlushTimer = 0;
       const flushDirtyAdded = () => {
         mutFlushTimer = 0;
-        if (gmgnLiveTransport === "shared-worker") {
+        if (!isFeePageContext() || gmgnLiveTransport === "shared-worker") {
           dirtyAdded.clear();
           return;
         }
@@ -5072,11 +5073,22 @@
         for (let i = 0; i < cap; i += 1) scanRoot(nodes[i]);
       };
       rootMo = new MutationObserver((records) => {
+        if (!isFeePageContext()) return;
         let taxDirty = null;
         for (let i = 0; i < records.length; i += 1) {
           const rec = records[i];
           rec.addedNodes.forEach((n) => {
-            if (n instanceof HTMLElement) dirtyAdded.add(n);
+            if (!(n instanceof HTMLElement)) return;
+            const href = String(n.getAttribute?.("href") || "");
+            if (
+              href &&
+              /\/token\//i.test(href) &&
+              !/\/bsc\/token\//i.test(href) &&
+              !/\/robinhood\/token\//i.test(href)
+            ) {
+              return;
+            }
+            dirtyAdded.add(n);
           });
           if (
             rec.target instanceof HTMLElement &&

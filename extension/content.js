@@ -18,6 +18,10 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.222: Debot 列表过滤 — K 线左侧新创建 DOM hide；搜索弹层也滤 Genius；Genius deferFlush 不单卡立刷。
+  // 0.8.220: Debot 对齐 187–219 — 扫卡只认 /token/bsc|/token/robinhood；钱包追踪禁整卡 textContent；loading 进热通道。
+  // 0.8.219: 钱包追踪跟单卡（Tracking.tsx / 陆小果加仓）禁徽章；标题在工具栏不在虚拟列表行里。
+  // 0.8.218: 混合勾 SOL/ETH/Base 卡顿 — 禁止扫 TokenItem 全量；只认 /bsc/token /robinhood/token；SOL K 线停扫。
   // 0.8.217: Genius 主路径 = 认 CA → ⏳ → /modes → 按 token 盖完整徽章；禁止把 🪙BNCB 预览当成品。
   // 0.8.216: /modes 回包按 data-fee-token 直接盖预览（K 线侧栏找不到 TokenItem）；loading 预览立刻 forceModes。
   // 0.8.215: 刷新战壕 Genius 预览卡 1min — /modes 勿与 Flap 混批（Worker 把 Genius 丢后台）；loading 当未画优先。
@@ -730,7 +734,7 @@
   const GMGN_FAVORITES_SENTRY_RE =
     /favorit|watchlist|collect(?:ion|list|token)?|starred|wishlist/i;
   const GMGN_WALLET_TRACK_SENTRY_RE =
-    /wallettrack|wallet.?track|followwallet|watchwallet|monitorwallet/i;
+    /wallettrack|wallet.?track|followwallet|watchwallet|monitorwallet|FollowWallet|FollowToast|Tracking\.tsx/i;
   // js-mcp: Tax 分红图 = TaxDividendTokenIcon；底池图 = Tax 外 /static/quotes（LaunchpadImageIcon）。
   // wrap 必须是整卡 Tax 容器。单个 TaxDividendTokenIcon 不能当 wrap（querySelector 只包第一张图）。
   // /static/lpp/ 是 Flap/Four 发射台 logo，不是 LP。目录：/static/config/quotes.json
@@ -2102,7 +2106,9 @@
     } else if (isGeniusFunToken(tok)) {
       rememberGeniusFunAddr(tok);
       queueToken(tok, { forceModes: true, deferFlush: true });
-      maybeFlushRequestQueue("genius-detect");
+      if (options.deferFlush !== true) {
+        maybeFlushRequestQueue("genius-detect");
+      }
     } else {
       scheduleIncompleteModes(tok);
     }
@@ -2227,6 +2233,7 @@
   function paintUnpaintedTargetViewportQuick(reason, rootHint = null, bypassGap = false) {
     if (!isGmgnHost()) return 0;
     if (!isExtensionContextValid() || !isTabVisible()) return 0;
+    if (!isAllowedScanChain()) return 0;
     const tokenPage = isGmgnTokenPage() || isTokenDetailRoute();
     // K 线侧栏与首页战壕一样要补画；进 K 线过渡只挡首页整列扫描，不挡侧栏。
     if (isTokenEnterTransitionActive() && !tokenPage) return 0;
@@ -2242,8 +2249,9 @@
     const msCap = tokenPage ? 24 : 12;
     try {
       const hrefSelector =
-        '[href*="/bsc/token/"][href*="0x"], [href*="/token/"][href*="0x"]';
-      const itemSelector = '[data-sentry-source-file="TokenItem.tsx"]';
+        '[href*="/bsc/token/"][href*="0x"], [href*="/robinhood/token/"][href*="0x"]';
+      const itemSelector =
+        '[href*="/bsc/token/"][href*="0x"], [href*="/robinhood/token/"][href*="0x"]';
       const items = [];
       const seen = new Set();
       const seenCards = new Set();
@@ -3195,9 +3203,7 @@
     if (rh) {
       // mixed 战壕：Robinhood 卡尾号随机，几何仍按行卡。
     } else {
-      const tok = extractAnyToken(href);
       if (!isBscTokenRouteHref(href)) return false;
-      if (!TARGET_TOKEN_RE.test(tok || "") && !isGeniusFunToken(tok)) return false;
     }
     try {
       const r = el.getBoundingClientRect();
@@ -5476,9 +5482,14 @@
   function isDebotSideRailCard(card) {
     if (!(card instanceof HTMLElement)) return false;
     try {
-      // Column root that hosts 钱包追踪 / 自选 / 持仓 headers
       let p = card;
-      for (let i = 0; i < 12 && p && p !== document.body; i++) {
+      for (let i = 0; i < 14 && p && p !== document.body; i++) {
+        const sentry = gmgnPanelSentryHay(p);
+        if (
+          /FollowWallet|Tracking\.tsx|WalletTrack|FollowToast|wallet.?track/i.test(sentry)
+        ) {
+          return true;
+        }
         const pr = p.getBoundingClientRect();
         if (
           pr.left < 80 &&
@@ -5486,15 +5497,13 @@
           pr.width <= 560 &&
           pr.height >= 160
         ) {
-          const head = (p.textContent || "").slice(0, 64).replace(/\s+/g, "");
+          const head = gmgnPanelChromeText(p);
           if (
-            /钱包追踪|自选热门|持仓|追踪数|实时通知|喊单|监控|备注/.test(head) &&
-            !/新创建|即将打满|已开盘|已迁移/.test(head.slice(0, 24))
+            /钱包追踪|自选热门|持仓/.test(head) &&
+            !/新创建|即将打满|已开盘|已迁移/.test(head.slice(0, 40))
           ) {
-            // 侧栏/追踪面板：有追踪语义且非主战壕三列头
-            if (/钱包|追踪|持仓|喊单|监控/.test(head)) return true;
+            return true;
           }
-          if (/钱包追踪|自选热门|持仓/.test(head)) return true;
         }
         p = p.parentElement;
       }
@@ -5502,14 +5511,8 @@
       // ignore
     }
     const r = card.getBoundingClientRect();
-    // Left wallet-track column / short rows
-    if (r.left < 40 && r.width > 0 && r.width <= 300) return true;
-    // Far-right 持仓 strip only when narrow.
     if (r.right > window.innerWidth - 40 && r.width > 0 && r.width < 280) return true;
-    // Very short rail chips
     if (r.width > 0 && r.width <= 200 && r.height > 0 && r.height < 56) return true;
-    const t = (card.textContent || "").replace(/\s+/g, " ");
-    if (/AI报告/.test(t) && !/MC|市值|Tax\s*\d/i.test(t)) return true;
     return false;
   }
 
@@ -5551,8 +5554,18 @@
         k += 1;
       }
     };
-    if (el.childElementCount > 12) takeSmall(el.firstElementChild, 0);
-    else takeSmall(el, 0);
+    if (el.childElementCount > 12) {
+      // 虚拟列表很大时标题在前几个工具栏子节点，不要只读第一张卡。
+      let kid = el.firstElementChild;
+      let k = 0;
+      while (kid && k < 5 && chunks.join("").length < maxChars) {
+        if (kid.childElementCount <= 16) takeSmall(kid, 0);
+        kid = kid.nextElementSibling;
+        k += 1;
+      }
+    } else {
+      takeSmall(el, 0);
+    }
     return chunks.join("").slice(0, maxChars);
   }
 
@@ -5583,6 +5596,16 @@
         const noteAt = compact.indexOf("备注", Math.max(0, monitorAt + 2));
         const trenchTitle = /新创建|即将打满|已开盘|已迁移/.test(compact.slice(0, 260));
         if (trenchTitle) return false;
+        if (
+          GMGN_WALLET_TRACK_SENTRY_RE.test(sentry) &&
+          !/PumpSub|SearchModal|TokenItem|CustomRndView/i.test(sentry)
+        ) {
+          return true;
+        }
+        if (compact.includes("钱包追踪")) {
+          const pr = p.getBoundingClientRect();
+          if (pr.width > 160 && pr.width <= 760 && pr.height >= 120) return true;
+        }
         const semanticHits = [walletAt, trackAt, callAt, monitorAt, noteAt].filter(
           (at) => at >= 0
         ).length;
@@ -7084,7 +7107,8 @@
       !isDebotHost() ||
       (!isTrenchListPage() && !isDebotTokenPage()) ||
       !records?.length ||
-      isDebotScrollCooling()
+      isDebotScrollCooling() ||
+      !isAllowedScanChain()
     ) {
       return 0;
     }
@@ -7093,13 +7117,13 @@
     const handleNode = (node) => {
       if (!(node instanceof HTMLElement) || discovered >= DEBOT_NEW_CARD_LIMIT) return;
       const candidates = [];
-      if (node.matches?.('a[href*="/token/"]')) candidates.push(node);
+      if (node.matches?.(DEBOT_TRENCH_HREF_SEL)) candidates.push(node);
       if (node.querySelectorAll && node.childElementCount <= 24) {
-        node.querySelectorAll('a[href*="/token/"]').forEach((el) => {
+        node.querySelectorAll(DEBOT_TRENCH_HREF_SEL).forEach((el) => {
           if (candidates.length < DEBOT_NEW_CARD_LIMIT) candidates.push(el);
         });
       } else if (node.querySelector) {
-        const first = node.querySelector('a[href*="/token/"]');
+        const first = node.querySelector(DEBOT_TRENCH_HREF_SEL);
         if (first) candidates.push(first);
       }
       for (const candidate of candidates) {
@@ -7159,10 +7183,11 @@
   /** Collect GMGN TokenItem / token-href roots touched by host mutations. */
   function collectGmgnEmbeddedDirtyCards(records) {
     if (!isGmgnTokenPage() || !records?.length) return 0;
+    if (!isAllowedScanChain()) return 0;
     if (shouldDeferGmgnTrenchResizeWork()) return 0;
-    const selector = '[data-sentry-source-file="TokenItem.tsx"]';
-    const hrefSel =
-      '[href*="/bsc/token/"][href*="0x"], [href*="/token/"][href*="0x"]';
+    const selector =
+      '[href*="/bsc/token/"][href*="0x"], [href*="/robinhood/token/"][href*="0x"]';
+    const hrefSel = selector;
     let added = 0;
     let matched = false;
     const skipForbiddenPanelCard = (card) => {
@@ -7177,6 +7202,10 @@
     };
     const addCard = (node) => {
       if (!(node instanceof HTMLElement)) return;
+      const ownHref = node.getAttribute?.("href") || "";
+      if (ownHref && looksLikeNonBscHref(ownHref) && !isRobinhoodTokenRouteHref(ownHref)) {
+        return;
+      }
       let card = node.matches(selector) ? node : node.closest?.(selector);
       // 0.7.5：无 TokenItem 标记时，回退到侧栏 token href 宿主
       if (!(card instanceof HTMLElement)) {
@@ -7270,6 +7299,10 @@
     };
     const probeEl = (el) => {
       if (!(el instanceof HTMLElement)) return false;
+      const ownHref = el.getAttribute("href") || "";
+      if (ownHref && looksLikeNonBscHref(ownHref) && !isRobinhoodTokenRouteHref(ownHref)) {
+        return false;
+      }
       // A direct extension badge insert/remove is our own feedback, not host work.
       if (el.dataset?.[ICON_MARK] === "1" || el.matches?.(`[${ICON_DATA}="1"]`)) {
         return false;
@@ -7569,7 +7602,7 @@
         (isGmgnRobinhoodPage() ||
           (isGmgnMixedChainPage() && rootHasRobinhoodTokenHref(root)))
       ) {
-        const items = root.querySelectorAll('[data-sentry-source-file="TokenItem.tsx"]');
+        const items = root.querySelectorAll('[href*="/robinhood/token/0x"]');
         const itemMax = Math.min(items.length, 40);
         for (let i = 0; i < itemMax && out.length < cap; i += 1) {
           const el = items[i];
@@ -10314,7 +10347,7 @@
 
   function gmgnDiscoveryMutationLooksRelevant(records) {
     const selector =
-      `${GMGN_FIXED_TRENCH_ROOT_SELECTOR}, ${GMGN_FIXED_SEARCH_ROOT_SELECTOR}, #token-base-address, [data-sentry-source-file="TokenItem.tsx"]`;
+      `${GMGN_FIXED_TRENCH_ROOT_SELECTOR}, ${GMGN_FIXED_SEARCH_ROOT_SELECTOR}, #token-base-address, [href*="/bsc/token/0x"], [href*="/robinhood/token/0x"]`;
     for (const record of records || []) {
       for (const node of [...(record.addedNodes || []), ...(record.removedNodes || [])]) {
         if (!(node instanceof Element)) continue;
@@ -13238,6 +13271,14 @@
       const icon = document.querySelector(
         `[${ICON_DATA}="1"][data-fee-token="${token}"]`
       );
+      if (
+        icon instanceof HTMLElement &&
+        icon.dataset.feeLoading === "1" &&
+        document.contains(icon)
+      ) {
+        const r = icon.getBoundingClientRect();
+        if (r.width > 2 && r.bottom > 0 && r.top < window.innerHeight + 80) return true;
+      }
       if (icon instanceof HTMLElement && icon.dataset.feeLoading !== "1") return false;
       const marked = document.querySelector(`[${CARD_DATA}="${token}"]`);
       if (!(marked instanceof HTMLElement)) return false;
@@ -13517,7 +13558,10 @@
           continue;
         }
         const entry = resolveEntry(tok);
-        if (!entry || isFeeLoadingEntry(entry) || isHostFeeEntryPending(entry)) continue;
+        if (!entry || isFeeLoadingEntry(entry) || isHostFeeEntryPending(entry)) {
+          if (paintLoadingBadgeAndQueue(card, tok, { deferFlush: true })) painted += 1;
+          continue;
+        }
         card.dataset[CARD_MARK] = tok;
         if (paintListCardFromCacheFast(card, tok, entry) || renderMode(card, tok, entry)) {
           painted += 1;
@@ -17158,9 +17202,11 @@
    */
   function isDebotNewCreationColumnCard(card) {
     if (!(card instanceof HTMLElement) || !isDebotHost()) return false;
+    const kline = isDebotTokenPage();
     try {
       const cr0 = card.getBoundingClientRect();
-      if (cr0.left < 250 || cr0.left >= 900) return false;
+      // 首页三列：新创建不在最左<250（那是钱包侧栏）。K 线左侧战壕可以更靠左。
+      if (!kline && (cr0.left < 250 || cr0.left >= 900)) return false;
     } catch (_band) {
       // fall through
     }
@@ -17190,7 +17236,9 @@
         el = el.parentElement;
       }
       const cr = card.getBoundingClientRect();
-      if (cr.width < 2 || cr.left < 250 || cr.left >= 900) return false;
+      if (cr.width < 2) return false;
+      if (kline) return false;
+      if (cr.left < 250 || cr.left >= 900) return false;
       const mainLeft = 260;
       const mainW = Math.max(300, window.innerWidth - mainLeft - 80);
       const colW = mainW / 3;
@@ -17392,7 +17440,8 @@
       if (typeof isDebotHost === "function" && isDebotHost()) {
         document
           .querySelectorAll(
-            '.MuiDialog-root [href*="/token/"], .MuiModal-root [href*="/token/"], [role="dialog"] [href*="/token/"]'
+            '.MuiDialog-root a[href*="/token/bsc/"], .MuiModal-root a[href*="/token/bsc/"], [role="dialog"] a[href*="/token/bsc/"], ' +
+              '.MuiDialog-root a[href*="/token/robinhood/"], .MuiModal-root a[href*="/token/robinhood/"], [role="dialog"] a[href*="/token/robinhood/"]'
           )
           .forEach((el) => {
             if (!(el instanceof HTMLElement)) return;
@@ -17463,9 +17512,10 @@
     let hid = false;
     for (const row of collectSearchOverlayCards()) {
       keep.add(row.card);
-      const hide = TARGET_TOKEN_RE.test(row.token)
-        ? shouldHideSearchOverlayToken(row.token, row.card)
-        : false;
+      const hide =
+        TARGET_TOKEN_RE.test(row.token) || isGeniusFunToken(row.token)
+          ? shouldHideSearchOverlayToken(row.token, row.card)
+          : false;
       setCardSearchHidden(row.card, hide);
       if (hide) hid = true;
     }
