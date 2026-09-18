@@ -320,7 +320,7 @@
 
   /** MAIN world page-hook：manifest 为主；仅缺失时单次 script 兜底（禁止并发重试风暴） */
   const PAGE_HOOK_FILE = "page-hook.js";
-  const PAGE_HOOK_VER = "191";
+  const PAGE_HOOK_VER = "196";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
 
   function pageHookHostFeeReady() {

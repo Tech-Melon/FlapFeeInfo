@@ -275,6 +275,7 @@ Debot 混合战壕按**卡 href** 认链（`/token/bsc/` vs `/token/robinhood/`�
 | GMGN Robinhood longxyz / bankr / pons v1 | **不画徽章** |
 | Debot `?chain=bsc` 或 `?chain=robinhood` 混合三列 `/token/bsc/…7777` | 现有 BSC 徽章，打 `/modes`；底池 🦋/BNB 等跟卡走 |
 | Debot 同页 `/token/robinhood/` + `meta.launchpad=pons_v2` | 💎/👨‍🍳 + 🪙ETH/USDG/SPY；**不打** `/modes` |
+| Debot `/token/bsc/…` + `meta.launchpad=geniusfun` | stub 先 `🪙BNCB`/`🪙GMEB`，再 `/modes` 成 `🎁→`/`👨‍🍳→`；**禁止** `founder_pct≈83%` 画 👨‍🍳 |
 | Debot 同页 robinhood long / bankr / pons v1 | **不画** |
 | GMGN BSC Genius.fun `0x69838bdf075242ce6578e48276d7e9e02b44794f` | `launchpad=geniusfun` 才扫/入队；主文案 `🪙BNCB \| 🎁→BNCB`（创作者 `🪙BNB \| 👨‍🍳→BNB`）；`🎁50%👨‍🍳12.5%🔥12.5%` + 平台 0.5% 只在 tooltip；点击 genius.fun；非 geniusfun 的 BSC 卡不打 `/modes` |
 
@@ -465,6 +466,23 @@ python tools/ctl.py watchdog-run
 | 7777 无图标 | 未重载 0.2.x 插件 | 确认 manifest version |
 | K 线侧栏下滑徽章几十秒不更新 | settled 后 light 续扫不扫战壕；短地址未爬卡；滚动热路径过重 | 升到 **0.7.9+**；扩展重载 + 硬刷页 |
 | 钱包追踪 / 收藏栏误挂徽章 | 禁区识别不全 | **0.7.7+** 禁钱包追踪+收藏；主战壕/搜索/K 线侧栏应仍有徽章 |
+| 点收藏卡死 / SOL 战壕网页无响应 | 收藏探测读大节点 `textContent`；混选含 BSC 时把 SOL 列当税币页 | 升到 **0.8.202+**；重载插件并硬刷页 |
+| Genius K 线顶栏 `🪙BNB \| 🎁→BNB`（页上是币安人生/BNCB） | 顶栏无 quotes 图时 `\|\| "BNB"` 填空 | 升到 **0.8.202+**；认 `IconBianrensheng`，Genius 禁止默认 BNB |
+| Genius 新创建 `🪙→BNB` / 悬浮只有买卖税 | 链上 native quote 写成 BNB，插件丢掉底池；tooltip 不渲染分配段 | 升到 **0.8.204+**；原生报价画 BNCB，悬浮列出 🎁/👨‍🍳/🔥/平台 |
+| 开着资金接收时 SOL 仍卡 / JSON.parse 被包 | 过滤钩子不看当前链，且改了全站 Port/JSON.parse 原型 | 升到 **0.8.206+**；只绑 SharedWorker port，SOL 不装 |
+| K 线开战壕刷新要几十秒才出界面 | 顶栏查找对 `main`/`body` 的 `span,div` 做 textContent，K 线页 O(n²) | 升到 **0.8.207+**；只扫 BaseInfoBar |
+| Genius 卡长期 `🪙BNCB` loading、Flap 只有 `💎` | 0.8.206 把 host-fee stub 的 `mode=unknown` 当 6h 负缓存，Genius 不再打 `/modes`；非原生 qa 默认 BNCB；缺展示名的报价地址被当成齐套 | 升到 **0.8.208+**；重载完整包并硬刷 BSC 战壕 |
+| Genius 要几十秒才从 `🪙BNCB` 变成 `🎁`；已开盘列更慢 | `forceModes` 对每张卡 `delayMs:0` 立刷，`/modes` 1 条 wait_chain 串行（js-mcp pending_map≈40） | 升到 **0.8.209+**；Genius 150ms/2 张组批 |
+| Genius 卡 `🪙BNCB \| ❓️未` 但链上是金库 | 空 unknown（买税 0）被 6h 负缓存，没带 `platforms` 时 Helper 直接 ❓️，挡住曲线 | 升到 **0.8.210+**；重载插件；服务端/Worker 已丢弃这类负缓存 |
+| 刷新后 Genius 只有 `🪙BNCB`、没有 🎁/👨‍🍳 | host-fee 先画底池预览；空 unknown 被当成定案，顶栏/Debot stable 不再换 `/modes` 结果 | 升到 **0.8.211+**；只有底池保持 pending，等曲线 🎁 |
+| K 线左侧战壕刷新后一直 `🪙BNCB` | `/modes` 回了 🎁，但补画把预览当已画跳过；短 CA 行 16px 进不了 findCardsByCa | 升到 **0.8.212+**；重载插件并硬刷 K 线 |
+| 刷新后 Genius 新卡一直只有 `🪙BNCB`（Debot TEST / GMGN NOTAGENIUS） | 0.8.211 把 Flap 空 unknown 也标 `__needsChain`，cf-memory ❓️ 连打 `/modes`，Genius 排队饿死 | 升到 **0.8.213+**；重载插件并硬刷战壕 |
+| 两枚 BNB🦋 Flap 只有 `💎`、Genius 徽章灰白 | 底池是另一枚 7777，Helper 没 symbol；Genius `mode=hybrid` 走灰样式 | 升到 **0.8.214+**；服务端补 quote symbol；徽章跟 🎁/👨‍🍳 配色 |
+| 刷新战壕 Genius 一直 `🪙BNCB`/`🪙QQQB` 约 1min | host-fee 先画底池；`/modes` 和 Flap 混批，Worker 把 Genius 丢 waitUntil 后台 | 升到 **0.8.215+**；Genius 单独成批；重载插件硬刷 |
+| K 线侧栏 Genius 几分钟仍只有 `🪙BNCB` | `/modes` 回了但找不到 TokenItem；预览卡不再入队 | 升到 **0.8.216+**；回包按徽章 token 盖；loading 立刻 forceModes |
+| Genius 刷新后像成品的 `🪙BNCB` 要等很久才出 🎁 | 未回包就把底池当徽章画了 | 升到 **0.8.217+**；未回包只显示 ⏳，回包再画完整 |
+| K 线侧栏 Genius 5min 仍只有 `🪙BNCB` | `/modes` 回了但找不到 TokenItem（短 CA 16px）；预览卡不再入队 | 升到 **0.8.216+**；回包按徽章 token 盖；loading 立刻 forceModes |
+| 不同浏览器占用差很多 / 刷新卡顿 | Chrome 走 SharedWorker，其它走 MAIN_THREAD JSON.parse；旧钩子把全站 Port/WS 原型都包了 | 升到 **0.8.203+**；重载插件并硬刷页 |
 | 拖 K 线分隔条时卡顿 | 拖动中仍扫 DOM | **0.7.6+** 拖动 pause，松手 settle 再扫 |
 | 开资金接收后新创建只剩很少卡 | 宿主 ~2 分钟轮出 + 屏蔽砍 👨‍🍳 + 无 SW 累积 | **0.7.4+** 保留池 10 分钟/40 卡；网页筛选+阈值配合 |
 | 抽样 feeMatch:false（行 CA≠徽章） | 虚拟列表复用短窗 | **0.7.4+** 无身份不 stable + scrub 后 cache 重画 |
@@ -844,8 +862,26 @@ python tools/ctl.py watchdog-run
  - `0.8.197`：SNAP_SHOT 只记 Genius CA 索引（不组 stub / 不扫三遍）；出卡后再画；PATCH 新卡仍走 host-fee
  - `0.8.198`：Genius 仅底池不算就绪（`isHostFeeEntryPending`）；预览带 loading，`/modes` 后必换 🎁/👨‍🍳
  - `0.8.199`：Flap/Four 与 Genius 同一套「预览≠齐套」：`quote_token=0x0` / 缺底池必须 `/modes`；BSC 7777/8888/ffff 无芯片才默认 BNB
-- 插件当前版本：见 `extension/manifest.json`（**0.8.199**，公开无剪切板）
-- page-hook：`HOOK_VER` **191**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.200`：Debot ranks `bsc:geniusfun` 走 stub+`/modes`（`base_token_symbol` 当底池）；禁止把 `founder_pct≈83%` 画成 👨‍🍳
+ - `0.8.201`：Debot 扫卡/Mutation 收 `/token/bsc/`（Genius 随机尾号）；`isDebotTokenItem` 认 geniusfun
+ - `0.8.202`：收藏/SOL 卡死 — 禁区探测只读标题栏、SOL 列不挂 observer、`?chain=sol` 不被混选 BSC 盖住；Genius 顶栏禁止 `\|\| BNB`，认币安人生芯片
+ - `0.8.203`：host-fee 按传输通道分流 — Chrome SharedWorker 只钩该 port；MAIN_THREAD 才装 JSON.parse；去掉全站 MessagePort/WebSocket 原型与热路径 Object.keys
+ - `0.8.204`：Genius 原生报价画 `BNCB`（不要 `BNB`）；悬浮窗列出 🎁/👨‍🍳/🔥/平台 占比
+ - `0.8.205`：悬浮 25bps 显示 0.25%（不要收成 0.3%）
+ - `0.8.206`：过滤只绑 SharedWorker port（SOL/已接通 SW 不包 JSON.parse）；unknown 负缓存 6h；Genius 先画 BNCB 再等 /modes
+ - `0.8.207`：K 线开战壕首屏 — 禁止对 main/body `span,div` 做 textContent（js-mcp 单次 longtask 24s）
+ - `0.8.208`：Genius stub 不当 6h unknown 负缓存（js-mcp：15 张 `🪙BNCB` loading，`/modes` 全是 7777）；非原生 qa 禁止默认 BNCB；缺展示名的报价地址不算齐套
+ - `0.8.209`：Genius `/modes` 组批（禁止 forceModes 1 条立刷）；Flap 缺底池符号仍打 `/modes`；Genius unknown 出 ❓️；已有 💎 不再挂 loading
+ - `0.8.210`：Genius 空 unknown（买税 0）不当 6h 负缓存；链上曲线能查到 🎁（js-mcp：`0x9984…`/`0xca34…`）；服务端/Worker 同步丢弃挡曲线的空 unknown，并持久化 `gift_bps`
+ - `0.8.211`：Genius 只有底池不算定案 — host stub / cf-memory 空 unknown 保持 pending（刷新后不再卡 `🪙BNCB`）；K 线顶栏/Debot stable 也不跳过
+ - `0.8.212`：K 线侧栏 `/modes` 后仍卡 `🪙BNCB` — 预览不当已画跳过；`findCardsByCa` 从 16px 短 CA 爬到 TokenItem
+ - `0.8.213`：空 unknown 的 `__needsChain` 只给 Genius（js-mcp：Flap `0x5585…7777` cf-memory ❓️ 连打，pending_map≈33，NOTAGENIUS 一直 `🪙BNCB`）
+ - `0.8.214`：Genius 配色跟 top_segment（🎁 琥珀 / 👨‍🍳 蓝，不再 hybrid 灰）；Flap 另一枚 7777 当底池时补 ERC20 symbol（js-mcp：`💎` 无 🦋）
+ - `0.8.215`：刷新战壕 Genius 预览 1min — `/modes` 禁止与 Flap 混批（Worker 把 Genius miss 丢后台）；loading 预览当未画优先 + 热通道
+ - `0.8.216`：刷新后 loading 预览立刻 force `/modes`；回包按 `data-fee-token` 盖徽章（K 线侧栏不依赖 findCardsByCa）
+ - `0.8.217`：Genius 主路径认 CA→⏳→`/modes`→按 token 盖完整徽章；禁止 🪙BNCB 预览当成品
+- 插件当前版本：见 `extension/manifest.json`（**0.8.217**，公开无剪切板）
+- page-hook：`HOOK_VER` **196**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  

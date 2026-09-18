@@ -18,6 +18,24 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.217: Genius 主路径 = 认 CA → ⏳ → /modes → 按 token 盖完整徽章；禁止把 🪙BNCB 预览当成品。
+  // 0.8.216: /modes 回包按 data-fee-token 直接盖预览（K 线侧栏找不到 TokenItem）；loading 预览立刻 forceModes。
+  // 0.8.215: 刷新战壕 Genius 预览卡 1min — /modes 勿与 Flap 混批（Worker 把 Genius 丢后台）；loading 当未画优先。
+  // 0.8.214: Genius 配色跟 top_segment（🎁金 / 👨‍🍳蓝，不再 hybrid 灰）；Flap 另一枚 7777 底池补 ERC20 symbol。
+  // 0.8.213: 空 unknown 的 __needsChain 只给 Genius — 0.8.211 误套 Flap 7777，cf-memory ❓️ 连打 /modes，Genius 预览饿死。
+  // 0.8.212: K 线侧栏 /modes 后仍卡 🪙BNCB — 预览徽章不当「已画」跳过；findCardsByCa 爬 TokenItem（短 CA 行 16px）。
+  // 0.8.211: Genius 只有底池不算定案（js-mcp：刷新后 🪙BNCB 无 🎁）；空 unknown/host stub 保持 pending，等 /modes 🎁。
+  // 0.8.210: Genius 空 unknown（买税 0）不当 6h 负缓存 — 链上曲线能查到 🎁，是 Helper/无 platform 的空包。
+  // 0.8.209: Genius /modes 组批（js-mcp：forceModes 1 条立刷，pending_map≈40，列要排几十秒）；Flap 💎 缺底池补 /modes；unknown 出 ❓️。
+  // 0.8.208: Genius stub 不当 6h unknown 负缓存（js-mcp：15 张卡 🪙BNCB loading，/modes 全是 7777）；非原生 qa 禁止默认 BNCB。
+  // 0.8.207: K 线+战壕首屏 — 禁止对 main/body 做 span/div textContent（js-mcp longtask 24s）。
+  // 0.8.206: 过滤只绑 SW port；SOL 不装 JSON.parse；unknown 负缓存 6h；Genius 先画 BNCB；同版 page-hook 不二次注入。
+  // 0.8.205: 悬浮占比 25bps 显示 0.25%（不要 toFixed(1) 收成 0.3%）。
+  // 0.8.204: Genius 原生报价画 BNCB（不要 BNB）；悬浮窗列出 🎁/👨‍🍳/🔥/平台 占比。
+  // 0.8.203: host-fee 按通道分流 — SharedWorker 只钩该 port；MAIN_THREAD 才 JSON.parse；去掉全站 WS/Port 原型。
+  // 0.8.202: 收藏/SOL 卡死 — 禁区探测禁大节点 textContent；SOL 列不挂 observer；Genius 顶栏禁止 ||BNB。
+  // 0.8.201: Debot 扫卡收 /token/bsc/（Genius 随机尾号）；ranks geniusfun stub+/modes。
+  // 0.8.200: Debot Genius 不吃 founder_pct≈83% 厨师；stub+base_token_symbol 后 /modes。
   // 0.8.199: Flap/Four 缺底池/0x0 不算齐套，必须 /modes；预览≠就绪（与 Genius 同一套门禁）。
   // 0.8.198: Genius 仅底池不算就绪；quote 预览必须带 loading，/modes 回包强制换 🎁/👨‍🍳。
   // 0.8.197: SNAP_SHOT 只建 Genius CA 索引（不组 stub）；出卡后再画 /modes。
@@ -355,6 +373,9 @@
   const incompleteModesTimers = new Map();
   const hostListBootAt = Date.now();
   const HOT_BATCH_MIN_TOKENS = 2;
+  /** Genius 组批窗：host-fee 一张张来时等这一窗再 POST，避免 1 条 wait_chain 串行。 */
+  const GENIUS_BATCH_FLUSH_MS = 150;
+  const GENIUS_BATCH_MIN_TOKENS = 2;
   // 0.7.57 热通道：主批在途时热 token 并行发送的单次上限（对齐 Worker 直填能力）。
   const HOT_LANE_MAX_TOKENS = 12;
   const RETRY_BASE_MS = 900;
@@ -690,6 +711,8 @@
   const POOL_PREFIX_DEFAULT = "🪙";
   const POOL_PREFIX_FLAP = "🦋"; // 7777 / 8888
   const POOL_PREFIX_FOUR = "🖐️"; // ffff Four.meme
+  /** Genius.fun 原生报价在 GMGN 上叫 BNCB，不是 BNB。 */
+  const GENIUS_NATIVE_QUOTE = "BNCB";
   const MAX_QUOTE_SYMBOL_LEN = 8;
   // GMGN special quote icons (not in /static/quotes/*.png RWA list).
   const GMGN_ICON_QUOTE_RULES = [
@@ -699,8 +722,15 @@
     [/usdc/i, "USDC"],
     [/weth/i, "WETH"],
     [/robinhoodeth|icon_robinhood/i, "ETH"],
+    [/bianrensheng|bianren/i, "币安人生"],
     [/wbnb|bnbball|\bbnb\b/i, "BNB"]
   ];
+  const GMGN_FEE_TOKEN_HREF_SELECTOR =
+    '[href*="/bsc/token/"][href*="0x"], [href*="/robinhood/token/"][href*="0x"]';
+  const GMGN_FAVORITES_SENTRY_RE =
+    /favorit|watchlist|collect(?:ion|list|token)?|starred|wishlist/i;
+  const GMGN_WALLET_TRACK_SENTRY_RE =
+    /wallettrack|wallet.?track|followwallet|watchwallet|monitorwallet/i;
   // js-mcp: Tax 分红图 = TaxDividendTokenIcon；底池图 = Tax 外 /static/quotes（LaunchpadImageIcon）。
   // wrap 必须是整卡 Tax 容器。单个 TaxDividendTokenIcon 不能当 wrap（querySelector 只包第一张图）。
   // /static/lpp/ 是 Flap/Four 发射台 logo，不是 LP。目录：/static/config/quotes.json
@@ -1746,15 +1776,16 @@
   function hostFeeQuoteReady(entry) {
     const qTok = String(entry.quote_token || entry.quote_address || "").toLowerCase();
     if (qTok === WBNB_ADDRESS) return true;
-    if (
-      /^0x[a-f0-9]{40}$/.test(qTok) &&
-      qTok !== "0x0000000000000000000000000000000000000000" &&
-      !quoteTokenLooksNative(qTok)
-    ) {
-      return true;
-    }
+    const fromAddr =
+      catalogTitleForQuoteAddr(qTok) || symbolFromKnownPayoutAddress(qTok, entry);
+    if (fromAddr && !quoteSymbolLooksNative(fromAddr)) return true;
     const qs = String(entry.quote_symbol || "").trim();
-    if (qs && !quoteSymbolLooksNative(qs) && isRealPoolQuoteSymbol(qs)) return true;
+    if (qs && !quoteSymbolLooksNative(qs)) {
+      if (isRealPoolQuoteSymbol(qs)) return true;
+      if (/[\u4e00-\u9fff]/.test(qs)) return true;
+      if (/^[A-Za-z0-9]{2,12}$/.test(qs)) return true;
+    }
+    // 有非零报价地址但还没有展示名（例如另一枚 7777 当底池）：等 /modes，不要只画 💎。
     return false;
   }
 
@@ -1780,9 +1811,17 @@
     if (entry.__pons_v2 === true) {
       return hostFeeAllocationBps(entry) > 0;
     }
+    if (isGeniusModesSettled(entry)) {
+      return hostFeeAllocationBps(entry) > 0 || entry.mode === "unknown";
+    }
     if (entry.source_host) return hostFeePaintComplete(entry);
     if (entry.__needsChain === true) return false;
-    return hostFeeAllocationBps(entry) > 0;
+    if (hostFeeAllocationBps(entry) <= 0) return false;
+    // /modes 还没落盘且报价地址不是原生、也没有展示名（另一枚 7777 当底池）→ 继续打。
+    if (!hostFeeQuoteReady(entry) && !quoteTokenLooksNative(entry.quote_token || entry.quote_address || "")) {
+      return false;
+    }
+    return true;
   }
 
   function cancelIncompleteModes(token) {
@@ -1823,6 +1862,26 @@
     return TARGET_TOKEN_RE.test(t) || isGeniusFunToken(t);
   }
 
+  const UNKNOWN_CACHE_MS = 6 * 60 * 60 * 1000;
+
+  function fetchedAtMs(entry) {
+    const t = Number(entry && entry.fetched_at) || 0;
+    if (t <= 0) return 0;
+    return t < 1e12 ? t * 1000 : t;
+  }
+
+  function isFreshUnknown(entry) {
+    if (!entry || entry.mode !== "unknown") return false;
+    // host-fee stub / 还要上链：mode=unknown 只是占坑，绝不是 6h 负缓存。
+    if (entry.source_host) return false;
+    if (entry.__needsChain === true) return false;
+    if (isFeeLoadingEntry(entry)) return false;
+    if (hostFeeAllocationBps(entry) > 0) return false;
+    const at = fetchedAtMs(entry);
+    if (!at) return true;
+    return Date.now() - at < UNKNOWN_CACHE_MS;
+  }
+
   function tokenNeedsModesFetch(token) {
     const tok = String(token || "").toLowerCase();
     const cached =
@@ -1835,6 +1894,15 @@
       if (searchOverlayModesTokens.has(tok)) return true;
       const gEntry = cached;
       if (!gEntry || isFeeLoadingEntry(gEntry)) return true;
+      if (isGeniusModesSettled(gEntry)) return !hostFeeCanSkipModes(gEntry);
+      if (isHostFeeEntryPending(gEntry) || isGeniusEmptyUnknown(gEntry)) return true;
+      if (isFreshUnknown(gEntry)) {
+        const tax =
+          (Number(gEntry.buy_tax_bps) || 0) + (Number(gEntry.sell_tax_bps) || 0);
+        if (tax <= 0) return true;
+        if (gEntry.platform === "geniusfun" || gEntry.__geniusfun === true) return false;
+        return true;
+      }
       return !hostFeeCanSkipModes(gEntry);
     }
     if (!TARGET_TOKEN_RE.test(tok)) return false;
@@ -1842,6 +1910,7 @@
     if (searchOverlayModesTokens.has(tok)) return true;
     const entry = cached;
     if (!entry || isFeeLoadingEntry(entry)) return true;
+    if (isFreshUnknown(entry)) return false;
     return !hostFeeCanSkipModes(entry);
   }
 
@@ -1923,6 +1992,11 @@
       queueToken(token, { deferFlush: true });
     }
     kickHotLaneIfBusy();
+    // Genius 绝不能 1 条 delayMs:0 立刷（js-mcp：整列变成串行 wait_chain，pending_map≈40）。
+    if (isGeniusFunToken(token)) {
+      maybeFlushRequestQueue("genius-force");
+      return;
+    }
     scheduleBatchFlush({ immediate: true, delayMs: 0 });
   }
 
@@ -2025,21 +2099,12 @@
       const href = readCardTokenHref(card);
       if (href && !isBscTaxTokenHref(href) && !isGeniusFunToken(tok)) return false;
       queueSearchOverlayModes(tok, href);
+    } else if (isGeniusFunToken(tok)) {
+      rememberGeniusFunAddr(tok);
+      queueToken(tok, { forceModes: true, deferFlush: true });
+      maybeFlushRequestQueue("genius-detect");
     } else {
       scheduleIncompleteModes(tok);
-    }
-    const gEntry = getEntryForCard(card, tok);
-    if (
-      isGeniusFeeEntry(gEntry, tok) &&
-      gEntry &&
-      !isFeeLoadingEntry(gEntry) &&
-      String(gEntry.quote_symbol || "").trim()
-    ) {
-      try {
-        return paintListCardFromCacheFast(card, tok, gEntry) === true;
-      } catch (_gPaint) {
-        // fall through to ⏳
-      }
     }
     try {
       const existing = card.querySelector(`[${ICON_DATA}="1"]`);
@@ -2277,19 +2342,21 @@
           "";
         const ca = extractAnyToken(raw);
         if (!ca || !isFeeTargetToken(ca, card)) continue;
-        // 已有正确徽章（含 ⏳）
+        // 已有正确徽章才跳过；🪙BNCB 预览 / ⏳ 必须让 /modes 的 🎁 盖上去。
         try {
           const good = findLocalBadgeForCard(card, ca);
-          if (
-            good instanceof HTMLElement &&
-            document.contains(good) &&
-            good.dataset.feeToken === ca &&
-            !isGmgnTrenchMisplacedBadge(card, good)
-          ) {
-            continue;
-          }
           if (good instanceof HTMLElement && isGmgnTrenchMisplacedBadge(card, good)) {
             removeAllBadgesForCard(card, ca);
+          } else if (
+            good instanceof HTMLElement &&
+            document.contains(good) &&
+            good.dataset.feeToken === ca
+          ) {
+            const ent = getEntryForCard(card, ca) || resolveEntry(ca);
+            const previewOnly =
+              good.dataset.feeLoading === "1" ||
+              (ent && (isHostFeeEntryPending(ent) || hostFeeStillNeedsModes(ent)));
+            if (!previewOnly) continue;
           }
         } catch (_q) {
           // ignore
@@ -2380,7 +2447,15 @@
       pool: "底池",
       token: "合约",
       emptyBasket: "暂无篮子成分",
-      moreAssets: "全部成分"
+      moreAssets: "全部成分",
+      holder: "持有人分红",
+      creator: "创作者",
+      gift: "金库",
+      burn: "销毁",
+      lp: "回流 LP",
+      giggle: "Giggle 慈善",
+      binance: "Binance 慈善",
+      platform: "平台"
     },
     en: {
       taxAlloc: "Tax allocation",
@@ -2389,7 +2464,15 @@
       pool: "Pool",
       token: "Token",
       emptyBasket: "No basket assets",
-      moreAssets: "All assets"
+      moreAssets: "All assets",
+      holder: "Holder",
+      creator: "Creator",
+      gift: "Vault",
+      burn: "Burn",
+      lp: "LP",
+      giggle: "Giggle charity",
+      binance: "Binance charity",
+      platform: "Platform"
     }
   };
 
@@ -3096,6 +3179,12 @@
       return false;
     }
   }
+
+  /** Debot 战壕 href：BSC 全量 /token/bsc/（含 Genius 随机尾号）+ Flap/Four 尾号 + RH。 */
+  const DEBOT_TRENCH_HREF_SEL =
+    "a[href*='/token/bsc/'], [href*='/token/bsc/'], " +
+    "[href*='/token/'][href*='8888'], [href*='/token/'][href*='7777'], " +
+    "[href*='/token/'][href*='ffff'], a[href*='/token/robinhood/']";
 
   function isDebotTrenchRowCard(el) {
     if (!(el instanceof HTMLElement)) return false;
@@ -4117,15 +4206,41 @@
   }
 
   /**
-   * BSC 税币战壕 + GMGN Robinhood pons v2。
-   * - 允许: ?chain=bsc | /bsc/token | /token/bsc | DOM 明确 BSC
-   * - Debot `?chain=bsc` / `?chain=robinhood` 都可能混排，页级放行后按卡 href 认链
-   * - 拒绝: 其它显式他链（sol/eth/…）
+   * URL 已是 SOL/ETH 等：即使 localStorage 混选含 BSC 也不当税币页（否则 SOL 战壕卡死）。
+   * Debot `?chain=bsc` / `?chain=robinhood` 混排仍按卡 href 认链。
    */
+  function urlIsExplicitNonFeeChain() {
+    const path = String(location.pathname || "");
+    if (
+      /^\/(sol|eth|base|tron|monad|blast|aptos|sui|polygon|matic|avax)(\/|$)/i.test(path) &&
+      !/\/bsc\/token\//i.test(path) &&
+      !/\/robinhood\/token\//i.test(path)
+    ) {
+      return true;
+    }
+    const parts = splitChainTokens(getUrlChain());
+    if (!parts.length) return false;
+    if (
+      parts.some(
+        (c) => c === "bsc" || c === "robinhood" || c === "all" || c === "multi"
+      )
+    ) {
+      return false;
+    }
+    return true;
+  }
+
   function isAllowedScanChain() {
     const bscOn = isFeeBadgeChainPrefOn("bsc");
     const rhOn = isFeeBadgeChainPrefOn("rh");
     if (!bscOn && !rhOn) return false;
+    if (
+      urlIsExplicitNonFeeChain() &&
+      !pageUrlIsBscToken() &&
+      !pageUrlIsRobinhoodToken()
+    ) {
+      return false;
+    }
     const set = getActiveChainSet();
     if (bscOn && set.has("bsc")) return true;
     if (rhOn && set.has("robinhood")) return true;
@@ -4373,69 +4488,82 @@
     return nodes.slice(0, MAX_CANDIDATES_PER_SCAN);
   }
 
+  /** K 线顶栏 BaseInfoBar（约 70px）。禁止拿 main/body，否则 textContent 会扫图表+战壕卡死。 */
+  function gmgnTokenHeaderScope() {
+    try {
+      const bar = document.querySelector('[data-sentry-source-file="BaseInfoBar.tsx"]');
+      if (bar instanceof HTMLElement) {
+        const r = bar.getBoundingClientRect();
+        if (r.height > 0 && r.height <= 140) return bar;
+      }
+    } catch (_bar) {
+      // ignore
+    }
+    const addr = document.getElementById("token-base-address");
+    if (addr instanceof HTMLElement) {
+      let p = addr.parentElement;
+      for (let i = 0; i < 8 && p && p !== document.body; i += 1) {
+        if (p.getAttribute("data-sentry-source-file") === "BaseInfoBar.tsx") return p;
+        try {
+          const r = p.getBoundingClientRect();
+          if (
+            r.width > 400 &&
+            r.height >= 48 &&
+            r.height <= 120 &&
+            r.top >= 0 &&
+            r.top < 220
+          ) {
+            return p;
+          }
+        } catch (_r) {
+          // ignore
+        }
+        p = p.parentElement;
+      }
+      return addr.parentElement instanceof HTMLElement ? addr.parentElement : addr;
+    }
+    return null;
+  }
+
   /** Header bar ~h-[70px] containing token metrics (价格/池子/总税率). Never body. */
   function findGmgnTokenPageRoot() {
-    // Official K-line address mount (user-confirmed DOM). This avoids the legacy
-    // document-wide span/a/div fallback on every header/card classification.
     const directAddress = document.querySelector("#token-base-address");
     if (directAddress instanceof HTMLElement && !isLargeTokenLinkCardNode(directAddress)) {
-      const r = directAddress.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0 && r.top >= 0 && r.top < 240) {
-        return directAddress.parentElement instanceof HTMLElement
-          ? directAddress.parentElement
-          : directAddress;
+      try {
+        const r = directAddress.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0 && r.top >= 0 && r.top < 240) {
+          return directAddress.parentElement instanceof HTMLElement
+            ? directAddress.parentElement
+            : directAddress;
+        }
+      } catch (_addr) {
+        // ignore
       }
     }
+    const strip = gmgnTokenHeaderScope();
+    if (strip instanceof HTMLElement) return strip;
     const taxLab = findGmgnTaxRateLabel();
     if (taxLab) {
       let p = taxLab;
       for (let i = 0; i < 10 && p; i += 1) {
         if (!(p instanceof HTMLElement)) break;
         if (p === document.body || p === document.documentElement) break;
-        const r = p.getBoundingClientRect();
-        // Header strip (js-mcp: ~2240×70) — reject full-viewport shells (SPA leftover bug).
-        if (
-          r.width > 500 &&
-          r.width < window.innerWidth * 0.98 &&
-          r.height >= 48 &&
-          r.height <= 120 &&
-          r.top < 200
-        ) {
-          return p;
+        try {
+          const r = p.getBoundingClientRect();
+          if (
+            r.width > 500 &&
+            r.width < window.innerWidth * 0.98 &&
+            r.height >= 48 &&
+            r.height <= 120 &&
+            r.top < 200
+          ) {
+            return p;
+          }
+        } catch (_tax) {
+          break;
         }
         p = p.parentElement;
       }
-    }
-    const short = Array.from(document.querySelectorAll("span, a, div")).find((el) => {
-      const t = (el.textContent || "").trim();
-      return TARGET_SHORT_TOKEN_RE.test(t) && t.length < 22;
-    });
-    if (short) {
-      let p = short;
-      for (let i = 0; i < 10 && p; i += 1) {
-        if (!(p instanceof HTMLElement)) break;
-        if (p === document.body || p === document.documentElement) break;
-        const r = p.getBoundingClientRect();
-        if (
-          r.width > 500 &&
-          r.width < window.innerWidth * 0.98 &&
-          r.height >= 48 &&
-          r.height <= 140 &&
-          r.top < 220
-        ) {
-          return p;
-        }
-        p = p.parentElement;
-      }
-    }
-    // Prefer main content over body (marking body poisons SPA home scans).
-    const main =
-      document.querySelector("main") ||
-      document.querySelector("#__next") ||
-      document.querySelector("[class*='chakra'] > div");
-    if (main instanceof HTMLElement && main !== document.body) {
-      const r = main.getBoundingClientRect();
-      if (r.height > 80 && r.height < window.innerHeight * 0.5) return main;
     }
     return null;
   }
@@ -4454,42 +4582,20 @@
       }
     }
 
-    // Prefer near-top header band — chart body churns DOM; avoid whole-document when possible.
     let found = null;
-    const roots = [];
-    try {
-      const main =
-        document.querySelector("main") ||
-        document.querySelector("#__next") ||
-        document.querySelector("[class*='chakra']");
-      if (main) roots.push(main);
-    } catch (_err) {
-      // ignore
-    }
-    if (!roots.length && document.body) roots.push(document.body);
-
-    for (const root of roots) {
-      if (!root?.querySelectorAll) continue;
+    const root = gmgnTokenHeaderScope();
+    if (root?.querySelectorAll) {
       const nodes = root.querySelectorAll("span, div");
-      const max = Math.min(nodes.length, 800);
+      const max = Math.min(nodes.length, 80);
       for (let i = 0; i < max; i += 1) {
         const el = nodes[i];
+        if (!(el instanceof HTMLElement) || el.childElementCount > 2) continue;
         const t = (el.textContent || "").replace(/\s+/g, " ").trim();
-        if (t === "总税率") {
+        if (t === "总税率" || (t.startsWith("总税率") && t.length <= 16)) {
           found = el;
           break;
         }
       }
-      if (found) break;
-      for (let i = 0; i < max; i += 1) {
-        const el = nodes[i];
-        const t = (el.textContent || "").replace(/\s+/g, " ").trim();
-        if (t.startsWith("总税率") && t.length <= 16) {
-          found = el;
-          break;
-        }
-      }
-      if (found) break;
     }
 
     taxRateLabelCache = { el: found, at: now };
@@ -4734,9 +4840,12 @@
         // ignore
       }
 
-      // 2) Visible short-CA text leaves in header band
-      const nodes = document.querySelectorAll("span, a, div, p, button");
-      const max = Math.min(nodes.length, 1600);
+      // 2) Visible short-CA text leaves in header band（只扫顶栏，禁止整页）
+      const headerScope = gmgnTokenHeaderScope() || document.querySelector("#token-base-address");
+      const nodes = headerScope
+        ? headerScope.querySelectorAll("span, a, div, p, button")
+        : [];
+      const max = Math.min(nodes.length, 120);
       for (let i = 0; i < max; i += 1) {
         const el = nodes[i];
         if (!(el instanceof HTMLElement)) continue;
@@ -4901,11 +5010,11 @@
       );
       if (entryHit && !isFeeLoadingEntry(entryHit)) {
         try {
-          const q =
-            resolveQuoteSymbol(
-              headerCard instanceof HTMLElement ? headerCard : existingGood,
-              entryHit
-            ) || "BNB";
+          const q = headerPoolQuoteForPaint(
+            urlTok,
+            entryHit,
+            headerCard instanceof HTMLElement ? headerCard : existingGood
+          );
           const presentation = computeBadgePresentation(entryHit, q, urlTok);
           if (presentation.label) {
             const textEl = existingGood.querySelector(".gmgn-fee-mode-icon__text");
@@ -5079,9 +5188,11 @@
     try {
       let q = "";
       if (!isFeeLoadingEntry(entry)) {
-        q =
-          (host instanceof HTMLElement ? resolveQuoteSymbol(host, entry) : "") ||
-          "BNB";
+        q = headerPoolQuoteForPaint(
+          token,
+          entry,
+          host instanceof HTMLElement ? host : null
+        );
       }
       const presentation = computeBadgePresentation(entry, q, token);
       const { label } = presentation;
@@ -5406,6 +5517,52 @@
    * GMGN 左侧「钱包 / 追踪 / 喊单 / 监控」面板（含弹层宽栏）。
    * 主战壕列在 mid 区；此栏 left≈0 且含追踪语义。
    */
+  /**
+   * Title/toolbar text only. Never read textContent of a virtual list — that
+   * serializes every row and freezes the tab (收藏抽屉 / SOL 战壕).
+   */
+  function gmgnPanelChromeText(el) {
+    if (!(el instanceof HTMLElement)) return "";
+    const maxChars = 260;
+    const chunks = [];
+    const takeSmall = (n, depth) => {
+      if (!(n instanceof HTMLElement) || depth > 3) return;
+      if (chunks.join("").length >= maxChars) return;
+      if (n.childElementCount > 12) {
+        takeSmall(n.firstElementChild, depth + 1);
+        const second = n.firstElementChild && n.firstElementChild.nextElementSibling;
+        if (second && second.childElementCount <= 12) takeSmall(second, depth + 1);
+        return;
+      }
+      const nodes = n.childNodes;
+      for (let i = 0; i < nodes.length; i += 1) {
+        const c = nodes[i];
+        if (c.nodeType !== 3) continue;
+        const t = String(c.nodeValue || "").replace(/\s+/g, "");
+        if (!t) continue;
+        chunks.push(t);
+        if (chunks.join("").length >= maxChars) return;
+      }
+      let kid = n.firstElementChild;
+      let k = 0;
+      while (kid && k < 8 && chunks.join("").length < maxChars) {
+        takeSmall(kid, depth + 1);
+        kid = kid.nextElementSibling;
+        k += 1;
+      }
+    };
+    if (el.childElementCount > 12) takeSmall(el.firstElementChild, 0);
+    else takeSmall(el, 0);
+    return chunks.join("").slice(0, maxChars);
+  }
+
+  function gmgnPanelSentryHay(el) {
+    if (!(el instanceof HTMLElement)) return "";
+    return `${el.getAttribute("data-sentry-source-file") || ""} ${
+      el.getAttribute("data-sentry-component") || ""
+    } ${String(el.className || "")}`;
+  }
+
   function isGmgnWalletTrackPanelUncached(node) {
     if (!(node instanceof HTMLElement) || !isGmgnHost()) return false;
     try {
@@ -5417,11 +5574,8 @@
         ) {
           return false;
         }
-        const rawText = p.textContent || "";
-        // Stop before the full-page shell. It contains footer labels such as
-        // 钱包追踪/监控/喊单 and used to force a synchronous full-page layout.
-        if (rawText.length > 5000) break;
-        const compact = rawText.slice(0, 900).replace(/\s+/g, "");
+        const sentry = gmgnPanelSentryHay(p);
+        const compact = gmgnPanelChromeText(p);
         const walletAt = compact.indexOf("钱包");
         const trackAt = compact.indexOf("追踪", Math.max(0, walletAt + 2));
         const callAt = compact.indexOf("喊单", Math.max(0, trackAt + 2));
@@ -5439,12 +5593,9 @@
           !/(?:Tax|MC|总税率)/i.test(compact) &&
           dollars >= 2 &&
           percents >= 2;
-        const structuralHint = /wallet|track|follow|monitor|watch/i.test(
-          `${p.getAttribute("data-sentry-source-file") || ""} ${String(p.className || "")}`
-        );
-        // A real wallet panel exposes several stable tab semantics. Main trench
-        // roots are rejected first, while narrow feeds can also use their source
-        // metadata or repeated wallet-value shape. No layout read is needed.
+        const structuralHint =
+          GMGN_WALLET_TRACK_SENTRY_RE.test(sentry) ||
+          /wallet|track|follow|monitor|watch/i.test(sentry);
         if (!trenchTitle && semanticHits >= 3) return true;
         if (
           !trenchTitle &&
@@ -5491,12 +5642,15 @@
         ) {
           return false;
         }
-        const rawText = p.textContent || "";
-        if (rawText.length > 5000) break;
-        const compact = rawText.slice(0, 260).replace(/\s+/g, "");
+        const sentry = gmgnPanelSentryHay(p);
+        const compact = gmgnPanelChromeText(p);
+        const titleHit =
+          compact.slice(0, 80).includes("收藏") ||
+          GMGN_FAVORITES_SENTRY_RE.test(sentry);
         if (
-          compact.slice(0, 80).includes("收藏") &&
-          /币种.*交易数.*价格.*24h%/i.test(compact)
+          titleHit &&
+          (/币种.*交易数.*价格.*24h%/i.test(compact) ||
+            (/币种/.test(compact) && /交易数|24h%/i.test(compact)))
         ) {
           return true;
         }
@@ -6838,23 +6992,33 @@
   function collectGmgnNewCardMutations(records) {
     if (!isGmgnHost() || !records?.length || shouldDeferGmgnTrenchResizeWork()) return 0;
     if (isGmgnScrollCooling() && !isGmgnTokenPage()) return 0;
-    const hrefSelector = '[href*="/bsc/token/"][href*="0x"], [href*="/token/"][href*="0x"]';
+    const hrefSelector = GMGN_FEE_TOKEN_HREF_SELECTOR;
     const itemSelector = '[data-sentry-source-file="TokenItem.tsx"]';
     const seen = new Set();
     let discovered = 0;
+    const tokenItemHasFeeHref = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      try {
+        if (el.matches?.(hrefSelector)) return true;
+        return Boolean(el.querySelector?.(hrefSelector));
+      } catch (_feeHref) {
+        return false;
+      }
+    };
     const handleNode = (node) => {
       if (!(node instanceof HTMLElement) || discovered >= GMGN_NEW_CARD_LIMIT) return;
       const candidates = [];
-      if (node.matches(hrefSelector) || node.matches(itemSelector)) candidates.push(node);
+      if (node.matches(hrefSelector)) candidates.push(node);
+      else if (node.matches(itemSelector) && tokenItemHasFeeHref(node)) {
+        candidates.push(node);
+      }
       if (node.childElementCount <= GMGN_NEW_CARD_LIMIT * 2) {
-        node.querySelectorAll?.(`${hrefSelector}, ${itemSelector}`).forEach((el) => {
+        node.querySelectorAll?.(hrefSelector).forEach((el) => {
           if (candidates.length < GMGN_NEW_CARD_LIMIT) candidates.push(el);
         });
       } else {
         const firstHref = node.querySelector?.(hrefSelector);
-        const firstItem = node.querySelector?.(itemSelector);
         if (firstHref) candidates.push(firstHref);
-        if (firstItem && firstItem !== firstHref) candidates.push(firstItem);
       }
       for (const candidate of candidates) {
         if (discovered >= GMGN_NEW_CARD_LIMIT) break;
@@ -7093,14 +7257,17 @@
 
   function gmgnMutationLooksRelevant(records) {
     if (!records || !records.length) return true;
-    const interestingHref = (href) =>
-      typeof href === "string" &&
-      href.length > 8 &&
-      (href.includes("7777") ||
-        href.includes("8888") ||
-        href.includes("ffff") ||
-        href.includes("FFFF") ||
-        href.includes("/token/"));
+    const interestingHref = (href) => {
+      const h = String(href || "");
+      if (h.length < 8) return false;
+      if (h.includes("/bsc/token/") || h.includes("/robinhood/token/")) return true;
+      return (
+        h.includes("7777") ||
+        h.includes("8888") ||
+        h.includes("ffff") ||
+        h.includes("FFFF")
+      );
+    };
     const probeEl = (el) => {
       if (!(el instanceof HTMLElement)) return false;
       // A direct extension badge insert/remove is our own feedback, not host work.
@@ -7113,8 +7280,12 @@
         const href = el.getAttribute("href") || "";
         if (interestingHref(href)) return true;
       }
-      // Shallow: direct child links / our marks (avoid full subtree walk on huge chunks).
-      if (el.querySelector?.(`[${ICON_DATA}="1"], a[href*="7777"], a[href*="8888"], a[href*="ffff"], a[href*="/token/"]`)) {
+      // Shallow: only BSC/RH fee hrefs. Generic /token/ matches SOL and freezes.
+      if (
+        el.querySelector?.(
+          `[${ICON_DATA}="1"], a[href*="/bsc/token/"], a[href*="/robinhood/token/"], a[href*="7777"], a[href*="8888"], a[href*="ffff"]`
+        )
+      ) {
         return true;
       }
       // Short Tax chip text on leaf-ish nodes.
@@ -7167,18 +7338,15 @@
       const tag = el.tagName;
       if (tag === "A") {
         const href = el.getAttribute("href") || "";
-        if (/\/token\/|\/bsc\/token\//i.test(href) && /(?:7777|8888|ffff)/i.test(href)) {
+        if (
+          /\/token\/bsc\//i.test(href) ||
+          /\/token\/robinhood\//i.test(href) ||
+          /(?:7777|8888|ffff)/i.test(href)
+        ) {
           return true;
         }
       }
-      if (
-        el.querySelector?.(
-          'a[href*="/token/"][href*="7777"], a[href*="/token/"][href*="8888"], ' +
-            'a[href*="/token/"][href*="ffff"], ' +
-            'a[href*="/bsc/token/"][href*="7777"], a[href*="/bsc/token/"][href*="8888"], ' +
-            'a[href*="/bsc/token/"][href*="ffff"]'
-        )
-      ) {
+      if (el.querySelector?.(DEBOT_TRENCH_HREF_SEL)) {
         return true;
       }
       if ((tag === "SPAN" || tag === "DIV") && el.childElementCount <= 3) {
@@ -7539,10 +7707,7 @@
     const forceFreshRoots = options.forceFreshRoots !== false;
     // Include div[href] (GMGN TokenItem) — a-only misses 新创建 seeds (js-mcp 0.6.4).
     const linkSel = isDebotHost()
-      ? "[href*='/token/'][href*='8888'], [href*='/token/'][href*='7777'], " +
-        "[href*='/token/'][href*='ffff'], " +
-        "[href*='/bsc/token/'][href*='8888'], [href*='/bsc/token/'][href*='7777'], " +
-        "[href*='/bsc/token/'][href*='ffff'], a[href*='/token/robinhood/']"
+      ? DEBOT_TRENCH_HREF_SEL
       : "[href*='/token/'][href*='8888'], [href*='/token/'][href*='7777'], " +
         "[href*='/token/'][href*='ffff'], " +
         "[href*='/bsc/token/'][href*='8888'], [href*='/bsc/token/'][href*='7777'], " +
@@ -7847,8 +8012,7 @@
     ) {
       if (
         entry.__pons_v2 !== true &&
-        (hostFeeAllocationBps(entry) > 0 ||
-          (isGeniusFeeEntry(entry, token) && String(entry.quote_symbol || "").trim()))
+        (hostFeeAllocationBps(entry) > 0 || isGeniusFeeEntry(entry, token))
       ) {
         return renderMode(card, token, entry);
       }
@@ -8212,7 +8376,7 @@
     });
   }
 
-  const PAGE_HOOK_VER = "191";
+  const PAGE_HOOK_VER = "193";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -8631,8 +8795,10 @@
             );
             if (card) {
               const inner = card.querySelector?.(
-                'a[href*="/token/"][href*="7777"], a[href*="/token/"][href*="8888"], a[href*="/token/"][href*="ffff"], ' +
-                  'a[href*="0x"][href*="7777"], a[href*="0x"][href*="8888"], a[href*="0x"][href*="ffff"]'
+                isDebotHost()
+                  ? DEBOT_TRENCH_HREF_SEL
+                  : 'a[href*="/token/"][href*="7777"], a[href*="/token/"][href*="8888"], a[href*="/token/"][href*="ffff"], ' +
+                    'a[href*="0x"][href*="7777"], a[href*="0x"][href*="8888"], a[href*="0x"][href*="ffff"]'
               );
               if (inner) href = inner.getAttribute("href") || inner.href || "";
             }
@@ -10007,8 +10173,7 @@
   function forceAppendDebotHeaderBadge(header, token, entry) {
     if (!(header instanceof HTMLElement) || !entry || !token) return false;
     try {
-      // Prefer API quote — avoid expensive DOM quote walk on header SPA.
-      const q = resolveQuoteSymbol(header, entry) || "BNB";
+      const q = headerPoolQuoteForPaint(token, entry, header);
       const presentation = computeBadgePresentation(entry, q, token);
       const { label } = presentation;
       if (!label) return false;
@@ -10346,6 +10511,11 @@
           // ⏳ 占位不算 stable：API 回包后必须能被 post-api paint 换掉
           if (locked.dataset.feeLoading === "1") return false;
           const headerEntry = resolveEntry(marked);
+          if (headerEntry && isHostFeeEntryPending(headerEntry)) return false;
+          if (headerEntry && hostFeeStillNeedsModes(headerEntry)) return false;
+          if (headerEntry && isGeniusFeeEntry(headerEntry, marked) && hostFeeAllocationBps(headerEntry) <= 0) {
+            return false;
+          }
           if (headerEntry && isGmgnHostFeeDomMismatch(card, headerEntry)) return false;
           if (headerEntry && isGmgnPoolDomMismatch(card, locked, headerEntry)) return false;
           return true;
@@ -10431,6 +10601,9 @@
       return false;
     }
     if (existing.dataset.feeLoading === "1") return false;
+    const debotPending = resolveEntry(marked);
+    if (debotPending && isHostFeeEntryPending(debotPending)) return false;
+    if (debotPending && hostFeeStillNeedsModes(debotPending)) return false;
     if (
       isDebotHost() &&
       existing.dataset.feeMountSide === "tax-col" &&
@@ -11512,6 +11685,17 @@
     const addTrenchRoot = (el) => {
       if (!(el instanceof HTMLElement)) return;
       if (isGmgnWalletTrackPanel(el) || isGmgnFavoritesPanel(el)) return;
+      try {
+        if (
+          !el.querySelector?.(
+            '[href*="/bsc/token/"], [href*="/robinhood/token/"]'
+          )
+        ) {
+          return;
+        }
+      } catch (_noFeeHref) {
+        return;
+      }
       const r = el.getBoundingClientRect();
       if (
         r.width < 180 ||
@@ -11945,10 +12129,7 @@
                 "[href*='/token/bsc/'][href*='8888'], [href*='/token/bsc/'][href*='7777'], " +
                 "[href*='/token/bsc/'][href*='ffff']"
             : isDebotHost()
-              ? "[href*='/token/'][href*='8888'], [href*='/token/'][href*='7777'], " +
-                "[href*='/token/'][href*='ffff'], " +
-                "[href*='/token/bsc/'][href*='8888'], [href*='/token/bsc/'][href*='7777'], " +
-                "[href*='/token/bsc/'][href*='ffff'], a[href*='/token/robinhood/']"
+              ? DEBOT_TRENCH_HREF_SEL
               : "[href*='/token/'][href*='8888'], [href*='/token/'][href*='7777'], " +
                 "[href*='/token/'][href*='ffff'], " +
                 "[href*='/bsc/token/'][href*='8888'], [href*='/bsc/token/'][href*='7777'], " +
@@ -12311,11 +12492,19 @@
         const href = (el.getAttribute("href") || "").toLowerCase();
         if (href.indexOf(tok) === -1) return;
         if (/flap\.sh|bscscan|etherscan/i.test(href)) return;
-        // Prefer row-sized hosts
-        const r = el.getBoundingClientRect();
+        let card = el;
+        if (isGmgnHost()) {
+          const item = el.closest?.('[data-sentry-source-file="TokenItem.tsx"]');
+          if (item instanceof HTMLElement) card = item;
+        } else if (isDebotHost()) {
+          const climbed = climbDebotListCard(el);
+          if (climbed instanceof HTMLElement) card = climbed;
+        }
+        if (seen.has(card)) return;
+        const r = card.getBoundingClientRect();
         if (r.width < 80 || r.height < 36) return;
-        seen.add(el);
-        out.push(el);
+        seen.add(card);
+        out.push(card);
       });
     } catch (_err) {
       // ignore
@@ -13067,6 +13256,14 @@
       );
       if (
         icon instanceof HTMLElement &&
+        icon.dataset.feeLoading === "1" &&
+        document.contains(icon)
+      ) {
+        const r = icon.getBoundingClientRect();
+        if (r.width > 2 && r.bottom > 0 && r.top < window.innerHeight + 80) return true;
+      }
+      if (
+        icon instanceof HTMLElement &&
         icon.dataset.feeLoading !== "1" &&
         document.contains(icon)
       ) {
@@ -13140,10 +13337,13 @@
       const token = tokens[i];
       let score = 0;
       try {
-        const hasIcon = !!document.querySelector(
+        const icon = document.querySelector(
           `[${ICON_DATA}="1"][data-fee-token="${token}"]`
         );
-        if (!hasIcon) score += 40;
+        const previewOnly =
+          icon instanceof HTMLElement && icon.dataset.feeLoading === "1";
+        if (!icon || previewOnly) score += 40;
+        if (isGeniusFunToken(token) && (!icon || previewOnly)) score += 80;
         const cards = document.querySelectorAll(`[${CARD_DATA}="${token}"]`);
         const lim = Math.min(cards.length, 3);
         for (let j = 0; j < lim; j += 1) {
@@ -13205,8 +13405,8 @@
     } catch (_gq) {
       geniusQueued = false;
     }
-    const minTok = geniusQueued ? 2 : hot ? HOT_BATCH_MIN_TOKENS : BATCH_MIN_TOKENS;
-    const flushMs = geniusQueued ? 80 : hot ? HOT_BATCH_FLUSH_MS : BATCH_FLUSH_MS;
+    const minTok = geniusQueued ? GENIUS_BATCH_MIN_TOKENS : hot ? HOT_BATCH_MIN_TOKENS : BATCH_MIN_TOKENS;
+    const flushMs = geniusQueued ? GENIUS_BATCH_FLUSH_MS : hot ? HOT_BATCH_FLUSH_MS : BATCH_FLUSH_MS;
     if (hot && batchActive && !hotLaneActive) {
       const mainAgeMs = batchStartedAt ? Date.now() - batchStartedAt : BATCH_STUCK_MS + 1;
       if (mainAgeMs < BATCH_STUCK_MS) void flushHotLane();
@@ -13232,12 +13432,12 @@
     const cachedHit = modeCache.get(tok);
     // 搜索弹层 forceModes：不走 host-fee 快路径。其余仅在真能 skip 时丢队。
     if (options.forceModes !== true && !searchOverlayModesTokens.has(tok)) {
-      if (cachedHit && hostFeeCanSkipModes(cachedHit)) {
+      if (cachedHit && (hostFeeCanSkipModes(cachedHit) || isFreshUnknown(cachedHit))) {
         requestQueue.delete(tok);
         cancelIncompleteModes(tok);
         return;
       }
-      if (!cachedHit && isPersistentCacheHit(tok)) return;
+      if (!cachedHit && isPersistentCacheHit(tok) && !tokenNeedsModesFetch(tok)) return;
     }
     if (requestQueue.has(tok)) return;
     const missingState = missingRetryState.get(tok);
@@ -13246,10 +13446,14 @@
     if (isGmgnHotUnpaintedToken(tok) || isDebotHotUnpaintedToken(tok)) noteGmgnHotWork();
     debugInfo("queue", { token: tok, queueSize: requestQueue.size });
     if (isGeniusFunToken(tok)) {
-      if (requestQueue.size >= 2) {
+      let nGenius = 0;
+      for (const t of requestQueue) {
+        if (isGeniusFunToken(t)) nGenius += 1;
+      }
+      if (nGenius >= GENIUS_BATCH_MIN_TOKENS) {
         scheduleBatchFlush({ immediate: true, delayMs: 0 });
       } else {
-        scheduleBatchFlush({ delayMs: 80 });
+        scheduleBatchFlush({ delayMs: GENIUS_BATCH_FLUSH_MS });
       }
       return;
     }
@@ -13434,6 +13638,55 @@
     );
   }
 
+  /** /modes 回包：按徽章 data-fee-token 直接盖预览，不依赖 findCardsByCa / CARD_DATA。 */
+  function applyModesResultToDom(token, entry) {
+    const tok = String(token || "").toLowerCase();
+    if (!tok || !entry) return 0;
+    let n = 0;
+    document.querySelectorAll(`[${ICON_DATA}="1"][data-fee-token="${tok}"]`).forEach((icon) => {
+      if (!(icon instanceof HTMLElement) || !document.contains(icon)) return;
+      try {
+        delete icon.dataset.feeSig;
+      } catch (_d) {
+        // ignore
+      }
+      let card = isGmgnHost()
+        ? icon.closest?.('[data-sentry-source-file="TokenItem.tsx"]')
+        : null;
+      if (!(card instanceof HTMLElement) && isDebotHost()) {
+        card = climbDebotListCard(icon);
+      }
+      if (!(card instanceof HTMLElement)) card = icon.parentElement;
+      if (!(card instanceof HTMLElement)) return;
+      try {
+        card.dataset[CARD_MARK] = tok;
+        card.setAttribute(CARD_DATA, tok);
+      } catch (_m) {
+        // ignore
+      }
+      if (renderMode(card, tok, entry, { forceRemount: false })) n += 1;
+    });
+    return n;
+  }
+
+  /** 页面上还在 🪙BNCB loading 的卡，立刻 force /modes（刷新后 host-fee 预览的正路）。 */
+  function queueVisiblePreviewModes(reason) {
+    const seen = new Set();
+    document.querySelectorAll(`[${ICON_DATA}="1"][data-fee-loading="1"]`).forEach((icon) => {
+      if (!(icon instanceof HTMLElement)) return;
+      const tok = String(icon.dataset.feeToken || "").toLowerCase();
+      if (!/^0x[a-f0-9]{40}$/.test(tok) || seen.has(tok)) return;
+      const text = String(icon.textContent || "");
+      if (text.indexOf("🪙") !== -1 || isGeniusFunToken(tok)) {
+        rememberGeniusFunAddr(tok);
+      }
+      if (!isModesQueueToken(tok)) return;
+      seen.add(tok);
+      queueToken(tok, { forceModes: true, deferFlush: true });
+    });
+    if (seen.size) maybeFlushRequestQueue(reason || "preview-modes");
+  }
+
   /**
    * Shared /modes response handling for both the main batch and the hot lane:
    * cache + paint confirmed results, then schedule pending/missing retries.
@@ -13452,12 +13705,20 @@
       const token = String(rawToken).toLowerCase();
       const entry = normalizeResult(result);
       if (!entry) return;
-      if (result.platform === "geniusfun" || entry.__geniusfun) {
+      if (
+        result.platform === "geniusfun" ||
+        entry.__geniusfun ||
+        entry.platform === "geniusfun" ||
+        isGeniusFunToken(token)
+      ) {
         rememberGeniusFunAddr(token);
         entry.__geniusfun = true;
+        if (!entry.platform) entry.platform = "geniusfun";
       }
       rememberPayoutSymbol(entry.dividend_token, entry.dividend_symbol);
       rememberPayoutSymbol(entry.top_payout_token, entry.top_payout_symbol);
+      rememberPayoutSymbol(entry.quote_token, entry.quote_symbol);
+      rememberPayoutSymbol(token, entry.tax_symbol);
       searchOverlayModesTokens.delete(token);
       const prev = modeCache.get(token);
       if (prev && prev.source_host && prev.is_vault && !entry.is_vault) {
@@ -13467,6 +13728,37 @@
       }
       if (isTrustedStockVault(entry)) {
         entry.is_stocks_vault = true;
+      }
+      const emptyUnknown =
+        entry.mode === "unknown" &&
+        hostFeeAllocationBps(entry) <= 0 &&
+        (Number(entry.buy_tax_bps) || 0) + (Number(entry.sell_tax_bps) || 0) <= 0;
+      const fromChain = result.source === "chain" || result.source === "upstream";
+      if (entry.__geniusfun || isGeniusFunToken(token)) {
+        entry.__modesSettled = !emptyUnknown || fromChain;
+        entry.__needsChain = emptyUnknown && !fromChain;
+      } else {
+        entry.__modesSettled = true;
+        entry.__needsChain = false;
+      }
+      if (entry.__geniusfun) {
+        const qTok = entry.quote_token || "";
+        let q = formatPoolQuoteSymbol(entry.quote_symbol || "");
+        if (!q || quoteSymbolLooksNative(q)) {
+          const fromAddr =
+            catalogTitleForQuoteAddr(qTok) || symbolFromKnownPayoutAddress(qTok, entry);
+          if (fromAddr && !quoteSymbolLooksNative(fromAddr)) {
+            q = formatPoolQuoteSymbol(fromAddr);
+          } else if (quoteTokenLooksNative(qTok) || quoteSymbolLooksNative(q) || !qTok) {
+            q = GENIUS_NATIVE_QUOTE;
+          }
+        }
+        if (q) {
+          entry.quote_symbol = q;
+          if (!entry.top_payout_symbol || quoteSymbolLooksNative(entry.top_payout_symbol)) {
+            entry.top_payout_symbol = q;
+          }
+        }
       }
       modeCache.set(token, entry);
       missingRetryState.delete(String(token).toLowerCase());
@@ -13507,6 +13799,7 @@
           }
         }
         applyModeToKnownCards(token, entry, merged);
+        applyModesResultToDom(token, entry);
         ingestFeeAndNotifyListHide(token, entry);
       });
       persistConfirmedModes(confirmed);
@@ -13602,36 +13895,42 @@
     for (const token of requestQueue) {
       // 主批已带上的 token 不重复请求（CF/后端虽会合并，但省一份带宽）。
       if (activeBatchTokens.includes(token)) continue;
-      if (isGmgnHotUnpaintedToken(token) || isDebotHotUnpaintedToken(token)) {
+      if (
+        isGmgnHotUnpaintedToken(token) ||
+        isDebotHotUnpaintedToken(token) ||
+        (isGeniusFunToken(token) && tokenNeedsModesFetch(token))
+      ) {
         hotTokens.push(token);
         if (hotTokens.length >= HOT_LANE_MAX_TOKENS) break;
       }
     }
-    if (hotTokens.length === 0) return;
-    hotTokens.forEach((token) => {
+    const geniusHot = hotTokens.filter((t) => isGeniusFunToken(t));
+    const sendHot = geniusHot.length ? geniusHot : hotTokens;
+    if (sendHot.length === 0) return;
+    sendHot.forEach((token) => {
       requestQueue.delete(token);
     });
     const controller = new AbortController();
     hotLaneAbortController = controller;
     const generation = (hotLaneGeneration += 1);
-    hotLaneTokens = hotTokens.slice();
+    hotLaneTokens = sendHot.slice();
     hotLaneActive = true;
     hotLaneStartedAt = Date.now();
     try {
-      debugInfo("request:start", { tokens: hotTokens, lane: "hot" });
-      const data = await queryModes(hotTokens, controller.signal);
+      debugInfo("request:start", { tokens: sendHot, lane: "hot" });
+      const data = await queryModes(sendHot, controller.signal);
       if (generation !== hotLaneGeneration) return;
       consecutiveFails = 0;
-      processModesResponse(hotTokens, data, "hot");
+      processModesResponse(sendHot, data, "hot");
     } catch (error) {
       if (generation !== hotLaneGeneration) return;
       if (isContextInvalidError(error)) return;
-      hotTokens.forEach((token) => deferTokenRetry(token, "fail"));
+      sendHot.forEach((token) => deferTokenRetry(token, "fail"));
       if (isAbortError(error)) {
-        debugInfo("request:aborted", { tokens: hotTokens, lane: "hot" });
+        debugInfo("request:aborted", { tokens: sendHot, lane: "hot" });
       } else {
         debugInfo("request:failed", {
-          tokens: hotTokens,
+          tokens: sendHot,
           lane: "hot",
           error: normalizeError(error)
         });
@@ -13678,9 +13977,12 @@
       return;
     }
 
-    // GMGN: viewport/top-band unpainted first; Debot: stable insertion order.
+    // Genius 单独成批：和 Flap 混打时 Worker 会把 Genius miss 丢 waitUntil，预览卡 1min。
     const ordered = orderTokensForBatch(Array.from(requestQueue));
-    const tokens = ordered.slice(0, MAX_BATCH_TOKENS);
+    const geniusOnly = ordered.filter((t) => isGeniusFunToken(t));
+    const pick = geniusOnly.length ? geniusOnly : ordered;
+    const cap = geniusOnly.length ? Math.min(24, MAX_BATCH_TOKENS) : MAX_BATCH_TOKENS;
+    const tokens = pick.slice(0, cap);
     tokens.forEach((token) => {
       requestQueue.delete(token);
     });
@@ -13928,12 +14230,30 @@
     return false;
   }
 
+  function isGeniusEmptyUnknown(entry) {
+    if (!entry || entry.mode !== "unknown") return false;
+    if (hostFeeAllocationBps(entry) > 0) return false;
+    return (Number(entry.buy_tax_bps) || 0) + (Number(entry.sell_tax_bps) || 0) <= 0;
+  }
+
+  function isGeniusModesSettled(entry) {
+    if (!entry || !isGeniusFeeEntry(entry) || entry.__modesSettled !== true) return false;
+    const src = String(entry.source || "");
+    // cf-memory / sqlite 空 unknown 不是曲线结果，不能定案。
+    if (isGeniusEmptyUnknown(entry) && src && src !== "chain" && src !== "upstream") {
+      return false;
+    }
+    return true;
+  }
+
   function isHostFeeEntryPending(entry) {
     if (!entry || isFeeLoadingEntry(entry)) return false;
     if (entry && entry.__pons_v2 === true) return false;
     if (isGeniusFeeEntry(entry)) {
-      // 只有底池、没有 🎁/👨‍🍳 仍算未完成，必须继续 /modes。
-      return hostFeeAllocationBps(entry) <= 0;
+      if (hostFeeAllocationBps(entry) > 0) return false;
+      if (isGeniusModesSettled(entry)) return false;
+      // host stub / 空 unknown / 未走曲线：先画底池预览，继续 /modes。
+      return true;
     }
     if (entry.source_host) return hostFeeAllocationBps(entry) <= 0;
     return false;
@@ -13992,6 +14312,9 @@
       giggle_charity_bps: Number(result.giggle_charity_bps) || 0,
       binance_charity_bps: Number(result.binance_charity_bps) || 0,
       gift_bps: Number(result.gift_bps) || 0,
+      platform_bps: Number(result.platform_bps) || 0,
+      platform:
+        typeof result.platform === "string" ? result.platform.trim().toLowerCase() : "",
       is_vault: Boolean(result.is_vault),
       is_stocks_vault: Boolean(result.is_stocks_vault),
       buy_tax_bps: Number(result.buy_tax_bps) || 0,
@@ -14475,6 +14798,35 @@
     return "BNB";
   }
 
+  function geniusDisplayQuote(entry, card, fromApiHint, fromAddrHint) {
+    const qTok = (entry && (entry.quote_token || entry.quote_address)) || "";
+    const fromDomG = card ? extractQuoteSymbolFromDom(card) : "";
+    if (fromDomG && !quoteSymbolLooksNative(fromDomG)) {
+      return formatPoolQuoteSymbol(fromDomG);
+    }
+    const fromAddr =
+      fromAddrHint ||
+      catalogTitleForQuoteAddr(qTok) ||
+      symbolFromKnownPayoutAddress(qTok, entry);
+    if (fromAddr && !quoteSymbolLooksNative(fromAddr)) {
+      return formatPoolQuoteSymbol(fromAddr);
+    }
+    const apiRaw =
+      fromApiHint ||
+      (entry && typeof entry.quote_symbol === "string" ? entry.quote_symbol.trim() : "");
+    const fromApi = apiRaw ? formatPoolQuoteSymbol(apiRaw) : "";
+    if (fromApi && !quoteSymbolLooksNative(fromApi)) {
+      if (quoteTokenLooksNative(qTok) || !qTok) return fromApi;
+      // stub 常把非原生 qa 写成 BNCB；qa 在目录里则以目录为准。
+      if (fromApi === GENIUS_NATIVE_QUOTE) return "";
+      return fromApi;
+    }
+    // 原生/空地址才默认 BNCB；非原生 qa 禁止用 BNCB 盖住 DJTB/自定义池。
+    if (quoteTokenLooksNative(qTok) || !qTok) return GENIUS_NATIVE_QUOTE;
+    if (fromDomG) return formatPoolQuoteSymbol(fromDomG);
+    return "";
+  }
+
   /**
    * 底池符号：稳的路径优先，不稳才回退。
    * 1) Tax 外 /static/quotes/{stem}.png 文件名（js-mcp：与 GMGN 底池芯片同源）
@@ -14522,6 +14874,17 @@
       return fromApi ? formatPoolQuoteSymbol(fromApi) : "";
     }
 
+    const geniusPool =
+      (entry && isGeniusFeeEntry(entry)) ||
+      (card &&
+        isGeniusFunToken(
+          extractCardHrefToken(card) ||
+            extractAnyToken(readCardTokenHref(card) || "")
+        ));
+    if (geniusPool) {
+      return geniusDisplayQuote(entry, card, fromApi, fromAddr);
+    }
+
     const fromDom = card ? extractQuoteSymbolFromDom(card) : "";
     if (fromDom && !quoteSymbolLooksNative(fromDom)) {
       const leftoverStockPool =
@@ -14534,7 +14897,8 @@
 
     if (!quoteTokenLooksNative(qTok)) {
       ensureGmgnQuotesCatalog();
-      const retry = catalogTitleForQuoteAddr(qTok);
+      const retry =
+        catalogTitleForQuoteAddr(qTok) || symbolFromKnownPayoutAddress(qTok, entry);
       if (retry && !quoteSymbolLooksNative(retry)) return formatPoolQuoteSymbol(retry);
       return "";
     }
@@ -14594,6 +14958,18 @@
 
   function resolveQuoteSymbol(card, entry) {
     return pickStablePoolQuote(entry, card);
+  }
+
+  /** K 线顶栏：Genius / 无报价时不要用 BNB 填空（0xfb9f 被画成 🪙BNB | 🎁→BNB）。 */
+  function headerPoolQuoteForPaint(token, entry, host) {
+    let q = "";
+    if (host instanceof HTMLElement) q = resolveQuoteSymbol(host, entry);
+    if (!q && entry) q = formatPoolQuoteSymbol(entry.quote_symbol || "") || "";
+    if (q) return q;
+    const tok = String(token || "").toLowerCase();
+    if (isGeniusFeeEntry(entry, tok) || isGeniusFunToken(tok)) return "";
+    if (TARGET_TOKEN_RE.test(tok)) return "BNB";
+    return "";
   }
 
   /**
@@ -17847,7 +18223,10 @@
       if (!entry) continue;
       entry.__pons_v2 = raw.__pons_v2 === true;
       entry.__geniusfun = raw.__geniusfun === true;
-      if (entry.__geniusfun) rememberGeniusFunAddr(token);
+      if (entry.__geniusfun) {
+        rememberGeniusFunAddr(token);
+        if (!entry.platform) entry.platform = "geniusfun";
+      }
       if (token) entry.address = token;
       if (isTrustedStockVault(entry)) entry.is_stocks_vault = true;
       if (!entry.dividend_symbol && entry.dividend_token) {
@@ -17950,6 +18329,7 @@
       }
     }
     scheduleTaxRecvHideApply(30);
+    queueVisiblePreviewModes("host-fee-preview");
     if (requestQueue.size > 0) {
       maybeFlushRequestQueue("host-fee-upgrade");
     }
@@ -18970,13 +19350,17 @@
     if (isGeniusFeeEntry(entry, token)) {
       const giftBps = effectiveGeniusGiftBps(entry);
       const chefBps = Number(entry.market_bps) || 0;
-      const payout = compactDisplaySymbol(
+      const rawPay = compactDisplaySymbol(
         entry.top_payout_symbol ||
           entry.quote_symbol ||
           entry.dividend_symbol ||
-          domQuote ||
           ""
       );
+      let payout = compactDisplaySymbol(domQuote || "");
+      if (!payout || quoteSymbolLooksNative(payout)) {
+        payout =
+          rawPay && !quoteSymbolLooksNative(rawPay) ? rawPay : GENIUS_NATIVE_QUOTE;
+      }
       if (giftBps > 0 && prefs.gift !== false) {
         if (payout && prefs.payoutArrow !== false) return `${GIFT_EMOJI}→${payout}`;
         return payout ? `${GIFT_EMOJI}${payout}` : GIFT_EMOJI;
@@ -18986,6 +19370,9 @@
         return payout ? `👨‍🍳${payout}` : "👨‍🍳";
       }
       if ((Number(entry.deflation_bps) || 0) > 0 && prefs.burn !== false) return "🔥";
+      if (entry.mode === "unknown" && prefs.unknown !== false) {
+        return modeMeta.unknown.fallback;
+      }
       return "";
     }
     const candidates = [];
@@ -19178,7 +19565,58 @@
     const n = Number(bps) || 0;
     if (n % 100 === 0) return `${n / 100}%`;
     const v = n / 100;
-    return `${String(v.toFixed(1)).replace(/\.0$/, "")}%`;
+    const decimals = n % 10 === 0 ? 1 : 2;
+    return `${String(v.toFixed(decimals)).replace(/0+$/, "").replace(/\.$/, "")}%`;
+  }
+
+  function geniusShareToTokenBps(shareBps, entry) {
+    const tax = Number(entry && entry.buy_tax_bps) || 0;
+    const share = Number(shareBps) || 0;
+    if (share <= 0) return 0;
+    if (tax <= 0) return share;
+    return Math.round((tax * share) / 10000);
+  }
+
+  function collectTipSegments(entry, token) {
+    if (!entry) return [];
+    const rows = [];
+    const genius = isGeniusFeeEntry(entry, token);
+    const push = (emoji, key, bps) => {
+      const n = Number(bps) || 0;
+      if (n <= 0) return;
+      const shown = genius ? geniusShareToTokenBps(n, entry) : n;
+      if (shown <= 0) return;
+      rows.push({
+        emoji,
+        key,
+        text: `${emoji} ${tipT(key)}`,
+        pct: bpsToPercentLabel(shown)
+      });
+    };
+    if (genius) {
+      push(GIFT_EMOJI, "gift", effectiveGeniusGiftBps(entry));
+      push("👨‍🍳", "creator", entry.market_bps);
+      push("🔥", "burn", entry.deflation_bps);
+      push("💧", "lp", entry.lp_bps);
+      const plat = Number(entry.platform_bps);
+      push("🪙", "platform", plat > 0 ? plat : 2500);
+      return rows;
+    }
+    push("💎", "holder", entry.dividend_bps);
+    const gift = Number(entry.gift_bps) || 0;
+    if (gift > 0) {
+      push(GIFT_EMOJI, "gift", gift);
+      push("👨‍🍳", "creator", entry.market_bps);
+    } else if (entry.is_vault) {
+      push(GIFT_EMOJI, "gift", entry.market_bps);
+    } else {
+      push("👨‍🍳", "creator", entry.market_bps);
+    }
+    push("🎓", "giggle", entry.giggle_charity_bps);
+    push("💛", "binance", entry.binance_charity_bps);
+    push("🔥", "burn", entry.deflation_bps);
+    push("💧", "lp", entry.lp_bps);
+    return rows;
   }
 
   function buildTipModel(entry, quoteSymbol, label, token) {
@@ -19189,6 +19627,7 @@
       poolPrefix: poolPrefixForToken(token || ""),
       buyTax: bpsToPercentLabel(entry.buy_tax_bps),
       sellTax: bpsToPercentLabel(entry.sell_tax_bps),
+      segments: collectTipSegments(entry, token),
       titleLines: String(entry.title || "")
         .split("\n")
         .map((s) => s.trim())
@@ -19236,6 +19675,17 @@
       };
     }
     const meta = modeMeta[entry.mode] || modeMeta.unknown;
+    let colorClass = meta.className;
+    if (isGeniusFeeEntry(entry, tok)) {
+      const top = String(entry.top_segment || "");
+      if (top && modeMeta[top] && top !== "hybrid" && top !== "unknown") {
+        colorClass = modeMeta[top].className;
+      } else if (effectiveGeniusGiftBps(entry) > 0) {
+        colorClass = "gift";
+      } else if ((Number(entry.market_bps) || 0) > 0) {
+        colorClass = "creator";
+      }
+    }
     const parts = buildDisplayParts(entry, quoteSymbol, tok);
     const label = parts.label;
     const basketAssets = getBasketAssetsForDisplay(entry);
@@ -19260,7 +19710,7 @@
       "gmgn-fee-mode-icon",
       `gmgn-fee-mode-icon--theme-${theme}`,
       solidDarkClass,
-      `gmgn-fee-mode-icon--${meta.className}`,
+      `gmgn-fee-mode-icon--${colorClass}`,
       `gmgn-fee-mode-icon--${siteStrategy.name}`,
       segmentCount >= 3 ? "gmgn-fee-mode-icon--wide" : "",
       segmentCount >= 2 ? "gmgn-fee-mode-icon--multi" : "",
@@ -19281,9 +19731,8 @@
     const awaitChain =
       entry.__pons_v2 !== true &&
       !hostFeeCanSkipModes(entry) &&
-      (Boolean(entry.source_host) ||
-        entry.__needsChain === true ||
-        isGeniusFeeEntry(entry, tok));
+      hostFeeAllocationBps(entry) <= 0 &&
+      (Boolean(entry.source_host) || entry.__needsChain === true);
     return {
       label,
       title,
@@ -19419,6 +19868,20 @@
         tipT("pool"),
         `${model.poolPrefix || POOL_PREFIX_DEFAULT}${model.quoteSymbol}`
       );
+    }
+
+    const segs = Array.isArray(model.segments) ? model.segments : [];
+    if (segs.length) {
+      const sec = document.createElement("div");
+      sec.className = "gmgn-fee-mode-tooltip__sec";
+      const secTitle = document.createElement("div");
+      secTitle.className = "gmgn-fee-mode-tooltip__sec-title";
+      secTitle.textContent = tipT("taxAlloc");
+      sec.appendChild(secTitle);
+      for (const row of segs) {
+        appendTipKv(sec, row.text, row.pct);
+      }
+      root.appendChild(sec);
     }
 
     appendTipKv(root, tipT("buySell"), `${model.buyTax} / ${model.sellTax}`);
@@ -21018,6 +21481,7 @@
                 lp_bps: Number(value.lp_bps) || 0,
                 giggle_charity_bps: Number(value.giggle_charity_bps) || 0,
                 binance_charity_bps: Number(value.binance_charity_bps) || 0,
+                gift_bps: Number(value.gift_bps) || 0,
                 is_vault: Boolean(value.is_vault),
                 buy_tax_bps: Number(value.buy_tax_bps) || 0,
                 sell_tax_bps: Number(value.sell_tax_bps) || 0,
@@ -21031,8 +21495,15 @@
                 vault_address:
                   typeof value.vault_address === "string" ? value.vault_address : "",
                 basket_assets: normalizeBasketAssets(value.basket_assets),
+                platform:
+                  typeof value.platform === "string" ? value.platform.trim().toLowerCase() : "",
                 fetched_at: Math.floor(value.fetchedAt / 1000)
               });
+              if (value.platform === "geniusfun" || value.__geniusfun === true) {
+                rememberGeniusFunAddr(token);
+                const cached = persistentCache.get(token);
+                if (cached) cached.__geniusfun = true;
+              }
             });
             broadcastBasketAddrCache([...persistentCache.values()]);
           }
@@ -21081,6 +21552,7 @@
   function persistConfirmedModes(entries) {
     for (const [token, entry] of entries) {
       if (!confirmedModes.has(entry.mode) || !entry.label) continue;
+      if (isGeniusFeeEntry(entry, token) && isGeniusEmptyUnknown(entry)) continue;
       persistentCache.set(token, {
         mode: entry.mode,
         label: entry.label,
@@ -21091,6 +21563,7 @@
         lp_bps: entry.lp_bps,
         giggle_charity_bps: entry.giggle_charity_bps || 0,
         binance_charity_bps: entry.binance_charity_bps || 0,
+        gift_bps: entry.gift_bps || 0,
         is_vault: entry.is_vault,
         buy_tax_bps: entry.buy_tax_bps,
         sell_tax_bps: entry.sell_tax_bps,
@@ -21101,6 +21574,8 @@
         quote_token: entry.quote_token || "",
         vault_address: entry.vault_address || "",
         basket_assets: normalizeBasketAssets(entry.basket_assets),
+        platform: entry.platform || (entry.__geniusfun ? "geniusfun" : ""),
+        __geniusfun: entry.__geniusfun === true,
         fetchedAt:
           typeof entry.fetched_at === "number" ? entry.fetched_at * 1000 : Date.now()
       });
@@ -21150,6 +21625,7 @@
           lp_bps: entry.lp_bps,
           giggle_charity_bps: entry.giggle_charity_bps || 0,
           binance_charity_bps: entry.binance_charity_bps || 0,
+          gift_bps: entry.gift_bps || 0,
           is_vault: entry.is_vault,
           buy_tax_bps: entry.buy_tax_bps,
           sell_tax_bps: entry.sell_tax_bps,
@@ -21160,6 +21636,7 @@
           quote_token: entry.quote_token || "",
           vault_address: entry.vault_address || "",
           basket_assets: normalizeBasketAssets(entry.basket_assets),
+          platform: entry.platform || (entry.__geniusfun ? "geniusfun" : ""),
           fetchedAt
         };
       }

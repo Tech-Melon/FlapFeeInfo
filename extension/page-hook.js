@@ -1,27 +1,31 @@
 /**
  * PAGE main world · document_start（早于页面脚本）
  *
- * 懒挂载（建议 A）：
- *   · 默认只装 SPA history 桥（对齐 0.5.25）
- *   · 仅 tax-recv / 自定义尾号屏蔽 enabled 时 installTaxRecvNetworkHooks()
- *     （XHR/fetch/WS/MessagePort/SharedWorker/JSON.parse）
- *   · 从不改 GMGN disableShareWorker（保持站点默认 SharedWorker）
+ * 通道分流（0.8.206）：
+ *   · SharedWorker 只钩该 worker 的 port（过滤也绑这一条，不改 MessagePort/JSON.parse/WS 原型）
+ *   · MAIN_THREAD 才装 JSON.parse + 列表 WS
+ *   · SOL / 非税币页不装过滤钩子
  *   · 禁止改 Object.prototype（0.8.123 挂 onmessage 导致 GMGN 打不开）
- * ★ 链+平台 host-fee：BSC Flap/Four 尾号、BSC geniusfun、RH pons_v2；禁止对任意卡扒 fiber / 乱包 dedicated Worker
+ * ★ 链+平台 host-fee：BSC Flap/Four 尾号、BSC geniusfun、RH pons_v2
  */
 (() => {
-  const HOOK_VER = 191;
+  const HOOK_VER = 196;
+  /** @type {""|"shared-worker"|"main-thread"} */
+  let gmgnLiveTransport = "";
+  let gmgnFiberNoted = false;
+  let jsonParseHookTimer = 0;
+  let taxRecvMainThreadTimer = 0;
+  let taxRecvWantMainThreadHooks = false;
   /** 钩子安装前的原生 parse；内部 clone 禁止走已包装的 JSON.parse。 */
   const NATIVE_JSON_PARSE = JSON.parse.bind(JSON);
   try {
-    if (window.__flapFeeInfoPageHook !== HOOK_VER) {
-      window.__flapFeeInfoPageHook = HOOK_VER;
-      if (document.documentElement) {
-        document.documentElement.setAttribute("data-flap-page-hook-ver", String(HOOK_VER));
-      }
+    if (window.__flapFeeInfoPageHook === HOOK_VER) return;
+    window.__flapFeeInfoPageHook = HOOK_VER;
+    if (document.documentElement) {
+      document.documentElement.setAttribute("data-flap-page-hook-ver", String(HOOK_VER));
     }
   } catch (_bootMark) {
-    // ignore — 继续安装钩子（重复注入时仍要补齐 host-fee）
+    // ignore
   }
   try {
     uninstallMainThreadProtoTap();
@@ -115,17 +119,69 @@
   const NativeWebSocketAdd = NativeWebSocket.prototype.addEventListener;
   const NativeWebSocketRm = NativeWebSocket.prototype.removeEventListener;
 
+  function writeGmgnTransportAttr() {
+    try {
+      const parts = [];
+      if (gmgnLiveTransport) parts.push(gmgnLiveTransport);
+      if (gmgnFiberNoted) parts.push("fiber");
+      const el = document.documentElement;
+      if (!el) return;
+      if (parts.length) el.setAttribute("data-flap-gmgn-transport", parts.join(","));
+      else el.removeAttribute("data-flap-gmgn-transport");
+    } catch (_tr) {
+      // ignore
+    }
+  }
+
   function noteGmgnTransport(kind) {
     const k = String(kind || "").trim();
     if (!k) return;
-    try {
-      const el = document.documentElement;
-      const prev = String(el.getAttribute("data-flap-gmgn-transport") || "");
-      const set = new Set(prev.split(/[,\s]+/).filter(Boolean));
-      set.add(k);
-      el.setAttribute("data-flap-gmgn-transport", Array.from(set).sort().join(","));
-    } catch (_tr) {
-      // ignore
+    if (k === "fiber") {
+      gmgnFiberNoted = true;
+      writeGmgnTransportAttr();
+      return;
+    }
+    if (k === "shared-worker") {
+      gmgnLiveTransport = "shared-worker";
+      if (jsonParseHookTimer) {
+        window.clearTimeout(jsonParseHookTimer);
+        jsonParseHookTimer = 0;
+      }
+      if (taxRecvMainThreadTimer) {
+        window.clearTimeout(taxRecvMainThreadTimer);
+        taxRecvMainThreadTimer = 0;
+      }
+      try {
+        unwrapJsonParseTaxRecvHook();
+      } catch (_un1) {
+        // ignore
+      }
+      try {
+        unwrapJsonParseHostFeeHook();
+      } catch (_un2) {
+        // ignore
+      }
+      writeGmgnTransportAttr();
+      return;
+    }
+    if (
+      k === "main-thread-flag" ||
+      k === "main-thread-ua" ||
+      k === "main-thread-timeout"
+    ) {
+      if (gmgnLiveTransport === "shared-worker") return;
+      gmgnLiveTransport = "main-thread";
+      writeGmgnTransportAttr();
+      try {
+        ensureJsonParseHostFeeHook();
+      } catch (_jp) {
+        // ignore
+      }
+      try {
+        installTaxRecvMainThreadHooks();
+      } catch (_mt) {
+        // ignore
+      }
     }
   }
 
@@ -145,15 +201,28 @@
 
   function shouldHookWsUrl(url) {
     const u = String(url || "");
-    if (!u) return false;
-    if (/latency|rtt|health|speed-test|sub-tx-hash|helius|rpc/i.test(u)) return false;
+    if (!u || !/wss?:\/\//i.test(u)) return false;
+    if (/latency|rtt|health|speed-test|sub-tx-hash|helius|rpc|kline|candle|trade/i.test(u)) {
+      return false;
+    }
     if (/portal-ws/i.test(u) && /debot\.ai|gungnir/i.test(u)) return true;
     if (/sgws\.debot\.ai/i.test(u)) return true;
-    if (/wss?:\/\//i.test(u) && (/ws\.gmgn\.ai/i.test(u) || /ws\.wenmoon\.cc/i.test(u))) {
+    // SharedWorker 已接管列表时，页面 WS 是行情/成交，不要逐帧 ingest。
+    if (gmgnLiveTransport === "shared-worker") return false;
+    if (/gmgn\.ai|wenmoon\.cc/i.test(u) && /socket\.io|trench|rank|pump/i.test(u)) {
       return true;
     }
-    if (/wss?:\/\//i.test(u) && /gmgn\.ai/i.test(u)) return true;
     return false;
+  }
+
+  function sharedWorkerUrlLooksUseful(scriptURL) {
+    const u = String(scriptURL || "");
+    return (
+      /\/workers\/gmgn/i.test(u) ||
+      /\/_next\/static\/workers\/gmgn/i.test(u) ||
+      /sharedSocketWorker/i.test(u) ||
+      /portal-ws/i.test(u)
+    );
   }
   const TAX_RECV_ALLOW_MAX = 24;
   let taxRecvPrefs = { enabled: false, thresholdPct: 100, allow: [], hideGenius: false };
@@ -496,21 +565,25 @@
     }
     let list = [];
     try {
-      const raw = localStorage.getItem("chain-multi-select");
-      if (raw) {
-        const g = JSON.parse(raw)?.selections?.global;
-        if (Array.isArray(g) && g.length) {
-          list = g.map((s) => String(s || "").toLowerCase()).filter(Boolean);
-        }
-      }
-    } catch (_ls) {
+      const q = String(new URL(href).searchParams.get("chain") || "").toLowerCase();
+      if (q) list = q.split(/[,|]/).map((s) => s.trim()).filter(Boolean);
+    } catch (_url) {
       // ignore
     }
-    if (!list.length) {
+    const urlIsConcrete =
+      list.length >= 1 &&
+      list.every((c) => c !== "all" && c !== "multi");
+    // URL ?chain=sol 就是当前页；不要被混选 localStorage 里的 bsc 盖成税币页。
+    if (!urlIsConcrete) {
       try {
-        const q = String(new URL(href).searchParams.get("chain") || "").toLowerCase();
-        if (q) list = q.split(/[,|]/).map((s) => s.trim()).filter(Boolean);
-      } catch (_url) {
+        const raw = localStorage.getItem("chain-multi-select");
+        if (raw) {
+          const g = JSON.parse(raw)?.selections?.global;
+          if (Array.isArray(g) && g.length) {
+            list = g.map((s) => String(s || "").toLowerCase()).filter(Boolean);
+          }
+        }
+      } catch (_ls) {
         // ignore
       }
     }
@@ -528,26 +601,26 @@
     try {
       const u = new URL(location.href);
       const q = String(u.searchParams.get("chain") || "").toLowerCase();
+      const path = String(u.pathname || "");
+      // GMGN / Debot K 线路径优先
+      if (/^\/bsc(\/|$)/i.test(path) || /\/bsc\/token\//i.test(path)) return true;
+      if (/\/token\/bsc(?:\/|$)/i.test(path)) return true;
+      if (
+        /^\/(sol|eth|base|tron|monad|blast)(\/|$)/i.test(path) &&
+        !/\/bsc\/token\//i.test(path)
+      ) {
+        return false;
+      }
       const selected = gmgnSelectedChains();
       if (selected.indexOf("bsc") !== -1) return true;
-      // Debot 战壕主入口 /meme?chain=bsc（双站同 query）
       if (q === "bsc") return true;
       // all/multi = 融合战壕：页级仍处理，行上 row.chain / /token/bsc 再筛
       if (q && q !== "all" && q !== "multi" && selected.length <= 1) return false;
-      const path = String(u.pathname || "");
-      // GMGN K 线
-      if (/^\/bsc(\/|$)/i.test(path) || /\/bsc\/token\//i.test(path)) return true;
-      // Debot/Gungnir K 线 /token/bsc/…
-      if (/\/token\/bsc(?:\/|$)/i.test(path)) return true;
       if (/\/token\/[a-z0-9_-]+(?:\/|$)/i.test(path) && !/\/token\/bsc(?:\/|$)/i.test(path)) {
         return false;
       }
       const host = String(u.hostname || "").toLowerCase();
-      // GMGN 战壕首页无 ?chain= 时默认 BSC（与 content 扫卡一致；显式他链已由 q 拦截）
-      if (host === "gmgn.ai" || host.endsWith(".gmgn.ai")) {
-        if (path === "/" || path === "" || /^\/meme/i.test(path)) return true;
-      }
-      // Debot/Gungnir 战壕 /meme 无 chain 时默认 BSC
+      // Debot/Gungnir 战壕 /meme 无 chain 时默认 BSC。GMGN 首页常是 SOL，不再默认 BSC。
       if (host.endsWith("debot.ai") || host.endsWith("gungnir.bot")) {
         if (path === "/" || path === "" || /^\/meme/i.test(path)) return true;
       }
@@ -866,6 +939,7 @@
     if (!item || typeof item !== "object" || typeof item.contract !== "string") {
       return false;
     }
+    if (debotRowIsGeniusFun(item) && debotRowIsBsc(item)) return true;
     if (!debotRowExtra(item)) return false;
     return isTargetTaxTokenAddr(item.contract);
   }
@@ -2616,7 +2690,15 @@
     }
     const meta = row.meta && typeof row.meta === "object" ? row.meta : null;
     const extra = (meta && meta.launchpad_extra) || row.launchpad_extra;
-    if (genius && (!extra || typeof extra !== "object")) {
+    if (genius) {
+      const ex = extra && typeof extra === "object" ? extra : {};
+      const quote_token = String(
+        ex.base_token || ex.quote_token || ex.quote_address || ""
+      )
+        .trim()
+        .toLowerCase();
+      let quote_symbol = String(ex.base_token_symbol || ex.quote_symbol || "").trim();
+      if (/\.png|\.jpg|https?:/i.test(quote_symbol)) quote_symbol = "";
       return {
         address: addr,
         source: "debot",
@@ -2626,10 +2708,13 @@
         lp_bps: 0,
         giggle_charity_bps: 0,
         binance_charity_bps: 0,
+        gift_bps: 0,
         is_vault: false,
         is_stocks_vault: false,
-        buy_tax_bps: 200,
-        sell_tax_bps: 200,
+        buy_tax_bps: Number(ex.buy_tax_bps || ex.buy_fee_bps) || 200,
+        sell_tax_bps: Number(ex.sell_tax_bps || ex.sell_fee_bps) || 200,
+        quote_token,
+        quote_symbol,
         __geniusfun: true,
         __needsChain: true
       };
@@ -4045,13 +4130,30 @@
       text.indexOf("trenches_delta") !== -1 ||
       text.indexOf("trenches_update") !== -1 ||
       text.indexOf("trenches_rank") !== -1 ||
-      text.indexOf("new_creations") !== -1 ||
-      text.indexOf("socket-event") !== -1 ||
       text.indexOf("meme:new") !== -1 ||
       text.indexOf("pons_v2") !== -1 ||
       text.indexOf("geniusfun") !== -1 ||
-      text.indexOf("genius.fun") !== -1
+      text.indexOf("genius.fun") !== -1 ||
+      text.indexOf("pumpRank") !== -1
     );
+  }
+
+  function payloadMightBeHostFee(data) {
+    if (data == null) return false;
+    if (typeof data === "string") return textMightBeHostFeeFeed(data);
+    if (typeof data !== "object") return false;
+    if (data.s_tal || data.tax_allocation || data.launchpad_extra) return true;
+    const pn = data.pluginName || (data.payload && data.payload.pluginName);
+    if (pn && /pumpRank|trench|meme/i.test(String(pn))) return true;
+    const ch = data.channel || (data.data && data.data.channel);
+    if (ch && /trenches_|ranks/i.test(String(ch))) return true;
+    const typ = data.type || data.event;
+    if (typ === "socket-event" || typ === "meme:new" || typ === "request_plugin") {
+      return true;
+    }
+    if (data.newCreations || data.new_creation) return true;
+    if (data.res && data.res.data) return true;
+    return false;
   }
 
   /** GMGN SharedWorker / MessagePort 帧：与 HTTP 一样提取 s_tal（过滤关时也要跑） */
@@ -4066,73 +4168,13 @@
 
   function tapHostFeePortData(data) {
     if (!isFeePageContext() || data == null) return;
+    if (!payloadMightBeHostFee(data)) return;
     try {
-      try {
-        window.__flapFeeLastPortTap = {
-          t: Date.now(),
-          typ: typeof data,
-          keys:
-            data && typeof data === "object"
-              ? Object.keys(data).slice(0, 24)
-              : [],
-          plugin: String(
-            (data && data.pluginName) ||
-              (data && data.payload && data.payload.pluginName) ||
-              ""
-          ).slice(0, 48),
-          preview: typeof data === "string" ? data.slice(0, 180) : ""
-        };
-        const inner =
-          (data && data.res && (data.res.data || data.res)) ||
-          (data && data.data) ||
-          data;
-        const nc = inner && (inner.newCreations || inner.new_creation);
-        if (nc && typeof nc === "object") {
-          const fr = nc.frame;
-          const u0 = Array.isArray(nc.upserts)
-            ? nc.upserts[0]
-            : fr && Array.isArray(fr.upserts)
-              ? fr.upserts[0]
-              : null;
-          window.__flapFeeLastNc = {
-            t: Date.now(),
-            mode: inner.mode || nc.mode || "",
-            keys: Object.keys(nc).slice(0, 14),
-            frType: Array.isArray(fr) ? "arr" : typeof fr,
-            frLen: Array.isArray(fr) ? fr.length : -1,
-            frKeys:
-              fr && typeof fr === "object" && !Array.isArray(fr)
-                ? Object.keys(fr).slice(0, 12)
-                : [],
-            nUps: Array.isArray(nc.upserts)
-              ? nc.upserts.length
-              : fr && Array.isArray(fr.upserts)
-                ? fr.upserts.length
-                : -1,
-            nRem: Array.isArray(nc.removals) ? nc.removals.length : -1,
-            nRep: fr && Array.isArray(fr.replaces) ? fr.replaces.length : -1,
-            kind: fr && fr.kind != null ? fr.kind : "",
-            u0key: u0 ? String(u0.key || "").slice(0, 72) : ""
-          };
-        }
-      } catch (_meta) {
-        // ignore
-      }
-      const NativeJSONParse = NATIVE_JSON_PARSE;
       if (typeof data === "string") {
-        if (
-          !textMightBeHostFeeFeed(data) &&
-          data.indexOf("pumpRank") === -1 &&
-          data.indexOf("socket-event") === -1 &&
-          data.indexOf("meme:new") === -1
-        ) {
-          return;
-        }
         const payload = unwrapSocketIoText(data);
         const c0 = payload.charAt(0);
         if (c0 !== "{" && c0 !== "[") return;
-        const obj = NativeJSONParse(payload);
-        collectHostFeesFromJson(obj);
+        collectHostFeesFromJson(NATIVE_JSON_PARSE(payload));
       } else if (typeof data === "object") {
         collectHostFeesFromJson(data);
       }
@@ -4996,6 +5038,10 @@
       let mutFlushTimer = 0;
       const flushDirtyAdded = () => {
         mutFlushTimer = 0;
+        if (gmgnLiveTransport === "shared-worker") {
+          dirtyAdded.clear();
+          return;
+        }
         const burst = dirtyAdded.size;
         const nodes = [];
         dirtyAdded.forEach((n) => nodes.push(n));
@@ -5017,6 +5063,7 @@
           return;
         }
         if (burst >= 24) {
+          if (gmgnLiveTransport === "shared-worker") return;
           const roots = collectHostFeeObserveRoots();
           for (let i = 0; i < roots.length; i += 1) scanRoot(roots[i]);
           return;
@@ -5051,10 +5098,12 @@
           mutFlushTimer = window.setTimeout(flushDirtyAdded, 80);
         }
       });
-      if (!attachObservers()) {
+      if (gmgnLiveTransport !== "shared-worker" && !attachObservers()) {
         window.setTimeout(() => attachObservers(), 400);
       }
-      window.setTimeout(() => attachObservers(), 1200);
+      if (gmgnLiveTransport !== "shared-worker") {
+        window.setTimeout(() => attachObservers(), 1200);
+      }
     } catch (_mo) {
       // ignore
     }
@@ -5063,185 +5112,37 @@
   function installHostFeePortTap() {
     if (window.__flapFeeHostFeePortTap === HOOK_VER) return;
     window.__flapFeeHostFeePortTap = HOOK_VER;
-    const hostPortWrapMap = new WeakMap();
-
-    function wrapHostPortFn(fn) {
-      if (typeof fn !== "function") return fn;
-      let wrapped = hostPortWrapMap.get(fn);
-      if (wrapped) return wrapped;
-      wrapped = function flapFeeHostPortTap(ev) {
-        const ingest = () => {
-          try {
-            if (ev && ev.data != null) tapHostFeePortData(ev.data);
-          } catch (_e) {
-            // ignore
-          }
-        };
-        if (prefsOn()) {
-          ingest();
-          try {
-            if (ev && ev.data && typeof ev.data === "object") {
-              const r = filterLiveObject(ev.data, "host-port");
-              if (r.drop) return undefined;
-              if (r.changed && r.data !== ev.data) {
-                if (!patchEventData(ev, r.data)) {
-                  try {
-                    return fn.call(this, { data: r.data, type: "message" });
-                  } catch (_d) {
-                    // fallthrough
-                  }
-                }
-              }
-            }
-          } catch (_flt) {
-            // ignore
-          }
-          return fn.apply(this, arguments);
-        }
-        try {
-          return fn.apply(this, arguments);
-        } finally {
-          scheduleHostFeeIngest(ingest);
-        }
-      };
-      hostPortWrapMap.set(fn, wrapped);
-      return wrapped;
-    }
-
-    const nativePortOm = NativeMessagePortOnmessage;
-    try {
-      if (
-        nativePortOm &&
-        typeof nativePortOm.set === "function" &&
-        !MessagePort.prototype.__flapFeeHostFeePortOm
-      ) {
-        MessagePort.prototype.__flapFeeHostFeePortOm = HOOK_VER;
-        Object.defineProperty(MessagePort.prototype, "onmessage", {
-          configurable: true,
-          enumerable: true,
-          get: function () {
-            return this.__flapFeeHostPortOmUser || null;
-          },
-          set: function (fn) {
-            this.__flapFeeHostPortOmUser = fn;
-            if (typeof fn !== "function") {
-              try {
-                nativePortOm.set.call(this, fn);
-              } catch (_e) {
-                // ignore
-              }
-              return;
-            }
-            try {
-              nativePortOm.set.call(this, wrapHostPortFn(fn));
-            } catch (_e2) {
-              try {
-                nativePortOm.set.call(this, fn);
-              } catch (_e3) {
-                // ignore
-              }
-            }
-          }
-        });
-      }
-    } catch (_pom) {
-      // ignore
-    }
-
-    try {
-      if (
-        typeof NativeMessagePortAdd === "function" &&
-        !MessagePort.prototype.__flapFeeHostFeePortAdd
-      ) {
-        MessagePort.prototype.__flapFeeHostFeePortAdd = HOOK_VER;
-        MessagePort.prototype.addEventListener = function (type, listener, opt) {
-          if (type === "message" && typeof listener === "function") {
-            return NativeMessagePortAdd.call(
-              this,
-              type,
-              wrapHostPortFn(listener),
-              opt
-            );
-          }
-          return NativeMessagePortAdd.call(this, type, listener, opt);
-        };
-      }
-      if (
-        typeof NativeMessagePortRm === "function" &&
-        !MessagePort.prototype.__flapFeeHostFeePortRm
-      ) {
-        MessagePort.prototype.__flapFeeHostFeePortRm = HOOK_VER;
-        MessagePort.prototype.removeEventListener = function (type, listener, opt) {
-          if (type === "message" && typeof listener === "function") {
-            const w = hostPortWrapMap.get(listener);
-            if (w) return NativeMessagePortRm.call(this, type, w, opt);
-          }
-          return NativeMessagePortRm.call(this, type, listener, opt);
-        };
-      }
-    } catch (_padd) {
-      // ignore
-    }
-
-    try {
-      const nativePortStart = NativeMessagePortStart;
-      if (typeof nativePortStart === "function" && !MessagePort.prototype.__flapFeeHostFeeStart) {
-        MessagePort.prototype.__flapFeeHostFeeStart = HOOK_VER;
-        MessagePort.prototype.start = function flapFeeHostPortStart() {
-          try {
-            if (!this.__flapFeeHostFeeStartTap) {
-              this.__flapFeeHostFeeStartTap = HOOK_VER;
-              NativeMessagePortAdd.call(this, "message", (ev) => {
-                try {
-                  if (ev && ev.data != null) tapHostFeePortData(ev.data);
-                } catch (_st) {
-                  // ignore
-                }
-              });
-            }
-          } catch (_tap) {
-            // ignore
-          }
-          return nativePortStart.call(this);
-        };
-      }
-    } catch (_pst) {
-      // ignore
-    }
-
+    // 只钩 GMGN/Debot 列表 SharedWorker 的 port。不要改 MessagePort 原型：
+    // 全站 Port/start 会把行情、分析、其它 worker 的每条消息都 ingest 一遍。
     if (typeof NativeSharedWorker === "function" && !window.SharedWorker.__flapFeeHostFeeSw) {
       function FlapHostFeeSharedWorker(scriptURL, options) {
         const sw =
           options !== undefined
             ? new NativeSharedWorker(scriptURL, options)
             : new NativeSharedWorker(scriptURL);
+        const useful = sharedWorkerUrlLooksUseful(scriptURL);
+        if (!useful) return sw;
         try {
           const u = String(scriptURL || "");
-          if (
-            /\/workers\/gmgn/i.test(u) ||
-            /\/_next\/static\/workers\/gmgn/i.test(u) ||
-            /sharedSocketWorker/i.test(u) ||
-            /portal-ws/i.test(u)
-          ) {
-            const list = (window.__flapFeeWorkersCreated =
-              window.__flapFeeWorkersCreated || []);
-            list.push({ u: u.slice(0, 160), kind: "shared", ver: HOOK_VER });
-            if (list.length > 20) list.shift();
-            if (/gmgn/i.test(u)) noteGmgnTransport("shared-worker");
-            if (/sharedSocketWorker|portal-ws/i.test(u)) noteDebotTransport("shared-worker");
+          const list = (window.__flapFeeWorkersCreated =
+            window.__flapFeeWorkersCreated || []);
+          list.push({ u: u.slice(0, 160), kind: "shared", ver: HOOK_VER });
+          if (list.length > 20) list.shift();
+          if (/gmgn/i.test(u)) noteGmgnTransport("shared-worker");
+          if (/sharedSocketWorker|portal-ws/i.test(u)) {
+            noteDebotTransport("shared-worker");
           }
         } catch (_e) {
           // ignore
         }
         try {
           if (sw.port) {
+            sw.port.__flapFeeGmgnPort = HOOK_VER;
             try {
               NativeMessagePortAdd.call(sw.port, "message", (ev) => {
-                try {
-                  if (ev && ev.data != null) tapHostFeePortData(ev.data);
-                } catch (_pt) {
-                  // ignore
-                }
+                if (prefsOn()) return;
+                if (!ev || ev.data == null || !payloadMightBeHostFee(ev.data)) return;
+                scheduleHostFeeIngest(() => tapHostFeePortData(ev.data));
               });
             } catch (_add) {
               // ignore
@@ -5305,109 +5206,6 @@
   function installHostFeeWebSocketTap() {
     if (window.__flapFeeHostFeeWsTap === HOOK_VER) return;
     window.__flapFeeHostFeeWsTap = HOOK_VER;
-    const hostWsWrapMap = new WeakMap();
-
-    function wrapHostWsFn(fn) {
-      if (typeof fn !== "function") return fn;
-      let wrapped = hostWsWrapMap.get(fn);
-      if (wrapped) return wrapped;
-      wrapped = function flapFeeHostWsTap(ev) {
-        const ingest = () => {
-          try {
-            if (ev && ev.data != null) tapHostFeePortData(ev.data);
-          } catch (_e) {
-            // ignore
-          }
-        };
-        if (prefsOn()) {
-          ingest();
-          return fn.apply(this, arguments);
-        }
-        try {
-          return fn.apply(this, arguments);
-        } finally {
-          scheduleHostFeeIngest(ingest);
-        }
-      };
-      hostWsWrapMap.set(fn, wrapped);
-      return wrapped;
-    }
-
-    const nativeWsOm = NativeWebSocketOnmessage;
-    try {
-      if (
-        nativeWsOm &&
-        typeof nativeWsOm.set === "function" &&
-        !NativeWebSocket.prototype.__flapFeeHostFeeWsOm
-      ) {
-        NativeWebSocket.prototype.__flapFeeHostFeeWsOm = HOOK_VER;
-        Object.defineProperty(NativeWebSocket.prototype, "onmessage", {
-          configurable: true,
-          enumerable: true,
-          get: function () {
-            return this.__flapFeeHostWsOmUser || null;
-          },
-          set: function (fn) {
-            this.__flapFeeHostWsOmUser = fn;
-            if (typeof fn !== "function") {
-              try {
-                nativeWsOm.set.call(this, fn);
-              } catch (_e) {
-                // ignore
-              }
-              return;
-            }
-            try {
-              nativeWsOm.set.call(this, wrapHostWsFn(fn));
-            } catch (_e2) {
-              try {
-                nativeWsOm.set.call(this, fn);
-              } catch (_e3) {
-                // ignore
-              }
-            }
-          }
-        });
-      }
-    } catch (_wom) {
-      // ignore
-    }
-
-    try {
-      if (
-        typeof NativeWebSocketAdd === "function" &&
-        !NativeWebSocket.prototype.__flapFeeHostFeeWsAdd
-      ) {
-        NativeWebSocket.prototype.__flapFeeHostFeeWsAdd = HOOK_VER;
-        NativeWebSocket.prototype.addEventListener = function (type, listener, opt) {
-          if (type === "message" && typeof listener === "function") {
-            return NativeWebSocketAdd.call(
-              this,
-              type,
-              wrapHostWsFn(listener),
-              opt
-            );
-          }
-          return NativeWebSocketAdd.call(this, type, listener, opt);
-        };
-      }
-      if (
-        typeof NativeWebSocketRm === "function" &&
-        !NativeWebSocket.prototype.__flapFeeHostFeeWsRm
-      ) {
-        NativeWebSocket.prototype.__flapFeeHostFeeWsRm = HOOK_VER;
-        NativeWebSocket.prototype.removeEventListener = function (type, listener, opt) {
-          if (type === "message" && typeof listener === "function") {
-            const w = hostWsWrapMap.get(listener);
-            if (w) return NativeWebSocketRm.call(this, type, w, opt);
-          }
-          return NativeWebSocketRm.call(this, type, listener, opt);
-        };
-      }
-    } catch (_wadd) {
-      // ignore
-    }
-
     const OrigWebSocket = window.WebSocket;
     if (typeof OrigWebSocket === "function" && !OrigWebSocket.__flapFeeHostFeeWsCtor) {
       function FlapHostFeeWebSocket(url, protocols) {
@@ -5421,6 +5219,10 @@
             if (/gmgn\.ai|wenmoon\.cc/i.test(String(url || ""))) {
               noteGmgnTransport("page-ws");
             }
+            NativeWebSocketAdd.call(ws, "message", (ev) => {
+              if (!ev || ev.data == null || !payloadMightBeHostFee(ev.data)) return;
+              scheduleHostFeeIngest(() => tapHostFeePortData(ev.data));
+            });
           }
         } catch (_e) {
           // ignore
@@ -6992,6 +6794,13 @@
       } catch (_e) {
         // ignore
       }
+      try {
+        if (typeof ensureTaxRecvRuntime === "function") {
+          ensureTaxRecvRuntime("spa");
+        }
+      } catch (_rt) {
+        // ignore
+      }
     };
     const wrapHistory = (type) => {
       try {
@@ -7149,8 +6958,17 @@
    * 关闭后 content 会 reload，下一跳不会进入此函数。
    */
   function installTaxRecvNetworkHooks() {
-    if (window.__flapFeeTaxRecvNetHooks === HOOK_VER) return;
-    window.__flapFeeTaxRecvNetHooks = HOOK_VER;
+    if (
+      window.__flapFeeTaxRecvNetHooks === HOOK_VER &&
+      (!taxRecvWantMainThreadHooks ||
+        window.__flapFeeTaxRecvMainThread === HOOK_VER ||
+        gmgnLiveTransport === "shared-worker")
+    ) {
+      return;
+    }
+    if (window.__flapFeeTaxRecvNetHooks !== HOOK_VER) {
+      window.__flapFeeTaxRecvNetHooks = HOOK_VER;
+    }
     try {
       window.__flapFeeTaxRecvNetHooksAt = Date.now();
     } catch (_t) {
@@ -7169,13 +6987,12 @@
     }
     try {
       uninstallMainThreadProtoTap();
-      noteMainThreadTransportHints();
     } catch (_mt) {
       // ignore
     }
 
     // ============================================================
-    // MessagePort.prototype — GMGN SharedWorker 实时主路径
+    // MessagePort：只绑 SharedWorker port，不改原型
     // 源码: new SharedWorker(...gmgn.js); this.port.onmessage = this.onMessage
     // 只包原型 setter，不依赖 SharedWorker 构造时机；非 token 帧零深 walk
     // ============================================================
@@ -7228,75 +7045,65 @@
       return wrapped;
     }
 
-    /**
-     * 开启屏蔽时：临时让 GMGN 走主线程 WSS（list 过滤可靠）。
-     * 关闭时：仅当本插件写入过时才 remove，不碰用户其它用途。
-     * 不修改浏览器全局 SharedWorker，只写 gmgn.ai 同源 localStorage。
-     */
-
-    try {
-      const nativePortOm = NativeMessagePortOnmessage;
-      if (nativePortOm && typeof nativePortOm.set === "function") {
-        Object.defineProperty(MessagePort.prototype, "onmessage", {
-          configurable: true,
-          enumerable: true,
-          get: function () {
-            return this.__flapFeePortOmUser || null;
-          },
-          set: function (fn) {
-            this.__flapFeePortOmUser = fn;
-            if (typeof fn !== "function") {
-              try {
-                nativePortOm.set.call(this, fn);
-              } catch (_e) {
-                // ignore
+    function bindTaxRecvPort(port) {
+      if (!port || port.__flapFeeTaxRecvBound === HOOK_VER) return;
+      port.__flapFeeTaxRecvBound = HOOK_VER;
+      const desc = NativeMessagePortOnmessage;
+      try {
+        if (desc && typeof desc.set === "function") {
+          Object.defineProperty(port, "onmessage", {
+            configurable: true,
+            enumerable: true,
+            get: function () {
+              return this.__flapFeePortOmUser || null;
+            },
+            set: function (fn) {
+              this.__flapFeePortOmUser = fn;
+              if (typeof fn !== "function") {
+                try {
+                  desc.set.call(this, fn);
+                } catch (_e) {
+                  // ignore
+                }
+                return;
               }
-              return;
-            }
-            try {
-              nativePortOm.set.call(this, wrapPortMessageFn(fn, "port-om"));
-            } catch (_e2) {
               try {
-                nativePortOm.set.call(this, fn);
-              } catch (_e3) {
-                // ignore
+                desc.set.call(this, wrapPortMessageFn(fn, "sw-om"));
+              } catch (_e2) {
+                try {
+                  desc.set.call(this, fn);
+                } catch (_e3) {
+                  // ignore
+                }
               }
             }
-          }
-        });
+          });
+        }
+      } catch (_om) {
+        // ignore
       }
-    } catch (_portOm) {
-      // ignore
-    }
-
-    try {
-      if (typeof NativeMessagePortAdd === "function") {
-        MessagePort.prototype.addEventListener = function (type, listener, opt) {
+      try {
+        const add = port.addEventListener.bind(port);
+        const rm = port.removeEventListener.bind(port);
+        port.addEventListener = function (type, listener, opt) {
           if (type === "message" && typeof listener === "function") {
-            return NativeMessagePortAdd.call(
-              this,
-              type,
-              wrapPortMessageFn(listener, "port-add"),
-              opt
-            );
+            return add.call(this, type, wrapPortMessageFn(listener, "sw-add"), opt);
           }
-          return NativeMessagePortAdd.call(this, type, listener, opt);
+          return add.call(this, type, listener, opt);
         };
-      }
-      if (typeof NativeMessagePortRm === "function") {
-        MessagePort.prototype.removeEventListener = function (type, listener, opt) {
+        port.removeEventListener = function (type, listener, opt) {
           if (type === "message" && typeof listener === "function") {
             const w = portFnWrapMap.get(listener);
-            if (w) return NativeMessagePortRm.call(this, type, w, opt);
+            if (w) return rm.call(this, type, w, opt);
           }
-          return NativeMessagePortRm.call(this, type, listener, opt);
+          return rm.call(this, type, listener, opt);
         };
+      } catch (_add) {
+        // ignore
       }
-    } catch (_portAdd) {
-      // ignore
     }
 
-    // SharedWorker：构造打点 + 确保 port 走 MessagePort 原型 setter
+    // SharedWorker：只绑 gmgn/portal-ws 这一条 port，不改 MessagePort 原型。
     if (typeof NativeSharedWorker === "function") {
       function FlapSharedWorker(scriptURL, options) {
         const sw =
@@ -7305,21 +7112,19 @@
             : new NativeSharedWorker(scriptURL);
         try {
           const u = String(scriptURL || "");
-          if (
-            /\/workers\/gmgn/i.test(u) ||
-            /\/_next\/static\/workers\/gmgn/i.test(u) ||
-            /sharedSocketWorker/i.test(u) ||
-            /portal-ws/i.test(u)
-          ) {
+          if (sharedWorkerUrlLooksUseful(u)) {
             const list = (window.__flapFeeWorkersCreated =
               window.__flapFeeWorkersCreated || []);
             list.push({ u: u.slice(0, 160), kind: "shared", ver: HOOK_VER });
             if (list.length > 20) list.shift();
             if (/gmgn/i.test(u)) noteGmgnTransport("shared-worker");
-            if (/sharedSocketWorker|portal-ws/i.test(u)) noteDebotTransport("shared-worker");
+            if (/sharedSocketWorker|portal-ws/i.test(u)) {
+              noteDebotTransport("shared-worker");
+            }
             try {
               if (sw.port) {
                 sw.port.__flapFeeGmgnPort = HOOK_VER;
+                bindTaxRecvPort(sw.port);
               }
             } catch (_p) {
               // ignore
@@ -7483,9 +7288,14 @@
     }
 
     /**
-     * 兜底：即使 MessageEvent.data 无法 patch，app 的 JSON.parse(e.data) 仍会经过这里。
-     * 只处理 trenches_delta / 含 s_tal 的列表 JSON，避免拖慢全局 parse。
+     * MAIN_THREAD 兜底：SharedWorker 已接通时不要包 JSON.parse / WS 原型。
      */
+    if (
+      taxRecvWantMainThreadHooks &&
+      gmgnLiveTransport !== "shared-worker" &&
+      window.__flapFeeTaxRecvMainThread !== HOOK_VER
+    ) {
+    window.__flapFeeTaxRecvMainThread = HOOK_VER;
     try {
       if (JSON.parse.__flapFeeTaxRecv !== HOOK_VER) {
         const wrappedParse = function flapFeeJsonParse(text, reviver) {
@@ -7722,6 +7532,7 @@
       } catch (_e) {
         // ignore
       }
+    }
     }
 
     // ============================================================
@@ -7971,7 +7782,12 @@
 
   function ensureTaxRecvRuntime(reason) {
     syncGmgnShareWorkerMode();
-    if (!anyFilterEnabled()) {
+    if (!anyFilterEnabled() || !isFeePageContext()) {
+      try {
+        unwrapJsonParseTaxRecvHook();
+      } catch (_un) {
+        // ignore
+      }
       return;
     }
     try {
@@ -7985,11 +7801,121 @@
         // ignore
       }
     }
+    if (gmgnLiveTransport === "shared-worker") return;
+    if (taxRecvMainThreadTimer) return;
+    taxRecvMainThreadTimer = window.setTimeout(() => {
+      taxRecvMainThreadTimer = 0;
+      if (gmgnLiveTransport === "shared-worker") return;
+      if (!anyFilterEnabled() || !isFeePageContext()) return;
+      taxRecvWantMainThreadHooks = true;
+      try {
+        installTaxRecvNetworkHooks();
+      } catch (_mt) {
+        // ignore
+      }
+    }, 1800);
+  }
+
+  function gmgnLikelyMainThread() {
+    try {
+      if (localStorage.getItem("disableShareWorker") === "true") return true;
+    } catch (_ls) {
+      // ignore
+    }
+    try {
+      const ua = String(navigator.userAgent || "");
+      if (/Android|iPhone|iPad|iPod|Mobile|HarmonyOS|HuaweiBrowser/i.test(ua)) {
+        return true;
+      }
+    } catch (_ua) {
+      // ignore
+    }
+    if (typeof SharedWorker !== "function") return true;
+    return false;
+  }
+
+  function unwrapJsonParseTaxRecvHook() {
+    try {
+      const cur = JSON.parse;
+      if (cur && cur.__flapFeeTaxRecv && cur.__flapFeeNative) {
+        JSON.parse = cur.__flapFeeNative;
+      }
+    } catch (_un) {
+      // ignore
+    }
+  }
+
+  function unwrapJsonParseHostFeeHook() {
+    try {
+      const cur = JSON.parse;
+      if (
+        cur &&
+        cur.__flapFeeHostFee &&
+        cur.__flapFeeNative &&
+        !cur.__flapFeeTaxRecv
+      ) {
+        JSON.parse = cur.__flapFeeNative;
+      }
+    } catch (_un) {
+      // ignore
+    }
+  }
+
+  function ensureJsonParseHostFeeHook() {
+    if (gmgnLiveTransport === "shared-worker") return;
+    try {
+      if (JSON.parse.__flapFeeHostFee || JSON.parse.__flapFeeTaxRecv) return;
+    } catch (_has) {
+      return;
+    }
+    const NativeJSONParse =
+      (JSON.parse && JSON.parse.__flapFeeNative) || JSON.parse.bind(JSON);
+    try {
+      const wrappedParse = function flapFeeHostJsonParse(text, reviver) {
+        if (
+          typeof text !== "string" ||
+          text.length < 40 ||
+          text.length >= 800000 ||
+          !textMightBeHostFeeFeed(text)
+        ) {
+          return NativeJSONParse(text, reviver);
+        }
+        const obj = NativeJSONParse(text, reviver);
+        if (obj && typeof obj === "object") {
+          scheduleHostFeeIngest(() => {
+            try {
+              collectHostFeesFromJson(obj);
+            } catch (_hf) {
+              // ignore
+            }
+          });
+        }
+        return obj;
+      };
+      wrappedParse.__flapFeeHostFee = HOOK_VER;
+      wrappedParse.__flapFeeNative = NativeJSONParse;
+      JSON.parse = wrappedParse;
+    } catch (_jp) {
+      // ignore
+    }
+  }
+
+  function scheduleMainThreadJsonParseFallback() {
+    if (jsonParseHookTimer || gmgnLiveTransport === "shared-worker") return;
+    if (gmgnLikelyMainThread()) {
+      noteGmgnTransport("main-thread-ua");
+      return;
+    }
+    jsonParseHookTimer = window.setTimeout(() => {
+      jsonParseHookTimer = 0;
+      if (gmgnLiveTransport === "shared-worker") return;
+      noteGmgnTransport("main-thread-timeout");
+    }, 1800);
   }
 
   /**
    * BSC / GMGN Robinhood 页安装：s_tal host-fee（Robinhood pons v2 不打 /modes）。
-   * 与列表过滤钩子独立；过滤关闭时仍可减少 /modes。
+   * SharedWorker 页：Port + 列表 HTTP。MAIN_THREAD 才补 JSON.parse。
    */
   function installHostFeeNetworkHooks() {
     if (window.__flapFeeHostFeeHooks === HOOK_VER) return;
@@ -7998,38 +7924,6 @@
     try {
       document.documentElement?.setAttribute("data-flap-host-fee-ver", String(HOOK_VER));
     } catch (_attr) {
-      // ignore
-    }
-    const NativeJSONParse =
-      (JSON.parse && JSON.parse.__flapFeeNative) || JSON.parse.bind(JSON);
-    try {
-      if (!JSON.parse.__flapFeeHostFee) {
-        const wrappedParse = function flapFeeHostJsonParse(text, reviver) {
-          if (
-            typeof text !== "string" ||
-            text.length < 40 ||
-            text.length >= 800000 ||
-            !textMightBeHostFeeFeed(text)
-          ) {
-            return NativeJSONParse(text, reviver);
-          }
-          const obj = NativeJSONParse(text, reviver);
-          if (obj && typeof obj === "object") {
-            scheduleHostFeeIngest(() => {
-              try {
-                collectHostFeesFromJson(obj);
-              } catch (_hf) {
-                // ignore
-              }
-            });
-          }
-          return obj;
-        };
-        wrappedParse.__flapFeeHostFee = HOOK_VER;
-        wrappedParse.__flapFeeNative = NativeJSONParse;
-        JSON.parse = wrappedParse;
-      }
-    } catch (_jp) {
       // ignore
     }
     try {
@@ -8088,23 +7982,19 @@
     } catch (_pt) {
       // ignore
     }
+    try {
+      scheduleMainThreadJsonParseFallback();
+    } catch (_fb) {
+      // ignore
+    }
   }
 
-  // ---------- boot：SPA 已装；host-fee 常开；过滤 enabled 时装网络过滤 ----------
+  // ---------- boot：SPA 已装；host-fee 按通道装；过滤 enabled 时装网络过滤 ----------
   readPrefsSync();
   try {
     uninstallMainThreadProtoTap();
-      noteMainThreadTransportHints();
+    noteMainThreadTransportHints();
   } catch (_mtBoot) {
-    // ignore
-  }
-  try {
-    if (isFeePageContext()) {
-      installHostFeePortTap();
-      installHostFeeWebSocketTap();
-      installHostFeeXhrTap();
-    }
-  } catch (_earlyPt) {
     // ignore
   }
   installHostFeeNetworkHooks();
