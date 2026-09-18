@@ -7,10 +7,10 @@
  *     （XHR/fetch/WS/MessagePort/SharedWorker/JSON.parse）
  *   · 从不改 GMGN disableShareWorker（保持站点默认 SharedWorker）
  *   · 禁止改 Object.prototype（0.8.123 挂 onmessage 导致 GMGN 打不开）
- * ★ BSC 税币过滤 + GMGN Robinhood pons v2 host-fee（不打 /modes）；禁止 DOM reflow / 乱包 dedicated Worker
+ * ★ 链+平台 host-fee：BSC Flap/Four 尾号、BSC geniusfun、RH pons_v2；禁止对任意卡扒 fiber / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 184;
+  const HOOK_VER = 187;
   /** 钩子安装前的原生 parse；内部 clone 禁止走已包装的 JSON.parse。 */
   const NATIVE_JSON_PARSE = JSON.parse.bind(JSON);
   try {
@@ -162,8 +162,13 @@
   /** @type {{ enabled: boolean, rules: Array<{suffix:string, enabled:boolean}> }} */
   let suffixHidePrefs = { enabled: false, rules: [] };
   let suffixHideEnabled = false;
-  /** @type {{ enabled: boolean, hideTaxVault: boolean, hideStockVault: boolean }} */
-  let vaultHidePrefs = { enabled: false, hideTaxVault: false, hideStockVault: false };
+  /** @type {{ enabled: boolean, hideTaxVault: boolean, hideStockVault: boolean, hideGenius: boolean }} */
+  let vaultHidePrefs = {
+    enabled: false,
+    hideTaxVault: false,
+    hideStockVault: false,
+    hideGenius: false
+  };
   let vaultHideEnabled = false;
 
   let lastGmgnTrench = null;
@@ -291,6 +296,9 @@
     if (!entry || !anyFilterEnabled()) return false;
     const addr = String(entry.address || "").toLowerCase();
     if (shouldHideByCustomSuffix(addr)) return true;
+    if (entry.__geniusfun === true) {
+      return vaultHideEnabled && vaultHidePrefs.hideGenius === true;
+    }
     if (vaultHideEnabled) {
       if (entry.is_stocks_vault === true && vaultHidePrefs.hideStockVault === true) {
         return true;
@@ -570,7 +578,8 @@
     vaultHidePrefs = {
       enabled: p?.enabled === true,
       hideTaxVault: p?.hideTaxVault === true,
-      hideStockVault: p?.hideStockVault === true
+      hideStockVault: p?.hideStockVault === true,
+      hideGenius: p?.hideGenius === true
     };
     vaultHideEnabled = vaultHidePrefs.enabled === true;
   }
@@ -700,11 +709,84 @@
     return TARGET_TOKEN_RE.test(a);
   }
 
+  function gmgnNormalizePlatform(item) {
+    const lp = gmgnLaunchpadFamily(item);
+    if (!lp) return "";
+    if (lp.indexOf("pons_v2") !== -1) return "pons_v2";
+    if (lp.indexOf("genius") !== -1) return "geniusfun";
+    if (lp.indexOf("four") !== -1) return "four";
+    if (lp.indexOf("flap") !== -1) return "flap";
+    return lp;
+  }
+
+  function gmgnItemIsBsc(item) {
+    if (gmgnItemIsRobinhood(item)) return false;
+    const chain = String(
+      item.chain || item.network || (item.f && (item.f.chain || item.f.network)) || ""
+    ).toLowerCase();
+    if (chain === "bsc") return true;
+    if (chain) return false;
+    const href = String(item.href || item.url || item.link || "");
+    if (/\/bsc\/token\//i.test(href) || /\/token\/bsc\//i.test(href)) return true;
+    if (/\/robinhood\/token\//i.test(href) || /\/token\/robinhood\//i.test(href)) {
+      return false;
+    }
+    const plat = gmgnNormalizePlatform(item);
+    // 无链字段时只信 BSC 平台，禁止把整页当 BSC 去判断任意卡。
+    return plat === "geniusfun" || plat === "flap" || plat === "four";
+  }
+
+  function isFlapFourSuffixAddr(addr) {
+    const a = String(addr || "").toLowerCase();
+    return TARGET_TOKEN_RE.test(a);
+  }
+
+  const geniusFunAddrSet = new Set();
+
+  function rememberGeniusFunAddr(addr) {
+    const a = String(addr || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(a)) return;
+    geniusFunAddrSet.add(a);
+    if (geniusFunAddrSet.size <= 400) return;
+    const first = geniusFunAddrSet.keys().next().value;
+    if (first) geniusFunAddrSet.delete(first);
+  }
+
+  function isGeniusFunAddr(addr) {
+    return geniusFunAddrSet.has(String(addr || "").toLowerCase());
+  }
+
   function isHostFeeTargetItem(item) {
     const addr = gmgnAddr(item);
     if (!addr) return false;
-    if (gmgnItemIsRobinhood(item)) return gmgnIsPonsV2(item);
-    return TARGET_TOKEN_RE.test(addr);
+    const plat = gmgnNormalizePlatform(item);
+    if (gmgnItemIsRobinhood(item)) return plat === "pons_v2";
+    if (!gmgnItemIsBsc(item)) return false;
+    if (plat === "geniusfun") return true;
+    if (plat === "four") return /ffff$/i.test(addr);
+    if (plat === "flap") return /(8888|7777)$/i.test(addr);
+    if (plat) return false;
+    return isFlapFourSuffixAddr(addr);
+  }
+
+  function isDomFeeTargetAddr(addr, href) {
+    const a = String(addr || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(a)) return false;
+    const h = String(href || "").toLowerCase();
+    if (/\/robinhood\/token\//i.test(h) || /\/token\/robinhood\//i.test(h)) {
+      return true;
+    }
+    if (/\/bsc\/token\//i.test(h) || /\/token\/bsc\//i.test(h)) {
+      if (isFlapFourSuffixAddr(a) || isGeniusFunAddr(a)) return true;
+      const path = String(location.pathname || "");
+      const m = path.match(/0x[a-fA-F0-9]{40}/i);
+      return Boolean(m && m[0].toLowerCase() === a);
+    }
+    if (isFlapFourSuffixAddr(a) || isGeniusFunAddr(a)) return true;
+    const path = String(location.pathname || "");
+    if (!/\/bsc\/token\//i.test(path) && !/\/token\/bsc\//i.test(path)) return false;
+    const m = path.match(/0x[a-fA-F0-9]{40}/i);
+    return Boolean(m && m[0].toLowerCase() === a);
   }
 
   function isGmgnTokenItem(item) {
@@ -912,8 +994,9 @@
     if (!vaultHideEnabled || !kind) return false;
     const hideTax = vaultHidePrefs.hideTaxVault === true;
     const hideStock = vaultHidePrefs.hideStockVault === true;
+    const hideGenius = vaultHidePrefs.hideGenius === true;
     // 总开关开了但子项都没勾：默认按税收金库屏蔽（96%🎁+4%💎 也算）
-    if (!hideTax && !hideStock) {
+    if (!hideTax && !hideStock && !hideGenius) {
       return kind === "tax";
     }
     if (kind === "stock") return hideStock;
@@ -1447,7 +1530,13 @@
       const addr = String(
         c.address || c.contract || c.token_address || c.ca || ""
       ).toLowerCase();
-      if (!TARGET_TOKEN_RE.test(addr) || seen.has(addr)) return;
+      if (!addr || seen.has(addr)) return;
+      const lp = String(
+        c.launchpad_platform || c.launchpad || c.lpp || (c.pool && c.pool.exchange) || ""
+      ).toLowerCase();
+      const genius = lp.indexOf("genius") !== -1;
+      if (!TARGET_TOKEN_RE.test(addr) && !genius) return;
+      if (genius) rememberGeniusFunAddr(addr);
       seen.add(addr);
       out.push(addr);
     };
@@ -1967,8 +2056,10 @@
   function queueHostFeeEntry(entry) {
     if (!entry || !entry.address) return;
     const pons = entry.__pons_v2 === true;
-    if (!TARGET_TOKEN_RE.test(entry.address) && !pons) return;
+    const genius = entry.__geniusfun === true;
+    if (!TARGET_TOKEN_RE.test(entry.address) && !pons && !genius) return;
     const addr = String(entry.address).toLowerCase();
+    if (genius) rememberGeniusFunAddr(addr);
     if (pons) {
       rhFeeDone.add(addr);
       if (rhFeeDone.size > 400) {
@@ -2010,15 +2101,50 @@
     }, 0);
   }
 
+  function gmgnGeniusStubFromItem(item, addr) {
+    const quote_symbol = gmgnResolveQuoteSymbol(item, null);
+    const quote_token = String(
+      item.launch_quote_address ||
+        item.qa ||
+        item.quote_address ||
+        (item.pool && (item.pool.quote_address || item.pool.token1_address)) ||
+        ""
+    ).toLowerCase();
+    return {
+      address: addr,
+      source: "gmgn",
+      dividend_bps: 0,
+      market_bps: 0,
+      deflation_bps: 0,
+      lp_bps: 0,
+      giggle_charity_bps: 0,
+      binance_charity_bps: 0,
+      is_vault: false,
+      is_stocks_vault: false,
+      buy_tax_bps: 200,
+      sell_tax_bps: 200,
+      quote_symbol,
+      quote_token,
+      __geniusfun: true,
+      __needsChain: true
+    };
+  }
+
   function gmgnHostFeeFromItem(item) {
     const addr = gmgnAddr(item);
     const pons = gmgnIsPonsV2(item);
+    const genius = gmgnNormalizePlatform(item) === "geniusfun" && gmgnItemIsBsc(item);
     if (pons) {
+      if (!addr) return null;
+    } else if (genius) {
       if (!addr) return null;
     } else if (!TARGET_TOKEN_RE.test(addr)) {
       return null;
     }
     const tal = gmgnTal(item);
+    if (genius && (!tal || typeof tal !== "object")) {
+      return gmgnGeniusStubFromItem(item, addr);
+    }
     if (!tal || typeof tal !== "object") return null;
     let dividend_bps = ratioToBps(
       pickTalField(tal, [
@@ -2172,8 +2298,9 @@
         quote_symbol,
         tax_symbol: selfSym
       }),
-      __needsChain: needsChain,
-      __pons_v2: pons
+      __needsChain: genius ? true : needsChain,
+      __pons_v2: pons,
+      __geniusfun: genius
     });
   }
 
@@ -2216,6 +2343,7 @@
     const href = String(row.href || row.url || row.path || row.token_url || row.link || "");
     if (/\/token\/bsc\/|\/bsc\/token\//i.test(href)) return true;
     if (/\/token\/robinhood\/|\/robinhood\/token\//i.test(href)) return false;
+    if (debotRowIsGeniusFun(row)) return true;
     const addr = String(
       row.contract || row.tokenAddress || row.token_address || row.address || ""
     )
@@ -2340,9 +2468,15 @@
     return s === "WBNB" ? "BNB" : s;
   }
 
+  function debotRowIsGeniusFun(row) {
+    const lp = debotRowLaunchpad(row);
+    return lp.indexOf("genius") !== -1;
+  }
+
   function debotHostFeeFromRow(row) {
     if (!row || typeof row !== "object") return null;
     const pons = debotRowIsPonsV2(row);
+    const genius = debotRowIsGeniusFun(row) && debotRowIsBsc(row);
     const rhRow = debotRowChain(row) === "robinhood" || pons;
     if (!debotRowIsBsc(row) && !pons) return null;
     const addr = String(
@@ -2352,11 +2486,31 @@
       .toLowerCase();
     if (pons) {
       if (!/^0x[a-f0-9]{40}$/.test(addr)) return null;
+    } else if (genius) {
+      if (!/^0x[a-f0-9]{40}$/.test(addr)) return null;
     } else if (!TARGET_TOKEN_RE.test(addr)) {
       return null;
     }
     const meta = row.meta && typeof row.meta === "object" ? row.meta : null;
     const extra = (meta && meta.launchpad_extra) || row.launchpad_extra;
+    if (genius && (!extra || typeof extra !== "object")) {
+      return {
+        address: addr,
+        source: "debot",
+        dividend_bps: 0,
+        market_bps: 0,
+        deflation_bps: 0,
+        lp_bps: 0,
+        giggle_charity_bps: 0,
+        binance_charity_bps: 0,
+        is_vault: false,
+        is_stocks_vault: false,
+        buy_tax_bps: 200,
+        sell_tax_bps: 200,
+        __geniusfun: true,
+        __needsChain: true
+      };
+    }
     if (!extra || typeof extra !== "object") return null;
     const dividend_bps = ratioToBps(extra.dividend_pct ?? extra.holder_pct);
     const is_vault_early =
@@ -2539,7 +2693,8 @@
         tax_symbol: selfSym
       }),
       __pons_v2: pons,
-      __needsChain: pons ? false : needsChain
+      __geniusfun: genius,
+      __needsChain: genius ? true : pons ? false : needsChain
     });
   }
 
@@ -3658,26 +3813,40 @@
         const ca = String(
           json?.data?.address || sec?.address || lp?.address || ""
         ).toLowerCase();
-        if (
+        const lpBag = {
+          launchpad: typeof lp === "string" ? lp : lp && lp.launchpad,
+          launchpad_platform:
+            (lp && typeof lp === "object" && (lp.launchpad_platform || lp.lpp || lp.launchpad)) ||
+            (typeof lp === "string" ? lp : "")
+        };
+        const plat = gmgnNormalizePlatform(lpBag);
+        if (ca && plat === "geniusfun") {
+          collectHostFeesFromGmgnItem({
+            a: ca,
+            s_tal: tal,
+            tax_allocation: tal,
+            security: sec,
+            launchpad: lpBag.launchpad,
+            launchpad_platform: "geniusfun",
+            f: {
+              launchpad: lpBag.launchpad,
+              launchpad_platform: "geniusfun"
+            }
+          });
+        } else if (
           tal &&
-          (TARGET_TOKEN_RE.test(ca) ||
-            gmgnIsPonsV2({
-              launchpad: typeof lp === "string" ? lp : lp && lp.launchpad,
-              launchpad_platform:
-                (lp && typeof lp === "object" && (lp.launchpad_platform || lp.lpp || lp.launchpad)) ||
-                ""
-            }))
+          (TARGET_TOKEN_RE.test(ca) || gmgnIsPonsV2(lpBag))
         ) {
           collectHostFeesFromGmgnItem({
             a: ca,
             s_tal: tal,
             tax_allocation: tal,
             security: sec,
-            launchpad: lp?.launchpad,
-            launchpad_platform: lp?.launchpad_platform,
+            launchpad: lpBag.launchpad,
+            launchpad_platform: lpBag.launchpad_platform,
             f: {
-              launchpad: lp?.launchpad,
-              launchpad_platform: lp?.launchpad_platform
+              launchpad: lpBag.launchpad,
+              launchpad_platform: lpBag.launchpad_platform
             }
           });
         }
@@ -3701,7 +3870,9 @@
       text.indexOf("new_creations") !== -1 ||
       text.indexOf("socket-event") !== -1 ||
       text.indexOf("meme:new") !== -1 ||
-      text.indexOf("pons_v2") !== -1
+      text.indexOf("pons_v2") !== -1 ||
+      text.indexOf("geniusfun") !== -1 ||
+      text.indexOf("genius.fun") !== -1
     );
   }
 
@@ -4251,16 +4422,48 @@
 
   function processGmgnReactTaxCard(card) {
     if (!(card instanceof HTMLElement)) return;
-    noteGmgnTransport("fiber");
+    const href = String(card.getAttribute?.("href") || "");
     const addr = gmgnAddrFromCard(card);
+    if (!isDomFeeTargetAddr(addr, href) && !/\/robinhood\/token\//i.test(href)) {
+      return;
+    }
+    noteGmgnTransport("fiber");
     const row = scrapeGmgnTokenRowFromFiber(card, addr);
     const loose = scrapeGmgnTokenDataLoose(card);
     if (addr) queueCardMarkFromItem(row || loose, addr);
-    const rhHref = /\/robinhood\/token\//i.test(String(card.getAttribute?.("href") || ""));
+    const rhHref = /\/robinhood\/token\//i.test(href);
+    let rowPlat = gmgnNormalizePlatform(row || {});
+    if (!rowPlat && !rhHref) {
+      const path = String(location.pathname || "");
+      const um = path.match(/0x[a-fA-F0-9]{40}/i);
+      if (um && um[0].toLowerCase() === String(addr || "").toLowerCase()) {
+        const lp = scrapeGmgnLaunchpadFromFiber(card, addr);
+        if (lp) {
+          rowPlat = gmgnNormalizePlatform({ launchpad: lp, launchpad_platform: lp });
+        }
+      }
+    }
+    if (rowPlat === "geniusfun" && !rhHref && gmgnItemIsBsc(row || { a: addr, href, launchpad: rowPlat })) {
+      rememberGeniusFunAddr(addr);
+      const stub = gmgnGeniusStubFromItem(
+        {
+          ...(row || {}),
+          a: addr,
+          launchpad: "geniusfun",
+          launchpad_platform: "geniusfun"
+        },
+        addr
+      );
+      if (stub) {
+        stub.__fromFiber = true;
+        queueHostFeeEntry(finalizeHostFeeEntry(stub));
+      }
+      return;
+    }
     if (!TARGET_TOKEN_RE.test(addr) && !(rhHref && gmgnIsPonsV2(row || {}))) {
+      if (!rhHref) return;
       const lp = scrapeGmgnLaunchpadFromFiber(card, addr);
       if (
-        rhHref &&
         addr &&
         gmgnAddr(row) === addr &&
         lp &&
@@ -4268,7 +4471,7 @@
       ) {
         queuePonsSkipAddr(addr);
       }
-      if (!(rhHref && String(lp || "").toLowerCase().indexOf("pons_v2") !== -1)) {
+      if (String(lp || "").toLowerCase().indexOf("pons_v2") === -1) {
         return;
       }
     }
@@ -4355,13 +4558,15 @@
     if (scrapedAddr && addr && scrapedAddr !== addr) return;
     const row = { ...scraped, contract: addr };
     const pons = debotRowIsPonsV2(row);
-    if (!TARGET_TOKEN_RE.test(addr) && !pons) {
+    const genius = debotRowIsGeniusFun(row) && debotRowIsBsc(row);
+    if (!TARGET_TOKEN_RE.test(addr) && !pons && !genius) {
       const lp = debotRowLaunchpad(row);
       if (/\/token\/robinhood\//i.test(href) && addr && lp && !pons) {
         queuePonsSkipAddr(addr);
       }
       return;
     }
+    if (genius && addr) rememberGeniusFunAddr(addr);
     if (pons && addr) debotClearRhSkip(addr);
     let entry = debotHostFeeFromRow(row);
     if (!entry) return;
@@ -4489,16 +4694,19 @@
       let budget = HOST_FEE_SCAN_MAX_NODES;
       if (debot) {
         const cards = root.matches?.(
-          "[data-contract], a[href*='/token/bsc/'], a[href*='/token/robinhood/']"
+          "a[href*='/token/bsc/'], a[href*='/token/robinhood/']"
         )
           ? [root]
           : root.querySelectorAll?.(
-              "[data-contract], a[href*='/token/bsc/'][href*='8888'], a[href*='/token/bsc/'][href*='7777'], a[href*='/token/bsc/'][href*='ffff'], a[href*='/token/robinhood/']"
+              "a[href*='/token/bsc/'], a[href*='/token/robinhood/']"
             );
         cards?.forEach?.((el) => {
           if (budget <= 0) return;
           const href = String(el.getAttribute?.("href") || "");
           const hrefAddr = (href.match(/0x[a-fA-F0-9]{40}/i) || [])[0];
+          if (!isDomFeeTargetAddr(hrefAddr, href) && !/\/token\/robinhood\//i.test(href)) {
+            return;
+          }
           if (/\/token\/robinhood\//i.test(href)) {
             if (debotRhSkipFresh(hrefAddr)) return;
           }
@@ -4509,7 +4717,13 @@
         return;
       }
       const card = resolveGmgnCardElement(root);
-      if (card) schedule(card, "gmgn");
+      if (card) {
+        const rootHref = String(card.getAttribute?.("href") || "");
+        const rootAddr = gmgnAddrFromCard(card);
+        if (isDomFeeTargetAddr(rootAddr, rootHref) || /\/robinhood\/token\//i.test(rootHref)) {
+          schedule(card, "gmgn");
+        }
+      }
       root
         .querySelectorAll?.(
           '[data-sentry-source-file="TokenItem.tsx"], [href*="/bsc/token/0x"], [href*="/robinhood/token/0x"]'
@@ -4528,6 +4742,9 @@
           ) {
             return;
           }
+          if (!isDomFeeTargetAddr(hrefAddr, href) && !/\/robinhood\/token\//i.test(href)) {
+            return;
+          }
           budget -= 1;
           const c = resolveGmgnCardElement(el);
           if (c) schedule(c, "gmgn");
@@ -4542,7 +4759,11 @@
         if (ev?.detail?.force === true) {
           rhFeeDone.delete(token);
         }
-        if (!TARGET_TOKEN_RE.test(token) && !isRobinhoodPageContext()) {
+        if (
+          !TARGET_TOKEN_RE.test(token) &&
+          !isGeniusFunAddr(token) &&
+          !isRobinhoodPageContext()
+        ) {
           // Debot 混合战壕：pons CA 尾号随机，不能用页级 chain 挡掉
           if (!/debot\.ai|gungnir\.bot/i.test(location.hostname || "")) return;
         }
@@ -5124,6 +5345,9 @@
     const addr = gmgnAddr(t);
     // 自定义尾号：任意 CA（不限 7777/8888/ffff）
     if (shouldHideByCustomSuffix(addr)) return true;
+    if (gmgnNormalizePlatform(t) === "geniusfun") {
+      return vaultHideEnabled && vaultHidePrefs.hideGenius === true;
+    }
     const tal = gmgnTal(t);
     if (vaultHideEnabled) {
       const vKind = gmgnVaultKind(tal, t);
@@ -5174,6 +5398,9 @@
     const contract = String(row.contract || "").toLowerCase();
     // 自定义尾号：任意 CA
     if (shouldHideByCustomSuffix(contract)) return true;
+    if (debotRowIsGeniusFun(row)) {
+      return vaultHideEnabled && vaultHidePrefs.hideGenius === true;
+    }
     const extra = debotRowExtra(row);
     if (vaultHideEnabled && extra) {
       const vKind = debotVaultKind(extra);

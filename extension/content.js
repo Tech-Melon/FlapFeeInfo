@@ -3,6 +3,7 @@
   const TOKEN_RE = /0x[a-fA-F0-9]{40}/;
   // Flap tax 8888/7777 + Four.meme tax ffff
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
+  const GENIUS_FUN_PAGE_BASE = "https://genius.fun/token";
   // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777|ffff)/i;
@@ -17,6 +18,12 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.193: Genius 主文案 🪙QUOTE|🎁→QUOTE（Flap 箭头）；BSC 整批 1 次 eth_call。
+  // 0.8.192: Genius 主文案 🪙QUOTE|🎁QUOTE（参考 Flap 身份，比例只在 tooltip）；后端整批 Multicall。
+  // 0.8.191: Genius 徽章紧凑 🪙QUOTE|🎁/👨‍🍳；金库过滤默不挡 Genius；新卡先画报价并立刻 /modes。
+  // 0.8.190: Genius js-mcp — Worker 剥 gift_bps 画成 🎁12.5%；1 条 KV 把其余推进后台队列一直 ⏳。
+  // 0.8.189: Genius 卡 ⏳ 卡死 — flush /modes 误删非 8888/7777/ffff 队列。
+  // 0.8.188: Genius.fun — 只认 BSC+geniusfun；Flap/Four/Pons 对齐链+平台，禁止对任意卡扒 fiber / 打 /modes。
   // 0.8.187: 点徽章开税收后 blur，空格不再二次打开；换绑成功不再被 KV 延迟误判失败。
   // 0.8.186: 新创建 7777 不再因 host-fee 缺 →QQQB 卡 ⏳；无 href 税币不走 RH 顶栏门禁。
   // 0.8.185: RH K 线非 pons（longxyz/bankr/v1）不画 ⏳；顶栏只认已确认 pons_v2。
@@ -634,7 +641,8 @@
   const DEFAULT_VAULT_HIDE = {
     enabled: false,
     hideTaxVault: false,
-    hideStockVault: false
+    hideStockVault: false,
+    hideGenius: false
   };
   const DEFAULT_SEARCH_HIDE = { enabled: false };
   const SEARCH_HIDE_ATTR = "data-flap-search-hidden";
@@ -731,6 +739,7 @@
     robinhood: "ETH"
   };
   const ponsV2AddrSet = new Set();
+  const geniusFunAddrSet = new Set();
   const ponsV2FiberCache = new WeakMap();
   /** Robinhood 已确认非 pons_v2（long/bankr/v1）：禁止反复 fiber 扒卡 */
   const PONS_SKIP_TTL_MS = 45000;
@@ -1780,6 +1789,11 @@
     return true;
   }
 
+  function isModesQueueToken(tok) {
+    const t = String(tok || "").toLowerCase();
+    return TARGET_TOKEN_RE.test(t) || isGeniusFunToken(t);
+  }
+
   function tokenNeedsModesFetch(token) {
     const tok = String(token || "").toLowerCase();
     const cached =
@@ -1787,6 +1801,13 @@
       (isPersistentCacheHit(tok) ? persistentCache.get(tok) : null);
     if (cached && cached.__pons_v2 === true) return false;
     if (ponsV2AddrSet.has(tok)) return false;
+    if (isGeniusFunToken(tok)) {
+      if (shouldHideByCustomSuffix(tok)) return false;
+      if (searchOverlayModesTokens.has(tok)) return true;
+      const gEntry = cached;
+      if (!gEntry || isFeeLoadingEntry(gEntry)) return true;
+      return !hostFeeCanSkipModes(gEntry);
+    }
     if (!TARGET_TOKEN_RE.test(tok)) return false;
     if (shouldHideByCustomSuffix(tok)) return false;
     if (searchOverlayModesTokens.has(tok)) return true;
@@ -1811,9 +1832,14 @@
 
   function queueSearchOverlayModes(token, href) {
     const tok = String(token || "").toLowerCase();
-    if (!TARGET_TOKEN_RE.test(tok) || !isExtensionContextValid()) return;
+    if (
+      (!TARGET_TOKEN_RE.test(tok) && !isGeniusFunToken(tok)) ||
+      !isExtensionContextValid()
+    ) {
+      return;
+    }
     if (!isBadgeAccessAllowed() || !isAllowedScanChain()) return;
-    if (href && !isBscTaxTokenHref(href)) return;
+    if (href && !isBscTaxTokenHref(href) && !isGeniusFunToken(tok)) return;
     if (shouldHideByCustomSuffix(tok)) return;
     if (searchOverlayModesTokens.size >= 48) {
       const oldest = searchOverlayModesTokens.keys().next().value;
@@ -1834,7 +1860,7 @@
     let n = 0;
     for (let i = 0; i < tokens.length; i += 1) {
       const tok = String(tokens[i] || "").toLowerCase();
-      if (!TARGET_TOKEN_RE.test(tok)) continue;
+      if (!TARGET_TOKEN_RE.test(tok) && !isGeniusFunToken(tok)) continue;
       const entry =
         modeCache.get(tok) ||
         (isPersistentCacheHit(tok) ? persistentCache.get(tok) : null);
@@ -1850,7 +1876,12 @@
     if (ponsV2AddrSet.has(token)) {
       return;
     }
-    if (!TARGET_TOKEN_RE.test(token) || !isExtensionContextValid()) return;
+    if (
+      (!TARGET_TOKEN_RE.test(token) && !isGeniusFunToken(token)) ||
+      !isExtensionContextValid()
+    ) {
+      return;
+    }
     if (!isBadgeAccessAllowed() || !isAllowedScanChain()) return;
     if (releaseQueuedTokenIfHostFeeReady(token)) return;
     if (!tokenNeedsModesFetch(token)) return;
@@ -1871,7 +1902,12 @@
     if (ponsV2AddrSet.has(token)) {
       return;
     }
-    if (!TARGET_TOKEN_RE.test(token) || incompleteModesTimers.has(token)) return;
+    if (
+      (!TARGET_TOKEN_RE.test(token) && !isGeniusFunToken(token)) ||
+      incompleteModesTimers.has(token)
+    ) {
+      return;
+    }
     if (!isBadgeAccessAllowed() || !isAllowedScanChain()) return;
     if (releaseQueuedTokenIfHostFeeReady(token)) return;
     if (!tokenNeedsModesFetch(token)) return;
@@ -1886,10 +1922,11 @@
         incompleteModesTimers.delete(oldest);
       }
     }
+    const delayMs = isGeniusFunToken(token) ? 0 : HOST_FEE_INCOMPLETE_DELAY_MS;
     const timerId = window.setTimeout(() => {
       incompleteModesTimers.delete(token);
       forceModesForWaitingToken(token);
-    }, HOST_FEE_INCOMPLETE_DELAY_MS);
+    }, delayMs);
     incompleteModesTimers.set(token, timerId);
   }
 
@@ -1957,10 +1994,23 @@
     }
     if (options.searchOverlay === true) {
       const href = readCardTokenHref(card);
-      if (href && !isBscTaxTokenHref(href)) return false;
+      if (href && !isBscTaxTokenHref(href) && !isGeniusFunToken(tok)) return false;
       queueSearchOverlayModes(tok, href);
     } else {
       scheduleIncompleteModes(tok);
+    }
+    const gEntry = getEntryForCard(card, tok);
+    if (
+      isGeniusFeeEntry(gEntry, tok) &&
+      gEntry &&
+      !isFeeLoadingEntry(gEntry) &&
+      String(gEntry.quote_symbol || "").trim()
+    ) {
+      try {
+        return paintListCardFromCacheFast(card, tok, gEntry) === true;
+      } catch (_gPaint) {
+        // fall through to ⏳
+      }
     }
     try {
       const existing = card.querySelector(`[${ICON_DATA}="1"]`);
@@ -3028,8 +3078,8 @@
       // mixed 战壕：Robinhood 卡尾号随机，几何仍按行卡。
     } else {
       const tok = extractAnyToken(href);
-      if (!TARGET_TOKEN_RE.test(tok || "")) return false;
       if (!isBscTokenRouteHref(href)) return false;
+      if (!TARGET_TOKEN_RE.test(tok || "") && !isGeniusFunToken(tok)) return false;
     }
     try {
       const r = el.getBoundingClientRect();
@@ -3568,6 +3618,19 @@
     return isDebotRobinhoodTokenHref(href);
   }
 
+  function rememberGeniusFunAddr(addr) {
+    const a = String(addr || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(a)) return;
+    geniusFunAddrSet.add(a);
+    if (geniusFunAddrSet.size <= 400) return;
+    const first = geniusFunAddrSet.keys().next().value;
+    if (first) geniusFunAddrSet.delete(first);
+  }
+
+  function isGeniusFunToken(addr) {
+    return geniusFunAddrSet.has(String(addr || "").toLowerCase());
+  }
+
   function rememberPonsV2Addr(addr) {
     const a = String(addr || "").toLowerCase();
     if (/^0x[a-f0-9]{40}$/.test(a)) {
@@ -3707,11 +3770,19 @@
     const s = String(raw || "")
       .toLowerCase()
       .replace(/\s+/g, "");
-    if (!s || s.length > 32) return "";
+    if (!s || s.length > 48) return "";
+    if (s.indexOf("geniusfun") !== -1 || s.indexOf("genius.fun") !== -1) return "geniusfun";
     if (s.indexOf("pons_v2") !== -1 || s === "ponsv2") return "pons_v2";
+    if (s.indexOf("fourmeme") !== -1 || s.indexOf("four.meme") !== -1) return "fourmeme";
+    if (s === "flap" || s.indexOf("flap") === 0) return "flap";
     if (s === "long.xyz" || s === "longxyz" || s.indexOf("long.xyz") !== -1) return "longxyz";
     if (s === "bankr" || s.indexOf("bankr.") === 0) return "bankr";
     return "";
+  }
+
+  function isGeniusFunLaunchpadRaw(raw) {
+    const s = String(raw || "").toLowerCase().replace(/[\s_-]+/g, "");
+    return s.indexOf("geniusfun") !== -1;
   }
 
   function launchpadFromFiberBag(d, wantAddr) {
@@ -3891,21 +3962,25 @@
     if (isBscTokenRouteHref(href)) return "bsc";
     const a = String(addr || "").toLowerCase();
     if (a && ponsV2AddrSet.has(a)) return "rh";
+    if (a && geniusFunAddrSet.has(a)) return "bsc";
     if (TARGET_TOKEN_RE.test(a)) return "bsc";
     if (pageUrlIsRobinhoodToken()) return "rh";
     return "bsc";
   }
 
   /**
-   * 徽章目标：BSC 仍是 8888/7777/ffff；GMGN Robinhood 只认 pons_v2（随机尾号）。
-   * 不扩三层尾号正则，也不打 /modes。
+   * 徽章目标（链 + 平台，禁止对任意卡判断）：
+   * - BSC + Flap/Four：href 是 BSC 且尾号 8888/7777/ffff（尾号即平台）
+   * - BSC + Genius.fun：host-fee/API 已标 geniusfun，或 K 线 URL 代币顶栏芯片
+   * - Robinhood + pons_v2：已确认集合 / 卡上 launchpad
    */
   function isFeeTargetToken(addr, card) {
     const a = String(addr || "").toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(a)) return false;
     if (!isFeeBadgeChainPrefOn(feeBadgeChainKind(a, card))) return false;
-    if (ponsV2AddrSet.has(a)) return true;
     if (isPonsSkipAddr(a)) return false;
+    if (ponsV2AddrSet.has(a)) return true;
+    if (isGeniusFunToken(a)) return true;
     const href = card ? readCardTokenHref(card) : "";
     if (isRobinhoodTokenRouteHref(href)) {
       if (card && scrapePonsV2FromCard(card)) {
@@ -3917,12 +3992,35 @@
     if (isBscTokenRouteHref(href)) {
       return TARGET_TOKEN_RE.test(a);
     }
-    // 无卡 href：BSC 税币尾号仍走 /modes。RH K 线 URL 代币（随机尾号）只认 pons_v2。
     if (!href && pageUrlIsRobinhoodToken()) {
       if (TARGET_TOKEN_RE.test(a)) return isFeeBadgeChainPrefOn("bsc");
       return isRhKlineFeeTarget(a);
     }
+    if (!href && pageUrlIsBscToken()) {
+      if (TARGET_TOKEN_RE.test(a)) return true;
+      return isBscKlineFeeTarget(a);
+    }
     return TARGET_TOKEN_RE.test(a);
+  }
+
+  function pageUrlIsBscToken() {
+    const path = location.pathname || "";
+    return /\/bsc\/token\//i.test(path) || /\/token\/bsc(?:\/|$)/i.test(path);
+  }
+
+  function isBscKlineFeeTarget(addr) {
+    const a = String(addr || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(a)) return false;
+    if (!isFeeBadgeChainPrefOn("bsc")) return false;
+    if (TARGET_TOKEN_RE.test(a) || isGeniusFunToken(a)) return true;
+    const urlTok = extractAnyToken(location.pathname || "");
+    if (urlTok !== a) return false;
+    const lp = scrapeLaunchpadFromTokenPage(a);
+    if (isGeniusFunLaunchpadRaw(lp) || normalizeLaunchpadChip(lp) === "geniusfun") {
+      rememberGeniusFunAddr(a);
+      return true;
+    }
+    return false;
   }
 
   /** 非 BSC 链名（query/path/href 命中即拒绝） */
@@ -3973,9 +4071,18 @@
     const href = readCardTokenHref(card);
     if (!href) return isAllowedScanChain();
     if (String(href).toLowerCase().indexOf("/token/") === -1) return isAllowedScanChain();
-    if (isBscTokenRouteHref(href)) return isFeeBadgeChainPrefOn("bsc");
+    if (isBscTokenRouteHref(href)) {
+      if (!isFeeBadgeChainPrefOn("bsc")) return false;
+      const tok = extractAnyToken(href);
+      if (tok && isGeniusFunToken(tok)) return true;
+      return TARGET_TOKEN_RE.test(tok || "");
+    }
     if (isRobinhoodTokenRouteHref(href) && (isGmgnHost() || isDebotLikeHost())) {
-      return isFeeBadgeChainPrefOn("rh");
+      if (!isFeeBadgeChainPrefOn("rh")) return false;
+      const tok = extractAnyToken(href);
+      if (tok && ponsV2AddrSet.has(tok)) return true;
+      if (tok && isPonsSkipAddr(tok)) return false;
+      return false;
     }
     return false;
   }
@@ -4173,14 +4280,16 @@
     return false;
   }
 
-  /** CA from URL path (GMGN/Debot token detail). BSC 税币尾号；Robinhood K 线任意 0x，画不画再看 pons_v2。 */
+  /** CA from URL path (GMGN/Debot token detail). BSC 税币尾号 / geniusfun；Robinhood K 线任意 0x，画不画再看 pons_v2。 */
   function extractTokenFromUrl() {
     const m = String(location.pathname || "").match(/0x[a-fA-F0-9]{40}/i);
     if (!m) return null;
     const token = m[0].toLowerCase();
     if (isGmgnRobinhoodPage()) return token;
     if (isDebotLikeHost() && /\/token\/robinhood\//i.test(location.pathname || "")) return token;
-    return TARGET_TOKEN_RE.test(token) ? token : null;
+    if (isGeniusFunToken(token) || TARGET_TOKEN_RE.test(token)) return token;
+    if (pageUrlIsBscToken() && isBscKlineFeeTarget(token)) return token;
+    return null;
   }
 
   /**
@@ -4218,6 +4327,19 @@
           nodes.push(el);
         }
       });
+    }
+    try {
+      let n = 0;
+      geniusFunAddrSet.forEach((ca) => {
+        if (n >= 12 || nodes.length >= MAX_CANDIDATES_PER_SCAN) return;
+        const el = document.querySelector(`[href*="${ca}"]`);
+        if (el instanceof HTMLElement && !nodes.includes(el)) {
+          nodes.push(el);
+          n += 1;
+        }
+      });
+    } catch (_g) {
+      // ignore
     }
     return nodes.slice(0, MAX_CANDIDATES_PER_SCAN);
   }
@@ -4355,7 +4477,7 @@
     if (isDebotLikeHost() && /\/token\/robinhood\//i.test(location.pathname || "")) {
       return false;
     }
-    return !TARGET_TOKEN_RE.test(token);
+    return !isFeeTargetToken(token);
   }
 
   /**
@@ -6651,7 +6773,14 @@
     if (isPonsSkipAddr(token)) return;
     const entry = resolveEntry(token);
     if (!entry || isHostFeeEntryPending(entry) || isFeeLoadingEntry(entry)) return;
-    if (entry.__pons_v2 !== true && !TARGET_TOKEN_RE.test(token)) return;
+    if (
+      entry.__pons_v2 !== true &&
+      !entry.__geniusfun &&
+      !isGeniusFunToken(token) &&
+      !TARGET_TOKEN_RE.test(token)
+    ) {
+      return;
+    }
     paintListCardFromCacheFast(card, token, entry);
   }
 
@@ -7038,7 +7167,10 @@
           record.attributeName === "href" &&
           record.target instanceof HTMLElement &&
           /\/token\//i.test(record.target.getAttribute("href") || "") &&
-          /(?:7777|8888|ffff)/i.test(record.target.getAttribute("href") || "")
+          (/\/(?:bsc|robinhood)\/token\//i.test(record.target.getAttribute("href") || "") ||
+            /\/token\/(?:bsc|robinhood)\//i.test(record.target.getAttribute("href") || "") ||
+            /(?:7777|8888|ffff)/i.test(record.target.getAttribute("href") || "") ||
+            isGeniusFunToken(extractAnyToken(record.target.getAttribute("href") || "")))
         ) {
           return true;
         }
@@ -7098,6 +7230,7 @@
     if (/\/robinhood\/token\//i.test(String(routeKey || "")) || /\/token\/robinhood\//i.test(String(routeKey || ""))) {
       return isPonsSkipAddr(token);
     }
+    if (isGeniusFunToken(token)) return false;
     return !TARGET_TOKEN_RE.test(token);
   }
 
@@ -7994,7 +8127,8 @@
     if (/\/robinhood\/token\//i.test(String(keyOrPath || "")) || /\/token\/robinhood\//i.test(String(keyOrPath || ""))) {
       return token;
     }
-    return TARGET_TOKEN_RE.test(token) ? token : null;
+    if (isGeniusFunToken(token) || TARGET_TOKEN_RE.test(token)) return token;
+    return null;
   }
 
   /**
@@ -8038,7 +8172,7 @@
     });
   }
 
-  const PAGE_HOOK_VER = "184";
+  const PAGE_HOOK_VER = "187";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -13001,8 +13135,19 @@
         // ignore
       }
     }
-    const minTok = hot ? HOT_BATCH_MIN_TOKENS : BATCH_MIN_TOKENS;
-    const flushMs = hot ? HOT_BATCH_FLUSH_MS : BATCH_FLUSH_MS;
+    let geniusQueued = false;
+    try {
+      for (const t of requestQueue) {
+        if (isGeniusFunToken(t)) {
+          geniusQueued = true;
+          break;
+        }
+      }
+    } catch (_gq) {
+      geniusQueued = false;
+    }
+    const minTok = geniusQueued ? 1 : hot ? HOT_BATCH_MIN_TOKENS : BATCH_MIN_TOKENS;
+    const flushMs = geniusQueued ? 0 : hot ? HOT_BATCH_FLUSH_MS : BATCH_FLUSH_MS;
     if (hot && batchActive && !hotLaneActive) {
       const mainAgeMs = batchStartedAt ? Date.now() - batchStartedAt : BATCH_STUCK_MS + 1;
       if (mainAgeMs < BATCH_STUCK_MS) void flushHotLane();
@@ -13019,7 +13164,7 @@
     if (ponsV2AddrSet.has(tok)) {
       return;
     }
-    if (!TARGET_TOKEN_RE.test(tok)) return;
+    if (!isModesQueueToken(tok)) return;
     // 非 BSC 页禁止入队（双保险）
     if (!isAllowedScanChain()) return;
     if (!isBadgeAccessAllowed()) return;
@@ -13041,6 +13186,10 @@
     requestQueue.add(tok);
     if (isGmgnHotUnpaintedToken(tok) || isDebotHotUnpaintedToken(tok)) noteGmgnHotWork();
     debugInfo("queue", { token: tok, queueSize: requestQueue.size });
+    if (isGeniusFunToken(tok)) {
+      scheduleBatchFlush({ immediate: true, delayMs: 0 });
+      return;
+    }
     if (options.deferFlush === true) return;
     maybeFlushRequestQueue("queue");
   }
@@ -13088,7 +13237,9 @@
           siteStrategy?.extractToken?.(card) ||
           "";
         const tok = String(token || "").toLowerCase();
-        if (!TARGET_TOKEN_RE.test(tok) && !ponsV2AddrSet.has(tok)) continue;
+        if (!TARGET_TOKEN_RE.test(tok) && !ponsV2AddrSet.has(tok) && !isGeniusFunToken(tok)) {
+          continue;
+        }
         const existing = findLocalBadgeForCard(card, tok);
         if (
           existing instanceof HTMLElement &&
@@ -13238,6 +13389,10 @@
       const token = String(rawToken).toLowerCase();
       const entry = normalizeResult(result);
       if (!entry) return;
+      if (result.platform === "geniusfun" || entry.__geniusfun) {
+        rememberGeniusFunAddr(token);
+        entry.__geniusfun = true;
+      }
       rememberPayoutSymbol(entry.dividend_token, entry.dividend_symbol);
       rememberPayoutSymbol(entry.top_payout_token, entry.top_payout_symbol);
       searchOverlayModesTokens.delete(token);
@@ -13442,9 +13597,9 @@
     }
     // 队列空或无目标 CA：绝不发 /modes
     if (batchActive || requestQueue.size === 0) return;
-    // 防御：只发合法 7777/8888/ffff；host-fee 已可画的不再打 /modes
+    // 只发 Flap/Four 尾号或已确认 geniusfun；host-fee 已可画的不再打 /modes
     for (const t of Array.from(requestQueue)) {
-      if (!TARGET_TOKEN_RE.test(String(t)) || !tokenNeedsModesFetch(t)) {
+      if (!isModesQueueToken(t) || !tokenNeedsModesFetch(t)) {
         requestQueue.delete(t);
       }
     }
@@ -13576,7 +13731,12 @@
       const res = await fetch(`${DEFAULT_API_BASE}/modes`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ tokens }),
+        body: JSON.stringify({
+          tokens,
+          platforms: Object.fromEntries(
+            tokens.filter((t) => isGeniusFunToken(t)).map((t) => [t, "geniusfun"])
+          )
+        }),
         signal: controller.signal,
         cache: "no-store"
       });
@@ -13692,14 +13852,25 @@
       (Number(entry.deflation_bps) || 0) +
       (Number(entry.lp_bps) || 0) +
       (Number(entry.giggle_charity_bps) || 0) +
-      (Number(entry.binance_charity_bps) || 0)
+      (Number(entry.binance_charity_bps) || 0) +
+      (Number(entry.gift_bps) || 0)
     );
   }
 
   /** 没有分配才 ⏳。已有 💎/👨‍🍳 先画，缺 →QQQB 仍打 /modes，不要干等几十秒。 */
+  function isGeniusFeeEntry(entry, token) {
+    if (entry && (entry.__geniusfun === true || entry.platform === "geniusfun")) return true;
+    if (token && isGeniusFunToken(token)) return true;
+    return false;
+  }
+
   function isHostFeeEntryPending(entry) {
     if (!entry || isFeeLoadingEntry(entry)) return false;
     if (entry && entry.__pons_v2 === true) return false;
+    if (isGeniusFeeEntry(entry)) {
+      if (hostFeeAllocationBps(entry) > 0) return false;
+      return !String(entry.quote_symbol || "").trim();
+    }
     if (entry.source_host) return hostFeeAllocationBps(entry) <= 0;
     return false;
   }
@@ -13755,6 +13926,7 @@
       lp_bps: Number(result.lp_bps) || 0,
       giggle_charity_bps: Number(result.giggle_charity_bps) || 0,
       binance_charity_bps: Number(result.binance_charity_bps) || 0,
+      gift_bps: Number(result.gift_bps) || 0,
       is_vault: Boolean(result.is_vault),
       is_stocks_vault: Boolean(result.is_stocks_vault),
       buy_tax_bps: Number(result.buy_tax_bps) || 0,
@@ -13783,7 +13955,12 @@
   function applyModeToKnownCards(token, entry, knownCards = null) {
     const tok = String(token || "").toLowerCase();
     // 无卡时不要用整页 RH 顶栏门禁把 BSC 税币挡掉（/modes 与 host-fee 都走这里）。
-    if (!isFeeTargetToken(tok) && !TARGET_TOKEN_RE.test(tok) && !ponsV2AddrSet.has(tok)) {
+    if (
+      !isFeeTargetToken(tok) &&
+      !TARGET_TOKEN_RE.test(tok) &&
+      !ponsV2AddrSet.has(tok) &&
+      !isGeniusFunToken(tok)
+    ) {
       return;
     }
     // 0.6.5: CA 定位 — mark + href 含完整 CA 的行（不靠 climb 猜）
@@ -16597,6 +16774,7 @@
 
   function shouldHideVaultCard(token, card) {
     if (!vaultHidePrefs || vaultHidePrefs.enabled !== true) return false;
+    if (isGeniusFunToken(token)) return vaultHidePrefs.hideGenius === true;
     const vk = vaultKindFromFeeOrBadge(token, card);
     if (vk === "stock") return vaultHidePrefs.hideStockVault === true;
     if (vk === "tax") return vaultHidePrefs.hideTaxVault === true;
@@ -16657,6 +16835,13 @@
   function shouldHideSearchOverlayToken(token, card) {
     if (!isSearchHideEnabled()) return false;
     const addr = String(token || "").toLowerCase();
+    if (isGeniusFunToken(addr)) {
+      return Boolean(
+        vaultHidePrefs &&
+          vaultHidePrefs.enabled === true &&
+          vaultHidePrefs.hideGenius === true
+      );
+    }
     if (!TARGET_TOKEN_RE.test(addr)) return false;
     const vk = vaultKindFromFeeOrBadge(addr, card);
     if (vaultHidePrefs && vaultHidePrefs.enabled === true && vk) {
@@ -16958,6 +17143,13 @@
   function entryShouldNotifyListHide(token, entry) {
     if (!entry) return false;
     const addr = String(token || "").toLowerCase();
+    if (isGeniusFeeEntry(entry, addr)) {
+      return (
+        vaultHidePrefs &&
+        vaultHidePrefs.enabled === true &&
+        vaultHidePrefs.hideGenius === true
+      );
+    }
     if (!TARGET_TOKEN_RE.test(addr)) return false;
     if (typeof shouldHideByCustomSuffix === "function" && shouldHideByCustomSuffix(addr)) {
       return true;
@@ -16965,7 +17157,8 @@
     if (vaultHidePrefs && vaultHidePrefs.enabled === true) {
       const hideTax = vaultHidePrefs.hideTaxVault === true;
       const hideStock = vaultHidePrefs.hideStockVault === true;
-      const taxOn = hideTax || (!hideTax && !hideStock);
+      const hideGenius = vaultHidePrefs.hideGenius === true;
+      const taxOn = hideTax || (!hideTax && !hideStock && !hideGenius);
       if (entry.is_stocks_vault === true && hideStock) return true;
       if (entry.is_vault === true && entry.is_stocks_vault !== true && taxOn) return true;
     }
@@ -17198,7 +17391,7 @@
     queryInScopes(`.gmgn-fee-mode-icon[data-fee-token]`).forEach((icon) => {
       if (!(icon instanceof HTMLElement)) return;
       const token = String(icon.dataset.feeToken || "").toLowerCase();
-      if (!TARGET_TOKEN_RE.test(token)) return;
+      if (!TARGET_TOKEN_RE.test(token) && !isGeniusFunToken(token)) return;
       const card =
         icon.closest?.(`[${CARD_DATA}]`) ||
         climbTaxRecvCardRoot(icon.parentElement || icon);
@@ -17244,7 +17437,11 @@
     const is_vault = Boolean(raw.is_vault);
     const segments = [];
     if (dividend_bps > 0) segments.push({ kind: "holder", bps: dividend_bps, pri: 0 });
-    if (market_bps > 0) {
+    const gift_bps = effectiveGeniusGiftBps(raw);
+    if (gift_bps > 0) {
+      segments.push({ kind: "gift", bps: gift_bps, pri: 1 });
+      if (market_bps > 0) segments.push({ kind: "creator", bps: market_bps, pri: 4 });
+    } else if (market_bps > 0) {
       segments.push({
         kind: is_vault ? "gift" : "creator",
         bps: market_bps,
@@ -17510,6 +17707,9 @@
         .trim()
         .toLowerCase();
       if (raw.__pons_v2 === true) rememberPonsV2Addr(token);
+      if (raw.__geniusfun === true || raw.platform === "geniusfun") {
+        rememberGeniusFunAddr(token);
+      }
       if (!isFeeTargetToken(token)) continue;
       const derived = deriveHostFeeMode(raw);
       const tax_symbol = String(raw.tax_symbol || "").trim();
@@ -17530,6 +17730,7 @@
         lp_bps: Number(raw.lp_bps) || 0,
         giggle_charity_bps: Number(raw.giggle_charity_bps) || 0,
         binance_charity_bps: Number(raw.binance_charity_bps) || 0,
+        gift_bps: Number(raw.gift_bps) || 0,
         is_vault: Boolean(raw.is_vault),
         is_stocks_vault: Boolean(raw.is_stocks_vault),
         buy_tax_bps: Number(raw.buy_tax_bps) || 0,
@@ -17545,6 +17746,8 @@
       const entry = normalizeResult(payload);
       if (!entry) continue;
       entry.__pons_v2 = raw.__pons_v2 === true;
+      entry.__geniusfun = raw.__geniusfun === true;
+      if (entry.__geniusfun) rememberGeniusFunAddr(token);
       if (token) entry.address = token;
       if (isTrustedStockVault(entry)) entry.is_stocks_vault = true;
       if (!entry.dividend_symbol && entry.dividend_token) {
@@ -18605,6 +18808,22 @@
    * (never omit when equals pool quote — user wants explicit payout).
    * Index vault gift: 📈 + first two basket symbols (not →IB-xxx).
    */
+  function effectiveGeniusGiftBps(entry) {
+    const g = Number(entry && entry.gift_bps) || 0;
+    if (g > 0) return g;
+    if (
+      entry &&
+      entry.is_vault === true &&
+      Number(entry.buy_tax_bps || 0) === 200 &&
+      Number(entry.market_bps || 0) === 1250 &&
+      Number(entry.deflation_bps || 0) === 1250 &&
+      Number(entry.dividend_bps || 0) === 0
+    ) {
+      return 5000;
+    }
+    return 0;
+  }
+
   function buildFeeLabel(entry, domQuoteSymbol, token) {
     const prefs = displayPrefs || DEFAULT_DISPLAY_PREFS;
     const domQuote = compactDisplaySymbol(domQuoteSymbol || "");
@@ -18616,11 +18835,43 @@
         !basketLooksLikeNativeOnly(basketAssets) &&
         isTrustedStockVault(entry)
     );
+    if (isGeniusFeeEntry(entry, token)) {
+      const giftBps = effectiveGeniusGiftBps(entry);
+      const chefBps = Number(entry.market_bps) || 0;
+      const payout = compactDisplaySymbol(
+        entry.top_payout_symbol ||
+          entry.quote_symbol ||
+          entry.dividend_symbol ||
+          domQuote ||
+          ""
+      );
+      if (giftBps > 0 && prefs.gift !== false) {
+        if (payout && prefs.payoutArrow !== false) return `${GIFT_EMOJI}→${payout}`;
+        return payout ? `${GIFT_EMOJI}${payout}` : GIFT_EMOJI;
+      }
+      if (chefBps > 0 && prefs.creator !== false) {
+        if (payout && prefs.payoutArrow !== false) return `👨‍🍳→${payout}`;
+        return payout ? `👨‍🍳${payout}` : "👨‍🍳";
+      }
+      if ((Number(entry.deflation_bps) || 0) > 0 && prefs.burn !== false) return "🔥";
+      return "";
+    }
     const candidates = [];
     if ((entry.dividend_bps || 0) > 0 && prefs.holder !== false) {
       candidates.push({ kind: "holder", emoji: "💎", bps: entry.dividend_bps, pri: 0 });
     }
-    if ((entry.market_bps || 0) > 0) {
+    const giftBps = effectiveGeniusGiftBps(entry);
+    if (giftBps > 0 && prefs.gift !== false) {
+      candidates.push({
+        kind: "gift",
+        emoji: useStockGift ? STOCK_EMOJI : GIFT_EMOJI,
+        bps: giftBps,
+        pri: 1
+      });
+      if ((entry.market_bps || 0) > 0 && prefs.creator !== false) {
+        candidates.push({ kind: "creator", emoji: "👨‍🍳", bps: entry.market_bps, pri: 4 });
+      }
+    } else if ((entry.market_bps || 0) > 0) {
       if (entry.is_vault && prefs.gift !== false) {
         candidates.push({
           kind: "gift",
@@ -19182,6 +19433,7 @@
     out.enabled = raw.enabled === true;
     out.hideTaxVault = raw.hideTaxVault === true;
     out.hideStockVault = raw.hideStockVault === true;
+    out.hideGenius = raw.hideGenius === true;
     return out;
   }
 
@@ -19189,7 +19441,8 @@
     const prefs = {
       enabled: vaultHidePrefs.enabled === true,
       hideTaxVault: vaultHidePrefs.hideTaxVault === true,
-      hideStockVault: vaultHidePrefs.hideStockVault === true
+      hideStockVault: vaultHidePrefs.hideStockVault === true,
+      hideGenius: vaultHidePrefs.hideGenius === true
     };
     const payload = JSON.stringify(prefs);
     try {
@@ -19255,9 +19508,13 @@
    * 徽章点击目标：
    * - Flap 8888/7777 → flap.sh taxinfo
    * - Four ffff → four.meme 代币页（用户指定 zh-TW/token/{ca}）
+   * - Genius.fun → genius.fun/token/{ca}
    */
   function buildTaxDetailUrl(token) {
     const ca = String(token || "").toLowerCase();
+    if (isGeniusFunToken(ca)) {
+      return `${GENIUS_FUN_PAGE_BASE}/${ca}`;
+    }
     if (!TARGET_TOKEN_RE.test(ca)) return "";
     if (isFourTaxToken(ca)) {
       return `${FOUR_TOKEN_PAGE_BASE}/${ca}`;
@@ -19336,7 +19593,7 @@
           if (dx > 6 || dy > 6) return;
         }
         const token = icon.dataset.feeToken || "";
-        if (!TARGET_TOKEN_RE.test(token)) return;
+        if (!TARGET_TOKEN_RE.test(token) && !isGeniusFunToken(token)) return;
         e.preventDefault();
         e.stopPropagation();
         try {
@@ -19354,7 +19611,7 @@
       if (badgeDragEdit || badgeDragState) return;
       if (e.key !== "Enter") return;
       const token = icon.dataset.feeToken || "";
-      if (!TARGET_TOKEN_RE.test(token)) return;
+      if (!TARGET_TOKEN_RE.test(token) && !isGeniusFunToken(token)) return;
       e.preventDefault();
       e.stopPropagation();
       try {

@@ -30,7 +30,7 @@
 - **币股 vault** 底池是 BNB，不会把 NVDAB / FXION 等分红股票当成底池；股票只出现在 📈 段
 - 不隐藏原网站的底池小图标；读不到报价时仍只显示 fee
 
-支持尾号 `8888` / `7777`（Flap）与 `ffff`（Four.meme）税币。GMGN **Robinhood** 链上 **Pons V2**（`pons_v2`）也显示徽章（底池 🪙ETH / QQQ 等，不查 BSC 链）。
+支持尾号 `8888` / `7777`（Flap）与 `ffff`（Four.meme）税币。**Genius.fun**（BSC，`launchpad=geniusfun`，尾号随机）同样显示徽章（底池 🪙，点击打开 genius.fun）。协议是固定模板，主文案只留身份：`🪙GMEB | 🎁→GMEB`（金库）或 `🪙BNB | 👨‍🍳→BNB`（创作者）；比例、销毁、平台费只在悬停。GMGN **Robinhood** 链上 **Pons V2**（`pons_v2`）也显示徽章（底池 🪙ETH / QQQ 等，不查 BSC 链）。识别都按 **链 + 平台**，不会对无关卡片打接口。
 
 **点击浏览器工具栏的插件图标**，可：
 

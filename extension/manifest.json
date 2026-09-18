@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.187",
-  "description": "FlapFeeInfo 0.8.187: Space no longer reopens tax info; license rebind trusts server OK.",
+  "version": "0.8.193",
+  "description": "FlapFeeInfo 0.8.193: Genius 🪙QUOTE | 🎁→QUOTE; one BSC eth_call per batch.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

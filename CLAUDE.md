@@ -12,9 +12,12 @@
 
 在 **GMGN / Debot / Gungnir** 等 meme 列表页上，给税收代币展示 **税收分配徽章**，并尽量附带 **底池/报价** 文字：
 
-- **Flap**（BSC）：尾号 **`8888` / `7777`** → Helper `getTaxTokenInfoV2`
-- **Four.meme**（BSC）：尾号 **`ffff`** → token 链上 Multicall（`feeRateBuy/Sell` + `rate*` + `quote`）
-- **Pons V2**（GMGN `?chain=robinhood`）：`launchpad`/`launchpad_platform` = **`pons_v2`**（尾号随机）→ 只用 GMGN host-fee，**不打 `/modes`** / 不查 BSC Helper
+识别一律 **链 + 平台**（禁止对任意卡扒 fiber / 打 `/modes`）：
+
+- **Flap**（`chain=bsc` + 尾号 **`8888` / `7777`**，launchpad 有则须 flap）→ Helper `getTaxTokenInfoV2`
+- **Four.meme**（`chain=bsc` + 尾号 **`ffff`**，launchpad 有则须 fourmeme）→ token 链上 Multicall
+- **Genius.fun**（`chain=bsc` + `launchpad`/`launchpad_platform`/`pool.exchange` = **`geniusfun`**，尾号随机）→ host-fee 先入集合，无 `s_tal` 立刻 `POST /modes`（`platforms[ca]=geniusfun`）；冷批与 Flap/Four **同一次 eth_call**（GeniusSnap state-override 读 curve.`toFoundation`/`feeBps`/`pairToken`/`factory`）；主文案 `🪙QUOTE | 🎁→QUOTE` / `🪙BNB | 👨‍🍳→BNB`（比例只在 tooltip）
+- **Pons V2**（`chain=robinhood` + `pons_v2`，尾号随机）→ 只用 GMGN/Debot host-fee，**不打 `/modes`**
 
 | 展示 | 含义 | 数据来源 |
 |------|------|----------|
@@ -40,7 +43,7 @@
 
 ```text
 浏览器插件 extension
-    POST /modes  { tokens: string[] }
+    POST /modes  { tokens: string[], platforms?: { [ca]: "geniusfun" } }
         ↓  （只等缓存层，不等链）
 Cloudflare Worker  (https://flap-fee-info.tech-melon.workers.dev)
     ① 立即返回 mem + KV 命中
@@ -52,8 +55,9 @@ Python API  (127.0.0.1:8765)
     默认 wait_chain=false：mem+SQLite 秒回，miss 后台 inflight 上链
     wait_chain=true（CF 后台）：阻塞到预算内链上完成，供 KV 落盘
         ↓
-BSC RPC / QuickNode
-    Helper.getTaxTokenInfoV2(taxToken)
+BSC RPC / NodeReal
+    冷批整表 **1 次 eth_call**：Flap Helper + Four views + GeniusSnap（state-override）打进同一个 Multicall3
+    符号走 KNOWN/缓存，插件 DOM 补 →QUOTE；币股篮子仍可由 host-fee 画 📈
 
 pending 清理：年龄 >5min 或 map 规模 >500（最旧优先淘汰）
 插件对 missing/pending 快轮询（~300/700/1500ms）直到缓存命中
@@ -113,7 +117,7 @@ FlapFeeInfo/
 
 ### 4.1 Token 过滤
 
-三层统一正则（BSC Flap/Four，概念上）：
+Flap/Four 三层统一正则（概念上）：
 
 ```text
 ^0x[a-fA-F0-9]{36}(8888|7777|ffff)$
@@ -121,20 +125,31 @@ FlapFeeInfo/
 
 改尾号规则时：**extension + worker + fee_mode_server + fee_mode** 必须同步。
 
-GMGN Robinhood **pons v2 不走这条正则**（CA 尾号随机）。识别：`chain=robinhood` 且 `launchpad`/`launchpad_platform` 含 `pons_v2`（含已开盘列；旧 id `pons` 是 v1，不要当 v2）。Worker / Python **不要改**。
+其它平台 **不扩这条正则**，一律 **链 + 平台**：
+
+| 链 | 平台 | 识别 | `/modes` |
+|----|------|------|----------|
+| BSC | Flap | href `/bsc/token` + 尾号 8888/7777；launchpad 有则须 flap | Helper |
+| BSC | Four.meme | href `/bsc/token` + 尾号 ffff；launchpad 有则须 fourmeme | Multicall |
+| BSC | Genius.fun | host-fee/API `launchpad`/`lpp`/`pool.exchange` = `geniusfun`（尾号随机）。禁止扫任意 BSC 卡扒 fiber | 仅已标记 CA，`platforms[ca]=geniusfun` |
+| Robinhood | Pons V2 | href `/robinhood/token` + `pons_v2`（旧 id `pons` 是 v1） | 不打 |
+
+Worker / Python **只在插件已标 `geniusfun` 时** 放行非尾号 CA，并链上校验 `curve.factory() == 0x78EAE953…8138afe31`。
 
 ### 4.2 链上 Helper
 
 - 地址：`0x53841c73217735F37BC1775538b03b23feFD8346`
 - 方法：`getTaxTokenInfoV2(address)`
 - 实现：`server/fee_mode.py` → `get_tax_allocation()` / 兼容 `get_fee_mode()`
+- Genius.fun：`get_tax_allocations()` 整批 **1 次 eth_call**（Flap Helper + Four views + GeniusSnap state-override）。Snap 失败才回退 2 次 Multicall3。主文案 `🎁→GMEB` / `👨‍🍳→BNB`（Flap 箭头，比例只在 tooltip）
 
 分类规则（`build_allocation`）：
 
 ```text
 segments = []
 if dividendBps > 0:        💎
-if marketBps > 0:          🎁 if is_vault else 👨‍🍳
+if gift_bps > 0:           🎁，且 marketBps>0 时并列 👨‍🍳（Genius 金库+厨师）
+elif marketBps > 0:        🎁 if is_vault else 👨‍🍳
 if giggle_charity_bps > 0: 🎓
 if binance_charity_bps > 0:💛
 if deflationBps > 0:       🔥
@@ -261,6 +276,7 @@ Debot 混合战壕按**卡 href** 认链（`/token/bsc/` vs `/token/robinhood/`�
 | Debot `?chain=bsc` 或 `?chain=robinhood` 混合三列 `/token/bsc/…7777` | 现有 BSC 徽章，打 `/modes`；底池 🦋/BNB 等跟卡走 |
 | Debot 同页 `/token/robinhood/` + `meta.launchpad=pons_v2` | 💎/👨‍🍳 + 🪙ETH/USDG/SPY；**不打** `/modes` |
 | Debot 同页 robinhood long / bankr / pons v1 | **不画** |
+| GMGN BSC Genius.fun `0x69838bdf075242ce6578e48276d7e9e02b44794f` | `launchpad=geniusfun` 才扫/入队；主文案 `🪙BNCB \| 🎁→BNCB`（创作者 `🪙BNB \| 👨‍🍳→BNB`）；`🎁50%👨‍🍳12.5%🔥12.5%` + 平台 0.5% 只在 tooltip；点击 genius.fun；非 geniusfun 的 BSC 卡不打 `/modes` |
 
 #### 卡片标记（Robinhood）
 
@@ -328,9 +344,10 @@ uv run flap-fee-server
 | 变量 | 含义 |
 |------|------|
 | `FLAP_FEE_HOST` / `PORT` | 默认 `127.0.0.1:8765` |
-| `FLAP_FEE_BSC_RPC_QN` | QuickNode 主 RPC（优先） |
-| `FLAP_FEE_BSC_RPC` | 备用 / 公共 seed（QN 未设时用） |
-| `FLAP_FEE_RPC_RPS_LIMIT` | QN RPC 限速（生产 **100**/s） |
+| `FLAP_FEE_BSC_RPC_NR` | NodeReal 主 RPC（优先） |
+| `FLAP_FEE_BSC_RPC_QN` | 旧键；仅当 URL 不是 QuickNode 时兼容（现网已是 NodeReal） |
+| `FLAP_FEE_BSC_RPC` | 备用 / 公共 seed |
+| `FLAP_FEE_RPC_RPS_LIMIT` | 主 RPC 限速（生产 **100**/s；现网 NodeReal 常用 30） |
 | `FLAP_FEE_MAX_FETCH_WORKERS` | 并发（生产 **48**，配合 ~0.5s eth_call 才能吃满 100 rps） |
 | `FLAP_FEE_API_TOKEN` | Bearer；生产必开 |
 
@@ -815,8 +832,14 @@ python tools/ctl.py watchdog-run
  - `0.8.185`：RH K 线非 pons（Long.xyz / bankr / pons v1）不挂 ⏳；顶栏只画已确认 pons_v2
  - `0.8.186`：新创建 7777 有 host-fee 分配即画 💎，不再因缺 →QQQB 卡 ⏳ 几十秒；仍打 /modes 补箭头；无 href 税币不走 RH 顶栏门禁
  - `0.8.187`：点徽章开税收后不再占焦点，空格留给 GMGN 搜索；换绑成功不再被 KV 延迟读误判失败
-- 插件当前版本：见 `extension/manifest.json`（**0.8.187**，公开无剪切板）
-- page-hook：`HOOK_VER` **184**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.188`：Genius.fun — 只认 BSC+geniusfun；Flap/Four/Pons 对齐链+平台；DOM 扫卡不再对任意 TokenItem 扒 fiber；`/modes` 带 `platforms`
+ - `0.8.189`：Genius 新创建卡 ⏳ 卡死 — flush `/modes` 把非 8888/7777/ffff 从队列删掉
+ - `0.8.190`：js-mcp — Worker 漏 `gift_bps` 画成 🎁12.5%；Genius 冷批 1 条 KV 把其余推进后台；curve 改 Multicall
+ - `0.8.191`：Genius 主文案紧凑 `🪙QUOTE|🎁/👨‍🍳`；金库屏蔽可勾 Genius（默认关，不吃税收/厨师规则）；新卡先画报价并立刻 `/modes`
+ - `0.8.192`：Genius 主文案 `🪙GMEB \| 🎁GMEB`（参考 Flap 身份，不用「几成」）；后端 `/modes` 整批 2～3 次 Multicall3，不再每 CA 串行 curve/views/symbol
+ - `0.8.193`：Genius 主文案改 Flap 箭头 `🪙BNCB \| 🎁→BNCB`；BSC 冷批 Flap/Four/Genius **1 次 eth_call**（GeniusSnap state-override）
+- 插件当前版本：见 `extension/manifest.json`（**0.8.193**，公开无剪切板）
+- page-hook：`HOOK_VER` **187**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  

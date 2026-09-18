@@ -27,7 +27,8 @@
   const DEFAULT_VAULT_HIDE = {
     enabled: false,
     hideTaxVault: false,
-    hideStockVault: false
+    hideStockVault: false,
+    hideGenius: false
   };
   const DEFAULT_SEARCH_HIDE = { enabled: false };
   const DEFAULT_DEV_COUNT_MARK = { enabled: false, rules: [] };
@@ -205,8 +206,10 @@
       vaultHideTaxDesc: "🎁 税收金库（含 96%金库+4%分红；单枚 QQQB/NVDA 分红币也算）",
       vaultHideStockTitle: "屏蔽币股金库",
       vaultHideStockDesc: "📈 Flap Stocks / Flap 币股（FXIO 等篮子）。默认不屏蔽",
+      vaultHideGeniusTitle: "屏蔽 Genius.fun",
+      vaultHideGeniusDesc: "BSC geniusfun。默认不屏蔽；税收金库/厨师规则不会误伤 Genius",
       vaultHideHint2:
-        "打开总开关且未勾子项时，默认屏蔽税收金库。只勾税收 → 保留 📈 币股篮子。可与资金接收叠加。",
+        "打开总开关且未勾子项时，默认屏蔽税收金库。Genius 默认保留。只勾税收 → 保留 📈 币股。可与资金接收叠加。",
       suffixHideSection: "自定义尾号屏蔽",
       suffixHideHint:
         "仅 BSC。隐藏指定十六进制尾号的 CA（可多条）。首页战壕与 K 线左侧「新创建」数据层过滤。默认关闭。改开关后 GMGN 会刷新页面。",
@@ -404,8 +407,10 @@
       vaultHideTaxDesc: "🎁 tax vaults (including 96% vault + 4% holder; single QQQB/NVDA payout)",
       vaultHideStockTitle: "Hide equity vaults",
       vaultHideStockDesc: "📈 Flap Stocks / Flap 币股 baskets (FXIO). Off by default",
+      vaultHideGeniusTitle: "Hide Genius.fun",
+      vaultHideGeniusDesc: "BSC geniusfun. Off by default; tax-vault/chef rules do not hide Genius",
       vaultHideHint2:
-        "Master on with no subtype checked defaults to hiding tax vaults. Tax-only keeps 📈 baskets. Stacks with fund-recipient hide.",
+        "Master on with no subtype checked defaults to hiding tax vaults. Genius stays visible unless checked. Tax-only keeps 📈 baskets. Stacks with fund-recipient hide.",
       suffixHideSection: "Custom CA suffix hide",
       suffixHideHint:
         "BSC only. Hide CAs ending with a hex suffix (multi-rule). Filters home trench and K-line left New creation. Off by default. GMGN reloads when this changes.",
@@ -527,6 +532,7 @@
   const vaultHideEnabled = document.getElementById("vaultHideEnabled");
   const vaultHideTax = document.getElementById("vaultHideTax");
   const vaultHideStock = document.getElementById("vaultHideStock");
+  const vaultHideGenius = document.getElementById("vaultHideGenius");
   const vaultHideOptions = document.getElementById("vaultHideOptions");
   const devCountEnabled = document.getElementById("devCountEnabled");
   const devCountRulesWrap = document.getElementById("devCountRulesWrap");
@@ -678,6 +684,7 @@
     out.enabled = raw.enabled === true;
     out.hideTaxVault = raw.hideTaxVault === true;
     out.hideStockVault = raw.hideStockVault === true;
+    out.hideGenius = raw.hideGenius === true;
     return out;
   }
 
@@ -1730,6 +1737,7 @@
     if (vaultHideEnabled) vaultHideEnabled.checked = vaultHideState.enabled === true;
     if (vaultHideTax) vaultHideTax.checked = vaultHideState.hideTaxVault === true;
     if (vaultHideStock) vaultHideStock.checked = vaultHideState.hideStockVault === true;
+    if (vaultHideGenius) vaultHideGenius.checked = vaultHideState.hideGenius === true;
     if (vaultHideOptions) {
       vaultHideOptions.classList.toggle("is-disabled", vaultHideState.enabled !== true);
     }
@@ -1739,7 +1747,8 @@
     return normalizeVaultHide({
       enabled: vaultHideEnabled?.checked === true,
       hideTaxVault: vaultHideTax?.checked === true,
-      hideStockVault: vaultHideStock?.checked === true
+      hideStockVault: vaultHideStock?.checked === true,
+      hideGenius: vaultHideGenius?.checked === true
     });
   }
 
@@ -2588,7 +2597,8 @@
     if (
       vaultHideState.enabled &&
       vaultHideState.hideTaxVault !== true &&
-      vaultHideState.hideStockVault !== true
+      vaultHideState.hideStockVault !== true &&
+      vaultHideState.hideGenius !== true
     ) {
       vaultHideState.hideTaxVault = true;
     }
@@ -2600,6 +2610,10 @@
     scheduleSaveVaultHide();
   });
   vaultHideStock?.addEventListener("change", () => {
+    vaultHideState = readVaultHideFromUI();
+    scheduleSaveVaultHide();
+  });
+  vaultHideGenius?.addEventListener("change", () => {
     vaultHideState = readVaultHideFromUI();
     scheduleSaveVaultHide();
   });
