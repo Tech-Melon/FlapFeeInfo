@@ -18,6 +18,11 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.197: SNAP_SHOT 只建 Genius CA 索引（不组 stub）；出卡后再画 /modes。
+  // 0.8.196: 资金接收 / 金库 两处独立勾选 Genius.fun 过滤（默认都不挡）。
+  // 0.8.195: 第一刀 — 过滤关时 Port/JSON.parse 先交给宿主再 ingest；hello 前不 postMessage。
+  // 0.8.194: 刷新丢 host-fee 回放；/modes 回包后 feeSig 对不上不再当 stable（卡 🪙BNCB）；Genius 组批 80ms。
+  // 0.8.194a: 刷新丢 host-fee — content idle 才监听，8s 去重把 Genius 补发挡掉；hello 回放 + SNAP_SHOT 只 ingest 税平台。
   // 0.8.193: Genius 主文案 🪙QUOTE|🎁→QUOTE（Flap 箭头）；BSC 整批 1 次 eth_call。
   // 0.8.192: Genius 主文案 🪙QUOTE|🎁QUOTE（参考 Flap 身份，比例只在 tooltip）；后端整批 Multicall。
   // 0.8.191: Genius 徽章紧凑 🪙QUOTE|🎁/👨‍🍳；金库过滤默不挡 Genius；新卡先画报价并立刻 /modes。
@@ -604,7 +609,8 @@
   const DEFAULT_TAX_RECV_HIDE = {
     enabled: false,
     thresholdPct: 100,
-    allow: []
+    allow: [],
+    hideGenius: false
   };
   const TAX_RECV_ALLOW_MAX = 24;
   /** 自定义尾号屏蔽（仅 BSC）：rules[].suffix 为 1–12 位 hex */
@@ -8172,7 +8178,7 @@
     });
   }
 
-  const PAGE_HOOK_VER = "187";
+  const PAGE_HOOK_VER = "191";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -10367,6 +10373,15 @@
         if (!TARGET_TOKEN_RE.test(hrefTok) && !isFeeTargetToken(hrefTok, card)) return false;
       }
       if (stableEntry && isGmgnRhTaxKindMismatch(card, stableEntry)) return false;
+      if (stableEntry && !isFeeLoadingEntry(stableEntry)) {
+        try {
+          const q = resolveQuoteSymbol(card, stableEntry);
+          const wantLabel = buildDisplayLabel(stableEntry, q, marked);
+          if (wantLabel && existing.dataset.feeSig !== wantLabel) return false;
+        } catch (_lb) {
+          // ignore
+        }
+      }
       return true;
     }
 
@@ -10409,6 +10424,16 @@
       if (!TARGET_TOKEN_RE.test(hrefTok) && !isFeeTargetToken(hrefTok, card)) return false;
     } else if (existing.dataset.feeToken !== marked) {
       return false;
+    }
+    const debotEntry = resolveEntry(marked);
+    if (debotEntry && !isFeeLoadingEntry(debotEntry)) {
+      try {
+        const q = resolveQuoteSymbol(card, debotEntry);
+        const wantLabel = buildDisplayLabel(debotEntry, q, marked);
+        if (wantLabel && existing.dataset.feeSig !== wantLabel) return false;
+      } catch (_dlb) {
+        // ignore
+      }
     }
     return true;
   }
@@ -13146,8 +13171,8 @@
     } catch (_gq) {
       geniusQueued = false;
     }
-    const minTok = geniusQueued ? 1 : hot ? HOT_BATCH_MIN_TOKENS : BATCH_MIN_TOKENS;
-    const flushMs = geniusQueued ? 0 : hot ? HOT_BATCH_FLUSH_MS : BATCH_FLUSH_MS;
+    const minTok = geniusQueued ? 2 : hot ? HOT_BATCH_MIN_TOKENS : BATCH_MIN_TOKENS;
+    const flushMs = geniusQueued ? 80 : hot ? HOT_BATCH_FLUSH_MS : BATCH_FLUSH_MS;
     if (hot && batchActive && !hotLaneActive) {
       const mainAgeMs = batchStartedAt ? Date.now() - batchStartedAt : BATCH_STUCK_MS + 1;
       if (mainAgeMs < BATCH_STUCK_MS) void flushHotLane();
@@ -13187,7 +13212,11 @@
     if (isGmgnHotUnpaintedToken(tok) || isDebotHotUnpaintedToken(tok)) noteGmgnHotWork();
     debugInfo("queue", { token: tok, queueSize: requestQueue.size });
     if (isGeniusFunToken(tok)) {
-      scheduleBatchFlush({ immediate: true, delayMs: 0 });
+      if (requestQueue.size >= 2) {
+        scheduleBatchFlush({ immediate: true, delayMs: 0 });
+      } else {
+        scheduleBatchFlush({ delayMs: 80 });
+      }
       return;
     }
     if (options.deferFlush === true) return;
@@ -13428,21 +13457,22 @@
         cardsByToken.get(marked).push(card);
       });
       confirmed.forEach(([token, entry]) => {
-        applyModeToKnownCards(token, entry, cardsByToken.get(token) || []);
-        try {
-          const wantBasket = getBasketAssetsForDisplay(entry).length;
-          (cardsByToken.get(token) || []).forEach((card) => {
-            const icon = card.querySelector?.(`[${ICON_DATA}="1"]`);
-            if (
-              icon instanceof HTMLElement &&
-              Number(icon.dataset.feeBasketCount || 0) !== wantBasket
-            ) {
-              delete icon.dataset.feeSig;
-            }
-          });
-        } catch (_bcSig) {
-          // ignore
+        const marked = cardsByToken.get(token) || [];
+        const found = findCardsByCa(token);
+        const merged = [];
+        const seenC = new Set();
+        for (const c of [...marked, ...found]) {
+          if (!(c instanceof HTMLElement) || seenC.has(c)) continue;
+          seenC.add(c);
+          merged.push(c);
+          try {
+            const icon = findLocalBadgeForCard(c, token) || c.querySelector?.(`[${ICON_DATA}="1"]`);
+            if (icon instanceof HTMLElement) delete icon.dataset.feeSig;
+          } catch (_sig) {
+            // ignore
+          }
         }
+        applyModeToKnownCards(token, entry, merged);
         ingestFeeAndNotifyListHide(token, entry);
       });
       persistConfirmedModes(confirmed);
@@ -15022,9 +15052,10 @@
   }
 
   function normalizeTaxRecvHidePrefs(raw) {
-    const out = { enabled: false, thresholdPct: 100, allow: [] };
+    const out = { enabled: false, thresholdPct: 100, allow: [], hideGenius: false };
     if (!raw || typeof raw !== "object") return out;
     out.enabled = raw.enabled === true;
+    out.hideGenius = raw.hideGenius === true;
     const thr = Number(raw.thresholdPct);
     if (Number.isFinite(thr)) {
       out.thresholdPct = Math.max(0, Math.min(100, Math.round(thr)));
@@ -15072,7 +15103,8 @@
     const prefs = {
       enabled: taxRecvHidePrefs.enabled === true,
       thresholdPct: taxRecvHidePrefs.thresholdPct,
-      allow: taxRecvHidePrefs.allow || []
+      allow: taxRecvHidePrefs.allow || [],
+      hideGenius: taxRecvHidePrefs.hideGenius === true
     };
     const payload = JSON.stringify(prefs);
     try {
@@ -16772,6 +16804,14 @@
     return card;
   }
 
+  function taxRecvHidesGeniusTokens() {
+    return (
+      taxRecvHidePrefs &&
+      taxRecvHidePrefs.enabled === true &&
+      taxRecvHidePrefs.hideGenius === true
+    );
+  }
+
   function shouldHideVaultCard(token, card) {
     if (!vaultHidePrefs || vaultHidePrefs.enabled !== true) return false;
     if (isGeniusFunToken(token)) return vaultHidePrefs.hideGenius === true;
@@ -16836,11 +16876,21 @@
     if (!isSearchHideEnabled()) return false;
     const addr = String(token || "").toLowerCase();
     if (isGeniusFunToken(addr)) {
-      return Boolean(
+      if (
         vaultHidePrefs &&
-          vaultHidePrefs.enabled === true &&
-          vaultHidePrefs.hideGenius === true
-      );
+        vaultHidePrefs.enabled === true &&
+        vaultHidePrefs.hideGenius === true
+      ) {
+        return true;
+      }
+      if (!taxRecvHidesGeniusTokens()) return false;
+      const info = resolveTaxRecvInfo(addr);
+      if (info && shouldHideTaxRecv(info, addr)) return true;
+      const pct = chefPctFromBadge(card);
+      if (pct != null) {
+        return shouldHideTaxRecv({ recvPct: pct, isVault: false, source: "badge" }, addr);
+      }
+      return false;
     }
     if (!TARGET_TOKEN_RE.test(addr)) return false;
     const vk = vaultKindFromFeeOrBadge(addr, card);
@@ -17036,9 +17086,11 @@
     }, d);
   }
 
-  function shouldHideTaxRecv(entry) {
+  function shouldHideTaxRecv(entry, token) {
     if (!taxRecvHidePrefs || taxRecvHidePrefs.enabled !== true) return false;
     if (!entry || typeof entry !== "object") return false;
+    const addr = String(token || entry.address || "").toLowerCase();
+    if (addr && isGeniusFunToken(addr) && !taxRecvHidesGeniusTokens()) return false;
     // 金库始终显示
     if (entry.isVault === true) return false;
     const pct = Number(entry.recvPct);
@@ -17057,7 +17109,7 @@
       const addr = String(row.address || "")
         .trim()
         .toLowerCase();
-      if (!TARGET_TOKEN_RE.test(addr)) continue;
+      if (!TARGET_TOKEN_RE.test(addr) && !isGeniusFunToken(addr)) continue;
       const recvPct = Number(row.recvPct);
       if (!Number.isFinite(recvPct)) continue;
       const next = {
@@ -17098,7 +17150,8 @@
   function ingestFeeEntryForTaxRecv(token, entry) {
     if (!token || !entry) return false;
     const addr = String(token).toLowerCase();
-    if (!TARGET_TOKEN_RE.test(addr)) return false;
+    if (!TARGET_TOKEN_RE.test(addr) && !isGeniusFunToken(addr)) return false;
+    if (isGeniusFunToken(addr) && !taxRecvHidesGeniusTokens()) return false;
     if (entry.is_vault) return false;
     const marketBps = Number(entry.market_bps) || 0;
     if (marketBps <= 0 && !entry.is_vault) {
@@ -17114,7 +17167,7 @@
         source: "fee"
       }
     ]);
-    if (shouldHideTaxRecv({ recvPct, isVault: false, source: "fee" })) {
+    if (shouldHideTaxRecv({ recvPct, isVault: false, source: "fee" }, addr)) {
       notifyPageHookHideAddrs([addr]);
     }
     return merged;
@@ -17125,7 +17178,7 @@
     const seen = new Set();
     for (let i = 0; i < (addrs || []).length; i += 1) {
       const tok = String(addrs[i] || "").toLowerCase();
-      if (!TARGET_TOKEN_RE.test(tok) || seen.has(tok)) continue;
+      if ((!TARGET_TOKEN_RE.test(tok) && !isGeniusFunToken(tok)) || seen.has(tok)) continue;
       seen.add(tok);
       list.push(tok);
     }
@@ -17144,11 +17197,17 @@
     if (!entry) return false;
     const addr = String(token || "").toLowerCase();
     if (isGeniusFeeEntry(entry, addr)) {
-      return (
+      if (
         vaultHidePrefs &&
         vaultHidePrefs.enabled === true &&
         vaultHidePrefs.hideGenius === true
-      );
+      ) {
+        return true;
+      }
+      if (!taxRecvHidesGeniusTokens()) return false;
+      if (entry.is_vault === true || entry.is_stocks_vault === true) return false;
+      const pct = (Number(entry.market_bps) || 0) / 100;
+      return shouldHideTaxRecv({ recvPct: pct, isVault: false, source: "fee" }, addr);
     }
     if (!TARGET_TOKEN_RE.test(addr)) return false;
     if (typeof shouldHideByCustomSuffix === "function" && shouldHideByCustomSuffix(addr)) {
@@ -17165,7 +17224,7 @@
     if (taxRecvHidePrefs && taxRecvHidePrefs.enabled === true) {
       if (entry.is_vault === true || entry.is_stocks_vault === true) return false;
       const pct = (Number(entry.market_bps) || 0) / 100;
-      if (pct > 0 && shouldHideTaxRecv({ recvPct: pct, isVault: false, source: "fee" })) {
+      if (pct > 0 && shouldHideTaxRecv({ recvPct: pct, isVault: false, source: "fee" }, addr)) {
         return true;
       }
     }
@@ -17330,7 +17389,7 @@
         return;
       }
       const info = resolveTaxRecvInfo(token);
-      let hideRecv = info ? shouldHideTaxRecv(info) : false;
+      let hideRecv = info ? shouldHideTaxRecv(info, token) : false;
       if (!hideRecv && taxRecvHidePrefs && taxRecvHidePrefs.enabled === true) {
         const vk = vaultKindFromFeeOrBadge(token, card);
         if (vk == null) {
@@ -17340,7 +17399,7 @@
               recvPct: pct,
               isVault: false,
               source: "badge"
-            });
+            }, token);
           }
         }
       }
@@ -17869,6 +17928,25 @@
           if (requestQueue.size > 0) maybeFlushRequestQueue("ranks-done");
           return;
         }
+        if (data.type === "genius-addr-map") {
+          const addrs = Array.isArray(data.addrs) ? data.addrs : [];
+          let n = 0;
+          for (let i = 0; i < addrs.length; i += 1) {
+            const a = String(addrs[i] || "").toLowerCase();
+            if (!/^0x[a-f0-9]{40}$/.test(a)) continue;
+            rememberGeniusFunAddr(a);
+            n += 1;
+          }
+          if (n > 0 && isGmgnHost()) {
+            try {
+              paintUnpaintedTargetViewportQuick("genius-index", null, true);
+              if (!isTokenDetailRoute()) paintGmgnCachedViewportCards("genius-index");
+            } catch (_gp) {
+              // ignore
+            }
+          }
+          return;
+        }
         if (data.type === "host-fee-quote-patch") {
           applyHostFeeQuotePatches(data.entries);
           return;
@@ -17889,6 +17967,19 @@
         // ignore
       }
     });
+    const hello = () => {
+      try {
+        window.postMessage(
+          { source: "flap-fee-info", type: "host-fee-hello" },
+          "*"
+        );
+      } catch (_h) {
+        // ignore
+      }
+    };
+    hello();
+    window.setTimeout(hello, 120);
+    window.setTimeout(hello, 400);
   }
 
   function installTaxRecvHideBridge() {
@@ -19146,6 +19237,10 @@
     const tipModel = buildTipModel(entry, quoteSymbol, label, tok);
     // Legacy plain title kept for rare code paths; UI uses custom tooltip.
     const title = tipModel.titleLines.join("\n");
+    const geniusAwaitChain =
+      isGeniusFeeEntry(entry, tok) &&
+      hostFeeAllocationBps(entry) <= 0 &&
+      (entry.__needsChain === true || Boolean(entry.source_host));
     return {
       label,
       title,
@@ -19159,7 +19254,7 @@
       poolColor,
       divColor,
       borderColor,
-      isLoading: false
+      isLoading: geniusAwaitChain
     };
   }
 

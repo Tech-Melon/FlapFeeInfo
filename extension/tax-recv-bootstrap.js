@@ -10,10 +10,15 @@
   const VAULT_KEY = "flapFeeInfo.vaultHide.v1";
   const VAULT_ATTR = "data-flap-vault-hide";
   const OWN_KEY = "flapFeeInfo.ownedDisableShareWorker";
-  const DEFAULT_TAX = { enabled: false, thresholdPct: 100, allow: [] };
+  const DEFAULT_TAX = { enabled: false, thresholdPct: 100, allow: [], hideGenius: false };
   const TAX_ALLOW_MAX = 24;
   const DEFAULT_SUFFIX = { enabled: false, rules: [] };
-  const DEFAULT_VAULT = { enabled: false, hideTaxVault: false, hideStockVault: false };
+  const DEFAULT_VAULT = {
+    enabled: false,
+    hideTaxVault: false,
+    hideStockVault: false,
+    hideGenius: false
+  };
   const SUFFIX_MAX = 24;
 
   function normalizeEvmAddress(raw) {
@@ -26,9 +31,10 @@
   }
 
   function normalizeTax(raw) {
-    const out = { enabled: false, thresholdPct: 100, allow: [] };
+    const out = { enabled: false, thresholdPct: 100, allow: [], hideGenius: false };
     if (!raw || typeof raw !== "object") return out;
     out.enabled = raw.enabled === true;
+    out.hideGenius = raw.hideGenius === true;
     const thr = Number(raw.thresholdPct);
     if (Number.isFinite(thr)) {
       out.thresholdPct = Math.max(0, Math.min(100, Math.round(thr)));
@@ -77,6 +83,7 @@
     out.enabled = raw.enabled === true;
     out.hideTaxVault = raw.hideTaxVault === true;
     out.hideStockVault = raw.hideStockVault === true;
+    out.hideGenius = raw.hideGenius === true;
     return out;
   }
 
@@ -113,7 +120,8 @@
     const payload = JSON.stringify({
       enabled: p.enabled === true,
       thresholdPct: p.thresholdPct,
-      allow: p.allow || []
+      allow: p.allow || [],
+      hideGenius: p.hideGenius === true
     });
     try {
       if (document.documentElement) {
@@ -312,7 +320,7 @@
 
   /** MAIN world page-hook：manifest 为主；仅缺失时单次 script 兜底（禁止并发重试风暴） */
   const PAGE_HOOK_FILE = "page-hook.js";
-  const PAGE_HOOK_VER = "187";
+  const PAGE_HOOK_VER = "191";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
 
   function pageHookHostFeeReady() {

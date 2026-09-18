@@ -838,15 +838,19 @@ python tools/ctl.py watchdog-run
  - `0.8.191`：Genius 主文案紧凑 `🪙QUOTE|🎁/👨‍🍳`；金库屏蔽可勾 Genius（默认关，不吃税收/厨师规则）；新卡先画报价并立刻 `/modes`
  - `0.8.192`：Genius 主文案 `🪙GMEB \| 🎁GMEB`（参考 Flap 身份，不用「几成」）；后端 `/modes` 整批 2～3 次 Multicall3，不再每 CA 串行 curve/views/symbol
  - `0.8.193`：Genius 主文案改 Flap 箭头 `🪙BNCB \| 🎁→BNCB`；BSC 冷批 Flap/Four/Genius **1 次 eth_call**（GeniusSnap state-override）
-- 插件当前版本：见 `extension/manifest.json`（**0.8.193**，公开无剪切板）
-- page-hook：`HOOK_VER` **187**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.194`：刷新 Genius 徽章卡住 — SharedWorker 首包在 content 监听前 postMessage，8s 去重不再补发；`host-fee-hello` 回放 + SNAP_SHOT 只 ingest 税平台
+ - `0.8.195`：第一刀流畅 — 过滤关时 Port/WS/JSON.parse 先给宿主再 ingest；content hello 前不 postMessage（2.5s 兜底）
+ - `0.8.196`：资金接收 / 金库两处独立勾选 Genius.fun（默认不挡；厨师走阈值，🎁 走金库总开关）
+ - `0.8.197`：SNAP_SHOT 只记 Genius CA 索引（不组 stub / 不扫三遍）；出卡后再画；PATCH 新卡仍走 host-fee
+- 插件当前版本：见 `extension/manifest.json`（**0.8.197**，公开无剪切板）
+- page-hook：`HOOK_VER` **191**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`；`chainBsc`/`chainRh` 默认 `true`，关则不画该链 CA 徽章）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  
 - 尾号屏蔽：`flapFeeInfo.suffixHide.v1` = `{ enabled, rules:[{id,suffix,enabled}] }`（最多 24 条 hex 1–12 位）
-- 资金接收：`flapFeeInfo.taxRecvHide.v1` = `{ enabled, thresholdPct, allow:[{id,address,enabled}] }`（白名单最多 24 个 0x 地址）
+- 资金接收：`flapFeeInfo.taxRecvHide.v1` = `{ enabled, thresholdPct, hideGenius, allow:[{id,address,enabled}] }`（`hideGenius` 默认 false；勾选后 Genius 👨‍🍳 按阈值挡，🎁 仍走金库开关）
 - 搜索框也屏蔽：`flapFeeInfo.searchHide.v1` = `{ enabled:false }`（默认关；开启后把已启用的资金接收/金库规则套到 GMGN 搜索弹层）
 - Dev 发币次数标记：`flapFeeInfo.devCountMark.v1` = `{ enabled, rules:[{id,op,min,color,enabled}] }`（`op` 为 `lt|lte|eq|gte|gt`，缺省按 `gte`；最多 12 条；默认关）
 - 推特备注描边：`flapFeeInfo.twHandleMark.v1` = `{ enabled, rules:[{id,handle,note,color,enabled}] }`（最多 24 条 handle，备注如「何一」；默认关）

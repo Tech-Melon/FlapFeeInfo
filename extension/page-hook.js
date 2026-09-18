@@ -10,7 +10,7 @@
  * ★ 链+平台 host-fee：BSC Flap/Four 尾号、BSC geniusfun、RH pons_v2；禁止对任意卡扒 fiber / 乱包 dedicated Worker
  */
 (() => {
-  const HOOK_VER = 187;
+  const HOOK_VER = 191;
   /** 钩子安装前的原生 parse；内部 clone 禁止走已包装的 JSON.parse。 */
   const NATIVE_JSON_PARSE = JSON.parse.bind(JSON);
   try {
@@ -156,7 +156,7 @@
     return false;
   }
   const TAX_RECV_ALLOW_MAX = 24;
-  let taxRecvPrefs = { enabled: false, thresholdPct: 100, allow: [] };
+  let taxRecvPrefs = { enabled: false, thresholdPct: 100, allow: [], hideGenius: false };
   let taxRecvEnabled = false;
   let taxRecvAllow = new Set();
   /** @type {{ enabled: boolean, rules: Array<{suffix:string, enabled:boolean}> }} */
@@ -297,7 +297,12 @@
     const addr = String(entry.address || "").toLowerCase();
     if (shouldHideByCustomSuffix(addr)) return true;
     if (entry.__geniusfun === true) {
-      return vaultHideEnabled && vaultHidePrefs.hideGenius === true;
+      if (vaultHideEnabled && vaultHidePrefs.hideGenius === true) return true;
+      if (!taxRecvEnabled || taxRecvPrefs.hideGenius !== true) return false;
+      if (entry.is_vault === true || entry.is_stocks_vault === true) return false;
+      const pct = (Number(entry.market_bps) || 0) / 100;
+      if (!(pct > 0)) return false;
+      return exceedsTaxRecvThreshold(pct, taxRecvPrefs.thresholdPct);
     }
     if (vaultHideEnabled) {
       if (entry.is_stocks_vault === true && vaultHidePrefs.hideStockVault === true) {
@@ -390,7 +395,8 @@
     taxRecvPrefs = {
       enabled: p.enabled === true,
       thresholdPct: clampTaxRecvThreshold(p.thresholdPct),
-      allow: normalizeTaxRecvAllow(p.allow)
+      allow: normalizeTaxRecvAllow(p.allow),
+      hideGenius: p.hideGenius === true
     };
     taxRecvEnabled = taxRecvPrefs.enabled === true;
     rebuildTaxRecvAllowSet();
@@ -756,6 +762,35 @@
     return geniusFunAddrSet.has(String(addr || "").toLowerCase());
   }
 
+  let geniusAddrFlushTimer = 0;
+
+  function flushGeniusAddrIndex() {
+    if (geniusAddrFlushTimer) {
+      window.clearTimeout(geniusAddrFlushTimer);
+      geniusAddrFlushTimer = 0;
+    }
+    if (!hostFeeClientReady || geniusFunAddrSet.size === 0) return;
+    const addrs = [];
+    geniusFunAddrSet.forEach((a) => addrs.push(a));
+    try {
+      window.postMessage(
+        { source: "flap-fee-info", type: "genius-addr-map", addrs },
+        "*"
+      );
+    } catch (_pm) {
+      // ignore
+    }
+  }
+
+  function scheduleGeniusAddrIndexFlush() {
+    if (!hostFeeClientReady) return;
+    if (geniusAddrFlushTimer) return;
+    geniusAddrFlushTimer = window.setTimeout(() => {
+      geniusAddrFlushTimer = 0;
+      flushGeniusAddrIndex();
+    }, 0);
+  }
+
   function isHostFeeTargetItem(item) {
     const addr = gmgnAddr(item);
     if (!addr) return false;
@@ -1007,10 +1042,88 @@
   // ---------- host fee fast-path (GMGN s_tal / Debot launchpad_extra) ----------
   /** @type {Map<string, object>} */
   const hostFeeDedupe = new Map();
+  /** Latest host-fee per CA for content.js boot replay (refresh loses early postMessage). */
+  const hostFeeReplay = new Map();
   /** @type {object[]} */
   let hostFeePending = [];
   let hostFeeFlushTimer = 0;
   const HOST_FEE_DEDUPE_MS = 8000;
+  const HOST_FEE_REPLAY_MAX = 120;
+  let hostFeeClientReady = false;
+  let hostFeeHelloWaitTimer = 0;
+  const HOST_FEE_HELLO_WAIT_MS = 2500;
+
+  function scheduleHostFeeIngest(fn) {
+    if (typeof fn !== "function") return;
+    if (prefsOn()) {
+      try {
+        fn();
+      } catch (_sync) {
+        // ignore
+      }
+      return;
+    }
+    try {
+      queueMicrotask(fn);
+    } catch (_qm) {
+      try {
+        fn();
+      } catch (_fb) {
+        // ignore
+      }
+    }
+  }
+
+  function markHostFeeClientReady(reason) {
+    hostFeeClientReady = true;
+    if (hostFeeHelloWaitTimer) {
+      window.clearTimeout(hostFeeHelloWaitTimer);
+      hostFeeHelloWaitTimer = 0;
+    }
+    try {
+      window.__flapFeeHostFeeClientReady = String(reason || "hello");
+    } catch (_m) {
+      // ignore
+    }
+    hostFeePending.length = 0;
+    if (hostFeeFlushTimer) {
+      window.clearTimeout(hostFeeFlushTimer);
+      hostFeeFlushTimer = 0;
+    }
+    flushHostFeeReplayToContent();
+    flushGeniusAddrIndex();
+  }
+
+  function rememberHostFeeReplay(entry) {
+    const addr = String((entry && entry.address) || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(addr) || !entry) return;
+    hostFeeReplay.set(addr, entry);
+    if (hostFeeReplay.size <= HOST_FEE_REPLAY_MAX) return;
+    const first = hostFeeReplay.keys().next().value;
+    if (first) hostFeeReplay.delete(first);
+  }
+
+  function flushHostFeeReplayToContent() {
+    const entries = [];
+    hostFeeReplay.forEach((row) => {
+      if (row && row.address) entries.push(row);
+    });
+    if (!entries.length) return;
+    for (let i = 0; i < entries.length; i += 48) {
+      try {
+        window.postMessage(
+          {
+            source: "flap-fee-info",
+            type: "host-fee-map",
+            entries: entries.slice(i, i + 48)
+          },
+          "*"
+        );
+      } catch (_pm) {
+        // ignore
+      }
+    }
+  }
 
   function ratioToBps(v) {
     if (v == null || v === "") return 0;
@@ -2070,6 +2183,7 @@
     const sig = hostFeeSig(entry);
     const prev = hostFeeDedupe.get(addr);
     const now = Date.now();
+    rememberHostFeeReplay(entry);
     if (prev && prev.sig === sig && now - prev.at < HOST_FEE_DEDUPE_MS) return;
     hostFeeDedupe.set(addr, { sig, at: now, kind: hostFeeKind(entry) });
     hostFeePending.push(entry);
@@ -2093,6 +2207,15 @@
       };
     } catch (_q) {
       // ignore
+    }
+    if (!hostFeeClientReady) {
+      if (!hostFeeHelloWaitTimer) {
+        hostFeeHelloWaitTimer = window.setTimeout(() => {
+          hostFeeHelloWaitTimer = 0;
+          markHostFeeClientReady("timeout");
+        }, HOST_FEE_HELLO_WAIT_MS);
+      }
+      return;
     }
     if (hostFeeFlushTimer) return;
     hostFeeFlushTimer = window.setTimeout(() => {
@@ -2908,26 +3031,76 @@
     for (let i = 0; i < arr.length; i++) collectHostFeesFromGmgnItem(arr[i]);
   }
 
-  function ingestGmgnTokenLike(row) {
+  function gmgnItemLooksLikeFeeTarget(item) {
+    const addr = gmgnAddr(item);
+    if (!addr) return false;
+    if (isFlapFourSuffixAddr(addr) || isGeniusFunAddr(addr)) return true;
+    const lp = gmgnLaunchpadFamily(item);
+    if (!lp) return false;
+    return lp.indexOf("genius") !== -1 || lp.indexOf("pons_v2") !== -1;
+  }
+
+  /**
+   * mode "index": SNAP_SHOT / 全量帧只记平台（Genius CA），不组 stub、不发卡标记。
+   * mode "full": PATCH 新卡才走 host-fee / card-mark。
+   */
+  function ingestGmgnTokenLike(row, mode) {
     if (!row || typeof row !== "object") return;
     const tok = unwrapGmgnTokenRow(row);
+    const addr = gmgnAddr(tok);
+    if (!addr) return;
+    const suffix = isFlapFourSuffixAddr(addr);
+    let genius = false;
+    let pons = false;
+    if (!suffix) {
+      const lp = gmgnLaunchpadFamily(tok);
+      if (lp) {
+        if (lp.indexOf("genius") !== -1) genius = true;
+        else if (lp.indexOf("pons_v2") !== -1) pons = true;
+      }
+    }
+    if (genius) {
+      rememberGeniusFunAddr(addr);
+      scheduleGeniusAddrIndexFlush();
+    }
+    if (mode === "index") {
+      if (suffix || pons) collectHostFeesFromGmgnItem(tok);
+      return;
+    }
     queueCardMarkFromItem(tok);
-    collectHostFeesFromGmgnItem(tok);
+    if (suffix || genius || pons || isGeniusFunAddr(addr)) {
+      collectHostFeesFromGmgnItem(tok);
+    }
+  }
+
+  function pumpRankFrameIsSnapshot(frame) {
+    if (!frame || typeof frame !== "object") return false;
+    const kind = frame.kind;
+    if (kind === 2 || String(kind || "").toUpperCase() === "SNAP_SHOT") return true;
+    const nData = Array.isArray(frame.data) ? frame.data.length : 0;
+    const nRep = Array.isArray(frame.replaces) ? frame.replaces.length : 0;
+    return nData >= 8 && nRep === 0;
   }
 
   /** PATCH frame.replaces[].data / Full frame.data */
   function ingestPumpRankFrame(frame) {
     if (!frame || typeof frame !== "object") return;
     if (Array.isArray(frame.data)) {
-      for (let i = 0; i < frame.data.length; i += 1) ingestGmgnTokenLike(frame.data[i]);
+      const dataMode =
+        pumpRankFrameIsSnapshot(frame) || frame.data.length >= 8 ? "index" : "full";
+      for (let i = 0; i < frame.data.length; i += 1) {
+        ingestGmgnTokenLike(frame.data[i], dataMode);
+      }
     }
     if (Array.isArray(frame.replaces)) {
       for (let i = 0; i < frame.replaces.length; i += 1) {
         const rep = frame.replaces[i];
-        if (rep && rep.data) ingestGmgnTokenLike(rep.data);
+        if (rep && rep.data) ingestGmgnTokenLike(rep.data, "full");
       }
     }
   }
+
+  const pumpRankDataSeen = new WeakSet();
 
   /**
    * SharedWorker pumpRank-bsc 推送外壳：
@@ -2936,6 +3109,8 @@
    */
   function collectPumpRankData(data) {
     if (!data || typeof data !== "object") return;
+    if (pumpRankDataSeen.has(data)) return;
+    pumpRankDataSeen.add(data);
     const cols = [
       "newCreations",
       "new_creation",
@@ -2947,42 +3122,41 @@
       const block = data[cols[i]];
       if (!block) continue;
       if (Array.isArray(block)) {
-        for (let j = 0; j < block.length; j += 1) ingestGmgnTokenLike(block[j]);
+        const mode = block.length >= 8 ? "index" : "full";
+        for (let j = 0; j < block.length; j += 1) ingestGmgnTokenLike(block[j], mode);
         continue;
       }
       if (typeof block !== "object") continue;
       ingestPumpRankFrame(block.frame);
-      const lists = [
-        block.tokens,
-        block.data,
-        block.upserts,
-        Array.isArray(block.frame) ? block.frame : null,
-        block.frame && block.frame.data,
-        block.frame && block.frame.upserts,
-        block.frame && block.frame.replaces
-      ];
+      const lists = block.frame
+        ? [block.tokens, block.upserts]
+        : [block.tokens, block.data, block.upserts, Array.isArray(block.frame) ? block.frame : null];
       for (let k = 0; k < lists.length; k += 1) {
         let list = lists[k];
         if (!list) continue;
         if (!Array.isArray(list) && typeof list === "object") list = Object.values(list);
         if (!Array.isArray(list)) continue;
-        for (let j = 0; j < list.length; j += 1) ingestGmgnTokenLike(list[j]);
+        const mode = list.length >= 8 ? "index" : "full";
+        for (let j = 0; j < list.length; j += 1) ingestGmgnTokenLike(list[j], mode);
       }
     }
   }
 
   function collectPumpRankEnvelope(msg) {
-    if (!msg || typeof msg !== "object") return;
+    if (!msg || typeof msg !== "object") return 0;
+    let n = 0;
     const res = msg.res || msg.payload?.res || msg.data?.res || null;
     const inner =
       (res && typeof res === "object" && (res.data || res.payload || res)) ||
       null;
     if (inner && typeof inner === "object") {
       collectPumpRankData(inner);
+      n += 1;
       if (inner.data && inner.data !== inner) collectPumpRankData(inner.data);
     }
     if (msg.data && typeof msg.data === "object" && msg.data !== msg) {
       collectPumpRankData(msg.data);
+      n += 1;
     }
     // SharedWorker RPC：{ type:"request_plugin", response:{ body:{ newCreations } } }
     const rpc = msg.response;
@@ -2990,9 +3164,11 @@
       const body = rpc.body || rpc.payload;
       if (body && typeof body === "object") {
         collectPumpRankData(body);
+        n += 1;
         if (body.data && body.data !== body) collectPumpRankData(body.data);
       }
     }
+    return n;
   }
 
   function unwrapGmgnTokenRow(row) {
@@ -3687,9 +3863,11 @@
         }
         handled = true;
       }
-      collectPumpRankEnvelope(json);
-      collectPumpRankData(json);
-      if (json.data && json.data !== json) collectPumpRankData(json.data);
+      const pumpTouched = collectPumpRankEnvelope(json);
+      if (!pumpTouched) {
+        collectPumpRankData(json);
+        if (json.data && json.data !== json) collectPumpRankData(json.data);
+      }
       collectGmgnPoolQuotesFromJson(json);
       // GMGN WS delta / update
       if (
@@ -3954,10 +4132,8 @@
         const c0 = payload.charAt(0);
         if (c0 !== "{" && c0 !== "[") return;
         const obj = NativeJSONParse(payload);
-        collectPumpRankEnvelope(obj);
         collectHostFeesFromJson(obj);
       } else if (typeof data === "object") {
-        collectPumpRankEnvelope(data);
         collectHostFeesFromJson(data);
       }
     } catch (_tap) {
@@ -4894,29 +5070,39 @@
       let wrapped = hostPortWrapMap.get(fn);
       if (wrapped) return wrapped;
       wrapped = function flapFeeHostPortTap(ev) {
-        try {
-          if (ev && ev.data != null) tapHostFeePortData(ev.data);
-        } catch (_e) {
-          // ignore
-        }
-        try {
-          if (prefsOn() && ev && ev.data && typeof ev.data === "object") {
-            const r = filterLiveObject(ev.data, "host-port");
-            if (r.drop) return undefined;
-            if (r.changed && r.data !== ev.data) {
-              if (!patchEventData(ev, r.data)) {
-                try {
-                  return fn.call(this, { data: r.data, type: "message" });
-                } catch (_d) {
-                  // fallthrough
+        const ingest = () => {
+          try {
+            if (ev && ev.data != null) tapHostFeePortData(ev.data);
+          } catch (_e) {
+            // ignore
+          }
+        };
+        if (prefsOn()) {
+          ingest();
+          try {
+            if (ev && ev.data && typeof ev.data === "object") {
+              const r = filterLiveObject(ev.data, "host-port");
+              if (r.drop) return undefined;
+              if (r.changed && r.data !== ev.data) {
+                if (!patchEventData(ev, r.data)) {
+                  try {
+                    return fn.call(this, { data: r.data, type: "message" });
+                  } catch (_d) {
+                    // fallthrough
+                  }
                 }
               }
             }
+          } catch (_flt) {
+            // ignore
           }
-        } catch (_flt) {
-          // ignore
+          return fn.apply(this, arguments);
         }
-        return fn.apply(this, arguments);
+        try {
+          return fn.apply(this, arguments);
+        } finally {
+          scheduleHostFeeIngest(ingest);
+        }
       };
       hostPortWrapMap.set(fn, wrapped);
       return wrapped;
@@ -5126,12 +5312,22 @@
       let wrapped = hostWsWrapMap.get(fn);
       if (wrapped) return wrapped;
       wrapped = function flapFeeHostWsTap(ev) {
-        try {
-          if (ev && ev.data != null) tapHostFeePortData(ev.data);
-        } catch (_e) {
-          // ignore
+        const ingest = () => {
+          try {
+            if (ev && ev.data != null) tapHostFeePortData(ev.data);
+          } catch (_e) {
+            // ignore
+          }
+        };
+        if (prefsOn()) {
+          ingest();
+          return fn.apply(this, arguments);
         }
-        return fn.apply(this, arguments);
+        try {
+          return fn.apply(this, arguments);
+        } finally {
+          scheduleHostFeeIngest(ingest);
+        }
       };
       hostWsWrapMap.set(fn, wrapped);
       return wrapped;
@@ -5285,7 +5481,9 @@
                 if (!rt || rt === "text" || rt === "") {
                   text = typeof xhr.responseText === "string" ? xhr.responseText : "";
                 } else if (rt === "json" && xhr.response && typeof xhr.response === "object") {
-                  if (wantHost) collectHostFeesFromJson(xhr.response);
+                  if (wantHost) {
+                    scheduleHostFeeIngest(() => collectHostFeesFromJson(xhr.response));
+                  }
                   if (wantSearch) {
                     const tokens = collectBscTaxSearchTokens(xhr.response);
                     if (tokens.length) {
@@ -5301,7 +5499,9 @@
                 // ignore
               }
               if (text && text.length >= 40) {
-                if (wantHost) collectHostFeesFromHttp(url, text);
+                if (wantHost) {
+                  scheduleHostFeeIngest(() => collectHostFeesFromHttp(url, text));
+                }
                 if (wantSearch) collectSearchOverlayTokensFromHttp(url, text);
               }
             } catch (_e) {
@@ -5346,7 +5546,14 @@
     // 自定义尾号：任意 CA（不限 7777/8888/ffff）
     if (shouldHideByCustomSuffix(addr)) return true;
     if (gmgnNormalizePlatform(t) === "geniusfun") {
-      return vaultHideEnabled && vaultHidePrefs.hideGenius === true;
+      if (vaultHideEnabled && vaultHidePrefs.hideGenius === true) return true;
+      if (!taxRecvEnabled || taxRecvPrefs.hideGenius !== true) return false;
+      const tal = gmgnTal(t);
+      if (!tal || typeof tal !== "object") return false;
+      const chefPct = gmgnCreatorRecvPct(tal, t);
+      if (chefPct == null) return false;
+      if (isTaxRecvAllowlisted(gmgnRecvAddresses(t, tal))) return false;
+      return exceedsTaxRecvThreshold(chefPct, taxRecvPrefs.thresholdPct);
     }
     const tal = gmgnTal(t);
     if (vaultHideEnabled) {
@@ -5399,7 +5606,15 @@
     // 自定义尾号：任意 CA
     if (shouldHideByCustomSuffix(contract)) return true;
     if (debotRowIsGeniusFun(row)) {
-      return vaultHideEnabled && vaultHidePrefs.hideGenius === true;
+      if (vaultHideEnabled && vaultHidePrefs.hideGenius === true) return true;
+      if (!taxRecvEnabled || taxRecvPrefs.hideGenius !== true) return false;
+      const extra = debotRowExtra(row);
+      if (!extra) return false;
+      const fp = debotChefPct(extra);
+      if (!(fp > 0)) return false;
+      if (!exceedsTaxRecvThreshold(fp, taxRecvPrefs.thresholdPct)) return false;
+      if (isTaxRecvAllowlisted([extra.fee_receiver, extra.founder_address])) return false;
+      return true;
     }
     const extra = debotRowExtra(row);
     if (vaultHideEnabled && extra) {
@@ -6806,6 +7021,10 @@
       try {
         const data = event.data;
         if (!data || data.source !== "flap-fee-info") return;
+        if (data.type === "host-fee-hello") {
+          markHostFeeClientReady("hello");
+          return;
+        }
         if (data.type === "basket-addr-cache") {
           learnVaultStockSymbols(data.rows);
           return;
@@ -7729,7 +7948,9 @@
                   } catch (_rt) {
                     text = "";
                   }
-                  if (text && text.length >= 40) collectHostFeesFromHttp(u, text);
+                  if (text && text.length >= 40) {
+                    scheduleHostFeeIngest(() => collectHostFeesFromHttp(u, text));
+                  }
                 }
                 if (urlLooksUseful(u)) void xhr.responseText;
               } catch (_e) {
@@ -7794,11 +8015,13 @@
           }
           const obj = NativeJSONParse(text, reviver);
           if (obj && typeof obj === "object") {
-            try {
-              collectHostFeesFromJson(obj);
-            } catch (_hf) {
-              // ignore
-            }
+            scheduleHostFeeIngest(() => {
+              try {
+                collectHostFeesFromJson(obj);
+              } catch (_hf) {
+                // ignore
+              }
+            });
           }
           return obj;
         };
@@ -7833,7 +8056,9 @@
             try {
               if (res && res.ok && typeof res.clone === "function") {
                 const text = await res.clone().text();
-                if (wantHost) collectHostFeesFromHttp(url, text);
+                if (wantHost) {
+                  scheduleHostFeeIngest(() => collectHostFeesFromHttp(url, text));
+                }
                 if (wantSearch) collectSearchOverlayTokensFromHttp(url, text);
               }
             } catch (_e) {

@@ -487,6 +487,14 @@
               <p class="theme-hint" data-i18n="taxRecvHint2" id="taxRecvHint2">
                 首页/K 线左侧「新创建」：7777/8888/ffff 且 👨‍🍳 达阈值则屏蔽（含 hybrid）。0% = 严格大于 0%（有 dev 分配就挡，不挡 0%）。纯 💎 持有人分红不挡。
               </p>
+              <label class="row drag-row" for="taxRecvHideGenius" id="taxRecvHideGeniusRow">
+                <input type="checkbox" id="taxRecvHideGenius" />
+                <span class="emoji">🪙</span>
+                <div class="label">
+                  <strong data-i18n="taxRecvHideGeniusTitle">也过滤 Genius.fun</strong>
+                  <span data-i18n="taxRecvHideGeniusDesc">默认不挡。勾选后 Genius 的 👨‍🍳 按上方阈值屏蔽；🎁 金库仍走下方「金库屏蔽」</span>
+                </div>
+              </label>
               <p class="theme-hint" data-i18n="taxRecvAllowLabel" style="margin-top:10px;font-weight:600">
                 接收地址白名单
               </p>
@@ -558,7 +566,7 @@
                   <span class="emoji">🪙</span>
                   <div class="label">
                     <strong data-i18n="vaultHideGeniusTitle">屏蔽 Genius.fun</strong>
-                    <span data-i18n="vaultHideGeniusDesc">BSC launchpad=geniusfun。默认不屏蔽，也不吃税收金库/厨师规则</span>
+                    <span data-i18n="vaultHideGeniusDesc">默认不挡。勾选后隐藏全部 Genius 卡（🎁/👨‍🍳 都挡）。厨师阈值见上方资金接收</span>
                   </div>
                 </label>
               </div>

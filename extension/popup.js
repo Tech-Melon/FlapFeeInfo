@@ -21,7 +21,12 @@
   const LICENSE_API_BASE = "https://flap-fee-info.tech-melon.workers.dev";
   const LICENSE_PURCHASE_URL = "https://t.me/TechMelon_Pay_bot?start=flap";
   const DEFAULT_THEME = "dark";
-  const DEFAULT_TAX_RECV_HIDE = { enabled: false, thresholdPct: 100, allow: [] };
+  const DEFAULT_TAX_RECV_HIDE = {
+    enabled: false,
+    thresholdPct: 100,
+    allow: [],
+    hideGenius: false
+  };
   const TAX_RECV_ALLOW_MAX = 24;
   const DEFAULT_SUFFIX_HIDE = { enabled: false, rules: [] };
   const DEFAULT_VAULT_HIDE = {
@@ -190,6 +195,9 @@
       taxRecvThresholdLabelGt: "阈值 >",
       taxRecvHint2:
         "首页/K 线左侧「新创建」：7777/8888/ffff 且 👨‍🍳 达阈值则屏蔽（含 hybrid）。0% = 严格大于 0%（有 dev 分配就挡，不挡 0%）。纯 💎 持有人分红不挡。",
+      taxRecvHideGeniusTitle: "也过滤 Genius.fun",
+      taxRecvHideGeniusDesc:
+        "默认不挡。勾选后 Genius 的 👨‍🍳 按上方阈值屏蔽；🎁 金库仍走下方「金库屏蔽」",
       taxRecvAllowLabel: "接收地址白名单",
       taxRecvAllowPh: "0x… 接收地址",
       taxRecvAllowHint:
@@ -207,7 +215,8 @@
       vaultHideStockTitle: "屏蔽币股金库",
       vaultHideStockDesc: "📈 Flap Stocks / Flap 币股（FXIO 等篮子）。默认不屏蔽",
       vaultHideGeniusTitle: "屏蔽 Genius.fun",
-      vaultHideGeniusDesc: "BSC geniusfun。默认不屏蔽；税收金库/厨师规则不会误伤 Genius",
+      vaultHideGeniusDesc:
+        "默认不挡。勾选后隐藏全部 Genius 卡（🎁/👨‍🍳 都挡）。厨师阈值见上方资金接收",
       vaultHideHint2:
         "打开总开关且未勾子项时，默认屏蔽税收金库。Genius 默认保留。只勾税收 → 保留 📈 币股。可与资金接收叠加。",
       suffixHideSection: "自定义尾号屏蔽",
@@ -391,6 +400,9 @@
       taxRecvThresholdLabelGt: "Threshold >",
       taxRecvHint2:
         "Home/K-line left New creation: hide 7777/8888/ffff when marketing hits threshold (incl. hybrid). 0% = strictly > 0%. Pure 💎 holder dividend kept.",
+      taxRecvHideGeniusTitle: "Also filter Genius.fun",
+      taxRecvHideGeniusDesc:
+        "Off by default. When on, Genius 👨‍🍳 uses the threshold above; 🎁 vaults still use Vault hide below",
       taxRecvAllowLabel: "Recipient allowlist",
       taxRecvAllowPh: "0x… recipient",
       taxRecvAllowHint:
@@ -408,7 +420,8 @@
       vaultHideStockTitle: "Hide equity vaults",
       vaultHideStockDesc: "📈 Flap Stocks / Flap 币股 baskets (FXIO). Off by default",
       vaultHideGeniusTitle: "Hide Genius.fun",
-      vaultHideGeniusDesc: "BSC geniusfun. Off by default; tax-vault/chef rules do not hide Genius",
+      vaultHideGeniusDesc:
+        "Off by default. When on, hide every Genius card (🎁 and 👨‍🍳). Chef threshold is under fund-recipient hide",
       vaultHideHint2:
         "Master on with no subtype checked defaults to hiding tax vaults. Genius stays visible unless checked. Tax-only keeps 📈 baskets. Stacks with fund-recipient hide.",
       suffixHideSection: "Custom CA suffix hide",
@@ -516,6 +529,8 @@
   const offsetSteps = Array.from(document.querySelectorAll(".btn-step"));
   const offsetSites = Array.from(document.querySelectorAll(".offset-site"));
   const taxRecvEnabled = document.getElementById("taxRecvEnabled");
+  const taxRecvHideGenius = document.getElementById("taxRecvHideGenius");
+  const taxRecvHideGeniusRow = document.getElementById("taxRecvHideGeniusRow");
   const taxRecvThreshold = document.getElementById("taxRecvThreshold");
   const taxRecvThresholdRange = document.getElementById("taxRecvThresholdRange");
   const taxRecvThresholdRow = document.getElementById("taxRecvThresholdRow");
@@ -637,9 +652,10 @@
   }
 
   function normalizeTaxRecvHide(raw) {
-    const out = { enabled: false, thresholdPct: 100, allow: [] };
+    const out = { enabled: false, thresholdPct: 100, allow: [], hideGenius: false };
     if (!raw || typeof raw !== "object") return out;
     out.enabled = raw.enabled === true;
+    out.hideGenius = raw.hideGenius === true;
     const thr = Number(raw.thresholdPct);
     if (Number.isFinite(thr)) {
       out.thresholdPct = Math.max(0, Math.min(100, Math.round(thr)));
@@ -1578,6 +1594,10 @@
   function renderTaxRecvUI(state) {
     taxRecvState = normalizeTaxRecvHide(state);
     if (taxRecvEnabled) taxRecvEnabled.checked = taxRecvState.enabled === true;
+    if (taxRecvHideGenius) taxRecvHideGenius.checked = taxRecvState.hideGenius === true;
+    if (taxRecvHideGeniusRow) {
+      taxRecvHideGeniusRow.classList.toggle("is-disabled", taxRecvState.enabled !== true);
+    }
     const thr = String(taxRecvState.thresholdPct);
     if (taxRecvThreshold) taxRecvThreshold.value = thr;
     if (taxRecvThresholdRange) taxRecvThresholdRange.value = thr;
@@ -1630,7 +1650,8 @@
     return normalizeTaxRecvHide({
       enabled: taxRecvEnabled?.checked === true,
       thresholdPct: thrRaw,
-      allow: taxRecvState.allow
+      allow: taxRecvState.allow,
+      hideGenius: taxRecvHideGenius?.checked === true
     });
   }
 
@@ -2550,6 +2571,10 @@
   taxRecvEnabled?.addEventListener("change", () => {
     taxRecvState = readTaxRecvFromUI();
     renderTaxRecvUI(taxRecvState);
+    scheduleSaveTaxRecv();
+  });
+  taxRecvHideGenius?.addEventListener("change", () => {
+    taxRecvState = readTaxRecvFromUI();
     scheduleSaveTaxRecv();
   });
 
