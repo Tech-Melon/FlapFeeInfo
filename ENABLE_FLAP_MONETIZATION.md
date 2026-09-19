@@ -59,7 +59,7 @@ VPS Python API（算链上税收分配，与许可无关）
 **推荐：经 Worker 写入**（与 FlapFeeInfo 已有的 KV binding 同源，**不需要** `CF_ACCOUNT_ID` / `CF_API_TOKEN`）
 
 ```env
-FLAP_WORKER_BASE_URL=https://flap-fee-info.tech-melon.workers.dev
+FLAP_WORKER_BASE_URL=https://taxinfo.tech-melon.top
 FLAP_LICENSE_SYNC_TOKEN=<与 Worker secret UPSTREAM_API_TOKEN 相同>
 ENABLE_FLAP_PLAN=1   # 上线月再开
 ```

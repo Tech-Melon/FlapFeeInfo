@@ -9,7 +9,7 @@
  * ★ 链+平台 host-fee：BSC Flap/Four 尾号、BSC geniusfun、RH pons_v2
  */
 (() => {
-  const HOOK_VER = 197;
+  const HOOK_VER = 199;
   /** @type {""|"shared-worker"|"main-thread"} */
   let gmgnLiveTransport = "";
   let gmgnFiberNoted = false;
@@ -1450,6 +1450,11 @@
    */
   function hostFeeShouldAskChain(entry, item) {
     if (!entry) return true;
+    if (entry.__geniusfun === true) {
+      if ((Number(entry.gift_bps) || 0) > 0) return false;
+      if (!entry.is_vault && (Number(entry.market_bps) || 0) > 0) return false;
+      return true;
+    }
     const n = Array.isArray(entry.basket_assets) ? entry.basket_assets.length : 0;
     const nativeOnly = hostFeeBasketIsNativeOnly(entry.basket_assets);
     const stocksLp = gmgnIsFlapStocksLaunchpad(item);
@@ -1473,13 +1478,17 @@
   function hostFeeTopPayoutSymbol(p) {
     const div = Number(p && p.dividend_bps) || 0;
     const mkt = Number(p && p.market_bps) || 0;
+    const gift = Number(p && p.gift_bps) || 0;
     const burn = Number(p && p.deflation_bps) || 0;
     const lp = Number(p && p.lp_bps) || 0;
     const giggle = Number(p && p.giggle_charity_bps) || 0;
     const binance = Number(p && p.binance_charity_bps) || 0;
     const segs = [];
     if (div > 0) segs.push({ k: "holder", b: div, p: 0, s: p.dividend_symbol });
-    if (mkt > 0) {
+    if (gift > 0) {
+      segs.push({ k: "gift", b: gift, p: 1, s: p.quote_symbol || p.dividend_symbol });
+      if (mkt > 0) segs.push({ k: "creator", b: mkt, p: 4, s: p.quote_symbol });
+    } else if (mkt > 0) {
       segs.push({
         k: p.is_vault ? "gift" : "creator",
         b: mkt,
@@ -2137,6 +2146,7 @@
     const bps =
       (Number(entry.dividend_bps) || 0) +
       (Number(entry.market_bps) || 0) +
+      (Number(entry.gift_bps) || 0) +
       (Number(entry.deflation_bps) || 0) +
       (Number(entry.lp_bps) || 0) +
       (Number(entry.giggle_charity_bps) || 0) +
@@ -2196,6 +2206,7 @@
     return [
       entry.dividend_bps || 0,
       entry.market_bps || 0,
+      entry.gift_bps || 0,
       entry.deflation_bps || 0,
       entry.lp_bps || 0,
       entry.giggle_charity_bps || 0,
@@ -2298,6 +2309,83 @@
     }, 0);
   }
 
+  function gmgnGeniusRecipientKind(row, tal) {
+    if (!row || typeof row !== "object") return "creator";
+    if (row.is_vault === true || row.is_vault === 1 || row.is_vault === "true") {
+      return "gift";
+    }
+    const alias = String(
+      (row.alias && (row.alias.zhCN || row.alias.en || row.alias.zhTW)) ||
+        row.name ||
+        row.role ||
+        ""
+    );
+    if (/vault|金库|金庫|foundation|基金/i.test(alias)) return "gift";
+    if (/platform|平台/i.test(alias)) return "platform";
+    if (/dev|chef|creator|创始|营销/i.test(alias)) return "creator";
+    const addr = String(row.address || "").toLowerCase();
+    const vaultAddr = String((tal && (tal.market_address || tal.vault_address)) || "").toLowerCase();
+    if (addr && vaultAddr && addr === vaultAddr && isGmgnVaultTal(tal)) return "gift";
+    return "creator";
+  }
+
+  /**
+   * js-mcp：Genius s_tal.marketing 是税内营销桶（常见 0.875），burn_rate=0.125。
+   * marketing_recipients.share 是桶内占比：
+   *   金库 Foundation Vault 4/7 → gift 50%
+   *   Dev 1/7 → 👨‍🍳 12.5%（无金库时 Dev 5/7 → 62.5%）
+   *   Genius Platform 2/7 → 平台 25%，不进徽章
+   */
+  function gmgnGeniusSplitFromTal(tal) {
+    const marketing = ratioToBps(
+      pickTalField(tal, ["marketing", "marketing_tax", "mktx"])
+    );
+    const burn = ratioToBps(
+      pickTalField(tal, ["burn", "burn_rate", "brtx", "deflation"])
+    );
+    const recs = Array.isArray(tal && tal.marketing_recipients)
+      ? tal.marketing_recipients
+      : [];
+    let gift_bps = 0;
+    let market_bps = 0;
+    let is_vault = isGmgnVaultTal(tal);
+    if (recs.length) {
+      for (let i = 0; i < recs.length; i += 1) {
+        const row = recs[i];
+        const share = Number(row && row.share);
+        if (!(share > 0) || !Number.isFinite(share)) continue;
+        const part = Math.round(marketing * share);
+        if (part <= 0) continue;
+        const kind = gmgnGeniusRecipientKind(row, tal);
+        if (kind === "gift") {
+          gift_bps += part;
+          is_vault = true;
+        } else if (kind === "platform") {
+          // 平台税不进徽章（对齐链上 platform_bps）
+        } else {
+          market_bps += part;
+        }
+      }
+    } else if (is_vault) {
+      gift_bps = marketing;
+    } else {
+      market_bps = marketing;
+    }
+    const vtx = ratioToBps(pickTalField(tal, ["vtx", "vault_tax"]));
+    if (vtx > 0 && gift_bps <= 0) {
+      gift_bps = vtx;
+      is_vault = true;
+      if (market_bps >= vtx) market_bps -= vtx;
+    }
+    return {
+      gift_bps,
+      market_bps,
+      deflation_bps: burn,
+      is_vault,
+      splitReady: recs.length >= 2 || gift_bps > 0
+    };
+  }
+
   function gmgnGeniusStubFromItem(item, addr) {
     const quote_symbol = gmgnResolveQuoteSymbol(item, null);
     const quote_token = String(
@@ -2354,20 +2442,32 @@
         "dividend_rate"
       ])
     );
-    let market_bps = ratioToBps(
-      pickTalField(tal, [
-        "marketing",
-        "marketing_tax",
-        "mktx",
-        "dev_tax",
-        "dev",
-        "market",
-        "founder"
-      ])
-    );
-    const deflation_bps = ratioToBps(
-      pickTalField(tal, ["burn", "burn_rate", "brtx", "deflation"])
-    );
+    let market_bps = 0;
+    let deflation_bps = 0;
+    let gift_bps = 0;
+    let geniusSplitReady = false;
+    if (genius) {
+      const split = gmgnGeniusSplitFromTal(tal);
+      gift_bps = split.gift_bps;
+      market_bps = split.market_bps;
+      deflation_bps = split.deflation_bps;
+      geniusSplitReady = split.splitReady;
+    } else {
+      market_bps = ratioToBps(
+        pickTalField(tal, [
+          "marketing",
+          "marketing_tax",
+          "mktx",
+          "dev_tax",
+          "dev",
+          "market",
+          "founder"
+        ])
+      );
+      deflation_bps = ratioToBps(
+        pickTalField(tal, ["burn", "burn_rate", "brtx", "deflation"])
+      );
+    }
     const lp_bps = ratioToBps(
       pickTalField(tal, ["liquidity", "lp", "lp_tax", "lqtx", "liquidity_tax"])
     );
@@ -2379,7 +2479,11 @@
     );
     let basket_assets = normalizeGmgnBasket(tal.dividend_tokens);
     const vaultKind = gmgnVaultKind(tal, item);
-    let is_vault = isGmgnVaultTal(tal) || vaultKind === "stock" || vaultKind === "tax";
+    let is_vault =
+      isGmgnVaultTal(tal) ||
+      vaultKind === "stock" ||
+      vaultKind === "tax" ||
+      (genius && gift_bps > 0);
     let is_stocks_vault = vaultKind === "stock" || basket_assets.length >= 2;
     const nativeOnlyBasket =
       basket_assets.length > 0 &&
@@ -2436,13 +2540,15 @@
       {
         dividend_bps,
         market_bps,
+        gift_bps,
         deflation_bps,
         lp_bps,
         giggle_charity_bps,
         binance_charity_bps,
         is_vault,
         is_stocks_vault,
-        basket_assets
+        basket_assets,
+        __geniusfun: genius
       },
       item
     );
@@ -2466,6 +2572,7 @@
       source: "gmgn",
       dividend_bps,
       market_bps,
+      gift_bps,
       deflation_bps,
       lp_bps,
       giggle_charity_bps,
@@ -2486,6 +2593,7 @@
       top_payout_symbol: hostFeeTopPayoutSymbol({
         dividend_bps,
         market_bps,
+        gift_bps,
         deflation_bps,
         lp_bps,
         giggle_charity_bps,
@@ -2495,7 +2603,7 @@
         quote_symbol,
         tax_symbol: selfSym
       }),
-      __needsChain: genius ? true : needsChain,
+      __needsChain: genius ? !geniusSplitReady : needsChain,
       __pons_v2: pons,
       __geniusfun: genius
     });
@@ -6784,6 +6892,20 @@
   if (!window.__flapFeeInfoSpaHook) {
     window.__flapFeeInfoSpaHook = 1;
     let lastSpaPath = String(location.pathname || "");
+    let lastSpaFireKey = "";
+    const spaRouteKey = () => {
+      const path = String(location.pathname || "");
+      let chain = "";
+      let tab = "";
+      try {
+        const u = new URL(location.href);
+        chain = u.searchParams.get("chain") || "";
+        tab = u.searchParams.get("tab") || "";
+      } catch (_u) {
+        // ignore
+      }
+      return `${path}|c=${chain}|t=${tab}`;
+    };
     const fireSpa = (reason) => {
       const path = String(location.pathname || "");
       const wasToken = /\/token\//i.test(lastSpaPath);
@@ -6792,6 +6914,9 @@
         markNcReseat();
       }
       lastSpaPath = path;
+      const key = spaRouteKey();
+      if (key === lastSpaFireKey) return;
+      lastSpaFireKey = key;
       try {
         window.postMessage(
           {

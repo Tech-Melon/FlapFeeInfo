@@ -1,5 +1,9 @@
 (() => {
-  const DEFAULT_API_BASE = "https://flap-fee-info.tech-melon.workers.dev";
+  const API_BASES = [
+    "https://taxinfo.tech-melon.top",
+    "https://flap-fee-info.tech-melon.workers.dev"
+  ];
+  let DEFAULT_API_BASE = API_BASES[0];
   const TOKEN_RE = /0x[a-fA-F0-9]{40}/;
   // Flap tax 8888/7777 + Four.meme tax ffff
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
@@ -18,6 +22,16 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.234: 空 unknown 先 400/1200/2800ms 重试 3 次，仍空再负缓存。
+  // 0.8.233: Flap 空 unknown 不得盖 host-fee 🔥；host-fee 有分配可纠正 6h 负缓存。
+  // 0.8.232: 撤回用户底纹；着色只改左右文字。BNCB↔BNB、QQQB↔QQQ 匹配保留。
+  // 0.8.231: 底池/分红色曾覆盖类型底色（已撤回底纹）。
+  // 0.8.230: 底栏抽屉禁徽章 — AttachContainer/CustomRndView（收藏/追踪/持仓/社媒/热门等）；收藏不再要求表头。
+  // 0.8.229: K 线降载 — SPA 同路由不 postMessage；PumpSub 无 href 仍观察；侧栏门禁禁 getBoundingClientRect。
+  // 0.8.228: Genius 对齐 Flap — host-fee 拆 marketing_recipients（金库/Dev/平台），齐套 skip /modes。
+  // 0.8.227: Genius 金库 — GMGN s_tal is_vault+marketing 不再画 👨‍🍳；未 /modes 结算前不 skip。
+  // 0.8.226: taxinfo 连不上则回退 workers.dev；验证失败展示错误码。
+  // 0.8.225: 许可证/徽章 API 改 taxinfo.tech-melon.top；verify 遇 license_invalid 短重试。
   // 0.8.224: 热路径不再刮 launchpad；Debot 顶栏禁止 body 全量 span/div；战壕列种子禁整列 textContent。
   // 0.8.223: 点进非税币 K 线卡死 — scrapeLaunchpad 禁止再调 extractTokenFromUrl（递归把主线程打满）。
   // 0.8.222: Debot 列表过滤 — K 线左侧新创建 DOM hide；搜索弹层也滤 Genius；Genius deferFlush 不单卡立刷。
@@ -396,6 +410,9 @@
   const GMGN_MISSING_RETRY_EARLY_MS = [1000, 2200, 4000];
   const HOT_PENDING_RETRY_EARLY_MS = [400, 900, 1800];
   const HOT_MISSING_RETRY_EARLY_MS = [700, 1500, 2800];
+  /** 空 unknown：初回后再打 3 次（400/1200/2800ms），仍空才进入负缓存。 */
+  const UNKNOWN_RETRY_DELAYS_MS = [400, 1200, 2800];
+  const UNKNOWN_RETRY_MAX = 3;
   /** 同时挂起的 miss 重入队定时器上限（防几十个 CA 各挂一个 timer） */
   const GMGN_MISSING_REQUEUE_MAX = 24;
   /** 热档最长：连续无热工作超过此时间退回稳态扫/防抖 */
@@ -737,6 +754,23 @@
     /favorit|watchlist|collect(?:ion|list|token)?|starred|wishlist/i;
   const GMGN_WALLET_TRACK_SENTRY_RE =
     /wallettrack|wallet.?track|followwallet|watchwallet|monitorwallet|FollowWallet|FollowToast|Tracking\.tsx/i;
+  /** js-mcp：底栏抽屉全在 AttachContainer / CustomRndView 里，不是 PumpSub 战壕。 */
+  const GMGN_SIDE_DOCK_SEL = [
+    '[data-sentry-component="AttachContainer"]',
+    '[data-sentry-component="CustomRndView"]',
+    '[data-sentry-component="WalletTrack"]',
+    '[data-sentry-component="WatchList"]',
+    '[data-sentry-component="WatchlistEntry"]',
+    '[data-sentry-component="XTrack"]',
+    '[data-sentry-component="XSniperView"]',
+    '[data-sentry-component="XSniperHeaderView"]',
+    '[data-sentry-component="PositionView"]',
+    '[data-sentry-component="Trending"]',
+    '[data-sentry-component="TrackingHeader"]',
+    '[data-sentry-source-file="Tracking.tsx"]',
+    '[data-sentry-source-file="PositionView.tsx"]',
+    '[data-sentry-source-file="XSniperView.tsx"]'
+  ].join(",");
   // js-mcp: Tax 分红图 = TaxDividendTokenIcon；底池图 = Tax 外 /static/quotes（LaunchpadImageIcon）。
   // wrap 必须是整卡 Tax 容器。单个 TaxDividendTokenIcon 不能当 wrap（querySelector 只包第一张图）。
   // /static/lpp/ 是 Flap/Four 发射台 logo，不是 LP。目录：/static/config/quotes.json
@@ -768,6 +802,7 @@
   const GENERIC_STYLE_QUOTES = new Set([
     "BNB",
     "WBNB",
+    "BNCB",
     "ETH",
     "WETH",
     "BUSD"
@@ -1721,6 +1756,33 @@
     if (wasAllowed) clearBadgeAccessForLicense(`api:${errorCode || "license"}`);
   }
 
+  function apiBaseOrder() {
+    if (DEFAULT_API_BASE === API_BASES[0]) return API_BASES.slice();
+    return [DEFAULT_API_BASE, ...API_BASES.filter((item) => item !== DEFAULT_API_BASE)];
+  }
+
+  async function fetchFlapApi(path, options) {
+    const bases = apiBaseOrder();
+    let lastErr = null;
+    for (let i = 0; i < bases.length; i += 1) {
+      const base = bases[i];
+      try {
+        const res = await fetch(`${base}${path}`, options);
+        if (res.status === 403 && i < bases.length - 1) {
+          lastErr = new Error("cf-403");
+          continue;
+        }
+        DEFAULT_API_BASE = base;
+        return res;
+      } catch (err) {
+        lastErr = err;
+        if (options?.signal?.aborted) throw err;
+      }
+    }
+    if (lastErr) throw lastErr;
+    throw new Error("flap-api-unreachable");
+  }
+
   async function refreshLicenseAccessState(reason) {
     if (!isExtensionContextValid()) return;
     if (licenseGateProbePromise) return licenseGateProbePromise;
@@ -1732,13 +1794,30 @@
           headers.Authorization = `Bearer ${licenseAccessKey}`;
           if (licenseDeviceId) headers["X-Flap-Device-Id"] = licenseDeviceId;
         }
-        const res = await fetch(`${DEFAULT_API_BASE}/license/verify`, {
-          method: "POST",
-          headers,
-          body: "{}",
-          cache: "no-store"
-        });
-        const data = await res.json().catch(() => null);
+        const delays = licenseAccessKey ? [0, 400, 1200] : [0];
+        let res = null;
+        let data = null;
+        for (let i = 0; i < delays.length; i += 1) {
+          if (delays[i]) {
+            await new Promise((resolve) => window.setTimeout(resolve, delays[i]));
+          }
+          res = await fetchFlapApi("/license/verify", {
+            method: "POST",
+            headers,
+            body: "{}",
+            cache: "no-store"
+          });
+          data = await res.json().catch(() => null);
+          const err = data?.error;
+          if (res.ok && data?.ok) break;
+          if (
+            err &&
+            err !== "license_invalid" &&
+            err !== "license_check_failed"
+          ) {
+            break;
+          }
+        }
         if (!licenseAccessKey) {
           licenseEnforcedByServer = data?.enforced === true;
           licenseAccessGranted = !licenseEnforcedByServer;
@@ -1817,6 +1896,12 @@
     if (entry.__pons_v2 === true) {
       return hostFeeAllocationBps(entry) > 0;
     }
+    if (isGeniusFeeEntry(entry) && !isGeniusModesSettled(entry)) {
+      if (!entry.source_host || !hostFeePaintComplete(entry)) return false;
+      if ((Number(entry.gift_bps) || 0) > 0) return true;
+      if (!entry.is_vault && (Number(entry.market_bps) || 0) > 0) return true;
+      return false;
+    }
     if (isGeniusModesSettled(entry)) {
       return hostFeeAllocationBps(entry) > 0 || entry.mode === "unknown";
     }
@@ -1876,16 +1961,38 @@
     return t < 1e12 ? t * 1000 : t;
   }
 
-  function isFreshUnknown(entry) {
+  function isEmptyUnknownEntry(entry) {
+    if (!entry || entry.mode !== "unknown") return false;
+    if (entry.source_host) return false;
+    if (hostFeeAllocationBps(entry) > 0) return false;
+    return true;
+  }
+
+  function unknownRetryCount(token) {
+    const st = missingRetryState.get(String(token || "").toLowerCase());
+    return Number(st && st.unknownAttempts) || 0;
+  }
+
+  function isFreshUnknown(entry, token) {
     if (!entry || entry.mode !== "unknown") return false;
     // host-fee stub / 还要上链：mode=unknown 只是占坑，绝不是 6h 负缓存。
     if (entry.source_host) return false;
     if (entry.__needsChain === true) return false;
     if (isFeeLoadingEntry(entry)) return false;
     if (hostFeeAllocationBps(entry) > 0) return false;
+    const tok = String(token || entry.address || "").toLowerCase();
+    const n = tok ? unknownRetryCount(tok) : UNKNOWN_RETRY_MAX;
+    if (n < UNKNOWN_RETRY_MAX) return false;
+    const st = tok ? missingRetryState.get(tok) : null;
+    if (st && st.kind === "unknown" && Date.now() < Number(st.retryAt || 0)) {
+      return false;
+    }
     const at = fetchedAtMs(entry);
     if (!at) return true;
-    return Date.now() - at < UNKNOWN_CACHE_MS;
+    const src = String(entry.source || "");
+    const ttl =
+      src === "chain" || src === "upstream" ? UNKNOWN_CACHE_MS : 20 * 1000;
+    return Date.now() - at < ttl;
   }
 
   function tokenNeedsModesFetch(token) {
@@ -1902,7 +2009,7 @@
       if (!gEntry || isFeeLoadingEntry(gEntry)) return true;
       if (isGeniusModesSettled(gEntry)) return !hostFeeCanSkipModes(gEntry);
       if (isHostFeeEntryPending(gEntry) || isGeniusEmptyUnknown(gEntry)) return true;
-      if (isFreshUnknown(gEntry)) {
+      if (isFreshUnknown(gEntry, tok)) {
         const tax =
           (Number(gEntry.buy_tax_bps) || 0) + (Number(gEntry.sell_tax_bps) || 0);
         if (tax <= 0) return true;
@@ -1916,7 +2023,10 @@
     if (searchOverlayModesTokens.has(tok)) return true;
     const entry = cached;
     if (!entry || isFeeLoadingEntry(entry)) return true;
-    if (isFreshUnknown(entry)) return false;
+    if (isEmptyUnknownEntry(entry) && unknownRetryCount(tok) < UNKNOWN_RETRY_MAX) {
+      return true;
+    }
+    if (isFreshUnknown(entry, tok)) return false;
     return !hostFeeCanSkipModes(entry);
   }
 
@@ -2148,17 +2258,9 @@
   function isGmgnTokenTrenchSidebarEl(el) {
     if (!(el instanceof HTMLElement) || !isGmgnTokenPage()) return false;
     if (!el.closest?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR)) return false;
-    try {
-      const r = el.getBoundingClientRect();
-      if (r.width < 60 || r.height < 28) return false;
-      if (r.top < 52) return false;
-      // 排除顶栏地址/总税率锁
-      if (isGmgnHeaderMarkedCard(el) || isGmgnTokenHeaderCard(el)) return false;
-      if (el.closest?.(`[${ICON_DATA}="1"][data-fee-header="1"]`)) return false;
-      return true;
-    } catch (_e) {
-      return false;
-    }
+    if (isGmgnHeaderMarkedCard(el) || isGmgnTokenHeaderCard(el)) return false;
+    if (el.closest?.(`[${ICON_DATA}="1"][data-fee-header="1"]`)) return false;
+    return true;
   }
 
   /** K 线侧栏还有未画的 7777/8888/ffff TokenItem（刷新后顶栏先就绪时不能改 light-scan）。 */
@@ -3988,7 +4090,8 @@
     const want = String(addr || "").toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(want)) return "";
     const cached = tokenPageLaunchpadAt.get(want);
-    if (cached && Date.now() - cached.at < 1600) return cached.lp;
+    const ttl = cached && cached.lp ? 8000 : 1500;
+    if (cached && Date.now() - cached.at < ttl) return cached.lp;
     if (scrapeLaunchpadBusy) return cached ? cached.lp : "";
     scrapeLaunchpadBusy = true;
     let lp = "";
@@ -4110,13 +4213,6 @@
     if (!/^0x[a-f0-9]{40}$/.test(a)) return false;
     if (!isFeeBadgeChainPrefOn("bsc")) return false;
     if (TARGET_TOKEN_RE.test(a) || isGeniusFunToken(a)) return true;
-    const urlTok = extractAnyToken(location.pathname || "");
-    if (urlTok !== a) return false;
-    const lp = scrapeLaunchpadFromTokenPage(a);
-    if (isGeniusFunLaunchpadRaw(lp) || normalizeLaunchpadChip(lp) === "geniusfun") {
-      rememberGeniusFunAddr(a);
-      return true;
-    }
     return false;
   }
 
@@ -5642,11 +5738,40 @@
   }
 
   /**
-   * GMGN favorites drawer/table. Require both the panel title and its table
-   * columns so a generic star button or the bottom navigation cannot match.
+   * 底栏 FootButton 打开的抽屉：收藏 / 钱包追踪 / 社媒监控 / 持仓 / 热门 / 盈亏 / 信号 / 喊单。
+   * js-mcp：一律挂在 AttachContainer + CustomRndView，战壕 TokenItem 在 PumpSub 里，不是这棵树。
+   */
+  function isGmgnSideDockPanel(node) {
+    if (!(node instanceof HTMLElement) || !isGmgnHost()) return false;
+    try {
+      if (
+        node.closest?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR) ||
+        node.closest?.(GMGN_FIXED_SEARCH_ROOT_SELECTOR)
+      ) {
+        return false;
+      }
+      return Boolean(node.closest?.(GMGN_SIDE_DOCK_SEL));
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  /**
+   * GMGN favorites drawer. WatchList 登录后是 TokenItem 卡，没有「币种/交易数」表头。
    */
   function isGmgnFavoritesPanel(node) {
     if (!(node instanceof HTMLElement) || !isGmgnHost()) return false;
+    if (isGmgnSideDockPanel(node)) {
+      try {
+        const dock = node.closest?.(GMGN_SIDE_DOCK_SEL);
+        const sentry = gmgnPanelSentryHay(dock || node);
+        if (GMGN_FAVORITES_SENTRY_RE.test(sentry)) return true;
+        const compact = gmgnPanelChromeText(dock || node);
+        if (compact.slice(0, 80).includes("收藏")) return true;
+      } catch (_fav) {
+        return true;
+      }
+    }
     try {
       let p = node;
       for (let i = 0; i < 18 && p && p !== document.body; i++) {
@@ -5657,14 +5782,9 @@
           return false;
         }
         const sentry = gmgnPanelSentryHay(p);
-        const compact = gmgnPanelChromeText(p);
-        const titleHit =
-          compact.slice(0, 80).includes("收藏") ||
-          GMGN_FAVORITES_SENTRY_RE.test(sentry);
         if (
-          titleHit &&
-          (/币种.*交易数.*价格.*24h%/i.test(compact) ||
-            (/币种/.test(compact) && /交易数|24h%/i.test(compact)))
+          GMGN_FAVORITES_SENTRY_RE.test(sentry) &&
+          !/PumpSub|SearchModal|TokenItem|FootButton/i.test(sentry)
         ) {
           return true;
         }
@@ -5725,6 +5845,7 @@
       // The Debot detector contains legacy card-size fallbacks and must never
       // classify GMGN anchors, Tax chips, or badge elements.
       if (isDebotHost() && isDebotSideRailCard(node)) return true;
+      if (isGmgnSideDockPanel(node)) return true;
       if (isGmgnWalletTrackPanel(node)) return true;
       if (isGmgnFavoritesPanel(node)) return true;
       if (isGmgnTopTickerOrChrome(node)) return true;
@@ -6263,7 +6384,9 @@
     const cacheTtl = cached?.forbidden === true ? 1500 : 200;
     if (cached && now - cached.at < cacheTtl) return cached.forbidden;
     const forbidden =
-      isGmgnWalletTrackPanel(target) || isGmgnFavoritesPanel(target);
+      isGmgnSideDockPanel(target) ||
+      isGmgnWalletTrackPanel(target) ||
+      isGmgnFavoritesPanel(target);
     gmgnForbiddenScrollTargetCache.set(target, { forbidden, at: now });
     return forbidden;
   }
@@ -6273,7 +6396,7 @@
     let root = null;
     let p = node;
     for (let depth = 0; depth < 10 && p && p !== document.body; depth += 1) {
-      if (isGmgnWalletTrackPanel(p) || isGmgnFavoritesPanel(p)) {
+      if (isGmgnSideDockPanel(p) || isGmgnWalletTrackPanel(p) || isGmgnFavoritesPanel(p)) {
         root = p;
       } else if (root) {
         break;
@@ -7045,7 +7168,11 @@
           ? card
           : card.closest?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR);
         if (!(trench instanceof HTMLElement)) continue;
-        if (isGmgnWalletTrackPanel(card) || isGmgnFavoritesPanel(card)) {
+        if (
+          isGmgnSideDockPanel(card) ||
+          isGmgnWalletTrackPanel(card) ||
+          isGmgnFavoritesPanel(card)
+        ) {
           wipeForbiddenMountBadges(card, true);
           continue;
         }
@@ -7184,7 +7311,9 @@
     const skipForbiddenPanelCard = (card) => {
       if (
         !(card instanceof HTMLElement) ||
-        (!isGmgnWalletTrackPanel(card) && !isGmgnFavoritesPanel(card))
+        (!isGmgnSideDockPanel(card) &&
+          !isGmgnWalletTrackPanel(card) &&
+          !isGmgnFavoritesPanel(card))
       ) {
         return false;
       }
@@ -7256,6 +7385,15 @@
     };
     for (const record of records) {
       if (!record) continue;
+      if (isGmgnTokenPage() && record.target instanceof HTMLElement) {
+        const tgt = record.target;
+        if (
+          !tgt.closest?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR) &&
+          !tgt.matches?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR)
+        ) {
+          if (record.type !== "attributes" || record.attributeName !== "href") continue;
+        }
+      }
       if (record.type === "attributes") {
         if (record.attributeName === "href" && record.target instanceof HTMLElement) {
           addCard(record.target);
@@ -7663,7 +7801,13 @@
       rootNodes.forEach((root) => {
         if (!(root instanceof HTMLElement)) return;
         if (isListReturnTransitionActive() && gmgnOutgoingTrenchRoots.has(root)) return;
-        if (isGmgnWalletTrackPanel(root) || isGmgnFavoritesPanel(root)) return;
+        if (
+          isGmgnSideDockPanel(root) ||
+          isGmgnWalletTrackPanel(root) ||
+          isGmgnFavoritesPanel(root)
+        ) {
+          return;
+        }
         const r = root.getBoundingClientRect();
         const fixedRoot = root.matches?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR);
         const maxWidth = fixedRoot ? window.innerWidth * 1.05 : window.innerWidth * 0.48;
@@ -8408,7 +8552,7 @@
     });
   }
 
-  const PAGE_HOOK_VER = "193";
+  const PAGE_HOOK_VER = "199";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -11716,7 +11860,7 @@
     };
     const addTrenchRoot = (el) => {
       if (!(el instanceof HTMLElement)) return;
-      if (isGmgnWalletTrackPanel(el) || isGmgnFavoritesPanel(el)) return;
+      if (isGmgnSideDockPanel(el) || isGmgnWalletTrackPanel(el) || isGmgnFavoritesPanel(el)) return;
       try {
         if (
           !el.querySelector?.(
@@ -11744,6 +11888,14 @@
       document.querySelectorAll(GMGN_FIXED_TRENCH_ROOT_SELECTOR)
     );
     exactTrenches.forEach(addTrenchRoot);
+    // PumpSub 已在 DOM 但虚拟列表还没 href 时，仍观察列根，禁止退回 documentElement 吃图表。
+    if (!roots.length && exactTrenches.length) {
+      exactTrenches.forEach((el) => {
+        if (!(el instanceof HTMLElement)) return;
+        if (isGmgnSideDockPanel(el) || isGmgnWalletTrackPanel(el) || isGmgnFavoritesPanel(el)) return;
+        push(el);
+      });
+    }
 
     // Compatibility fallback only when neither stable PumpSubX variant is present.
     if (!exactTrenches.length) {
@@ -11765,6 +11917,7 @@
       if (
         !(el instanceof HTMLElement) ||
         isExplicitlyHiddenOverlay(el) ||
+        isGmgnSideDockPanel(el) ||
         isGmgnWalletTrackPanel(el) ||
         isGmgnFavoritesPanel(el)
       ) return false;
@@ -11778,6 +11931,7 @@
       if (
         searchPanel instanceof HTMLElement &&
         !isExplicitlyHiddenOverlay(searchPanel) &&
+        !isGmgnSideDockPanel(searchPanel) &&
         !isGmgnWalletTrackPanel(searchPanel) &&
         !isGmgnFavoritesPanel(searchPanel)
       ) {
@@ -11876,7 +12030,9 @@
         (r) =>
           r.isConnected &&
           (!isGmgnHost() ||
-            (!isGmgnWalletTrackPanel(r) && !isGmgnFavoritesPanel(r)))
+            (!isGmgnSideDockPanel(r) &&
+              !isGmgnWalletTrackPanel(r) &&
+              !isGmgnFavoritesPanel(r)))
       );
       if (alive.length) {
         scanRootsCache.roots = alive;
@@ -11966,7 +12122,7 @@
       if (isExplicitlyHiddenOverlay(el)) return;
       // Wallet tracking and favorites are hard scan boundaries, even when the
       // host renders them as dialog-like panels.
-      if (isGmgnWalletTrackPanel(el) || isGmgnFavoritesPanel(el)) return;
+      if (isGmgnSideDockPanel(el) || isGmgnWalletTrackPanel(el) || isGmgnFavoritesPanel(el)) return;
       if (roots.includes(el)) return;
       const r = el.getBoundingClientRect();
       if (r.width < 260 || r.height < 100) return;
@@ -13200,8 +13356,26 @@
     }
     missingRetryState.set(normalized, {
       attempts,
+      unknownAttempts: previous?.unknownAttempts || 0,
       retryAt: Date.now() + delayMs,
       kind
+    });
+    if (isGmgnHost() || isDebotHost()) scheduleGmgnMissingRequeue(normalized, delayMs);
+  }
+
+  function deferEmptyUnknownRetry(token) {
+    const normalized = String(token || "").toLowerCase();
+    if (!normalized) return;
+    const previous = missingRetryState.get(normalized);
+    const used = Number(previous && previous.unknownAttempts) || 0;
+    if (used >= UNKNOWN_RETRY_MAX) return;
+    const attempts = used + 1;
+    const delayMs = UNKNOWN_RETRY_DELAYS_MS[attempts - 1] || 2800;
+    missingRetryState.set(normalized, {
+      attempts: previous?.attempts || 0,
+      unknownAttempts: attempts,
+      retryAt: Date.now() + delayMs,
+      kind: "unknown"
     });
     if (isGmgnHost() || isDebotHost()) scheduleGmgnMissingRequeue(normalized, delayMs);
   }
@@ -13239,14 +13413,17 @@
       if (!isExtensionContextValid() || !isTabVisible()) return;
       if (!(isGmgnHost() || isDebotHost())) return;
       const cached = modeCache.get(token);
+      const retryingUnknown =
+        isEmptyUnknownEntry(cached) && unknownRetryCount(token) < UNKNOWN_RETRY_MAX;
       if (
         cached &&
         cached.__needsChain !== true &&
-        !isHostFeeEntryPending(cached)
+        !isHostFeeEntryPending(cached) &&
+        !retryingUnknown
       ) {
         return;
       }
-      if (!cached && isPersistentCacheHit(token)) {
+      if (!cached && isPersistentCacheHit(token) && !retryingUnknown) {
         return;
       }
       const state = missingRetryState.get(token);
@@ -13254,7 +13431,9 @@
       // Only requeue for cards we already discovered (no blind network storm).
       let hasMarked = false;
       try {
-        hasMarked = !!document.querySelector(`[${CARD_DATA}="${token}"]`);
+        hasMarked = !!document.querySelector(
+          `[${CARD_DATA}="${token}"], [${ICON_DATA}="1"][data-fee-token="${token}"]`
+        );
       } catch (_err) {
         hasMarked = false;
       }
@@ -13475,7 +13654,10 @@
     const cachedHit = modeCache.get(tok);
     // 搜索弹层 forceModes：不走 host-fee 快路径。其余仅在真能 skip 时丢队。
     if (options.forceModes !== true && !searchOverlayModesTokens.has(tok)) {
-      if (cachedHit && (hostFeeCanSkipModes(cachedHit) || isFreshUnknown(cachedHit))) {
+      if (
+        cachedHit &&
+        (hostFeeCanSkipModes(cachedHit) || isFreshUnknown(cachedHit, tok))
+      ) {
         requestQueue.delete(tok);
         cancelIncompleteModes(tok);
         return;
@@ -13772,6 +13954,19 @@
         // 宿主金库 vs 旧 KV 🔥：不要用销毁盖掉金库。
         if (nextBag === 0) return;
       }
+      const emptyUnknownIncoming =
+        entry.mode === "unknown" &&
+        hostFeeAllocationBps(entry) <= 0 &&
+        (Number(entry.buy_tax_bps) || 0) + (Number(entry.sell_tax_bps) || 0) <= 0;
+      if (
+        prev &&
+        prev.source_host &&
+        hostFeeAllocationBps(prev) > 0 &&
+        emptyUnknownIncoming
+      ) {
+        // GMGN 已有 🔥/💎，空 unknown（旧负缓存）不得盖掉。
+        return;
+      }
       if (isTrustedStockVault(entry)) {
         entry.is_stocks_vault = true;
       }
@@ -13807,15 +14002,24 @@
         }
       }
       modeCache.set(token, entry);
-      missingRetryState.delete(String(token).toLowerCase());
-      const missTimer = gmgnMissingRequeueTimers.get(String(token).toLowerCase());
-      if (missTimer) {
-        try {
-          window.clearTimeout(missTimer);
-        } catch (_errT) {
-          // ignore
+      const tokKey = String(token).toLowerCase();
+      if (
+        emptyUnknown &&
+        !entry.__geniusfun &&
+        !isGeniusFunToken(token)
+      ) {
+        deferEmptyUnknownRetry(tokKey);
+      } else {
+        missingRetryState.delete(tokKey);
+        const missTimer = gmgnMissingRequeueTimers.get(tokKey);
+        if (missTimer) {
+          try {
+            window.clearTimeout(missTimer);
+          } catch (_errT) {
+            // ignore
+          }
+          gmgnMissingRequeueTimers.delete(tokKey);
         }
-        gmgnMissingRequeueTimers.delete(String(token).toLowerCase());
       }
       confirmed.push([token, entry]);
     });
@@ -14140,7 +14344,7 @@
           headers["X-Flap-Device-Id"] = licenseDeviceId;
         }
       }
-      const res = await fetch(`${DEFAULT_API_BASE}/modes`, {
+      const res = await fetchFlapApi("/modes", {
         method: "POST",
         headers,
         body: JSON.stringify({
@@ -14296,9 +14500,9 @@
     if (!entry || isFeeLoadingEntry(entry)) return false;
     if (entry && entry.__pons_v2 === true) return false;
     if (isGeniusFeeEntry(entry)) {
-      if (hostFeeAllocationBps(entry) > 0) return false;
       if (isGeniusModesSettled(entry)) return false;
-      // host stub / 空 unknown / 未走曲线：先画底池预览，继续 /modes。
+      if ((Number(entry.gift_bps) || 0) > 0) return false;
+      if (!entry.is_vault && (Number(entry.market_bps) || 0) > 0) return false;
       return true;
     }
     if (entry.source_host) return hostFeeAllocationBps(entry) <= 0;
@@ -15309,9 +15513,14 @@
       keys.add("ETH");
       keys.add("WETH");
     }
-    if (keys.has("WBNB") || keys.has("BNB")) {
+    if (keys.has("WBNB") || keys.has("BNB") || keys.has("BNCB")) {
       keys.add("BNB");
       keys.add("WBNB");
+      keys.add("BNCB");
+    }
+    if (keys.has("QQQB") || keys.has("QQQ")) {
+      keys.add("QQQ");
+      keys.add("QQQB");
     }
     return keys;
   }
@@ -18311,8 +18520,13 @@
       }
       const prev = modeCache.get(token);
       if (prev && !prev.source_host && prev.__needsChain !== true) {
-        // /modes 已定案：host-fee 不再用 fiber/DOM 猜篮子或底池。
-        continue;
+        const prevEmpty =
+          prev.mode === "unknown" && hostFeeAllocationBps(prev) <= 0;
+        const nextHasAlloc = hostFeeAllocationBps(entry) > 0;
+        // 空 unknown 负缓存不能挡住 GMGN host-fee 的真实分配（EMBERCAT 🔥）。
+        if (!(prevEmpty && nextHasAlloc)) {
+          continue;
+        }
       }
       if (prev && !hostFeeEntryShouldApply(prev, entry)) continue;
       if (prev && Number(prev.fetched_at) > 0) {
@@ -19375,8 +19589,14 @@
   function effectiveGeniusGiftBps(entry) {
     const g = Number(entry && entry.gift_bps) || 0;
     if (g > 0) return g;
+    if (!entry || !isGeniusFeeEntry(entry)) return 0;
+    // GMGN s_tal：金库只给 is_vault + marketing（常见 0.875），没有单独 gift_bps。
+    // 旧指纹只认链上 1250/1250/200，host-fee 会把金库画成 👨‍🍳。
+    if (entry.is_vault === true) {
+      const m = Number(entry.market_bps) || 0;
+      if (m > 0) return m;
+    }
     if (
-      entry &&
       entry.is_vault === true &&
       Number(entry.buy_tax_bps || 0) === 200 &&
       Number(entry.market_bps || 0) === 1250 &&
@@ -20295,6 +20515,7 @@
     else icon.style.removeProperty("--flap-pool-fg");
     if (divColor) icon.style.setProperty("--flap-div-fg", divColor);
     else icon.style.removeProperty("--flap-div-fg");
+    icon.style.removeProperty("--flap-tint-bg");
     const borderFg =
       symbolStylePrefs.syncBorder
         ? presentation.borderColor || poolColor || divColor

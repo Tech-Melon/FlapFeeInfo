@@ -9,6 +9,7 @@
   --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
   --border: #243044;
   --ok: #3ecf8e;
+  --err: #f07178;
   --license-glow: #f0b429;
   --license-bg: color-mix(in srgb, #f0b429 12%, var(--card));
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
@@ -25,6 +26,7 @@
     --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
     --border: #d5dde8;
     --ok: #1a9f63;
+    --err: #c43c46;
     --license-glow: #d4920a;
     --license-bg: linear-gradient(135deg, #fff9e8 0%, #ffffff 55%, #f3f8ff 100%);
     --shadow: 0 8px 22px rgba(21, 32, 51, 0.08);
@@ -349,8 +351,16 @@ body {
 .license-status {
   margin: 8px 0 0;
   font-size: 11px;
-  color: var(--ok);
+  color: var(--muted);
   min-height: 1em;
+}
+
+.license-status.is-ok {
+  color: var(--ok);
+}
+
+.license-status.is-error {
+  color: var(--err);
 }
 
 .tax-recv-section {

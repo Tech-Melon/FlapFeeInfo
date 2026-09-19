@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.224",
-  "description": "FlapFeeInfo 0.8.224: Hot path no launchpad scrape; Debot header no full-page leaf scan.",
+  "version": "0.8.234",
+  "description": "FlapFeeInfo 0.8.234: Retry empty unknown 3 times before negative cache.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",
@@ -19,7 +19,10 @@
       "128": "icons/flap-128.png"
     }
   },
-  "host_permissions": ["https://flap-fee-info.tech-melon.workers.dev/*"],
+  "host_permissions": [
+    "https://taxinfo.tech-melon.top/*",
+    "https://flap-fee-info.tech-melon.workers.dev/*"
+  ],
   "permissions": ["storage"],
   "content_scripts": [
     {

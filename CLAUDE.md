@@ -45,7 +45,7 @@
 浏览器插件 extension
     POST /modes  { tokens: string[], platforms?: { [ca]: "geniusfun" } }
         ↓  （只等缓存层，不等链）
-Cloudflare Worker  (https://flap-fee-info.tech-melon.workers.dev)
+Cloudflare Worker  (https://taxinfo.tech-melon.top ，workers.dev 仍可用)
     ① 立即返回 mem + KV 命中
     ② miss → pending 标记 + waitUntil 后台回源
         ↓  Bearer + POST /modes { wait_chain: true }  （仅后台）
@@ -460,7 +460,7 @@ python tools/ctl.py watchdog-run
 | 徽章被裁半截 | 挂在 Tax 芯片内 / overflow | 外侧挂载 + CSS `min-width:max-content`（已做） |
 | 只有 mode 无比例 | 命中旧缓存 | 清 storage 或等 miss；schema 已强制完整 payload |
 | GMGN 无 🪙BNB / 🪙USD1 | 未识别特殊 icon / 默认 BNB | 升到 `0.2.9+`；确认 `chain=bsc` |
-| Worker 403 | 无 UA / 边缘防护 | 浏览器正常；脚本请求带浏览器 UA |
+| Worker 403 | 无 UA / 边缘防护 | 浏览器正常；脚本请求带浏览器 UA；插件走 `taxinfo.tech-melon.top` |
 | KV Write 日账单 ≈$5 尖峰 | 冷 isolate 把 stale gift KV 当 miss 反复 `put`；旧版还会重写已命中 key | Worker **先返回 stale KV、isolate 只刷新一次** + 0.7.65 只写 miss；`wrangler deploy` |
 | Worker 仪表盘「错误」~数万/天 | 跨请求 await 共享 inflight Promise，插件 Abort 后 hang detector | 升 Worker **0.7.66+**；点 Errors→Invocation Statuses 应见 hung/exception 下降 |
 | 7777 无图标 | 未重载 0.2.x 插件 | 确认 manifest version |
@@ -891,8 +891,18 @@ python tools/ctl.py watchdog-run
  - `0.8.222`：Debot 列表过滤补齐 — K 线左侧「新创建」也能 DOM hide；搜索弹层滤 Genius
  - `0.8.223`：点进非税币 K 线卡死 — `scrapeLaunchpad` 禁止再调 `extractTokenFromUrl`（递归打满主线程）
  - `0.8.224`：Mutation 热路径不再刮 launchpad；Debot 顶栏禁止 body 全量叶扫；战壕列种子禁整列 textContent
-- 插件当前版本：见 `extension/manifest.json`（**0.8.224**，公开无剪切板）
-- page-hook：`HOOK_VER` **197**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.225`：许可证/徽章 API 改 `https://taxinfo.tech-melon.top`；弹窗区分密钥无效/网络拦截；粘贴 TG 整段也能抽出 12 位密钥；`license_invalid` 短重试
+ - `0.8.226`：`taxinfo` 连不上回退 `workers.dev`；验证失败带错误码，避免都显示成「检查密钥或网络」
+ - `0.8.227`：Genius 金库 — GMGN `s_tal.is_vault`+`marketing` 不再画 👨‍🍳；未 `/modes` 结算前不 skip
+ - `0.8.228`：Genius 对齐 Flap — host-fee 拆 `marketing_recipients`（金库 50%/Dev 12.5%/平台不进徽章）；齐套 skip `/modes`
+ - `0.8.229`：K 线降载 — `replaceState` 同路由不 postMessage；PumpSub 无 href 仍观察列根；侧栏门禁去掉 getBoundingClientRect
+ - `0.8.230`：底栏抽屉禁徽章 — `AttachContainer`/`CustomRndView`（收藏/追踪/持仓/社媒/热门/盈亏/信号/喊单）；收藏不再要求「币种/交易数」表头
+ - `0.8.231`：底池/分红色曾覆盖类型底色（眼花，0.8.232 撤回底纹）
+ - `0.8.232`：着色只改左右文字；底纹/默认边框仍跟 💎/👨‍🍳；`BNCB↔BNB`、`QQQB↔QQQ` 匹配保留
+ - `0.8.233`：Flap 空 unknown 负缓存不得盖 GMGN host-fee 🔥（EMBERCAT `burn_rate=1`）
+ - `0.8.234`：空 unknown 先按 400/1200/2800ms 重试 3 次，仍空再进负缓存
+- 插件当前版本：见 `extension/manifest.json`（**0.8.234**，公开无剪切板）
+- page-hook：`HOOK_VER` **199**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  

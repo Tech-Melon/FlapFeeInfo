@@ -18,7 +18,11 @@
   const SYMBOL_STYLE_KEY = "flapFeeInfo.symbolStyle.v1";
   const LICENSE_KEY = "flapFeeInfo.license.v1";
   const DEVICE_ID_KEY = "flapFeeInfo.deviceId.v1";
-  const LICENSE_API_BASE = "https://flap-fee-info.tech-melon.workers.dev";
+  const LICENSE_API_BASES = [
+    "https://taxinfo.tech-melon.top",
+    "https://flap-fee-info.tech-melon.workers.dev"
+  ];
+  let licenseApiBase = LICENSE_API_BASES[0];
   const LICENSE_PURCHASE_URL = "https://t.me/TechMelon_Pay_bot?start=flap";
   const DEFAULT_THEME = "dark";
   const DEFAULT_TAX_RECV_HIDE = {
@@ -151,9 +155,9 @@
       pref_pool_desc: "🦋Flap / 🖐️Four / 🪙其它",
       poolColorSection: "底池与分红着色",
       poolColorHint:
-        "一条规则同时用于底池（左）和分红（右）。同一代币共用颜色。BNB / ETH / USD* 底池且分红是别的币时，整枚跟分红色；分红没设色则仍用底池色。",
+        "一条规则同时用于底池（左）和分红（右）。同一代币共用颜色。BNB / ETH / BNCB / USD* 底池且分红是别的币时，整枚文字跟分红色；分红没设色则仍用底池色。底纹仍跟 💎/👨‍🍳。",
       poolColorSyncBorderTitle: "边框颜色一起变更",
-      poolColorSyncBorderDesc: "默认关：外框仍跟 💎/👨‍🍳。开启后边框跟代币色，底色仍跟类型",
+      poolColorSyncBorderDesc: "默认关：外框仍跟 💎/👨‍🍳。开启后边框跟代币色，底纹仍跟类型",
       poolColorEnableTitle: "启用着色",
       poolColorEnableDesc: "命中后改显示名，并给对应半边文字上色",
       poolColorNamePh: "QQQB / BNB",
@@ -246,8 +250,13 @@
       licenseCleared: "已清除",
       licenseEmpty: "未填写密钥",
       licenseInvalid: "密钥格式无效",
+      licenseNotFound: "密钥无效或未开通 Flap，请粘贴 Bot 发的 12 位密钥",
+      licenseBlocked: "许可证请求被拦截，请关闭广告拦截后重试",
+      licenseNetwork: "连不上许可证服务，请检查网络后重试",
+      licenseUnavailable: "许可证服务暂时不可用，请稍后重试",
       licenseVerifying: "正在验证…",
       licenseVerifyFail: "验证失败，请检查密钥或网络",
+      licenseSaveFail: "验证通过，但本机保存失败，请重试",
       licenseExpired: "密钥已过期",
       licenseNoPerm: "密钥无 Flap 权限",
       licenseDeviceMismatch: "此密钥已绑定其它设备，可点「换绑到此设备」",
@@ -356,7 +365,7 @@
       pref_pool_desc: "🦋Flap / 🖐️Four / 🪙other",
       poolColorSection: "Pool & dividend colors",
       poolColorHint:
-        "One rule covers pool (left) and dividend (right). Same token shares color. BNB / ETH / USD* pools with a different payout take the dividend color; if that payout has no color, fall back to the pool color.",
+        "One rule covers pool (left) and dividend (right). Same token shares color. BNB / ETH / BNCB / USD* pools with a different payout take the dividend text color; if unset, fall back to the pool color. Fill still follows 💎/👨‍🍳.",
       poolColorSyncBorderTitle: "Also change border color",
       poolColorSyncBorderDesc: "Off: frame stays 💎/👨‍🍳. On: border follows token color; fill still follows fee type",
       poolColorEnableTitle: "Enable coloring",
@@ -452,8 +461,13 @@
       licenseCleared: "Cleared",
       licenseEmpty: "No key saved",
       licenseInvalid: "Invalid key format",
+      licenseNotFound: "Key not found or Flap plan not active — paste the 12-char bot key",
+      licenseBlocked: "License request blocked — disable ad blockers and retry",
+      licenseNetwork: "Cannot reach license service — check your network",
+      licenseUnavailable: "License service is temporarily unavailable — retry later",
       licenseVerifying: "Verifying…",
       licenseVerifyFail: "Verification failed — check key or network",
+      licenseSaveFail: "Verified, but saving on this device failed — retry",
       licenseExpired: "Key expired",
       licenseNoPerm: "Key has no Flap permission",
       licenseDeviceMismatch: "Key bound to another device — use Rebind",
@@ -907,13 +921,25 @@
     return out;
   }
 
+  function extractLicenseKey(raw) {
+    const text = String(raw ?? "").trim();
+    if (!text) return "";
+    const hex12 = text.match(/\b[0-9a-fA-F]{12}\b/);
+    if (hex12) return hex12[0].toLowerCase();
+    const cleaned = text
+      .replace(/🔑/g, " ")
+      .replace(/密钥\s*[：:]/g, " ")
+      .replace(/access\s*key\s*[：:]/gi, " ");
+    const compact = cleaned.replace(/\s+/g, "");
+    if (/^[A-Za-z0-9._~\-]{8,128}$/.test(compact)) return compact;
+    const token = cleaned.match(/[A-Za-z0-9._~\-]{8,128}/);
+    return token ? token[0] : "";
+  }
+
   function normalizeLicense(raw) {
-    const key = String(raw?.key || raw || "")
-      .trim()
-      .replace(/\s+/g, "");
-    if (!key) return { ...DEFAULT_LICENSE };
-    // Allow printable keys from TG bot (alphanumeric + common separators).
-    if (!/^[A-Za-z0-9._~\-]{8,128}$/.test(key)) return null;
+    const leftover = String(raw?.key || raw || "").trim();
+    const key = extractLicenseKey(leftover);
+    if (!key) return leftover ? null : { ...DEFAULT_LICENSE };
     return { key };
   }
 
@@ -993,6 +1019,12 @@
     if (code === "license_expired") return t("licenseExpired");
     if (code === "license_no_flap_perm") return t("licenseNoPerm");
     if (code === "license_device_mismatch") return t("licenseDeviceMismatch");
+    if (code === "license_invalid") return t("licenseNotFound");
+    if (code === "license_blocked") return t("licenseBlocked");
+    if (code === "license_network") return t("licenseNetwork");
+    if (code === "license_check_failed" || code === "license_store_unavailable") {
+      return t("licenseUnavailable");
+    }
     if (
       code === "license_device_bind_failed" ||
       code === "license_device_required" ||
@@ -1000,45 +1032,156 @@
     ) {
       return t("licenseRebindFail");
     }
-    return t("licenseVerifyFail");
+    if (code === "license_verify_failed") {
+      return `${t("licenseVerifyFail")}（verify_failed）`;
+    }
+    return `${t("licenseVerifyFail")}（${code || "unknown"}）`;
   }
 
-  async function callLicenseApi(path, key, deviceId) {
-    const res = await fetch(`${LICENSE_API_BASE}${path}`, {
+  function classifyLicenseHttpError(res, text, data) {
+    if (data && typeof data === "object") {
+      if (data.error_code === 1010 || data.error_name === "browser_signature_banned") {
+        return "license_blocked";
+      }
+      if (data.error) return String(data.error);
+    }
+    const blob = String(text || "");
+    if (
+      res?.status === 403 ||
+      /1010|just a moment|cloudflare|access denied/i.test(blob)
+    ) {
+      return "license_blocked";
+    }
+    return "license_network";
+  }
+
+  function isLicenseTransportError(code) {
+    return code === "license_network" || code === "license_blocked";
+  }
+
+  async function callLicenseApi(path, key, deviceId, base) {
+    const res = await fetch(`${base}${path}`, {
       method: "POST",
       headers: licenseHeaders(key, deviceId),
       body: "{}",
       cache: "no-store"
     });
-    const data = await res.json().catch(() => null);
+    const text = await res.text();
+    let data = null;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+    if (!data || typeof data !== "object") {
+      return {
+        res,
+        data: { ok: false, error: classifyLicenseHttpError(res, text, null) }
+      };
+    }
+    if (!res.ok && !data.error) {
+      data = { ...data, ok: false, error: classifyLicenseHttpError(res, text, data) };
+    }
     return { res, data };
   }
 
+  function sleepMs(ms) {
+    return new Promise((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
+  }
+
+  async function verifyLicenseKeyOnce(key, deviceId) {
+    const bases = [
+      licenseApiBase,
+      ...LICENSE_API_BASES.filter((item) => item !== licenseApiBase)
+    ];
+    let last = {
+      ok: false,
+      error: "license_network",
+      deviceMismatch: false
+    };
+    for (let i = 0; i < bases.length; i += 1) {
+      const base = bases[i];
+      try {
+        const { res, data } = await callLicenseApi("/license/verify", key, deviceId, base);
+        if (!res.ok || !data?.ok) {
+          last = {
+            ok: false,
+            error: data?.error || "license_verify_failed",
+            deviceMismatch: data?.error === "license_device_mismatch"
+          };
+          if (isLicenseTransportError(last.error) && i < bases.length - 1) continue;
+          return last;
+        }
+        licenseApiBase = base;
+        if (key && data.device_bound && data.device_match === false) {
+          return { ok: false, error: "license_device_mismatch", deviceMismatch: true };
+        }
+        return { ok: true, data };
+      } catch {
+        last = { ok: false, error: "license_network", deviceMismatch: false };
+        if (i < bases.length - 1) continue;
+      }
+    }
+    return last;
+  }
+
+  function shouldRetryLicenseVerify(result) {
+    const err = result?.error;
+    return (
+      err === "license_invalid" ||
+      err === "license_network" ||
+      err === "license_check_failed" ||
+      err === "license_store_unavailable"
+    );
+  }
+
   async function verifyLicenseKey(key, deviceId) {
-    const { res, data } = await callLicenseApi("/license/verify", key, deviceId);
-    if (!res.ok || !data?.ok) {
-      return {
-        ok: false,
-        error: data?.error || "license_verify_failed",
-        deviceMismatch: data?.error === "license_device_mismatch"
-      };
+    const delays = [0, 400, 1200];
+    let last = { ok: false, error: "license_verify_failed", deviceMismatch: false };
+    for (let i = 0; i < delays.length; i += 1) {
+      if (delays[i]) await sleepMs(delays[i]);
+      try {
+        last = await verifyLicenseKeyOnce(key, deviceId);
+      } catch {
+        last = { ok: false, error: "license_network", deviceMismatch: false };
+      }
+      if (last.ok) return last;
+      if (!shouldRetryLicenseVerify(last)) return last;
     }
-    if (key && data.device_bound && data.device_match === false) {
-      return { ok: false, error: "license_device_mismatch", deviceMismatch: true };
-    }
-    return { ok: true, data };
+    return last;
   }
 
   async function rebindLicenseKey(key, deviceId) {
-    const { res, data } = await callLicenseApi("/license/rebind", key, deviceId);
-    if (!res.ok || !data?.ok) {
-      return { ok: false, error: data?.error || "license_rebind_failed" };
+    const bases = [
+      licenseApiBase,
+      ...LICENSE_API_BASES.filter((item) => item !== licenseApiBase)
+    ];
+    let last = { ok: false, error: "license_rebind_failed" };
+    for (let i = 0; i < bases.length; i += 1) {
+      try {
+        const { res, data } = await callLicenseApi("/license/rebind", key, deviceId, bases[i]);
+        if (!res.ok || !data?.ok) {
+          last = { ok: false, error: data?.error || "license_rebind_failed" };
+          if (isLicenseTransportError(last.error) && i < bases.length - 1) continue;
+          return last;
+        }
+        licenseApiBase = bases[i];
+        return { ok: true, data };
+      } catch {
+        last = { ok: false, error: "license_network" };
+        if (i < bases.length - 1) continue;
+      }
     }
-    return { ok: true, data };
+    return last;
   }
 
-  function setLicenseStatus(msg) {
-    if (licenseStatus) licenseStatus.textContent = msg || "";
+  function setLicenseStatus(msg, kind) {
+    if (!licenseStatus) return;
+    licenseStatus.textContent = msg || "";
+    licenseStatus.classList.toggle("is-ok", kind === "ok");
+    licenseStatus.classList.toggle("is-error", kind === "error");
   }
 
   function setLicenseCollapsed(on) {
@@ -1144,7 +1287,7 @@
       updateLicensePill();
       updateLicenseHeroSub();
       updateLicenseRebindVisibility();
-      setLicenseStatus(mapLicenseError(result.error));
+      setLicenseStatus(mapLicenseError(result.error), "error");
       setLicenseCollapsed(false);
       return false;
     }
@@ -1153,7 +1296,7 @@
     licenseDeviceMismatch = false;
     const saved = await saveLicense(key ? { key } : { key: "" });
     if (!saved && key) {
-      setLicenseStatus(t("licenseVerifyFail"));
+      setLicenseStatus(t("licenseSaveFail"), "error");
       return false;
     }
     if (saved) licenseState = saved;
@@ -1161,7 +1304,7 @@
     updateLicenseHeroSub();
     updateLicenseRebindVisibility();
     if (key) {
-      setLicenseStatus(t("licenseSaved"));
+      setLicenseStatus(t("licenseSaved"), "ok");
       if (collapseOnSuccess) setLicenseCollapsed(true);
     } else {
       setLicenseStatus(t("licenseEmpty"));
@@ -1175,7 +1318,7 @@
     const raw = licenseKeyInput?.value || "";
     const next = normalizeLicense({ key: raw });
     if (!next) {
-      setLicenseStatus(t("licenseInvalid"));
+      setLicenseStatus(t("licenseInvalid"), "error");
       setLicenseCollapsed(false);
       return;
     }
@@ -1192,7 +1335,7 @@
       const result = await verifyLicenseKey(next.key, deviceId);
       await applyLicenseVerificationResult(next.key, result, { collapseOnSuccess: true });
     } catch {
-      setLicenseStatus(t("licenseVerifyFail"));
+      setLicenseStatus(t("licenseNetwork"), "error");
       setLicenseCollapsed(false);
     } finally {
       setLicenseBusy(false);
@@ -1204,7 +1347,7 @@
     const key = String(licenseKeyInput?.value || licenseState.key || "").trim();
     const next = normalizeLicense({ key });
     if (!next?.key) {
-      setLicenseStatus(t("licenseInvalid"));
+      setLicenseStatus(t("licenseInvalid"), "error");
       return;
     }
 
@@ -1213,12 +1356,12 @@
     try {
       const deviceId = await ensureDeviceId();
       if (!deviceId) {
-        setLicenseStatus(t("licenseRebindFail"));
+        setLicenseStatus(t("licenseRebindFail"), "error");
         return;
       }
       const rebound = await rebindLicenseKey(next.key, deviceId);
       if (!rebound.ok) {
-        setLicenseStatus(mapLicenseError(rebound.error) || t("licenseRebindFail"));
+        setLicenseStatus(mapLicenseError(rebound.error) || t("licenseRebindFail"), "error");
         return;
       }
       // KV 读可能短暂落后于 put；换绑接口已成功就把本机当已绑定，避免误报失败。
@@ -1228,9 +1371,9 @@
         { ok: true, data: rebound.data || { device_rebound: true } },
         { collapseOnSuccess: true }
       );
-      setLicenseStatus(t("licenseRebound"));
+      setLicenseStatus(t("licenseRebound"), "ok");
     } catch {
-      setLicenseStatus(t("licenseRebindFail"));
+      setLicenseStatus(t("licenseRebindFail"), "error");
     } finally {
       setLicenseBusy(false);
     }
@@ -1246,7 +1389,7 @@
     updateLicensePill();
     updateLicenseHeroSub();
     updateLicenseRebindVisibility();
-    setLicenseStatus(t("licenseCleared"));
+    setLicenseStatus(t("licenseCleared"), "ok");
     setLicenseCollapsed(false);
   }
 
@@ -1272,13 +1415,14 @@
         updateLicensePill();
         updateLicenseHeroSub();
         updateLicenseRebindVisibility();
-        setLicenseStatus(mapLicenseError(result.error));
+        setLicenseStatus(mapLicenseError(result.error), "error");
         setLicenseCollapsed(false);
       }
     } catch {
       licenseVerified = false;
       updateLicensePill();
       updateLicenseHeroSub();
+      setLicenseStatus(t("licenseNetwork"), "error");
       setLicenseCollapsed(false);
     } finally {
       setLicenseBusy(false);
