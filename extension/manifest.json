@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.234",
-  "description": "FlapFeeInfo 0.8.234: Retry empty unknown 3 times before negative cache.",
+  "version": "0.8.236",
+  "description": "FlapFeeInfo 0.8.236: Keep flap_stocks basket over empty /modes gift.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

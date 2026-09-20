@@ -155,7 +155,7 @@
       pref_pool_desc: "🦋Flap / 🖐️Four / 🪙其它",
       poolColorSection: "底池与分红着色",
       poolColorHint:
-        "一条规则同时用于底池（左）和分红（右）。同一代币共用颜色。BNB / ETH / BNCB / USD* 底池且分红是别的币时，整枚文字跟分红色；分红没设色则仍用底池色。底纹仍跟 💎/👨‍🍳。",
+        "一条规则同时用于底池（左）和分红（右）。同一代币共用颜色。BNB / ETH / USD* 底池且分红是别的币时，整枚文字跟分红色；分红没设色则仍用底池色。底纹仍跟 💎/👨‍🍳。BNCB 与 BNB 分开匹配。",
       poolColorSyncBorderTitle: "边框颜色一起变更",
       poolColorSyncBorderDesc: "默认关：外框仍跟 💎/👨‍🍳。开启后边框跟代币色，底纹仍跟类型",
       poolColorEnableTitle: "启用着色",
@@ -365,7 +365,7 @@
       pref_pool_desc: "🦋Flap / 🖐️Four / 🪙other",
       poolColorSection: "Pool & dividend colors",
       poolColorHint:
-        "One rule covers pool (left) and dividend (right). Same token shares color. BNB / ETH / BNCB / USD* pools with a different payout take the dividend text color; if unset, fall back to the pool color. Fill still follows 💎/👨‍🍳.",
+        "One rule covers pool (left) and dividend (right). Same token shares color. BNB / ETH / USD* pools with a different payout take the dividend text color; if unset, fall back to the pool color. Fill still follows 💎/👨‍🍳. BNCB is not BNB.",
       poolColorSyncBorderTitle: "Also change border color",
       poolColorSyncBorderDesc: "Off: frame stays 💎/👨‍🍳. On: border follows token color; fill still follows fee type",
       poolColorEnableTitle: "Enable coloring",

@@ -22,6 +22,8 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.236: flap_stocks 篮子不被 /modes 空篮子 🎁 盖掉（小浣熊 FXIO&SPCX）。
+  // 0.8.235: BNB 着色不再误伤 BNCB；GENIUS↔GENI 可命中 Genius 徽章。
   // 0.8.234: 空 unknown 先 400/1200/2800ms 重试 3 次，仍空再负缓存。
   // 0.8.233: Flap 空 unknown 不得盖 host-fee 🔥；host-fee 有分配可纠正 6h 负缓存。
   // 0.8.232: 撤回用户底纹；着色只改左右文字。BNCB↔BNB、QQQB↔QQQ 匹配保留。
@@ -802,7 +804,6 @@
   const GENERIC_STYLE_QUOTES = new Set([
     "BNB",
     "WBNB",
-    "BNCB",
     "ETH",
     "WETH",
     "BUSD"
@@ -1121,6 +1122,26 @@
     // 单成分 100%金库+0分红（FXIO）；API 常不带 is_stocks_vault。96%🎁+4%💎 仍是税收金库。
     if (isSingleAssetStockVault(entry)) return true;
     return false;
+  }
+
+  /** /modes Helper 常回空篮子；GMGN flap_stocks 的 dividend_tokens 不能被盖掉。 */
+  function takeStockBasket(fromEntry, toEntry) {
+    if (!fromEntry || !toEntry) return;
+    const fromBag = normalizeBasketAssets(fromEntry.basket_assets);
+    const toBag = normalizeBasketAssets(toEntry.basket_assets);
+    if (fromBag.length >= 2 && toBag.length < 2) {
+      toEntry.basket_assets = fromBag;
+      toEntry.is_stocks_vault = true;
+      return;
+    }
+    if (
+      fromEntry.is_stocks_vault === true &&
+      fromBag.length >= 1 &&
+      toBag.length < 1
+    ) {
+      toEntry.basket_assets = fromBag;
+      toEntry.is_stocks_vault = true;
+    }
   }
 
   /** 单成分篮子地址/符号与底池报价相同（SPCX病毒/SPCXB）。 */
@@ -13967,6 +13988,7 @@
         // GMGN 已有 🔥/💎，空 unknown（旧负缓存）不得盖掉。
         return;
       }
+      takeStockBasket(prev, entry);
       if (isTrustedStockVault(entry)) {
         entry.is_stocks_vault = true;
       }
@@ -15513,14 +15535,17 @@
       keys.add("ETH");
       keys.add("WETH");
     }
-    if (keys.has("WBNB") || keys.has("BNB") || keys.has("BNCB")) {
+    if (keys.has("WBNB") || keys.has("BNB")) {
       keys.add("BNB");
       keys.add("WBNB");
-      keys.add("BNCB");
     }
     if (keys.has("QQQB") || keys.has("QQQ")) {
       keys.add("QQQ");
       keys.add("QQQB");
+    }
+    if (keys.has("GENI") || keys.has("GENIUS")) {
+      keys.add("GENI");
+      keys.add("GENIUS");
     }
     return keys;
   }
@@ -15543,6 +15568,8 @@
       if (!r || r.enabled === false) continue;
       const match = normalizeStyleMatch(r.match || r.name);
       if (match && keys.has(match)) return r;
+      const shown = compactDisplaySymbol(match);
+      if (shown && shown !== match && keys.has(shown)) return r;
     }
     return null;
   }
@@ -18523,12 +18550,20 @@
         const prevEmpty =
           prev.mode === "unknown" && hostFeeAllocationBps(prev) <= 0;
         const nextHasAlloc = hostFeeAllocationBps(entry) > 0;
-        // 空 unknown 负缓存不能挡住 GMGN host-fee 的真实分配（EMBERCAT 🔥）。
-        if (!(prevEmpty && nextHasAlloc)) {
+        const prevBag = normalizeBasketAssets(prev.basket_assets).length;
+        const nextBag = normalizeBasketAssets(entry.basket_assets).length;
+        const stocksFill =
+          prev.is_vault &&
+          prevBag < 2 &&
+          (entry.is_stocks_vault === true || nextBag >= 2);
+        // 空 unknown 负缓存不能挡住 GMGN host-fee；空篮子金库允许 flap_stocks 补篮子。
+        if (!(prevEmpty && nextHasAlloc) && !stocksFill) {
           continue;
         }
       }
       if (prev && !hostFeeEntryShouldApply(prev, entry)) continue;
+      takeStockBasket(prev, entry);
+      if (isTrustedStockVault(entry)) entry.is_stocks_vault = true;
       if (prev && Number(prev.fetched_at) > 0) {
         entry.fetched_at = prev.fetched_at;
       }
