@@ -22,6 +22,7 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.237: 底池/箭头展示名拉丁 4→6 字（GENIUS 不再截成 GENI）。
   // 0.8.236: flap_stocks 篮子不被 /modes 空篮子 🎁 盖掉（小浣熊 FXIO&SPCX）。
   // 0.8.235: BNB 着色不再误伤 BNCB；GENIUS↔GENI 可命中 Genius 徽章。
   // 0.8.234: 空 unknown 先 400/1200/2800ms 重试 3 次，仍空再负缓存。
@@ -14413,8 +14414,7 @@
   }
 
   /**
-   * 紧凑展示符号：拉丁 4 字 + 大写；中文分红名（哈基米…）必须保留，否则 → 后为空。
-   * 0.5.22 起部分路径依赖 API label；本地重算 fee 时若剥掉 CJK 会丢 →SYMBOL。
+   * 紧凑展示符号：拉丁/中文最多 6 字（GENIUS 不再截成 GENI）。
    */
   function compactDisplaySymbol(symbol) {
     const s = String(symbol || "").trim();
@@ -14422,13 +14422,12 @@
     // 保留 CJK + 字母数字（去空格/标点）
     const cleaned = s.replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "");
     if (!cleaned) return "";
-    // 纯中文（或含中文）：最多 6 字，不 upper
     if (/[\u4e00-\u9fff]/.test(cleaned)) {
       return cleaned.length > 6 ? cleaned.slice(0, 6) : cleaned;
     }
     const raw = cleaned.toUpperCase();
     if (raw === "WBNB") return "BNB";
-    return raw.length > 4 ? raw.slice(0, 4) : raw;
+    return raw.length > 6 ? raw.slice(0, 6) : raw;
   }
 
   /** 币股篮子专用：保留 FXION/NVDAON 等区分度，仅剥 Flap 常见尾缀 B（NVDAB→NVDA） */

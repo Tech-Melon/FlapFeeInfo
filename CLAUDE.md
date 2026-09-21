@@ -903,7 +903,8 @@ python tools/ctl.py watchdog-run
  - `0.8.234`：空 unknown 先按 400/1200/2800ms 重试 3 次，仍空再进负缓存
  - `0.8.235`：BNB 着色不再误伤 BNCB；Genius `GENIUS` 规则可命中徽章上的 `GENI`
  - `0.8.236`：`flap_stocks` 双成分篮子不被 Helper 空篮子 🎁 盖掉（小浣熊 `📈FXIO&SPCX`）
-- 插件当前版本：见 `extension/manifest.json`（**0.8.236**，公开无剪切板）
+ - `0.8.237`：底池/箭头展示名拉丁最多 6 字（`GENIUS` 不再截成 `GENI`）
+- 插件当前版本：见 `extension/manifest.json`（**0.8.237**，公开无剪切板）
 - page-hook：`HOOK_VER` **199**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
