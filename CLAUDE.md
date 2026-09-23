@@ -16,7 +16,7 @@
 
 - **Flap**（`chain=bsc` + 尾号 **`8888` / `7777`**，launchpad 有则须 flap）→ Helper `getTaxTokenInfoV2`
 - **Four.meme**（`chain=bsc` + 尾号 **`ffff`**，launchpad 有则须 fourmeme）→ token 链上 Multicall
-- **Genius.fun**（`chain=bsc` + `launchpad`/`launchpad_platform`/`pool.exchange` = **`geniusfun`**，尾号随机）→ host-fee 先入集合，无 `s_tal` 立刻 `POST /modes`（`platforms[ca]=geniusfun`）；冷批与 Flap/Four **同一次 eth_call**（GeniusSnap state-override 读 curve.`toFoundation`/`feeBps`/`pairToken`/`factory`）；主文案 `🪙QUOTE | 🎁→QUOTE` / `🪙BNB | 👨‍🍳→BNB`（比例只在 tooltip）
+- **Genius.fun**（`chain=bsc` + `launchpad`=`geniusfun`，尾号 **`6666`** 或随机）→ host-fee 先入集合，无 `s_tal` 立刻 `POST /modes`（`platforms[ca]=geniusfun`）；冷批与 Flap/Four **同一次 eth_call**；主文案 `🪙BNCB | 🎁→BNCB` / `🪙BNB | 👨‍🍳→BNB`（比例只在 tooltip）
 - **Pons V2**（`chain=robinhood` + `pons_v2`，尾号随机）→ 只用 GMGN/Debot host-fee，**不打 `/modes`**
 
 | 展示 | 含义 | 数据来源 |
@@ -121,6 +121,12 @@ Flap/Four 三层统一正则（概念上）：
 
 ```text
 ^0x[a-fA-F0-9]{36}(8888|7777|ffff)$
+```
+
+Genius.fun 尾号（不进上面这条，避免走 Flap Helper）：
+
+```text
+^0x[a-fA-F0-9]{36}6666$
 ```
 
 改尾号规则时：**extension + worker + fee_mode_server + fee_mode** 必须同步。
@@ -278,6 +284,7 @@ Debot 混合战壕按**卡 href** 认链（`/token/bsc/` vs `/token/robinhood/`�
 | Debot `/token/bsc/…` + `meta.launchpad=geniusfun` | stub 先 `🪙BNCB`/`🪙GMEB`，再 `/modes` 成 `🎁→`/`👨‍🍳→`；**禁止** `founder_pct≈83%` 画 👨‍🍳 |
 | Debot 同页 robinhood long / bankr / pons v1 | **不画** |
 | GMGN BSC Genius.fun `0x69838bdf075242ce6578e48276d7e9e02b44794f` | `launchpad=geniusfun` 才扫/入队；主文案 `🪙BNCB \| 🎁→BNCB`（创作者 `🪙BNB \| 👨‍🍳→BNB`）；`🎁50%👨‍🍳12.5%🔥12.5%` + 平台 0.5% 只在 tooltip；点击 genius.fun；非 geniusfun 的 BSC 卡不打 `/modes` |
+| GMGN Genius `0xe7f0fc2e…6666`（AMCB 池） | Helper 可能 revert；必须吃 GMGN `token_fee_info` `s_tal`（金库 50%/Dev 12.5%/🔥12.5%）；底池 `🪙AMCB`，禁止 `🪙WETH \| ❓️未` |
 
 #### 卡片标记（Robinhood）
 
@@ -506,6 +513,7 @@ python tools/ctl.py watchdog-run
 | 点徽章看税收后回 GMGN 按空格又打开税收 | 徽章 tabindex 抢焦点，空格当再次点击 | 升到 **0.8.187+**；点击后 blur，空格不再开税收 |
 | Robinhood 新创建 👨‍🍳/💎 闪变 | BSC leftover💎 / dividendBecameReal 把 JSON 半包盖到 fiber 厨师上 | 升到 **0.8.150+**；Robinhood 禁止类型对打，BSC 合并逻辑不动 |
 | Robinhood 💎→USDG / 🪙WETH 不显示 | quotes.json 无 USDG/WETH；0x0 当 BNB 把 ETH 分红藏掉 | 升到 **0.8.151+**；重载完整包并硬刷页 |
+| Genius `6666` K 线 `🪙WETH \| ❓️未` | Helper 对新曲线 revert 成 unknown；`/modes` 负缓存挡住后续 `token_fee_info` 金库分配；顶栏把 WETH 图标当底池 | 升到 **0.8.243+**；重载插件并硬刷页（清 unknown 后走 GMGN s_tal，底池 AMCB） |
 | Robinhood 底池总是 🪙ETH | 每张卡都有 `IconRobinhoodeth` 链标，旧逻辑当底池，盖住 QQQ/SPY quotes 图 | 升到 **0.8.152+**；重载完整包并硬刷页 |
 | Robinhood 改完 BSC 底池/分红变了 | USDG/WETH 地址表曾写入共用 quotes 目录 | 升到 **0.8.153+**；BSC 与 RH 目录按链隔离 |
 | Debot `?chain=robinhood` 无徽章 | 旧版整页当非 BSC 清掉；混合战壕要按卡 `/token/robinhood/` + pons_v2 | 升到 **0.8.154+**；重载完整包并硬刷 Debot |
@@ -904,8 +912,14 @@ python tools/ctl.py watchdog-run
  - `0.8.235`：BNB 着色不再误伤 BNCB；Genius `GENIUS` 规则可命中徽章上的 `GENI`
  - `0.8.236`：`flap_stocks` 双成分篮子不被 Helper 空篮子 🎁 盖掉（小浣熊 `📈FXIO&SPCX`）
  - `0.8.237`：底池/箭头展示名拉丁最多 6 字（`GENIUS` 不再截成 `GENI`）
-- 插件当前版本：见 `extension/manifest.json`（**0.8.237**，公开无剪切板）
-- page-hook：`HOOK_VER` **199**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.238`：Robinhood 迟到分红可纠正首帧厨师（再扫窗 4s→12s；JSON 禁止厨师盖分红）
+ - `0.8.239`：复制即搜等 `writeText` 成功后再开搜索（点 symbol 不再复制失败）
+ - `0.8.240`：Genius.fun 尾号 `6666` 当税币（K 线顶栏不再 `🪙WETH | ❓️未`）
+ - `0.8.241`：Genius 仍按 GMGN `launchpad=geniusfun` 认卡（6666 只是快路径）；s_tal 齐套 skip `/modes`
+ - `0.8.242`：Genius 底池跟 `qa`（GENIUS/AMCB/GMEB）；非 BNCB 地址禁止默认 `BNCB`
+ - `0.8.243`：Genius 链上 unknown 不得挡住 GMGN `token_fee_info`；AMCB 写入报价表；K 线顶栏扫 header
+- 插件当前版本：见 `extension/manifest.json`（**0.8.243**，公开无剪切板）
+- page-hook：`HOOK_VER` **203**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  

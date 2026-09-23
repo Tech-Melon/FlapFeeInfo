@@ -9,7 +9,7 @@
  * ★ 链+平台 host-fee：BSC Flap/Four 尾号、BSC geniusfun、RH pons_v2
  */
 (() => {
-  const HOOK_VER = 199;
+  const HOOK_VER = 203;
   /** @type {""|"shared-worker"|"main-thread"} */
   let gmgnLiveTransport = "";
   let gmgnFiberNoted = false;
@@ -41,8 +41,9 @@
   const VAULT_HIDE_ATTR = "data-flap-vault-hide";
   const VAULT_HIDE_LS_KEY = "flapFeeInfo.vaultHide.v1";
   const SUFFIX_MAX_RULES = 24;
-  /** 与 content.js 一致：Flap 8888/7777 + Four.meme ffff */
+  /** 与 content.js 一致：Flap 8888/7777 + Four.meme ffff；Genius.fun 6666 另走后缀 */
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
+  const GENIUS_FUN_SUFFIX_RE = /^0x[a-fA-F0-9]{36}6666$/i;
   /**
    * 新创建保留池（仅过滤开启时）：
    * - 宿主 API 常在 ~2 分钟后把币移出 new_creation。
@@ -831,8 +832,17 @@
     if (first) geniusFunAddrSet.delete(first);
   }
 
+  function isGeniusFunSuffix(addr) {
+    return GENIUS_FUN_SUFFIX_RE.test(String(addr || ""));
+  }
+
   function isGeniusFunAddr(addr) {
-    return geniusFunAddrSet.has(String(addr || "").toLowerCase());
+    const a = String(addr || "").toLowerCase();
+    if (isGeniusFunSuffix(a)) {
+      rememberGeniusFunAddr(a);
+      return true;
+    }
+    return geniusFunAddrSet.has(a);
   }
 
   let geniusAddrFlushTimer = 0;
@@ -874,7 +884,7 @@
     if (plat === "four") return /ffff$/i.test(addr);
     if (plat === "flap") return /(8888|7777)$/i.test(addr);
     if (plat) return false;
-    return isFlapFourSuffixAddr(addr);
+    return isFlapFourSuffixAddr(addr) || isGeniusFunSuffix(addr);
   }
 
   function isDomFeeTargetAddr(addr, href) {
@@ -971,6 +981,7 @@
 
   function gmgnLaunchpadFamily(item) {
     // trenches_rank 缩写：lpp=flap_stocks|flap；lp 始终是 flap，不能用来区分币股。
+    const pool = item?.pool && typeof item.pool === "object" ? item.pool : null;
     const raw =
       item?.launchpad_platform ||
       item?.lpp ||
@@ -981,7 +992,14 @@
       item?.launchpad ||
       item?.f?.launchpad ||
       "";
-    return String(raw || "").toLowerCase();
+    if (raw) return String(raw).toLowerCase();
+    const poolEx = String(
+      (pool && (pool.exchange || pool.pool_type || pool.launchpad)) ||
+        item?.exchange ||
+        ""
+    ).toLowerCase();
+    if (/genius|flap|four|pons/.test(poolEx)) return poolEx;
+    return "";
   }
 
   function gmgnIsPonsV2(item) {
@@ -1235,6 +1253,10 @@
     if (a === "0x55d398326f99059ff775485246999027b3197955") return "USDT";
     if (a === "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d") return "USDC";
     if (a === "0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d") return "USD1";
+    if (a === "0x4902c5ebc598265ed2212b559b042de8a5eeec3f") return "BNCB";
+    if (a === "0x1f12b85aac097e43aa1555b2881e98a51090e9a6") return "GENIUS";
+    if (a === "0x46ceefda28dd7207059ed19b0acdc026955bb15c") return "GMEB";
+    if (a === "0x96e7d606e229448ef817a7f35fd7394c3e15d00c") return "AMCB";
     return "";
   }
 
@@ -1731,7 +1753,8 @@
         c.launchpad_platform || c.launchpad || c.lpp || (c.pool && c.pool.exchange) || ""
       ).toLowerCase();
       const genius = lp.indexOf("genius") !== -1;
-      if (!TARGET_TOKEN_RE.test(addr) && !genius) return;
+      if (!TARGET_TOKEN_RE.test(addr) && !genius && !isGeniusFunSuffix(addr)) return;
+      if (isGeniusFunSuffix(addr)) rememberGeniusFunAddr(addr);
       if (genius) rememberGeniusFunAddr(addr);
       seen.add(addr);
       out.push(addr);
@@ -2418,7 +2441,9 @@
   function gmgnHostFeeFromItem(item) {
     const addr = gmgnAddr(item);
     const pons = gmgnIsPonsV2(item);
-    const genius = gmgnNormalizePlatform(item) === "geniusfun" && gmgnItemIsBsc(item);
+    const genius =
+      (gmgnNormalizePlatform(item) === "geniusfun" && gmgnItemIsBsc(item)) ||
+      isGeniusFunSuffix(addr);
     if (pons) {
       if (!addr) return null;
     } else if (genius) {
@@ -2654,7 +2679,7 @@
     )
       .trim()
       .toLowerCase();
-    return TARGET_TOKEN_RE.test(addr);
+    return TARGET_TOKEN_RE.test(addr) || isGeniusFunSuffix(addr);
   }
 
   function debotRowLaunchpad(row) {
@@ -2674,7 +2699,7 @@
   const debotRhSkipAt = new Map();
   /** ranks/host-fee 已处理过的 RH 卡：DOM tap 不再扒 fiber */
   const rhFeeDone = new Set();
-  /** 已处理则跳过。仅首帧厨师在 4s 内再扫，接住 marketing→dividend。
+  /** 已处理则跳过。首帧厨师在 12s 内再扫，接住迟到分红（刷新才对的那类）。
    *  content 发现 TaxAllocationIcon 与 kind 对打时可 force 清 rhFeeDone 再扫。 */
   function rhFeeScanSkip(addr) {
     const a = String(addr || "").toLowerCase();
@@ -2684,8 +2709,8 @@
     const at = typeof prev.at === "number" ? prev.at : 0;
     if (!at) return true;
     const age = Date.now() - at;
-    if (age < 500) return true;
-    if (age > 4000) return true;
+    if (age < 400) return true;
+    if (age > 12000) return true;
     return false;
   }
   const ponsSkipPending = [];
@@ -2781,7 +2806,6 @@
   function debotHostFeeFromRow(row) {
     if (!row || typeof row !== "object") return null;
     const pons = debotRowIsPonsV2(row);
-    const genius = debotRowIsGeniusFun(row) && debotRowIsBsc(row);
     const rhRow = debotRowChain(row) === "robinhood" || pons;
     if (!debotRowIsBsc(row) && !pons) return null;
     const addr = String(
@@ -2789,6 +2813,8 @@
     )
       .trim()
       .toLowerCase();
+    const genius =
+      (debotRowIsGeniusFun(row) && debotRowIsBsc(row)) || isGeniusFunSuffix(addr);
     if (pons) {
       if (!/^0x[a-f0-9]{40}$/.test(addr)) return null;
     } else if (genius) {
@@ -4163,6 +4189,16 @@
       const json = nativeJsonParse(text);
       collectHostFeesFromJson(json);
       collectGmgnPoolQuotesFromJson(json);
+      if (
+        /mutil_window_token_info|multi_token_info|token_info_brief/i.test(u) &&
+        Array.isArray(json?.data)
+      ) {
+        const rows = json.data;
+        const lim = Math.min(rows.length, 24);
+        for (let i = 0; i < lim; i += 1) {
+          ingestGmgnTokenLike(rows[i], "full");
+        }
+      }
       if (/meme\/v\d+\/ranks/i.test(u)) {
         flushHostFeePendingNow();
         try {
@@ -4191,16 +4227,24 @@
             (typeof lp === "string" ? lp : "")
         };
         const plat = gmgnNormalizePlatform(lpBag);
-        if (ca && plat === "geniusfun") {
+        const quoteAddr = String(
+          (lp && typeof lp === "object" && (lp.launch_quote_address || lp.qa || lp.quote_address)) ||
+            ""
+        ).toLowerCase();
+        if (ca && (plat === "geniusfun" || isGeniusFunAddr(ca))) {
+          rememberGeniusFunAddr(ca);
           collectHostFeesFromGmgnItem({
             a: ca,
             s_tal: tal,
             tax_allocation: tal,
             security: sec,
-            launchpad: lpBag.launchpad,
+            qa: quoteAddr,
+            quote_address: quoteAddr,
+            launch_quote_address: quoteAddr,
+            launchpad: lpBag.launchpad || "geniusfun",
             launchpad_platform: "geniusfun",
             f: {
-              launchpad: lpBag.launchpad,
+              launchpad: lpBag.launchpad || "geniusfun",
               launchpad_platform: "geniusfun"
             }
           });
@@ -4769,24 +4813,16 @@
         }
       }
     }
-    if (rowPlat === "geniusfun" && !rhHref && gmgnItemIsBsc(row || { a: addr, href, launchpad: rowPlat })) {
+    const geniusCard =
+      rowPlat === "geniusfun" || isGeniusFunAddr(addr);
+    if (geniusCard && !rhHref && gmgnItemIsBsc(row || { a: addr, href, launchpad: rowPlat })) {
       rememberGeniusFunAddr(addr);
-      const stub = gmgnGeniusStubFromItem(
-        {
-          ...(row || {}),
-          a: addr,
-          launchpad: "geniusfun",
-          launchpad_platform: "geniusfun"
-        },
-        addr
-      );
-      if (stub) {
-        stub.__fromFiber = true;
-        queueHostFeeEntry(finalizeHostFeeEntry(stub));
-      }
-      return;
     }
-    if (!TARGET_TOKEN_RE.test(addr) && !(rhHref && gmgnIsPonsV2(row || {}))) {
+    if (
+      !TARGET_TOKEN_RE.test(addr) &&
+      !(rhHref && gmgnIsPonsV2(row || {})) &&
+      !geniusCard
+    ) {
       if (!rhHref) return;
       const lp = scrapeGmgnLaunchpadFromFiber(card, addr);
       if (
@@ -5098,6 +5134,18 @@
         const roots = collectHostFeeObserveRoots();
         const scope = roots.length ? roots : [document.documentElement];
         let hits = 0;
+        try {
+          const path = String(location.pathname || "").toLowerCase();
+          if (!hostIsDebot() && path.indexOf(token) !== -1) {
+            const leaf = document.querySelector("#token-base-address");
+            if (leaf instanceof HTMLElement) {
+              schedule(leaf, "gmgn");
+              hits += 1;
+            }
+          }
+        } catch (_hdr) {
+          // ignore
+        }
         for (let ri = 0; ri < scope.length && hits < 6; ri += 1) {
           const root = scope[ri];
           if (!root?.querySelectorAll) continue;

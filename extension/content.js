@@ -7,10 +7,11 @@
   const TOKEN_RE = /0x[a-fA-F0-9]{40}/;
   // Flap tax 8888/7777 + Four.meme tax ffff
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
+  const GENIUS_FUN_SUFFIX_RE = /^0x[a-fA-F0-9]{36}6666$/i;
   const GENIUS_FUN_PAGE_BASE = "https://genius.fun/token";
   // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
-  const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777|ffff)/i;
+  const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777|ffff|6666)/i;
   const GMGN_TRENCH_ROOT_SELECTOR =
     "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100";
   // Stable GMGN surfaces from the live DOM. Prefer these over page-wide wrappers;
@@ -22,6 +23,12 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.243: Genius 链上 unknown 不得挡住 GMGN token_fee_info；AMCB 写入报价表；K 线顶栏吃 header fiber。
+  // 0.8.242: Genius 底池跟 qa（GENIUS/AMCB/GMEB）；非 BNCB 地址禁止默认 BNCB，缺名等 /modes。
+  // 0.8.241: Genius 仍按 launchpad 认卡；GMGN s_tal 齐套 skip /modes；K 线顶栏刮一次发射台。
+  // 0.8.240: Genius.fun 尾号 6666 当税币（底池 🪙BNCB，不走 Flap Helper）。
+  // 0.8.239: 复制即搜等 writeText 成功后再开搜索，避免点 symbol 复制失败。
+  // 0.8.238: RH 分红迟到 — 厨师 12s 内再扫；JSON 分红可纠正首帧厨师，反向仍禁止。
   // 0.8.237: 底池/箭头展示名拉丁 4→6 字（GENIUS 不再截成 GENI）。
   // 0.8.236: flap_stocks 篮子不被 /modes 空篮子 🎁 盖掉（小浣熊 FXIO&SPCX）。
   // 0.8.235: BNB 着色不再误伤 BNCB；GENIUS↔GENI 可命中 Genius 徽章。
@@ -737,8 +744,14 @@
   const POOL_PREFIX_DEFAULT = "🪙";
   const POOL_PREFIX_FLAP = "🦋"; // 7777 / 8888
   const POOL_PREFIX_FOUR = "🖐️"; // ffff Four.meme
-  /** Genius.fun 原生报价在 GMGN 上叫 BNCB，不是 BNB。 */
+  /** Genius.fun 原生报价在 GMGN 上叫 BNCB，不是 BNB。其它 pair（GENIUS/AMCB/GMEB）跟 qa。 */
   const GENIUS_NATIVE_QUOTE = "BNCB";
+  const GENIUS_QUOTE_BY_ADDR = {
+    "0x4902c5ebc598265ed2212b559b042de8a5eeec3f": "BNCB",
+    "0x1f12b85aac097e43aa1555b2881e98a51090e9a6": "GENIUS",
+    "0x46ceefda28dd7207059ed19b0acdc026955bb15c": "GMEB",
+    "0x96e7d606e229448ef817a7f35fd7394c3e15d00c": "AMCB"
+  };
   const MAX_QUOTE_SYMBOL_LEN = 8;
   // GMGN special quote icons (not in /static/quotes/*.png RWA list).
   const GMGN_ICON_QUOTE_RULES = [
@@ -1082,6 +1095,7 @@
     if (a === "0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d") return "USD1";
     if (a === "0xd6829ea836b6fa224d099d40e54b31262f874631") return "NFLX";
     if (a === "0xf2ec508422174ee564de98187db9359d318afb6b") return "DJTB";
+    if (GENIUS_QUOTE_BY_ADDR[a]) return GENIUS_QUOTE_BY_ADDR[a];
     if (payoutSymbolByAddr.has(a)) return payoutSymbolByAddr.get(a);
     ensureGmgnQuotesCatalog();
     return catalogTitleForQuoteAddr(a) || "";
@@ -1688,7 +1702,7 @@
     const tok = String(token || "").toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(tok)) return;
     const now = Date.now();
-    if (now - (rhFeeFiberRetryAt.get(tok) || 0) < 2000) return;
+    if (now - (rhFeeFiberRetryAt.get(tok) || 0) < 800) return;
     if (now - rhFeeFiberRetryWindowAt > 1000) {
       rhFeeFiberRetryWindowAt = now;
       rhFeeFiberRetryWindowN = 0;
@@ -1880,7 +1894,29 @@
     return hostFeeStillNeedsModes(entry);
   }
 
+  function geniusQuoteSymbolFromAddr(addr) {
+    const a = String(addr || "")
+      .trim()
+      .toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(a)) return "";
+    return (
+      GENIUS_QUOTE_BY_ADDR[a] ||
+      catalogTitleForQuoteAddr(a) ||
+      (payoutSymbolByAddr.has(a) ? payoutSymbolByAddr.get(a) : "") ||
+      ""
+    );
+  }
+
   function hostFeeQuoteReady(entry) {
+    if (isGeniusFeeEntry(entry)) {
+      const qTok = String(entry.quote_token || entry.quote_address || "").toLowerCase();
+      if (quoteTokenLooksNative(qTok) || !qTok) return true;
+      const known = geniusQuoteSymbolFromAddr(qTok);
+      if (known && !quoteSymbolLooksNative(known)) return true;
+      const qs = formatPoolQuoteSymbol(entry.quote_symbol || "");
+      if (qs && qs !== GENIUS_NATIVE_QUOTE && !quoteSymbolLooksNative(qs)) return true;
+      return false;
+    }
     const qTok = String(entry.quote_token || entry.quote_address || "").toLowerCase();
     if (qTok === WBNB_ADDRESS) return true;
     const fromAddr =
@@ -1997,9 +2033,8 @@
 
   function isFreshUnknown(entry, token) {
     if (!entry || entry.mode !== "unknown") return false;
-    // host-fee stub / 还要上链：mode=unknown 只是占坑，绝不是 6h 负缓存。
+    // host-fee stub：mode=unknown 只是占坑，绝不是 6h 负缓存。
     if (entry.source_host) return false;
-    if (entry.__needsChain === true) return false;
     if (isFeeLoadingEntry(entry)) return false;
     if (hostFeeAllocationBps(entry) > 0) return false;
     const tok = String(token || entry.address || "").toLowerCase();
@@ -2009,6 +2044,8 @@
     if (st && st.kind === "unknown" && Date.now() < Number(st.retryAt || 0)) {
       return false;
     }
+    // 重试用尽后停 /modes；__needsChain 仍允许后续 host-fee 覆盖。
+    if (entry.__needsChain === true) return true;
     const at = fetchedAtMs(entry);
     if (!at) return true;
     const src = String(entry.source || "");
@@ -2030,7 +2067,10 @@
       const gEntry = cached;
       if (!gEntry || isFeeLoadingEntry(gEntry)) return true;
       if (isGeniusModesSettled(gEntry)) return !hostFeeCanSkipModes(gEntry);
-      if (isHostFeeEntryPending(gEntry) || isGeniusEmptyUnknown(gEntry)) return true;
+      if (isHostFeeEntryPending(gEntry) || isGeniusEmptyUnknown(gEntry)) {
+        if (isFreshUnknown(gEntry, tok)) return false;
+        return true;
+      }
       if (isFreshUnknown(gEntry, tok)) {
         const tax =
           (Number(gEntry.buy_tax_bps) || 0) + (Number(gEntry.sell_tax_bps) || 0);
@@ -3843,8 +3883,17 @@
     if (first) geniusFunAddrSet.delete(first);
   }
 
+  function isGeniusFunSuffix(addr) {
+    return GENIUS_FUN_SUFFIX_RE.test(String(addr || ""));
+  }
+
   function isGeniusFunToken(addr) {
-    return geniusFunAddrSet.has(String(addr || "").toLowerCase());
+    const a = String(addr || "").toLowerCase();
+    if (isGeniusFunSuffix(a)) {
+      rememberGeniusFunAddr(a);
+      return true;
+    }
+    return geniusFunAddrSet.has(a);
   }
 
   function rememberPonsV2Addr(addr) {
@@ -3999,6 +4048,66 @@
   function isGeniusFunLaunchpadRaw(raw) {
     const s = String(raw || "").toLowerCase().replace(/[\s_-]+/g, "");
     return s.indexOf("geniusfun") !== -1;
+  }
+
+  const geniusFiberCache = new WeakMap();
+  let geniusFiberSlotAt = 0;
+  let geniusFiberSlotN = 0;
+
+  function takeGeniusFiberSlot() {
+    const now = Date.now();
+    if (now - geniusFiberSlotAt > 200) {
+      geniusFiberSlotAt = now;
+      geniusFiberSlotN = 0;
+    }
+    if (geniusFiberSlotN >= 2) return false;
+    geniusFiberSlotN += 1;
+    return true;
+  }
+
+  /** 按卡 launchpad=geniusfun 认平台（对齐 pons_v2）。尾号 6666 只是快路径。 */
+  function scrapeGeniusFromCard(card) {
+    if (!(card instanceof HTMLElement) || isDebotHost()) return false;
+    const href = readCardTokenHref(card);
+    if (!isBscTokenRouteHref(href)) return false;
+    const hrefTok = extractAnyToken(href);
+    if (hrefTok && isGeniusFunToken(hrefTok)) return true;
+    if (hrefTok && TARGET_TOKEN_RE.test(hrefTok)) return false;
+    const cached = geniusFiberCache.get(card);
+    if (cached && Date.now() - cached.at < 4000) return cached.ok;
+    if (!takeGeniusFiberSlot()) return cached ? cached.ok : false;
+    let ok = false;
+    try {
+      let f = reactFiberOfCard(card);
+      for (let i = 0; i < 16 && f; i += 1) {
+        const p = f.memoizedProps;
+        if (p && typeof p === "object") {
+          const bags = [p.data, p.token, p.item, p.row, p];
+          for (let j = 0; j < bags.length; j += 1) {
+            const d = bags[j];
+            if (!d || typeof d !== "object") continue;
+            const raw = launchpadFromFiberBag(d, hrefTok || "") || launchpadFromFiberBag(d, "");
+            if (!isGeniusFunLaunchpadRaw(raw) && normalizeLaunchpadChip(raw) !== "geniusfun") {
+              continue;
+            }
+            const addr = extractAnyToken(
+              d.address || d.a || d.contract || href || ""
+            );
+            if (addr && (!hrefTok || addr === hrefTok)) {
+              rememberGeniusFunAddr(addr);
+              ok = true;
+              break;
+            }
+          }
+          if (ok) break;
+        }
+        f = f.return;
+      }
+    } catch (_e) {
+      ok = false;
+    }
+    geniusFiberCache.set(card, { ok, at: Date.now() });
+    return ok;
   }
 
   function launchpadFromFiberBag(d, wantAddr) {
@@ -4212,7 +4321,8 @@
       return false;
     }
     if (isBscTokenRouteHref(href)) {
-      return TARGET_TOKEN_RE.test(a);
+      if (TARGET_TOKEN_RE.test(a) || isGeniusFunToken(a)) return true;
+      return Boolean(card && scrapeGeniusFromCard(card));
     }
     if (!href && pageUrlIsRobinhoodToken()) {
       if (TARGET_TOKEN_RE.test(a)) return isFeeBadgeChainPrefOn("bsc");
@@ -4290,7 +4400,8 @@
       if (!isFeeBadgeChainPrefOn("bsc")) return false;
       const tok = extractAnyToken(href);
       if (tok && isGeniusFunToken(tok)) return true;
-      return TARGET_TOKEN_RE.test(tok || "");
+      if (TARGET_TOKEN_RE.test(tok || "") || isGeniusFunSuffix(tok || "")) return true;
+      return Boolean(card && scrapeGeniusFromCard(card));
     }
     if (isRobinhoodTokenRouteHref(href) && (isGmgnHost() || isDebotLikeHost())) {
       if (!isFeeBadgeChainPrefOn("rh")) return false;
@@ -5105,7 +5216,10 @@
       return !!getCachedGmgnHeaderBadge(urlTok);
     }
 
-    if (!pageUrlIsRobinhoodToken()) queueToken(urlTok);
+    if (!pageUrlIsRobinhoodToken()) {
+      if (isGeniusFunToken(urlTok)) rememberGeniusFunAddr(urlTok);
+      queueToken(urlTok);
+    }
 
     const existingGood = findGmgnHeaderBadgeEl(urlTok);
     if (
@@ -5157,6 +5271,9 @@
     removeStaleTokenHeaderBadges(urlTok);
     const host = climbGmgnHeaderCardFromLeaf(addrLeaf) || addrLeaf;
     const markHost = host instanceof HTMLElement ? host : addrLeaf;
+    if (!pageUrlIsRobinhoodToken()) {
+      trySeedHostFeeForCard(markHost, urlTok);
+    }
     const entry = getEntryForCard(markHost, urlTok) || resolveEntry(urlTok);
     markHost.dataset[CARD_MARK] = urlTok;
     try {
@@ -8574,7 +8691,7 @@
     });
   }
 
-  const PAGE_HOOK_VER = "199";
+  const PAGE_HOOK_VER = "202";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -10895,7 +11012,7 @@
       pendingLightScan = false;
       tryPaintDebotTokenHeader("scan-pre");
     }
-    if (isGmgnTokenPage() && extractTokenFromUrl() && !hasGmgnTokenHeaderBadge()) {
+    if (isGmgnTokenPage() && resolveUrlFeeToken() && !hasGmgnTokenHeaderBadge()) {
       lightScan = false;
       pendingLightScan = false;
       tryPaintGmgnTokenHeader("scan-pre");
@@ -13998,8 +14115,10 @@
         hostFeeAllocationBps(entry) <= 0 &&
         (Number(entry.buy_tax_bps) || 0) + (Number(entry.sell_tax_bps) || 0) <= 0;
       const fromChain = result.source === "chain" || result.source === "upstream";
+      if (token) entry.address = token;
       if (entry.__geniusfun || isGeniusFunToken(token)) {
-        entry.__modesSettled = !emptyUnknown || fromChain;
+        // chain unknown 不是定案（host-fee 仍可覆盖），但不要钉死 __needsChain，否则 6h 内无法停 /modes。
+        entry.__modesSettled = !emptyUnknown;
         entry.__needsChain = emptyUnknown && !fromChain;
       } else {
         entry.__modesSettled = true;
@@ -14008,17 +14127,24 @@
       if (entry.__geniusfun) {
         const qTok = entry.quote_token || "";
         let q = formatPoolQuoteSymbol(entry.quote_symbol || "");
+        if (q === GENIUS_NATIVE_QUOTE && qTok && !quoteTokenLooksNative(qTok)) {
+          const mapped = geniusQuoteSymbolFromAddr(qTok);
+          q = mapped && mapped !== GENIUS_NATIVE_QUOTE ? formatPoolQuoteSymbol(mapped) : "";
+        }
         if (!q || quoteSymbolLooksNative(q)) {
           const fromAddr =
-            catalogTitleForQuoteAddr(qTok) || symbolFromKnownPayoutAddress(qTok, entry);
+            geniusQuoteSymbolFromAddr(qTok) ||
+            catalogTitleForQuoteAddr(qTok) ||
+            symbolFromKnownPayoutAddress(qTok, entry);
           if (fromAddr && !quoteSymbolLooksNative(fromAddr)) {
             q = formatPoolQuoteSymbol(fromAddr);
-          } else if (quoteTokenLooksNative(qTok) || quoteSymbolLooksNative(q) || !qTok) {
+          } else if (quoteTokenLooksNative(qTok) || !qTok) {
             q = GENIUS_NATIVE_QUOTE;
           }
         }
         if (q) {
           entry.quote_symbol = q;
+          if (qTok) rememberPayoutSymbol(qTok, q);
           if (!entry.top_payout_symbol || quoteSymbolLooksNative(entry.top_payout_symbol)) {
             entry.top_payout_symbol = q;
           }
@@ -14026,11 +14152,7 @@
       }
       modeCache.set(token, entry);
       const tokKey = String(token).toLowerCase();
-      if (
-        emptyUnknown &&
-        !entry.__geniusfun &&
-        !isGeniusFunToken(token)
-      ) {
+      if (emptyUnknown) {
         deferEmptyUnknownRetry(tokKey);
       } else {
         missingRetryState.delete(tokKey);
@@ -14509,11 +14631,8 @@
 
   function isGeniusModesSettled(entry) {
     if (!entry || !isGeniusFeeEntry(entry) || entry.__modesSettled !== true) return false;
-    const src = String(entry.source || "");
-    // cf-memory / sqlite 空 unknown 不是曲线结果，不能定案。
-    if (isGeniusEmptyUnknown(entry) && src && src !== "chain" && src !== "upstream") {
-      return false;
-    }
+    // 空 unknown（含 chain revert）都不能定案，等 GMGN host-fee。
+    if (isGeniusEmptyUnknown(entry)) return false;
     return true;
   }
 
@@ -14524,6 +14643,9 @@
       if (isGeniusModesSettled(entry)) return false;
       if ((Number(entry.gift_bps) || 0) > 0) return false;
       if (!entry.is_vault && (Number(entry.market_bps) || 0) > 0) return false;
+      if (isGeniusEmptyUnknown(entry) && isFreshUnknown(entry, entry.address)) {
+        return false;
+      }
       return true;
     }
     if (entry.source_host) return hostFeeAllocationBps(entry) <= 0;
@@ -14534,7 +14656,10 @@
   function hostFeeStillNeedsModes(entry) {
     if (!entry || isFeeLoadingEntry(entry)) return false;
     if (entry.__pons_v2 === true) return false;
-    if (isGeniusFeeEntry(entry) && hostFeeAllocationBps(entry) <= 0) return true;
+    if (isGeniusFeeEntry(entry) && hostFeeAllocationBps(entry) <= 0) {
+      if (isFreshUnknown(entry, entry.address)) return false;
+      return true;
+    }
     if (entry.source_host) return !hostFeeCanSkipModes(entry);
     return entry.__needsChain === true;
   }
@@ -15071,30 +15196,34 @@
 
   function geniusDisplayQuote(entry, card, fromApiHint, fromAddrHint) {
     const qTok = (entry && (entry.quote_token || entry.quote_address)) || "";
+    const mapped = geniusQuoteSymbolFromAddr(qTok);
+    if (mapped && !quoteSymbolLooksNative(mapped)) {
+      return formatPoolQuoteSymbol(mapped);
+    }
     const fromDomG = card ? extractQuoteSymbolFromDom(card) : "";
-    if (fromDomG && !quoteSymbolLooksNative(fromDomG)) {
+    if (fromDomG && !quoteSymbolLooksNative(fromDomG) && fromDomG !== GENIUS_NATIVE_QUOTE) {
       return formatPoolQuoteSymbol(fromDomG);
     }
     const fromAddr =
       fromAddrHint ||
       catalogTitleForQuoteAddr(qTok) ||
       symbolFromKnownPayoutAddress(qTok, entry);
-    if (fromAddr && !quoteSymbolLooksNative(fromAddr)) {
+    if (fromAddr && !quoteSymbolLooksNative(fromAddr) && fromAddr !== GENIUS_NATIVE_QUOTE) {
       return formatPoolQuoteSymbol(fromAddr);
     }
     const apiRaw =
       fromApiHint ||
       (entry && typeof entry.quote_symbol === "string" ? entry.quote_symbol.trim() : "");
-    const fromApi = apiRaw ? formatPoolQuoteSymbol(apiRaw) : "";
+    let fromApi = apiRaw ? formatPoolQuoteSymbol(apiRaw) : "";
+    if (fromApi === GENIUS_NATIVE_QUOTE && qTok && !quoteTokenLooksNative(qTok)) {
+      fromApi = "";
+    }
     if (fromApi && !quoteSymbolLooksNative(fromApi)) {
       if (quoteTokenLooksNative(qTok) || !qTok) return fromApi;
-      // stub 常把非原生 qa 写成 BNCB；qa 在目录里则以目录为准。
-      if (fromApi === GENIUS_NATIVE_QUOTE) return "";
       return fromApi;
     }
-    // 原生/空地址才默认 BNCB；非原生 qa 禁止用 BNCB 盖住 DJTB/自定义池。
     if (quoteTokenLooksNative(qTok) || !qTok) return GENIUS_NATIVE_QUOTE;
-    if (fromDomG) return formatPoolQuoteSymbol(fromDomG);
+    if (fromDomG && fromDomG !== GENIUS_NATIVE_QUOTE) return formatPoolQuoteSymbol(fromDomG);
     return "";
   }
 
@@ -15146,11 +15275,13 @@
     }
 
     const geniusPool =
-      (entry && isGeniusFeeEntry(entry)) ||
+      (entry && isGeniusFeeEntry(entry, entry.address)) ||
+      (entry && isGeniusFunToken(entry.address)) ||
       (card &&
         isGeniusFunToken(
           extractCardHrefToken(card) ||
-            extractAnyToken(readCardTokenHref(card) || "")
+            extractAnyToken(readCardTokenHref(card) || "") ||
+            extractAnyToken(card.getAttribute?.(CARD_DATA) || "")
         ));
     if (geniusPool) {
       return geniusDisplayQuote(entry, card, fromApi, fromAddr);
@@ -15327,6 +15458,18 @@
       const special = readSpecial(false);
       if (special) return special;
       return readSpecial(true) || "";
+    }
+
+    const cardTok =
+      extractCardHrefToken(card) ||
+      extractAnyToken(readCardTokenHref(card) || "") ||
+      extractAnyToken(card.getAttribute?.(CARD_DATA) || "");
+    if (isGeniusFunToken(cardTok)) {
+      const fromFileG = readQuotesPng();
+      if (fromFileG && !/^(ETH|WETH|BNB|WBNB)$/i.test(fromFileG)) return fromFileG;
+      const specialG = readSpecial(false);
+      if (specialG && !/^(ETH|WETH|BNB|WBNB)$/i.test(specialG)) return specialG;
+      return "";
     }
 
     const specialFirst = readSpecial(true);
@@ -18299,14 +18442,16 @@
     return "";
   }
 
-  /** Robinhood 无 /modes 纠偏：禁止 JSON 半包把厨师↔分红打成闪变；fiber 可纠正虚拟列表残留。 */
+  /** Robinhood 无 /modes 纠偏：禁止 JSON 半包把分红打成厨师；迟到分红可以纠正首帧厨师。 */
   function robinhoodHostFeeShouldApply(prev, entry) {
     if (!prev) return true;
     const prevKind = robinhoodExclusiveKind(prev);
     const nextKind = robinhoodExclusiveKind(entry);
     if (prevKind && nextKind && prevKind !== nextKind) {
-      // fiber 纠正 JSON 或旧 fiber（TokenItem 复用）；JSON 不能把已定案类型改成对面。
-      return entry.__fromFiber === true;
+      if (entry.__fromFiber === true) return true;
+      // 首帧厨师 / 虚拟列表残留：后续分红包（含 JSON）可以纠正；反向仍禁止。
+      if (prevKind === "creator" && nextKind === "holder") return true;
+      return false;
     }
     return true;
   }
@@ -18315,6 +18460,13 @@
     if (!prev) return true;
     if (entry.__pons_v2 === true || prev.__pons_v2 === true) {
       return robinhoodHostFeeShouldApply(prev, entry);
+    }
+    if (
+      prev.mode === "unknown" &&
+      hostFeeAllocationBps(prev) <= 0 &&
+      hostFeeAllocationBps(entry) > 0
+    ) {
+      return true;
     }
     if (
       dividendPayoutLooksNative(entry) &&
@@ -18403,6 +18555,7 @@
     }
     if (entry.source_host && !prev.source_host) {
       if (nb > pb) return true;
+      if (prev.mode === "unknown" && hostFeeAllocationBps(prev) <= 0) return true;
       if (prev.label && prev.__needsChain !== true) return false;
       return true;
     }
@@ -18449,7 +18602,25 @@
       const curQ = formatPoolQuoteSymbol(prev.quote_symbol || "");
       const nextTok = String(raw.quote_token || "").toLowerCase();
       if (curQ === nextQ && (!nextTok || nextTok === (prev.quote_token || ""))) continue;
-      if (!quoteSymbolLooksNative(prev.quote_symbol) && curQ && curQ !== nextQ) continue;
+      const prevFakeBncb =
+        curQ === GENIUS_NATIVE_QUOTE &&
+        nextTok &&
+        !quoteTokenLooksNative(nextTok) &&
+        geniusQuoteSymbolFromAddr(nextTok) !== GENIUS_NATIVE_QUOTE;
+      const prevFakeWeth =
+        /^(ETH|WETH)$/i.test(curQ) &&
+        isGeniusFunToken(token) &&
+        nextTok &&
+        !quoteTokenLooksNative(nextTok);
+      if (
+        !quoteSymbolLooksNative(prev.quote_symbol) &&
+        curQ &&
+        curQ !== nextQ &&
+        !prevFakeBncb &&
+        !prevFakeWeth
+      ) {
+        continue;
+      }
       const entry = {
         ...prev,
         quote_symbol: nextQ,
@@ -19663,9 +19834,20 @@
           ""
       );
       let payout = compactDisplaySymbol(domQuote || "");
-      if (!payout || quoteSymbolLooksNative(payout)) {
-        payout =
-          rawPay && !quoteSymbolLooksNative(rawPay) ? rawPay : GENIUS_NATIVE_QUOTE;
+      if (!payout || quoteSymbolLooksNative(payout) || payout === GENIUS_NATIVE_QUOTE) {
+        if (rawPay && !quoteSymbolLooksNative(rawPay) && rawPay !== GENIUS_NATIVE_QUOTE) {
+          payout = rawPay;
+        } else {
+          const qTok = (entry && (entry.quote_token || entry.quote_address)) || "";
+          const mapped = geniusQuoteSymbolFromAddr(qTok);
+          if (mapped && !quoteSymbolLooksNative(mapped)) {
+            payout = compactDisplaySymbol(mapped);
+          } else if (quoteTokenLooksNative(qTok) || !qTok) {
+            payout = GENIUS_NATIVE_QUOTE;
+          } else if (payout === GENIUS_NATIVE_QUOTE) {
+            payout = "";
+          }
+        }
       }
       if (giftBps > 0 && prefs.gift !== false) {
         if (payout && prefs.payoutArrow !== false) return `${GIFT_EMOJI}→${payout}`;
