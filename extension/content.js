@@ -23,6 +23,7 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.246: Genius Pancake 明确 BNB 才画 BNB；曲线 WBNB 仍 BNCB；徽章含 🔥 多段。
   // 0.8.245: 自分红箭头用发射名；缓存 dividend_symbol=底池 的脏行丢掉。
   // 0.8.244: 自分红（dividend=CA）禁止用底池 quote 画 →BNCB（人生好物）。
   // 0.8.243: Genius 链上 unknown 不得挡住 GMGN token_fee_info；AMCB 写入报价表；K 线顶栏吃 header fiber。
@@ -1044,6 +1045,7 @@
     if (a === "0x0000000000000000000000000000000000000000") return;
     // 税币 CA 不能记成底池 BNCB（自分红脏缓存会让 💎→BNCB 复活）。
     if (TARGET_TOKEN_RE.test(a) && /^(BNCB|BNB|WBNB)$/.test(s)) return;
+    if (a === WBNB_ADDRESS && s === "BNCB") return;
     payoutSymbolByAddr.set(a, s);
   }
 
@@ -1994,11 +1996,11 @@
   function hostFeeQuoteReady(entry) {
     if (isGeniusFeeEntry(entry)) {
       const qTok = String(entry.quote_token || entry.quote_address || "").toLowerCase();
-      if (quoteTokenLooksNative(qTok) || !qTok) return true;
-      const known = geniusQuoteSymbolFromAddr(qTok);
-      if (known && !quoteSymbolLooksNative(known)) return true;
+      if (geniusQuoteSymbolFromAddr(qTok)) return true;
       const qs = formatPoolQuoteSymbol(entry.quote_symbol || "");
-      if (qs && qs !== GENIUS_NATIVE_QUOTE && !quoteSymbolLooksNative(qs)) return true;
+      if (qs === "BNB") return true;
+      if (qs && qs !== GENIUS_NATIVE_QUOTE && qs !== "WBNB") return true;
+      // 0x0 / WBNB / 默认 BNCB：曲线还是 Pancake 要等 /modes 或 mutil qs。
       return false;
     }
     const qTok = String(entry.quote_token || entry.quote_address || "").toLowerCase();
@@ -14235,26 +14237,16 @@
       }
       if (entry.__geniusfun) {
         const qTok = entry.quote_token || "";
-        let q = formatPoolQuoteSymbol(entry.quote_symbol || "");
-        if (q === GENIUS_NATIVE_QUOTE && qTok && !quoteTokenLooksNative(qTok)) {
-          const mapped = geniusQuoteSymbolFromAddr(qTok);
-          q = mapped && mapped !== GENIUS_NATIVE_QUOTE ? formatPoolQuoteSymbol(mapped) : "";
-        }
-        if (!q || quoteSymbolLooksNative(q)) {
-          const fromAddr =
-            geniusQuoteSymbolFromAddr(qTok) ||
-            catalogTitleForQuoteAddr(qTok) ||
-            symbolFromKnownPayoutAddress(qTok, entry);
-          if (fromAddr && !quoteSymbolLooksNative(fromAddr)) {
-            q = formatPoolQuoteSymbol(fromAddr);
-          } else if (quoteTokenLooksNative(qTok) || !qTok) {
-            q = GENIUS_NATIVE_QUOTE;
-          }
-        }
+        const q = geniusDisplayQuote(entry, null, entry.quote_symbol || "", "");
         if (q) {
           entry.quote_symbol = q;
           if (qTok) rememberPayoutSymbol(qTok, q);
-          if (!entry.top_payout_symbol || quoteSymbolLooksNative(entry.top_payout_symbol)) {
+          const top = formatPoolQuoteSymbol(entry.top_payout_symbol || "");
+          if (
+            !top ||
+            quoteSymbolLooksNative(top) ||
+            (top === GENIUS_NATIVE_QUOTE && q !== GENIUS_NATIVE_QUOTE)
+          ) {
             entry.top_payout_symbol = q;
           }
         }
@@ -15304,36 +15296,36 @@
   }
 
   function geniusDisplayQuote(entry, card, fromApiHint, fromAddrHint) {
-    const qTok = (entry && (entry.quote_token || entry.quote_address)) || "";
+    const qTok = String((entry && (entry.quote_token || entry.quote_address)) || "")
+      .trim()
+      .toLowerCase();
     const mapped = geniusQuoteSymbolFromAddr(qTok);
-    if (mapped && !quoteSymbolLooksNative(mapped)) {
-      return formatPoolQuoteSymbol(mapped);
-    }
+    if (mapped) return formatPoolQuoteSymbol(mapped);
+
     const fromDomG = card ? extractQuoteSymbolFromDom(card) : "";
     if (fromDomG && !quoteSymbolLooksNative(fromDomG) && fromDomG !== GENIUS_NATIVE_QUOTE) {
       return formatPoolQuoteSymbol(fromDomG);
     }
-    const fromAddr =
-      fromAddrHint ||
-      catalogTitleForQuoteAddr(qTok) ||
-      symbolFromKnownPayoutAddress(qTok, entry);
-    if (fromAddr && !quoteSymbolLooksNative(fromAddr) && fromAddr !== GENIUS_NATIVE_QUOTE) {
-      return formatPoolQuoteSymbol(fromAddr);
-    }
+
     const apiRaw =
       fromApiHint ||
       (entry && typeof entry.quote_symbol === "string" ? entry.quote_symbol.trim() : "");
-    let fromApi = apiRaw ? formatPoolQuoteSymbol(apiRaw) : "";
-    if (fromApi === GENIUS_NATIVE_QUOTE && qTok && !quoteTokenLooksNative(qTok)) {
-      fromApi = "";
-    }
-    if (fromApi && !quoteSymbolLooksNative(fromApi)) {
-      if (quoteTokenLooksNative(qTok) || !qTok) return fromApi;
+    const fromApi = apiRaw ? formatPoolQuoteSymbol(apiRaw) : "";
+    // Pancake 毕业：API/DOM 明确 BNB。曲线上 GMGN 常把 qa 写成 WBNB，仍应画 BNCB。
+    if (fromApi === "BNB" || fromDomG === "BNB") return "BNB";
+    if (fromApi && fromApi !== GENIUS_NATIVE_QUOTE && fromApi !== "WBNB" && !quoteSymbolLooksNative(fromApi)) {
       return fromApi;
     }
-    if (quoteTokenLooksNative(qTok) || !qTok) return GENIUS_NATIVE_QUOTE;
-    if (fromDomG && fromDomG !== GENIUS_NATIVE_QUOTE) return formatPoolQuoteSymbol(fromDomG);
-    return "";
+
+    const fromAddr = fromAddrHint || catalogTitleForQuoteAddr(qTok);
+    if (fromAddr && fromAddr !== GENIUS_NATIVE_QUOTE && !quoteSymbolLooksNative(fromAddr)) {
+      return formatPoolQuoteSymbol(fromAddr);
+    }
+
+    if (fromApi === GENIUS_NATIVE_QUOTE || fromDomG === GENIUS_NATIVE_QUOTE) {
+      return GENIUS_NATIVE_QUOTE;
+    }
+    return GENIUS_NATIVE_QUOTE;
   }
 
   /**
@@ -18707,15 +18699,20 @@
       const fromAddr = catalogTitleForQuoteAddr(raw.quote_token || "");
       const nextRaw = fromAddr || String(raw.quote_symbol || "").trim();
       const nextQ = formatPoolQuoteSymbol(nextRaw);
-      if (!nextQ || quoteSymbolLooksNative(nextQ)) continue;
       const curQ = formatPoolQuoteSymbol(prev.quote_symbol || "");
       const nextTok = String(raw.quote_token || "").toLowerCase();
+      const geniusBncbToBnb =
+        isGeniusFeeEntry(prev) &&
+        curQ === GENIUS_NATIVE_QUOTE &&
+        nextQ === "BNB";
+      if (!nextQ || (quoteSymbolLooksNative(nextQ) && !geniusBncbToBnb)) continue;
       if (curQ === nextQ && (!nextTok || nextTok === (prev.quote_token || ""))) continue;
       const prevFakeBncb =
         curQ === GENIUS_NATIVE_QUOTE &&
-        nextTok &&
-        !quoteTokenLooksNative(nextTok) &&
-        geniusQuoteSymbolFromAddr(nextTok) !== GENIUS_NATIVE_QUOTE;
+        (geniusBncbToBnb ||
+          (nextTok &&
+            !quoteTokenLooksNative(nextTok) &&
+            geniusQuoteSymbolFromAddr(nextTok) !== GENIUS_NATIVE_QUOTE));
       const prevFakeWeth =
         /^(ETH|WETH)$/i.test(curQ) &&
         isGeniusFunToken(token) &&
@@ -19933,45 +19930,6 @@
         !basketLooksLikeNativeOnly(basketAssets) &&
         isTrustedStockVault(entry)
     );
-    if (isGeniusFeeEntry(entry, token)) {
-      const giftBps = effectiveGeniusGiftBps(entry);
-      const chefBps = Number(entry.market_bps) || 0;
-      const rawPay = compactDisplaySymbol(
-        entry.top_payout_symbol ||
-          entry.quote_symbol ||
-          entry.dividend_symbol ||
-          ""
-      );
-      let payout = compactDisplaySymbol(domQuote || "");
-      if (!payout || quoteSymbolLooksNative(payout) || payout === GENIUS_NATIVE_QUOTE) {
-        if (rawPay && !quoteSymbolLooksNative(rawPay) && rawPay !== GENIUS_NATIVE_QUOTE) {
-          payout = rawPay;
-        } else {
-          const qTok = (entry && (entry.quote_token || entry.quote_address)) || "";
-          const mapped = geniusQuoteSymbolFromAddr(qTok);
-          if (mapped && !quoteSymbolLooksNative(mapped)) {
-            payout = compactDisplaySymbol(mapped);
-          } else if (quoteTokenLooksNative(qTok) || !qTok) {
-            payout = GENIUS_NATIVE_QUOTE;
-          } else if (payout === GENIUS_NATIVE_QUOTE) {
-            payout = "";
-          }
-        }
-      }
-      if (giftBps > 0 && prefs.gift !== false) {
-        if (payout && prefs.payoutArrow !== false) return `${GIFT_EMOJI}→${payout}`;
-        return payout ? `${GIFT_EMOJI}${payout}` : GIFT_EMOJI;
-      }
-      if (chefBps > 0 && prefs.creator !== false) {
-        if (payout && prefs.payoutArrow !== false) return `👨‍🍳→${payout}`;
-        return payout ? `👨‍🍳${payout}` : "👨‍🍳";
-      }
-      if ((Number(entry.deflation_bps) || 0) > 0 && prefs.burn !== false) return "🔥";
-      if (entry.mode === "unknown" && prefs.unknown !== false) {
-        return modeMeta.unknown.fallback;
-      }
-      return "";
-    }
     const candidates = [];
     if ((entry.dividend_bps || 0) > 0 && prefs.holder !== false) {
       candidates.push({ kind: "holder", emoji: "💎", bps: entry.dividend_bps, pri: 0 });
@@ -20107,7 +20065,12 @@
         top === "giggle" ||
         top === "binance"
       ) {
-        const srcQ = entry.quote_symbol || domQuote || "";
+        const srcQ = isGeniusFeeEntry(entry, token)
+          ? geniusDisplayQuote(entry, null, entry.quote_symbol || "", "") ||
+            entry.quote_symbol ||
+            domQuote ||
+            ""
+          : entry.quote_symbol || domQuote || "";
         if (
           forceVaultNativePoolQuote(entry) &&
           (looksLikeStockQuoteChip(srcQ, entry) ||
