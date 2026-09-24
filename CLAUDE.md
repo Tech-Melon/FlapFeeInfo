@@ -82,6 +82,7 @@ FlapFeeInfo/
 ├── .gitignore                # 公开仓默认只放行 extension + README + CLAUDE.md
 ├── extension/                # ★ 浏览器插件（公开）
 │   ├── manifest.json         # MV3，当前版本见 name 旁 version
+│   ├── fee-core.js           # ★ 共享纯逻辑：平台注册表 + 纯函数（见 4.0）
 │   ├── content.js            # 站点策略 + 扫卡 + 渲染
 │   ├── page-hook.js
 │   ├── tax-recv-bootstrap.js
@@ -105,6 +106,7 @@ FlapFeeInfo/
 │   ├── flap-fee-info.service
 │   ├── deploy-hk0.md
 │   └── nginx-*.conf
+├── tests/                    # node --test：fee-core 样本 + 结构守护（打包前自动跑，本地不进公开 git）
 ├── tools/
 │   └── ctl.py                # status/deploy/test/logs...
 ├── dist/                     # 打包 zip（忽略）
@@ -114,6 +116,16 @@ FlapFeeInfo/
 ---
 
 ## 4. 关键实现约定
+
+### 4.0 共享逻辑 `fee-core.js`（单一来源）
+
+- **平台注册表** `PLATFORMS`：`flap / four / geniusfun`（source=modes）、`pons_v2 / longxyz`（source=host，只用网站原始数据）。新增平台先改这里（launchpad 匹配、尾号提示、点击链接），再补 `tests/fee-core.test.js` 样本。
+- **平台只在 page-hook 判定一次**：host-fee entry 带 `platform`，content 以它为准（点击跳转、longxyz 集合）；content 不再按尾号/fiber 自猜新平台。`__pons_v2` / `__geniusfun` 仍保留兼容。
+- 已收敛的纯函数：`ratioToBps`（GMGN 比例）、`pctToBps`（Debot 百分比）、`feeEntryIsPureVault`、`compactBasketSymbol`、`basketSymbolMatchesDom`、`normalizeCardMarkHandle`、`isGeniusFunSuffix`、`taxDetailUrl`；篮子 `normalizeBasketAssets` / `dedupeBasketAssets`（剥 `<>`）/ `basketDisplaySymbols` / `basketSymbolsReady` / `basketLikelyTruncated` / `isSingleAssetStockVault` / `mergeBasketWithTaxDomSymbols`；`suffixRulesMatch`（尾号规则，门禁各自做）；`taxInnerReuseStep`（虚拟列表复用残留内图状态机）。**禁止**在 content/page-hook 重新声明（测试会拦）。
+- `CORE_VER`：fee-core API 变更必须 +1（插件重载不刷页时 MAIN world 留旧版，同版号会跳过）。
+- 加载顺序：manifest `["fee-core.js","page-hook.js"]` / `["fee-core.js","content.js"]`；bootstrap、content、完整包 background 的 page-hook 兜底注入都先注 fee-core（测试守护）。`fee-core.js` 在 `web_accessible_resources`。
+- content 收 host-fee：`entry.platform` 为准推导 `__pons_v2`（source=host）/ `__geniusfun`；无 platform 的旧路径（Genius stub）才退回旧标记。
+- 两边**有意**保留的同名函数（DOM / 语义不同，勿合并）：`hostFeePaintComplete`（page-hook 首帧粗判需报价地址，content 另认 WBNB 分红/报价名就绪）、`gmgnTaxInnerStemSig`（两边 DOM 查找范围不同）、`gmgnTaxInnerStaleAfterReuse` / `shouldHideByCustomSuffix`（外壳各自取 DOM/门禁，核心走 fee-core）。
 
 ### 4.1 Token 过滤
 
@@ -139,8 +151,13 @@ Genius.fun 尾号（不进上面这条，避免走 Flap Helper）：
 | BSC | Four.meme | href `/bsc/token` + 尾号 ffff；launchpad 有则须 fourmeme | Multicall |
 | BSC | Genius.fun | host-fee/API `launchpad`/`lpp`/`pool.exchange` = `geniusfun`（尾号随机）。禁止扫任意 BSC 卡扒 fiber | 仅已标记 CA，`platforms[ca]=geniusfun` |
 | Robinhood | Pons V2 | href `/robinhood/token` + `pons_v2`（旧 id `pons` 是 v1） | 不打 |
+| Robinhood | Long.xyz | `launchpad_platform=longxyz` **且** GMGN 带非空 `tax_allocation`（与 Pons V2 同一条 host-fee 通道，`__longxyz` 仅用于点击跳 `app.long.xyz/tokens/{ca}`）；缺数据不画、不 ⏳ | 不打 |
 
-Worker / Python **只在插件已标 `geniusfun` 时** 放行非尾号 CA，并链上校验 `curve.factory() == 0x78EAE953…8138afe31`。
+Long.xyz 调研（js-mcp 2026-09）：地址多为 `…1e18` 靓号；Uniswap v4 hook 动态费（`pool_type: v4_rehype`，`fee_params` 从高衰减到 ~1.6%），代币本身 `buy_tax/sell_tax=0`；GMGN 列表与 `token_fee_info` **都没有 `tax_allocation`**，所以当前一律不画。手续费去向只在 Long.xyz 自家 API（`token_fee_receiver_address`，默认=创建者），按约定不用。底池名来自 GMGN `quotes.json`（如 `0xc0d6…`→META）。Long.xyz 也在 Base，只接 Robinhood。
+
+Worker / Python **只在插件已标 `geniusfun` 时** 放行非尾号 CA，并链上校验 `curve.factory()` ∈ { `0x78EAE953…8138afe31`（v1，原生 BNB/BNCB）, `0x37ee8aee…79928a37`（v2，AMCB/AGPUB 等代币报价，同 owner `0xe7c7…fd98`）}。
+
+尾号 `6666` 只是 Genius 快路径：宿主明确给了别的 launchpad（如 Debot `cheesepad_melt`）时 page-hook 记入 not-genius 集合并通知 content，**不画、不打 `/modes`**。
 
 ### 4.2 链上 Helper
 
@@ -278,13 +295,15 @@ Debot 混合战壕按**卡 href** 认链（`/token/bsc/` vs `/token/robinhood/`�
 | GMGN Robinhood pons v2 + USDG 分红 | `🪙USDG \| 💎→USDG`（`qa=0x5fc5360…`，不要画成 `🪙ETH`） |
 | GMGN Robinhood pons v2 + WETH 底池 | `🪙WETH \| …`（`qa=0xc08751e4…`，不要收成 ETH 或藏箭头） |
 | GMGN Robinhood pons v2 + ETH 厨师 | `🪙ETH \| 👨‍🍳`（已开盘列仍是 `pons_v2`） |
-| GMGN Robinhood longxyz / bankr / pons v1 | **不画徽章** |
+| GMGN Robinhood longxyz / bankr / pons v1 | **不画徽章**（longxyz 例外：GMGN 日后带 `tax_allocation` 则按 Pons V2 画，如 `🪙META \| 👨‍🍳→META`） |
 | Debot `?chain=bsc` 或 `?chain=robinhood` 混合三列 `/token/bsc/…7777` | 现有 BSC 徽章，打 `/modes`；底池 🦋/BNB 等跟卡走 |
 | Debot 同页 `/token/robinhood/` + `meta.launchpad=pons_v2` | 💎/👨‍🍳 + 🪙ETH/USDG/SPY；**不打** `/modes` |
 | Debot `/token/bsc/…` + `meta.launchpad=geniusfun` | stub 先 `🪙BNCB`/`🪙GMEB`，再 `/modes` 成 `🎁→`/`👨‍🍳→`；**禁止** `founder_pct≈83%` 画 👨‍🍳 |
 | Debot 同页 robinhood long / bankr / pons v1 | **不画** |
 | GMGN BSC Genius.fun `0x69838bdf075242ce6578e48276d7e9e02b44794f` | `launchpad=geniusfun` 才扫/入队；主文案 `🪙BNCB \| 🎁→BNCB`（创作者 `🪙BNB \| 👨‍🍳→BNB`）；`🎁50%👨‍🍳12.5%🔥12.5%` + 平台 0.5% 只在 tooltip；点击 genius.fun；非 geniusfun 的 BSC 卡不打 `/modes` |
-| GMGN Genius `0xe7f0fc2e…6666`（AMCB 池） | Helper 可能 revert；必须吃 GMGN `token_fee_info` `s_tal`（金库 50%/Dev 12.5%/🔥12.5%）；底池 `🪙AMCB`，禁止 `🪙WETH \| ❓️未` |
+| GMGN Genius `0xe7f0fc2e…6666`（AMCB 池，v2 factory） | `/modes` = `🎁→AMCB`（金库 50%/Dev 12.5%/🔥12.5%）；K 线顶栏 `🪙AMCB \| 🎁→AMCB`（战壕全局选 HOOD 时也要出），禁止 `🪙WETH \| ❓️未` 或空白 |
+| Debot `0x2aaa8077…89187777`（Rat Lab） | `🦋AMZN \| 💎99%→AMZN👨‍🍳1%`（Debot `founder_pct_other:1` 是 1%，禁止 `👨‍🍳→AMZN💎99%`） |
+| Debot `0xc2cd1ee1…9fa96666`（`cheesepad_melt`） | **不画**（尾号 6666 但不是 Genius） |
 | GMGN Genius `0x61f5e76c…0d07` GENGO 已迁 Pancake | 主文案 `🪙BNB \| 👨‍🍳→BNB`（62.5% 最大）；`🔥12.5%` 只在 tooltip；曲线 HNSR 仍 `🪙BNCB \| 👨‍🍳→BNCB` |
 | GMGN Flap `0x7b5fba98…7777` 混选 HOOD | 空 qa 是 BSC 默认 BNB，禁止 `🦋WETH \| 💎→BNB` |
 | GMGN Flap `0xabeb19a5…7777` 人生好物 | 底池 `🦋BNCB`；分红是本币，徽章 `🦋BNCB \| 💎→人生好物`（或无发射名时 `🦋BNCB \| 💎`），禁止 `💎→BNCB` |
@@ -358,8 +377,8 @@ uv run flap-fee-server
 | `FLAP_FEE_BSC_RPC_NR` | NodeReal 主 RPC（优先） |
 | `FLAP_FEE_BSC_RPC_QN` | 旧键；仅当 URL 不是 QuickNode 时兼容（现网已是 NodeReal） |
 | `FLAP_FEE_BSC_RPC` | 备用 / 公共 seed |
-| `FLAP_FEE_RPC_RPS_LIMIT` | 主 RPC 限速（生产 **100**/s；现网 NodeReal 常用 30） |
-| `FLAP_FEE_MAX_FETCH_WORKERS` | 并发（生产 **48**，配合 ~0.5s eth_call 才能吃满 100 rps） |
+| `FLAP_FEE_RPC_RPS_LIMIT` | 主 RPC 限速（生产 **30**/s）。NodeReal **Growth** 套餐：**700 CUPS**、**500M CU/月**、15 API Key；调高前先看 NodeReal 后台 CU 用量与限流，勿照搬旧 QuickNode 时代的 100 |
+| `FLAP_FEE_MAX_FETCH_WORKERS` | 并发（生产 **48**；受上面 rps 限速约束，不会超 CUPS） |
 | `FLAP_FEE_API_TOKEN` | Bearer；生产必开 |
 
 单 token 调试：
@@ -389,6 +408,7 @@ wrangler deploy
 打包（**每次都打公开包 + 完整包**）：
 
 ```powershell
+node --test tests/fee-core.test.js                 # 打包脚本会先跑；失败不打包
 python _run_pack_extension.py
 # → dist/FlapFeeInfo-extension-vX.Y.Z.zip          公开（仅徽章）
 # → dist/FlapFeeInfo-extension-clip-vX.Y.Z.zip     完整（叠 clip-jump）
@@ -437,6 +457,7 @@ python tools/ctl.py watchdog-run
 
 - `README.md`
 - `CLAUDE.md`
+- `CHANGELOG.md`（逐版本实现备注；新版本在顶部追加，**不要**再写回 `content.js` 头部）
 - `extension/**`
 
 因此 **server / cloudflare / tools 默认不会 push 到公开 GitHub**。全栈代码在开发者本机完整目录中维护。
@@ -521,6 +542,10 @@ python tools/ctl.py watchdog-run
 | Genius GENGO 已迁 Pancake `🪙BNCB` | API `quote_symbol=BNB` 被默认改成 BNCB | 升到 **0.8.246+**；明确 BNB 才画 `🪙BNB`，曲线 WBNB 仍 BNCB |
 | 混选 BSC+HOOD 底池变 `🪙WETH` | `quotes.json` robinhood `0x0=WETH` 写入共用目录，盖掉 BSC `0x0=BNB` | 升到 **0.8.247+**；0x0 不进 quotes 地址表 |
 | Genius 徽章变成 `👨‍🍳62.5%🔥12.5%` | 0.8.246 误把 Flap 多段拼进 Genius 主文案 | 升到 **0.8.248+**；主文案只显示占用最高的一段，比例在 tooltip |
+| Genius v2（AMCB/AGPUB 池）`/modes` 全是 `❓️未` | 后端只认 v1 factory `0x78EAE…` | 后端已认 v2 `0x37ee…`；`python tools/ctl.py deploy` |
+| 战壕切过 HOOD 后，BSC Genius K 线顶栏无徽章 | `chain-multi-select=["robinhood"]` 让无 chain 字段的 `token_fee_info` 被当 RH 非 pons → pons-skip 挡掉 | 升到 **0.8.249+**；Genius 不进 pons-skip，URL 自身 BSC token 不当 RH |
+| Debot 1% 厨师画成 `👨‍🍳→X💎99%` | Debot `*_pct` 是百分比，`ratioToBps(1)` 按比例猜成 100% | 升到 **0.8.249+**；Debot 走 `pctToBps` |
+| 每页 page-hook 注入两次 | content/bootstrap 的 `PAGE_HOOK_VER`（202/197）≠ page-hook `HOOK_VER`（203），ready 检测永远失败 | 升到 **0.8.249+**；三处同为 204，打包脚本校验 |
 | Robinhood 底池总是 🪙ETH | 每张卡都有 `IconRobinhoodeth` 链标，旧逻辑当底池，盖住 QQQ/SPY quotes 图 | 升到 **0.8.152+**；重载完整包并硬刷页 |
 | Robinhood 改完 BSC 底池/分红变了 | USDG/WETH 地址表曾写入共用 quotes 目录 | 升到 **0.8.153+**；BSC 与 RH 目录按链隔离 |
 | Debot `?chain=robinhood` 无徽章 | 旧版整页当非 BSC 清掉；混合战壕要按卡 `/token/robinhood/` + pons_v2 | 升到 **0.8.154+**；重载完整包并硬刷 Debot |
@@ -555,7 +580,7 @@ python tools/ctl.py watchdog-run
 
 ## 10. 版本与变更提示
 
-- 插件版本：`extension/manifest.json` → `version`（发布前递增）  
+- 插件版本：`extension/manifest.json` → `version`（发布前递增）；逐版本实现备注写根目录 `CHANGELOG.md` 顶部  
 - 近期能力：  
   - `0.2.x`：结构化分配 + 7777 + hybrid + Gungnir  
   - `0.2.6+`：底池报价合成 `🪙QUOTE | fee`  
@@ -930,8 +955,10 @@ python tools/ctl.py watchdog-run
  - `0.8.246`：Genius 已迁 Pancake（明确 BNB）画 `🪙BNB`，曲线 WBNB 仍 BNCB；徽章走多段（含 🔥12.5%），默认 BNCB 不再 skip `/modes`
  - `0.8.247`：混选 HOOD 时 `quotes.json` 的 `0x0=WETH` 不得覆盖 BSC `0x0=BNB`（GENGO / Flap 7777 误画 WETH）
  - `0.8.248`：Genius 主文案恢复「主要占用是谁就显示谁」：`🪙BNB | 👨‍🍳→BNB`，`🎁50%👨‍🍳12.5%🔥12.5%` 只在 tooltip
-- 插件当前版本：见 `extension/manifest.json`（**0.8.248**，公开无剪切板）
-- page-hook：`HOOK_VER` **203**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
+ - `0.8.249`：js-mcp 全面体检 — 战壕选 HOOD 后 BSC Genius K 线顶栏被 pons-skip 挡掉（Genius 不进 pons-skip、URL 自身 BSC token 不当 RH）；Debot `*_pct` 按百分比（1% 厨师不再变 100%）；尾号 6666 但宿主 launchpad≠geniusfun 不画；分红=底池时箭头与底池同名（AMZNB/XAUT0→AMZN/XAUT）；`PAGE_HOOK_VER` 三处对齐 204，不再每页重复注入 page-hook。后端同步：Genius v2 factory、Four/Genius/Flap 底池 symbol 先进缓存再拼 label（`🎓50%→GMEB`、`💎90%→SPCXB`）
+ - `0.8.250`：`fee-core.js` 共享纯逻辑（平台注册表 + 单位换算/纯金库/篮子/尾号规则/复用状态机），`tests/` 17 项样本+结构守护，打包前必跑；平台只在 page-hook 判定，content 以 `entry.platform` 为准；金库屏蔽「纯金库不屏蔽」选项（`keepPureTaxVault`）；Long.xyz 预留（GMGN 带 `tax_allocation` 才画，点击 app.long.xyz）；厨师/慈善/回流箭头与底池同名（`💛→MRNAB`→`💛→MRNA`）；bootstrap 发金库 prefs 不再丢 `hideGenius`
+- 插件当前版本：见 `extension/manifest.json`（**0.8.250**，公开无剪切板）
+- page-hook：`HOOK_VER` **205**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）；`content.js` / `tax-recv-bootstrap.js` 的 `PAGE_HOOK_VER` 必须相同（`_run_pack_extension.py` 会校验）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
@@ -939,6 +966,7 @@ python tools/ctl.py watchdog-run
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  
 - 尾号屏蔽：`flapFeeInfo.suffixHide.v1` = `{ enabled, rules:[{id,suffix,enabled}] }`（最多 24 条 hex 1–12 位）
 - 资金接收：`flapFeeInfo.taxRecvHide.v1` = `{ enabled, thresholdPct, hideGenius, allow:[{id,address,enabled}] }`（`hideGenius` 默认 false；勾选后 Genius 👨‍🍳 按阈值挡，🎁 仍走金库开关）
+- 金库屏蔽：`flapFeeInfo.vaultHide.v1` = `{ enabled, hideTaxVault, hideStockVault, hideGenius, keepPureTaxVault }`（`keepPureTaxVault` 默认 false；勾选后税收 **100% 进金库**（🎁→X，分红/销毁/回流/慈善全 0）的税收金库不屏蔽，🎁50%🔥50%、🎁96%💎4% 仍屏蔽；只作用于税收金库，不影响币股/Genius。page-hook `gmgnTalIsPureVault` / `debotExtraIsPureVault` / `hostFeeEntryIsPureVault`，content `keepPureTaxVault` 兜底 DOM）
 - 搜索框也屏蔽：`flapFeeInfo.searchHide.v1` = `{ enabled:false }`（默认关；开启后把已启用的资金接收/金库规则套到 GMGN 搜索弹层）
 - Dev 发币次数标记：`flapFeeInfo.devCountMark.v1` = `{ enabled, rules:[{id,op,min,color,enabled}] }`（`op` 为 `lt|lte|eq|gte|gt`，缺省按 `gte`；最多 12 条；默认关）
 - 推特备注描边：`flapFeeInfo.twHandleMark.v1` = `{ enabled, rules:[{id,handle,note,color,enabled}] }`（最多 24 条 handle，备注如「何一」；默认关）

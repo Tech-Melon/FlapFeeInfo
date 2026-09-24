@@ -37,7 +37,8 @@
     enabled: false,
     hideTaxVault: false,
     hideStockVault: false,
-    hideGenius: false
+    hideGenius: false,
+    keepPureTaxVault: false
   };
   const DEFAULT_SEARCH_HIDE = { enabled: false };
   const DEFAULT_DEV_COUNT_MARK = { enabled: false, rules: [] };
@@ -216,6 +217,8 @@
       vaultHideEnableDesc: "按下方选项过滤首页与 K 线左侧「新创建」（改开关会刷新页面）",
       vaultHideTaxTitle: "屏蔽税收金库",
       vaultHideTaxDesc: "🎁 税收金库（含 96%金库+4%分红；单枚 QQQB/NVDA 分红币也算）",
+      vaultKeepPureTitle: "纯金库不屏蔽",
+      vaultKeepPureDesc: "税收 100% 进金库（🎁→X）时保留展示；🎁50%🔥50% 等混合仍屏蔽。默认不勾",
       vaultHideStockTitle: "屏蔽币股金库",
       vaultHideStockDesc: "📈 Flap Stocks / Flap 币股（FXIO 等篮子）。默认不屏蔽",
       vaultHideGeniusTitle: "屏蔽 Genius.fun",
@@ -426,6 +429,8 @@
       vaultHideEnableDesc: "Filter home & K-line left New creation (page reloads)",
       vaultHideTaxTitle: "Hide tax vaults",
       vaultHideTaxDesc: "🎁 tax vaults (including 96% vault + 4% holder; single QQQB/NVDA payout)",
+      vaultKeepPureTitle: "Keep 100% vault tokens",
+      vaultKeepPureDesc: "Show tax vaults when all tax goes to the vault (🎁→X); mixed ones like 🎁50%🔥50% stay hidden. Off by default",
       vaultHideStockTitle: "Hide equity vaults",
       vaultHideStockDesc: "📈 Flap Stocks / Flap 币股 baskets (FXIO). Off by default",
       vaultHideGeniusTitle: "Hide Genius.fun",
@@ -562,6 +567,7 @@
   const vaultHideTax = document.getElementById("vaultHideTax");
   const vaultHideStock = document.getElementById("vaultHideStock");
   const vaultHideGenius = document.getElementById("vaultHideGenius");
+  const vaultKeepPure = document.getElementById("vaultKeepPure");
   const vaultHideOptions = document.getElementById("vaultHideOptions");
   const devCountEnabled = document.getElementById("devCountEnabled");
   const devCountRulesWrap = document.getElementById("devCountRulesWrap");
@@ -715,6 +721,7 @@
     out.hideTaxVault = raw.hideTaxVault === true;
     out.hideStockVault = raw.hideStockVault === true;
     out.hideGenius = raw.hideGenius === true;
+    out.keepPureTaxVault = raw.keepPureTaxVault === true;
     return out;
   }
 
@@ -1903,6 +1910,7 @@
     if (vaultHideTax) vaultHideTax.checked = vaultHideState.hideTaxVault === true;
     if (vaultHideStock) vaultHideStock.checked = vaultHideState.hideStockVault === true;
     if (vaultHideGenius) vaultHideGenius.checked = vaultHideState.hideGenius === true;
+    if (vaultKeepPure) vaultKeepPure.checked = vaultHideState.keepPureTaxVault === true;
     if (vaultHideOptions) {
       vaultHideOptions.classList.toggle("is-disabled", vaultHideState.enabled !== true);
     }
@@ -1913,7 +1921,8 @@
       enabled: vaultHideEnabled?.checked === true,
       hideTaxVault: vaultHideTax?.checked === true,
       hideStockVault: vaultHideStock?.checked === true,
-      hideGenius: vaultHideGenius?.checked === true
+      hideGenius: vaultHideGenius?.checked === true,
+      keepPureTaxVault: vaultKeepPure?.checked === true
     });
   }
 
@@ -2783,6 +2792,10 @@
     scheduleSaveVaultHide();
   });
   vaultHideGenius?.addEventListener("change", () => {
+    vaultHideState = readVaultHideFromUI();
+    scheduleSaveVaultHide();
+  });
+  vaultKeepPure?.addEventListener("change", () => {
     vaultHideState = readVaultHideFromUI();
     scheduleSaveVaultHide();
   });

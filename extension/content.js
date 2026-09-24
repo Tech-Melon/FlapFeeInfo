@@ -1,14 +1,29 @@
 (() => {
+  // fee-core.js 在 manifest 中先于本文件加载（同一 ISOLATED world）。
+  const Core = globalThis.__flapFeeCore;
+  if (!Core) return;
+  const {
+    compactBasketSymbol,
+    basketSymbolMatchesDom,
+    normalizeCardMarkHandle,
+    isGeniusFunSuffix,
+    feeEntryIsPureVault,
+    normalizeBasketAssets,
+    dedupeBasketAssets,
+    basketDisplaySymbols,
+    basketSymbolsReady,
+    basketLikelyTruncated,
+    isSingleAssetStockVault,
+    mergeBasketWithTaxDomSymbols
+  } = Core;
   const API_BASES = [
     "https://taxinfo.tech-melon.top",
     "https://flap-fee-info.tech-melon.workers.dev"
   ];
   let DEFAULT_API_BASE = API_BASES[0];
   const TOKEN_RE = /0x[a-fA-F0-9]{40}/;
-  // Flap tax 8888/7777 + Four.meme tax ffff
-  const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
-  const GENIUS_FUN_SUFFIX_RE = /^0x[a-fA-F0-9]{36}6666$/i;
-  const GENIUS_FUN_PAGE_BASE = "https://genius.fun/token";
+  // Flap tax 8888/7777 + Four.meme tax ffff（fee-core 单一来源）
+  const TARGET_TOKEN_RE = Core.TARGET_TOKEN_RE;
   // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
   const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777|ffff|6666)/i;
@@ -23,360 +38,7 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
-  // 0.8.248: Genius 主文案只显示占用最高的 🎁/👨‍🍳/🔥 + →底池；比例只在 tooltip。
-  // 0.8.247: 混选 HOOD 时 quotes.json 的 0x0=WETH 不得盖 BSC 0x0=BNB（GENGO / 7777 误画 WETH）。
-  // 0.8.246: Genius Pancake 明确 BNB 才画 BNB；曲线 WBNB 仍 BNCB；徽章含 🔥 多段。
-  // 0.8.245: 自分红箭头用发射名；缓存 dividend_symbol=底池 的脏行丢掉。
-  // 0.8.244: 自分红（dividend=CA）禁止用底池 quote 画 →BNCB（人生好物）。
-  // 0.8.243: Genius 链上 unknown 不得挡住 GMGN token_fee_info；AMCB 写入报价表；K 线顶栏吃 header fiber。
-  // 0.8.242: Genius 底池跟 qa（GENIUS/AMCB/GMEB）；非 BNCB 地址禁止默认 BNCB，缺名等 /modes。
-  // 0.8.241: Genius 仍按 launchpad 认卡；GMGN s_tal 齐套 skip /modes；K 线顶栏刮一次发射台。
-  // 0.8.240: Genius.fun 尾号 6666 当税币（底池 🪙BNCB，不走 Flap Helper）。
-  // 0.8.239: 复制即搜等 writeText 成功后再开搜索，避免点 symbol 复制失败。
-  // 0.8.238: RH 分红迟到 — 厨师 12s 内再扫；JSON 分红可纠正首帧厨师，反向仍禁止。
-  // 0.8.237: 底池/箭头展示名拉丁 4→6 字（GENIUS 不再截成 GENI）。
-  // 0.8.236: flap_stocks 篮子不被 /modes 空篮子 🎁 盖掉（小浣熊 FXIO&SPCX）。
-  // 0.8.235: BNB 着色不再误伤 BNCB；GENIUS↔GENI 可命中 Genius 徽章。
-  // 0.8.234: 空 unknown 先 400/1200/2800ms 重试 3 次，仍空再负缓存。
-  // 0.8.233: Flap 空 unknown 不得盖 host-fee 🔥；host-fee 有分配可纠正 6h 负缓存。
-  // 0.8.232: 撤回用户底纹；着色只改左右文字。BNCB↔BNB、QQQB↔QQQ 匹配保留。
-  // 0.8.231: 底池/分红色曾覆盖类型底色（已撤回底纹）。
-  // 0.8.230: 底栏抽屉禁徽章 — AttachContainer/CustomRndView（收藏/追踪/持仓/社媒/热门等）；收藏不再要求表头。
-  // 0.8.229: K 线降载 — SPA 同路由不 postMessage；PumpSub 无 href 仍观察；侧栏门禁禁 getBoundingClientRect。
-  // 0.8.228: Genius 对齐 Flap — host-fee 拆 marketing_recipients（金库/Dev/平台），齐套 skip /modes。
-  // 0.8.227: Genius 金库 — GMGN s_tal is_vault+marketing 不再画 👨‍🍳；未 /modes 结算前不 skip。
-  // 0.8.226: taxinfo 连不上则回退 workers.dev；验证失败展示错误码。
-  // 0.8.225: 许可证/徽章 API 改 taxinfo.tech-melon.top；verify 遇 license_invalid 短重试。
-  // 0.8.224: 热路径不再刮 launchpad；Debot 顶栏禁止 body 全量 span/div；战壕列种子禁整列 textContent。
-  // 0.8.223: 点进非税币 K 线卡死 — scrapeLaunchpad 禁止再调 extractTokenFromUrl（递归把主线程打满）。
-  // 0.8.222: Debot 列表过滤 — K 线左侧新创建 DOM hide；搜索弹层也滤 Genius；Genius deferFlush 不单卡立刷。
-  // 0.8.220: Debot 对齐 187–219 — 扫卡只认 /token/bsc|/token/robinhood；钱包追踪禁整卡 textContent；loading 进热通道。
-  // 0.8.219: 钱包追踪跟单卡（Tracking.tsx / 陆小果加仓）禁徽章；标题在工具栏不在虚拟列表行里。
-  // 0.8.218: 混合勾 SOL/ETH/Base 卡顿 — 禁止扫 TokenItem 全量；只认 /bsc/token /robinhood/token；SOL K 线停扫。
-  // 0.8.217: Genius 主路径 = 认 CA → ⏳ → /modes → 按 token 盖完整徽章；禁止把 🪙BNCB 预览当成品。
-  // 0.8.216: /modes 回包按 data-fee-token 直接盖预览（K 线侧栏找不到 TokenItem）；loading 预览立刻 forceModes。
-  // 0.8.215: 刷新战壕 Genius 预览卡 1min — /modes 勿与 Flap 混批（Worker 把 Genius 丢后台）；loading 当未画优先。
-  // 0.8.214: Genius 配色跟 top_segment（🎁金 / 👨‍🍳蓝，不再 hybrid 灰）；Flap 另一枚 7777 底池补 ERC20 symbol。
-  // 0.8.213: 空 unknown 的 __needsChain 只给 Genius — 0.8.211 误套 Flap 7777，cf-memory ❓️ 连打 /modes，Genius 预览饿死。
-  // 0.8.212: K 线侧栏 /modes 后仍卡 🪙BNCB — 预览徽章不当「已画」跳过；findCardsByCa 爬 TokenItem（短 CA 行 16px）。
-  // 0.8.211: Genius 只有底池不算定案（js-mcp：刷新后 🪙BNCB 无 🎁）；空 unknown/host stub 保持 pending，等 /modes 🎁。
-  // 0.8.210: Genius 空 unknown（买税 0）不当 6h 负缓存 — 链上曲线能查到 🎁，是 Helper/无 platform 的空包。
-  // 0.8.209: Genius /modes 组批（js-mcp：forceModes 1 条立刷，pending_map≈40，列要排几十秒）；Flap 💎 缺底池补 /modes；unknown 出 ❓️。
-  // 0.8.208: Genius stub 不当 6h unknown 负缓存（js-mcp：15 张卡 🪙BNCB loading，/modes 全是 7777）；非原生 qa 禁止默认 BNCB。
-  // 0.8.207: K 线+战壕首屏 — 禁止对 main/body 做 span/div textContent（js-mcp longtask 24s）。
-  // 0.8.206: 过滤只绑 SW port；SOL 不装 JSON.parse；unknown 负缓存 6h；Genius 先画 BNCB；同版 page-hook 不二次注入。
-  // 0.8.205: 悬浮占比 25bps 显示 0.25%（不要 toFixed(1) 收成 0.3%）。
-  // 0.8.204: Genius 原生报价画 BNCB（不要 BNB）；悬浮窗列出 🎁/👨‍🍳/🔥/平台 占比。
-  // 0.8.203: host-fee 按通道分流 — SharedWorker 只钩该 port；MAIN_THREAD 才 JSON.parse；去掉全站 WS/Port 原型。
-  // 0.8.202: 收藏/SOL 卡死 — 禁区探测禁大节点 textContent；SOL 列不挂 observer；Genius 顶栏禁止 ||BNB。
-  // 0.8.201: Debot 扫卡收 /token/bsc/（Genius 随机尾号）；ranks geniusfun stub+/modes。
-  // 0.8.200: Debot Genius 不吃 founder_pct≈83% 厨师；stub+base_token_symbol 后 /modes。
-  // 0.8.199: Flap/Four 缺底池/0x0 不算齐套，必须 /modes；预览≠就绪（与 Genius 同一套门禁）。
-  // 0.8.198: Genius 仅底池不算就绪；quote 预览必须带 loading，/modes 回包强制换 🎁/👨‍🍳。
-  // 0.8.197: SNAP_SHOT 只建 Genius CA 索引（不组 stub）；出卡后再画 /modes。
-  // 0.8.196: 资金接收 / 金库 两处独立勾选 Genius.fun 过滤（默认都不挡）。
-  // 0.8.195: 第一刀 — 过滤关时 Port/JSON.parse 先交给宿主再 ingest；hello 前不 postMessage。
-  // 0.8.194: 刷新丢 host-fee 回放；/modes 回包后 feeSig 对不上不再当 stable（卡 🪙BNCB）；Genius 组批 80ms。
-  // 0.8.194a: 刷新丢 host-fee — content idle 才监听，8s 去重把 Genius 补发挡掉；hello 回放 + SNAP_SHOT 只 ingest 税平台。
-  // 0.8.193: Genius 主文案 🪙QUOTE|🎁→QUOTE（Flap 箭头）；BSC 整批 1 次 eth_call。
-  // 0.8.192: Genius 主文案 🪙QUOTE|🎁QUOTE（参考 Flap 身份，比例只在 tooltip）；后端整批 Multicall。
-  // 0.8.191: Genius 徽章紧凑 🪙QUOTE|🎁/👨‍🍳；金库过滤默不挡 Genius；新卡先画报价并立刻 /modes。
-  // 0.8.190: Genius js-mcp — Worker 剥 gift_bps 画成 🎁12.5%；1 条 KV 把其余推进后台队列一直 ⏳。
-  // 0.8.189: Genius 卡 ⏳ 卡死 — flush /modes 误删非 8888/7777/ffff 队列。
-  // 0.8.188: Genius.fun — 只认 BSC+geniusfun；Flap/Four/Pons 对齐链+平台，禁止对任意卡扒 fiber / 打 /modes。
-  // 0.8.187: 点徽章开税收后 blur，空格不再二次打开；换绑成功不再被 KV 延迟误判失败。
-  // 0.8.186: 新创建 7777 不再因 host-fee 缺 →QQQB 卡 ⏳；无 href 税币不走 RH 顶栏门禁。
-  // 0.8.185: RH K 线非 pons（longxyz/bankr/v1）不画 ⏳；顶栏只认已确认 pons_v2。
-  // 0.8.184: 显示项可单独开关 BSC / Robinhood 链徽章。
-  // 0.8.183: 完整包剪切板 — GMGN 后台时其它标签复制 CA 立刻跳（copy 中继）。
-  // 0.8.182: 完整包剪切板 — 别处复制跳 K 线：税币尾号免定链、页内并行查找、SW 空包不当钱包。
-  // 0.8.181: 完整包复制即搜 — 只填可见搜索弹层，清掉 `/` 快捷键残留，避免顶栏旧值。
-  // 0.8.180: 新创建跳闪 — Port 仍先 tap 原文再过滤；禁止把心跳 reseat 当新卡 host-fee 狂推。
-  // 0.8.179: GMGN 刷新降载 — JSON.parse 过滤后直接返回对象，禁止 stringify 再 parse。
-  // 0.8.178: 标准底池跟分红色；分红未设色则回退底池色。
-  // 0.8.177: 标准底池（BNB/ETH/USD*）且分红是别的代币时，整枚跟分红色，不用底池色当身份。
-  // 0.8.176: 底池与分红共用规则；同名代币沿用底池色；边框变色可选。
-  // 0.8.175: 底池/分红可自定义显示名；颜色只涂左底池/右分红，外框仍跟税收类型。
-  // 0.8.174: Debot `/token/robinhood` 与 GMGN 一样按卡 href；底池名可自定义徽章颜色（与截断后展示名匹配）。
-  // 0.8.173: 点 RH K 线不得把整页当 Robinhood — 侧栏 BSC 7777 仍按卡 href 画，禁止写入 pons-skip。
-  // 0.8.172: 已开盘 Pons href 换卡立刻拆错徽章；TaxAllocationIcon 对打；fiber 可强制再扫 chef→holder。
-  // 0.8.171: 混链 page-hook 按卡认 RH，禁止整页 pons-skip 误伤 BSC 税币。
-  // 0.8.170: 混链热路径降载 — 混链判断走缓存；仅厨师首帧 4s 内再扫；无 RH 列不扫 TokenItem。
-  // 0.8.169: 0.8.167 去掉 rhFeeDone 跳过导致徽章 Mutation 反馈环卡死；短窗节流后再扫分红迟到。
-  // 0.8.168: GMGN 多链混选 — 不再用整页 ?chain= 当唯一门禁，按卡 /bsc/token vs /robinhood/token 认链。
-  // 0.8.167: Pons v2 分红被画成 👨‍🍳 — fiber 必须对齐 href CA，禁止上一张 Dev 的 s_tal 写到新卡。
-  // 0.8.166: 完整包 — 页内点 CA 不再开左上角抢焦点小窗；前台跳转不再空等。
-  // 0.8.165: 完整包 — CA 定链改走 GMGN 页内 token_info_brief；search_v3 失败冷却，避免 429 打爆 Cloudflare。
-  // 0.8.164: 完整包 — Chrome 在后台时从其它应用复制 CA 仍跳 K 线（offscreen 保活 + 抢前台）。
-  // 0.8.163: 完整包 — 别处复制 CA 切到 GMGN 后立刻 SPA（不要等鼠标移入；未聚焦时禁止合成 click）。
-  // 0.8.162: 完整包 — 复制 CA 在 GMGN/Debot 页内先 SPA，不依赖休眠的 Service Worker。
-  // 0.8.161: 完整包 — 复制即搜不再只认 copy 事件；失败不记 seen；切页仍不重复跳。
-  // 0.8.160: 完整包剪切板 — 确认代币后聚焦站点标签；切标签/同一段 CA 不重复跳。
-  // 0.8.159: 完整包剪切板 — 搜索失败可重试，不再把超时当成钱包记 seen。
-  // 0.8.158: 混合战壕 — ranks 先标非 pons 跳过；扫卡只收已确认 Pons，不再每轮扒 long/bankr。
-  // 0.8.157: 完整包剪切板 — 钱包地址先定链再切标签，避免切走其它页又被拽回 GMGN/Debot。
-  // 0.8.156: 混合战壕降载 — 非 pons 负缓存、Debot 跳过叶扫/O(n²)、稳定卡不再 enrich DOM。
-  // 0.8.155: Debot 混合战壕扫卡按 href 收 BSC+Robinhood，不再用 8888/7777 选择器漏掉 pons。
-  // 0.8.154: Debot 混合战壕按卡 href 认链；Robinhood 只画 pons_v2，BSC 税币仍走 /modes。
-  // 0.8.153: Robinhood 底池/地址表只在 ?chain=robinhood 生效，不写进 BSC quotes 目录。
-  // 0.8.152: Robinhood 底池优先 quote_address / quotes.png；IconRobinhoodeth 是链标不是底池。
-  // 0.8.151: Robinhood 底池/分红显示 USDG、WETH；ETH/USD 分红不再被当成 BNB 藏掉。
-  // 0.8.150: Robinhood 只开「缺字段直接画」；厨师/分红对打被 BSC leftover 启发式闪变则丢 JSON 半包。
-  // 0.8.149: Robinhood pons v2 禁止用 ⏳ 卡死（无 /modes）；host-fee 有分配即画。
-  // 0.8.148: GMGN Robinhood pons v2 徽章（不打 /modes）+ 卡片标记兼容。
-  // 0.8.147: GMGN 推特短链 x.com/i/status/{id} 也能打备注（作者在链接文字里，旧逻辑把 /i/ 整段丢掉）。
-  // 0.8.146: 发币次数未拿到（0/缺字段）不上色，避免新卡先闪 <N 色条再改对。
-  // 0.8.145: 重复 symbol — 不用「2m」DOM 时间排序（同分钟会标反）；先见/列位决定先后；session 多标签合并而非整表覆盖。
-  // 0.8.141: GMGN 推特备注挂预览小图标右侧（不再跟 @handle 掉到下一行）。
-  // 0.8.140: ×N 贴卡片左侧色条旁（不挂头像、不挤排版）。
-  // 0.8.139: ×N 挂到头像容器左上（高 z-index），避免被头像盖住；不改卡片排版。
-  // 0.8.138: 发币次数贴头像左缘，不改卡片排版。
-  // 0.8.137: 发币次数 ×N 挪到头像左侧（卡片左内边距），不再叠在头像上。
-  // 0.8.135: Debot 推特备注挂到指标行第 2 个小图标后，避开 overflow:auto/hidden 裁切。
-  // 0.8.134: 三项卡片标记热路径降载 — 关闭时不扫 DOM；Debot 禁 fiber/innerText；Mutation 节流。
-  // 0.8.133: 推特备注挂可跳转的 x.com/twitter 链接右侧（图标或 @handle 链都认，跳过 search）。
-  // 0.8.132: 重复 symbol 按发布时间最早的上色；红泡挂行卡左上角防裁切。
-  // 0.8.131: 新创建重复 symbol — 窗口内首次高亮；可选等第 2 个才亮，2/3/4… 旁红泡。
-  // 0.8.130: Debot 卡片标记 — ranks dev_token_stats.created_count + social_info.twitter_screen_name；行卡 a[/token/bsc]。
-  // 0.8.129: 推特备注 = 右侧色条（对左侧发币次数）；链接旁实心小备注。
-  // 0.8.128: 推特备注改挂链接旁、淡描边；0.8.127 右上大胶囊过抢。
-  // 0.8.127: 发币次数比较符 <≤=≥>；推特备注右上大胶囊；虚拟列表 href 复用后立刻重画标记。
-  // 0.8.126: GMGN 卡片标记 — Dev 发币次数左侧光条+×N；推特备注胶囊+描边（对齐站点关注 dev 金边）。
-  // 0.8.125: 刷新/多开 GMGN 无法屏蔽 — SharedWorker getFullFrame 走 { type:request_plugin, response.body }，信封 walk 补 response 才能种影子并滤 60 条。
-  // 0.8.124: 撤回 0.8.123 的 Object.prototype.onmessage（`'onmessage' in {}` 为 true，GMGN 打不开）。MAIN_THREAD 只走 JSON.parse / Response.json / WS。
-  // 0.8.123: GMGN MAIN_THREAD（手机 UA / disableShareWorker / Worker 降级）走假 MessagePort + SNAP_SHOT 数组，MessagePort.prototype 钩不到。page-hook 拦假 port.onmessage，资金接收/金库才能滤。
-  // 0.8.122: js-mcp 复现 suffix-hide-prefs 重推（hydrate 0/200/1000ms）无条件 resetNcPumpShadows，影子清空后 hb-unready 漏 🎁。规则未变不重置。0.8.86 能用是因为当时 disableShareWorker、没有双影子。
-  // 0.8.121: 刷新后屏蔽正常、几秒后又漏 🎁 — HTTP 滤了 tokens 但没种 ncServer；pumpRank 心跳 hb-unready 把 targetLen=60 原样交给宿主。首包先 seed 再 splice。
-  // 0.8.119: js-mcp 遮罩把已过滤列盖住 1.4–2s（token→token 列还在只是被 cover；K→战壕 t=240 已有 3 张仍等到 t=1453）。去掉 pending 遮罩；仅 token↔列表 reseat。
-  // 0.8.118: 0.8.117 opacity:0 + retag 误剥 data-flap-nc-col，K 线侧栏吃未过滤 60 条且同 seq 心跳不落地。改遮罩、pending 不剥标记、SPA 窗口 kind=2 过滤全量。
-  // 0.8.117: js-mcp 回首页 t=200 已是 2 张过滤，t=341 又闪 9 张未过滤（seq 未变，SW 缓存），t=702 才 PATCH 回去。切列 750ms 隐新创建。
-  // 0.8.116: 新创建每一帧都整槽重铺过滤后的 0..n-1（8s 窗口过期后心跳 nRep=0 又截未过滤前 N 张；切多了会截空）。
-  // 0.8.115: SPA 重挂后 8s 内每帧整槽重铺（一次性 reseat 打在旧树上，K 线侧栏仍漏 🎁/👨‍🍳）。
-  // 0.8.114: SPA K↔首页重挂未过滤列，心跳截尾漏 🎁；ffff 资金接收按 founder/marketing 屏蔽。
-  // 0.8.113: js-mcp 实锤 0.8.112 hb-unready 写 targetLen=0，新创建整列「暂无数据」。未就绪心跳保原长度；HTTP 全量先种 ncServer。
-  // 0.8.112: 新创建屏蔽 — live PATCH 按宿主顺序重写 replaces，禁止 Full 截尾把厨师卡留在原位。
-  // 0.8.111: 搜索 search_v3 预打 /modes；只收 BSC+8888/7777/ffff；QN 100 rps。
-  // 0.8.110: Debot 新创建对齐 GMGN — 不垫 keep-pool、hideAddr 贯穿、NFLX/DJTB 快画、rAF 挂徽章。
-  // 0.8.109: 撤回 0.8.105–108 的 /modes 半包门禁与 Four 屏蔽改动，恢复 0.8.104 快画/过滤。
-  // 0.8.104: pumpRank 新创建屏蔽镜像 Worker order，按宿主当前长度重写 PATCH（抽槽不截尾）。
-  // 0.8.103: 新卡插入不拆徽章/不灌 PATCH removals；战壕徽章绝对定位 + rAF 再挂。
-  // 0.8.102: PATCH frame.replaces[].data 做 host-fee；过滤压缩 replaces 下标。
-  // 0.8.101: pumpRank newCreations.frame 才是 token 数组；原地 splice + host-fee ingest。
-  // 0.8.100: js-mcp itemKey=`0x-bsc`，removals 必须带 -bsc 后缀否则 Map 删不掉厨师卡。
-  // 0.8.99: pumpRank upserts 为 {key,data}，删除字段是 removals 不是 r；解开 data 才能滤/快画。
-  // 0.8.98: SPA 进 K 线侧栏徽章；hideAddr 写入 pumpRank/delta r[]。不恢复 DOM reflow。
-  // 0.8.97: 新创建禁 DOM reflow/upsert 回填；K 线 guardian 不再 200ms 扫列。
-  // 0.8.96: K 线新创建禁止 DOM hide/reflow（会把整列打空）；过滤只走 pumpRank 数据层。
-  // 0.8.95: K 线图表 scroll 不再冻侧栏新卡；GMGN 新创建 DOM 兜底藏 👨‍🍳/🎁（pumpRank 漏网/keep-pool 回填）。
-  // 0.8.94: SharedWorker pumpRank-bsc 新创建走列表过滤（0.8.90 停写 disableShareWorker 后漏滤）。
-  // 0.8.93: K 线侧栏战壕与首页对齐立刻快画；进 token 不再等 2s guardian / header-only progressive。
-  // 0.8.92: 快路径只认首帧底池+分红（GMGN qa/s_tal，Debot base_token/dividend_token）；去掉底池白名单。
-  // 0.8.91: 齐套快画；缺参等 80ms 再 /modes。拆 1s/2.5s/1.6s/8s 旧等待。
-  // 0.8.90: 不再写 GMGN disableShareWorker；过滤仍走 SharedWorker Port。Gungnir=Debot。
-  // 0.8.89: 首帧齐套才用宿主快路径；缺 qa/s_tal/分红名任一立刻 /modes，不等 HTTP/WSS 补洞。
-  // 0.8.88: GMGN 底池认缩写 qa（HTTP/WS/fiber 同一套）；缺地址不默认 BNB（USDT 池无芯片）。
-  // 0.8.87: 币股 hide 认 GMGN lpp=flap_stocks / Debot vault_tokens，不再当税收金库。
-  // 0.8.86: 单枚 FXIO 币股不要画 🎁→IBCO；IB-COCO 包装币不当箭头。
-  // 0.8.85: 销毁为最大份额时 → 只用本币名，禁止底池/分红 USDT 冒充。
-  // 0.8.84: 新卡分类/底池/分红不再靠 NVDA 名单；本卡结构 + 数据角色。
-  // 0.8.83: 稳的 💎/👨‍🍳 立刻画，不再 ⏳ 8s；分红名（景甜）后补 /modes。
-  // 0.8.82: Four 税收钱包(marketing 100%) 恢复 👨‍🍳；勿把残留 💎 画在税收钱包卡上。
-  // 0.8.80: 任意分红代币（含中文名 币安人生）要画 →；只在 WBNB 地址确认时才用 →BNB。
-  // 0.8.79: 96%金库+4%分红不当 📈；WBNB 确认才 →BNB；金库屏蔽按类型不看比例。
-  // 0.8.78: 搜索只走 /modes；禁止默认 BNB 覆盖已确认 USDT/TRX；host-fee 猜的 💎→BNB 不再 skip 链。
-  // 0.8.77: Debot 搜索无流动池时默认 🦋BNB；tokenPair 仅 USDT/USD1/BNB 当真底池。
-  // 0.8.76: Debot/GMGN 搜索框输入立刻快绘；Debot 结果换行后再补绘，避免徽章被冲掉。
-  // 0.8.75: 搜索弹层 cache-first，未命中立刻 /modes（不等等 host-fee / Debot 1.6s 新卡组批）。
-  // 0.8.74: 分红箭头只在明确知道代币时写入（WBNB→BNB、TRX、CA=自身）；禁止默认成本币名。
-  // 0.8.73: GMGN/Debot 自分红对齐 — host-fee 把底池 WBNB 写成 dividend_tokens 时不再画 💎→BNB 并 skip /modes。
-  // 0.8.72: Debot 自分红 — ranks 把底池 WBNB 写成 dividend_token 时不再画 💎→BNB 并 skip /modes。
-  // 0.8.71: Debot 战壕徽章绝对贴 Tax 列外侧（不再进 space-between 挤掉 MC/买）；列表扫间隔对齐 GMGN。
-  // 0.8.70: Debot 回战壕快绘 16→28 / 12ms→22ms，首波铺满三列视口（js-mcp: 22 目标被 16 上限漏 5）。
-  // 0.8.69: Debot 只认 /token/bsc 与 row.chain=bsc；K→战壕列根门禁 + cache-first burst（对齐 GMGN）。
-  // 0.8.68: Debot 对齐 GMGN — 三列局部扫 + 按 CA 定向更新；空金库组批，禁 1s 单打 /modes 与热通道。
-  // 0.8.67: Debot Port host-fee 立即 postMessage；新卡组批 200ms；就绪即出 /modes 队。
-  // 0.8.66: Debot /modes 降频 — 新卡组批对齐 GMGN（200ms/2张）；host-fee 就绪即出队，
-  //          禁止每张新卡 80ms 单打 + 热通道。
-  // 0.8.65: Debot 新卡对齐 GMGN — 过滤 SharedWorker portal-ws `socket-event`/`meme:new`；
-  //          disableShareWorker 仅 GMGN；host-fee 从 Port args 提取。
-  // 0.8.64: Debot 快路径 — founder_pct_dev 才是 👨‍🍳；vault 字段为 0 时不要 ?? 挡住。
-  //          稳的 💎/👨‍🍳 不打 /modes；新卡不再 ⏳ 等链。过滤走 WS+HTTP 同一套 pct。
-  // 0.8.63: Debot 对齐 GMGN — 砍 keep-alive force 扫、列根 scoped observer、
-  //          新创建 👨‍🍳 HTTP+徽章兜底；隐藏行卡而非整列 viewport。
-  // 0.8.62: Debot 列表过滤改条件后整页 reload；搜索弹层同样可屏蔽；金库走 DOM 兜底。
-  // 0.8.60: 搜索弹层可选套用资金接收/金库屏蔽（默认关；仅弹层打开时扫，search_v3 无 s_tal）。
-  // 0.8.59: GMGN 列表过滤（资金接收/金库/尾号）改条件后整页 reload，首包走已挂钩 HTTP。
-  // 0.8.58: 刷新降载 — JSON.parse 先过滤再解析；hydration 1.6s 内不整列扫 fiber；少 boot 扫。
-  // 0.8.57: 稳的 💎/👨‍🍳/已出成分的📈 走快路径；空金库/无成分币股走 /modes。降 mutation 负载。
-  // 0.8.56: 金库/股票名报价/单成分篮子本地不定案，交给 /modes；链上结果不被 host-fee 覆盖。
-  // 0.8.55: 篮子若只是底池报价币（SPCXB）则仍是税收金库，不要 📈 也不要强制 BNB。
-  // 0.8.54: 普通税收金库底池跟 Helper/Pancake quote（QQQB），仅币股篮子仍固定 BNB。
-  // 0.8.53: 空篮子金库仍打 /modes；单成分 Helper 篮子画 📈FXIO；宿主金库可覆盖旧 KV 🔥。
-  // 0.8.52: 三次 15min — 金库 WBNB 分红不当 📈 篮子；BNB-only 篮子不升币股。
-  // 0.8.51: 刷新降载 — host-fee DOM 合并扫描、JSON.parse 不再二次序列化、首扫不 force。
-  // 0.8.50: 二次 15min 采样 — fiber 创作者覆盖 leftover 💎QQQB。
-  // 0.8.49: ⏳ 满 1s 仍无真徽章则立刻 flush /modes；host-fee 短窗也收到 1s。
-  // 0.8.48: 15min 采样 — 勿把 marketing+market_address 当成 🎁；fiber 金库覆盖 leftover 💎QQQB。
-  // 0.8.47: 空篮子币股不再永远 ⏳；fiber 空金库覆盖 leftover 📈；BNB 池不信残留股票图。
-  // 0.8.46: Flap Stocks 单成分金库（FXION 100%）画 📈FXIO，不再当成 💎 或 📈→BNB。
-  // 0.8.45: href 复用后 Tax 内图未换则视为残留（💎/📈 都不信）；禁止 DOM 发明篮子；Debot 底池不用 bstocks。
-  // 0.8.44: 纯税收金库勿用虚拟列表残留 Tax 内股票图升成 📈；空篮子 🎁 立即画，不再等 leftover。
-  // 0.8.43: 宿主分红是中文名（牛来）时徽章显示 →牛来；Tax 拉丁图（AAPLB）仍优先于中文发射名。
-  // 0.8.42: 双通道兼容 — SharedWorker Port + 页面 WSS + HTTP 快照 + 卡片 fiber，按浏览器自动走通。
-  // 0.8.41: 监听 SharedWorker pumpRank-bsc 外壳（res.data.newCreations）；WSS 推送进徽章，漏推走 HTTP/fiber。
-  // 0.8.40: 虚拟列表复用勿把上一张卡 Tax 内图当分红；href 切换先拆徽章；host-fee 纠正错误 ticker。
-  // 0.8.39: 新卡徽章改走 React fiber tax_allocation（不依赖页面 WSS；SharedWorker 通道对插件不可见）。
-  // 0.8.38: 新卡 host-fee 有分配后不再因 __needsChain 卡 ⏳ 到 /modes（约 30s）；短窗后仍画。
-  // 0.8.37: 新卡 Tax 内图不当底池；中文 name 不当分红 ticker；⏳ 分红未齐短窗后仍画；WeakMap 绑 href。
-  // 0.8.36: Debot/Gungnir `/popout/xTracker` 与 GMGN 文章弹窗一样，不在本窗跳 K 线/搜索。
-  // 0.8.35: GMGN xTracker popout 不在本窗跳 K 线/搜索，改去其它 GMGN 标签（完整包）。
-  // 0.8.34: 文章重点样式独立暗色/浅色主题（完整包）。
-  // 0.8.33: 徽章悬停详情浮窗默认关；修浮窗粘住（pointer-events + 锚点丢失必关）。
-  // 0.8.32: Debot/GMGN 禁止改 <title>；Debot 交易页不跑文章样式；顶栏徽章不进名称行。
-  // 0.8.31: hybrid 长徽章不再因 Tax 几何/绝对坐标被每轮拆挂（消失闪烁）。
-  // 0.8.30: Worker 强制鉴权（REQUIRE_LICENSE=1）；弹窗提示先填 TG Bot 密钥。
-  // 0.8.29: 0.8.27 底池回退热路径降载 — 稳定卡不每轮扫 quotes；站点分离 + WeakMap 短缓存。
-  // 0.8.28: 资金接收方白名单 — GMGN market_address/creator、Debot fee_receiver 命中则不屏蔽。
-  // 0.8.27: 底池/分红符号：Tax 外/内 quotes 文件名最稳；BNB 视为未齐，回退地址目录/HTTP。
-  // 0.8.26: 许可证换绑 — 新设备验证冲突时保留密钥并显示「换绑到此设备」。
-  // 0.8.25: GMGN HTTP/WSS 后补 pool.quote（NVDAB）升级 🦋BNB，不再停在默认底池。
-  // 0.8.24: 文章样式可填路径（debot.ai/popout/xTracker），不再把完整 URL 剥成整站。
-  // 0.8.23: Debot 停滚对当前列 cache-first 补画 + href scrub（对齐 GMGN PumpSub settle）。
-  // 0.8.22: 金库 preview 缺篮子先 ⏳；后续 WS/Tax 图标补全能覆盖空篮子 🎁。
-  // 0.8.21: host-fee 分红仍是 BNB 时继续打 /modes，避免新创建永远 ⏳。
-  // 0.8.20: Debot 徽章挂 overflow 隐藏列外侧，避免长标题/待加仓把 Tax 旁徽章裁掉。
-  // 0.8.19: Debot 战壕按行卡局部扫（对齐 GMGN）；pending 快重试；徽章挂 Tax 旁。
-  // 0.8.18: tooltip 篮子 name/sym 与底池/买卖税一律 textContent，禁止远端字段进 innerHTML。
-  // 0.8.17: GMGN 底池/税收图按 DOM 角色 + quotes.json 目录；新 quote/分红 token 不靠硬编码名单。
-  // 0.8.16: 非 vault 底池认 Tax 外芯片 / API quote（SPCX 等）；禁止误判成股票后回退 BNB。
-  // 0.8.15: 顶栏 settled 后若侧栏仍有未画卡，禁止改 light-scan，继续扫 PumpSub。
-  // 0.8.14: K 线刷新后侧栏按 TokenItem 列轮询补画（禁 8ms/顶栏 href 把新创建饿死）。
-  // 0.8.13: K 线内嵌战壕新卡走 collectGmgnNewCardMutations + 视口快补（顶栏 settled 后不再饿死）。
-  // 0.8.12: K 线顶栏用 resolveQuoteSymbol；👨‍🍳 箭头把 NVDA/NVDAB 当股票芯片。
-  // 0.8.11: 新创建 host-fee 分红未齐先 ⏳；不取消 /modes；Tax 股票芯片不当底池。
-  // 0.8.10: 战壕→K线返回 — 徽章贴 .trenches-tax 右侧同行；name-after 当 Tax 已在则重挂。
-  // 0.7.57: 热通道 — 主批 /modes 在途时，视口/新创建热 token 走第二条并行请求
-  //          （GMGN 列表页 only，上限 12），消除新币撞上冷大批要排队的竞态；
-  //          watchdog/resume/hardReset 同步回收热通道。
-  // 0.7.56: 新币徽章提速 — 新卡组批窗 500→200ms / 满 2 张即发；热路径单token
-  //          组批 200→120ms。后端很闲（cache hit 1ms、QN 无 429），延迟都在前端窗口。
-  // 0.7.53: 英文专名改在 data-word 上加深绿底浅字，不再用看不清的 CSS Highlight。
-  // 0.7.52: 英文 Highlight 改为每次扫全部推文正文，避免中文重扫清掉英文。
-  // 0.7.51: 推特卡整卡插入时补扫 CollapsibleTextContent，避免正文永远扫不到。
-  // 0.7.50: 跟单列表不改 DOM；推文英文用 CSS Highlight，避开 span[data-word] 包胶囊。
-  // 0.7.49: 文章样式不碰 GMGN 跟单/战壕列表（TrackerListItem），只标推特卡，避免增量错位。
-  // 0.7.48: 文章样式只标重点专名；英文按句子上下文，不再因拆 span 被当成孤词。
-  // 0.7.47: 文章样式英文专名走同一套分词（Chinamaxxing / Federal Reserve）。
-  // 0.7.46: 文章样式用 Intl.Segmenter + 虚词过滤识别句中名词。
-  // 0.7.45: 文章样式跳过孤词/金额（36.6K）；专名仍走词表而非泛 NER。
-  // 0.7.44: 文章样式识别中文专名（词表最长匹配 + 中国神灵类复合 + 自定义词）。
-  // 0.7.43: 文章样式只扫变化节点，不再每次整页重扫。
-  // 0.7.42: 完整包文章样式改圆角胶囊，引号后固定跟「复制」。
-  // 0.7.41: 完整包可选文章重点样式（默认关；按填写域名注入）。
-  // 0.7.40: 完整包剪切板轮询 350ms（前台+offscreen）。
-  // 0.7.38: 完整包可选覆盖 GMGN 推特监控等站点自带 CA 样式。
-  // 0.7.37: 完整包高亮 CA 可申请全站权限，X/其它 https 页也能点跳。
-  // 0.7.36: 完整包可选高亮页面 CA（默认关，CSS Highlight，点击复制并跳转）。
-  // 0.7.35: 完整包剪切板 — 切页不复跳；可选复用已开 GMGN/Debot 标签。
-  // 0.7.34: 币股 vault 底池用 BNB，不再把 GMGN NVDAB/FXION 芯片当 LP quote。
-  // 0.7.33: 完整包剪切板可选用站点（仅 GMGN / 仅 Debot / 二者都用）。
-  // 0.7.32: Four.meme Giggle/Binance 慈善分段（🎓/💛）；modeCache.v4。
-  // 0.7.31: 版本对齐；徽章逻辑不变。剪切板仅完整包且默认只跳当前标签。
-  // 0.7.30: 剪切板跳转已拆到 private/clip-jump overlay，本文件只负责徽章。
-  // 0.7.18: 资金接收 0 = 严格 >0%（有 dev 分配才挡，不是 ≥0%）。
-  // 0.7.17: 资金接收阈值下限 0（只要分给了 dev 钱包就屏蔽）；0% 本身不挡。
-  // 0.7.16: ffff 选择器补齐（候选/mutation/click-arm）；新卡组批不阻塞整队；Debot 停滚 settle 恢复侧栏扫.
-  // 0.7.12: watch scoped TokenItem href swaps so virtual rows repaint after reuse.
-  // 0.7.11: fixed GMGN surfaces, scoped observers, and current-column scroll repair.
-  // 0.7.15: GMGN token->trench return waits for replacement PumpSub roots; accept full-width home roots.
-  // 0.7.9: K 线战壕短地址先爬真实卡片；停滚分片补绘并复用相邻徽章
-  // 0.7.8: GMGN 战壕/钱包追踪滚动热路径降载；禁区停滚不再恢复扫描
-  // 0.7.5: K 线侧栏下滑徽章饥饿 — truncated 禁 light 死循环；token 页视口快补；dirty 兜底
-  // 0.7.6: GMGN K 线分隔条拖动期间暂停扫描，停止后单次恢复；header 引用快路径
-  // 0.7.7: GMGN 钱包追踪/收藏面板禁徽章；搜索、战壕、K 线保持显示
-  // 0.7.4: feeMatch 最小加固 — 无身份信号不 stable；scrub 拆错后 cache 重画
-  // 0.7.3: 禁挂徽章 — 钱包追踪弹层/侧栏、GMGN 顶 ticker、搜索「钱包」区
-  // 0.7.2: ffff 视口快补 ⏳；4444 残留 7777 必拆；降负载 timings；底池 DOM 优先；href 身份
-  // 0.7.0: Debot ranks v4 资金接收屏蔽修复；自定义多尾号屏蔽（BSC）；底池 Flap=🦋 Four=🖐️
-  // 0.6.16: 自定义多规则尾号屏蔽（仅 BSC，新创建列）；底池前缀 Flap=🦋 Four=🖐️
-  // 0.6.16b: Debot ranks v3→v4 导致 dev 钱包接收屏蔽失效 — page-hook 认 v4 + POST body.column
-  // 0.6.15: ffff 徽章点击 → four.meme/zh-TW/token/{ca}；Flap 仍 flap.sh taxinfo.
-  // 0.6.14: Four.meme ffff 税币 — 与 Flap 同徽章 schema；后端 Multicall 链上读.
-  // 0.6.13: Hot/Steady 双轨 — 视口/新创建未画加速；稳态保持流畅；仅 BSC 链工作.
-  // 0.6.12: pending 快重试 / missing 略缓；区分 soft-miss 原因，限制 requeue 定时器数量.
-  // 0.6.11: 流畅回退 — 扫卡/mutation 节奏对齐 0.6.2；身份校验快路径+节流，保留防错徽章.
-  // 0.6.10: Debot 双站 debot.ai + gungnir.bot 列表 /meme?chain=bsc 与 K 线 /token/bsc 门控对齐.
-  // 0.6.9: 仅 BSC 生效 — ?chain=bsc 或路径 /bsc/token、/token/bsc；robinhood 等立即清徽章.
-  // 0.6.8: /modes 批：新CA 满3或350ms；0 CA 不请求；CF soft-wait 回填；禁狂刷 503.
-  // 0.6.7: 严禁错徽章 — 扫卡前 enforceIdentity；无身份/fee≠CA 立刻拆；仅 loading 或正确 entry.
-  // 0.6.6: CF/后端 async-cache-first — 插件对 pending/missing 快轮询；回画 findCardsByCa.
-  // 0.6.5: 身份=卡片自身 CA（div[href] 唯一）；禁「多 href 优先 7777」导致 ffff 卡挂错徽章；新创建加速.
-  // 0.6.4: js-mcp 实锤 GMGN TokenItem 用 div[href=/bsc/token/…] 非 a — extractCardHrefToken 必须读任意 [href].
-  // 0.6.3: 新币徽章 — href 优先于 short CA，禁虚拟列表复用旧徽章；无 /modes 仅 ⏳，有正确值才出真徽章.
-  // 0.5.22: GMGN-only batch priority for top viewport + flush when scan truncated; Debot untouched.
-  // 0.5.21: GMGN-only new-card latency (soft debounce / early miss retry / cache paint); Debot untouched.
-  // 0.5.18: GMGN embedded TokenItem dirty queue + single-pass search overlay/address mount.
-  // 0.5.17: GMGN list readiness + fast paint also recognize virtual rows without token <a>.
-  // 0.5.16: GMGN post-commit SPA signal + structural list gate; clear badge on non-target routes.
-  // 0.5.15: fail-open network handling; route-committed header paint; no pre-click work.
-  // 0.5.14: reject stale badges when virtual rows recycle to non-7777/8888 tokens.
-  // 0.5.13: gate K-line -> trench paint on real list DOM; trim steady/resume maintenance.
-  // 0.5.12: freeze outgoing trench DOM until the real token header mounts.
-  // 0.5.11: Debot virtual-list scroll cooldown + mutation feedback-loop suppression.
-  // 0.5.10: GMGN/Debot/Gungnir header lock + current-address validation + targeted React repair.
-  // 0.5.9: GMGN 顶栏优先 #token-base-address / [data-addr]；DOM 被 React 重绘后 observer 补挂.
-  // 0.5.8: 顶栏成功判定仅 fee-header 真锁；勿把左侧同 CA 列表徽章当顶栏已挂好；cache ready 强制补画.
-  // 0.5.7: short CA 定位 — 仅在内联战壕打开时排除左侧列；全宽 K 线恢复左顶栏地址.
-  // 0.5.6: 内联战壕开启时 short CA 勿选左侧列 — 优先总税率左侧最近的顶栏地址.
-  // 0.5.5: GMGN 顶栏强制可挂（insert 成功即 OK）+ token 页 guardian 续画；修双端都不显示.
-  // 0.5.4: GMGN 顶栏徽章 data-fee-header 锁定 — 防 isStable 误判/列表 remount 闪没.
-  // 0.5.3: GMGN K 线徽章闪一下消失 — 禁止 tryPaint 狂清顶栏；列表扫勿 clear 顶栏 URL 徽章.
-  // 0.5.2: GMGN token 多栏 — 顶栏+左侧战壕同时扫（取消 settled 才开侧栏的死锁，对齐 0.4.24）.
-  // 0.5.1: GMGN 多栏布局(战壕+K线) short CA 不在视口左侧 — 放宽 left 带限制.
-  // 0.5.0: 里程碑发布 — GMGN 流畅/地址旁挂载/三列同 CA；Debot 顶栏+坐标双徽章；100% 仅图标.
-  // 0.4.51: GMGN 三列同 CA 各显徽章（list-return 禁 token 级 seen）；单卡仍防双徽章.
-  // 0.4.50: GMGN K 线强制 short CA afterend（禁总税率兜底抢挂）；已挂税率旁则迁移.
-  // 0.4.49: GMGN K 线徽章改挂 short CA 旁；回战壕补洞防 early-stop 卡 10~12 枚 2–3s.
-  // 0.4.48: Debot 坐标模式禁嵌套双徽章；100% 份额只显示类型图标（不写 100%）.
-  // 0.4.47: Debot K 线顶栏徽章 — 顶栏 short CA 用 title/ca-text 定位（登录侧栏导致 220 节点漏扫）.
-  // 0.4.46: GMGN 回战壕对标 Debot — 禁首扫 force 叠 host longtask；DOM-watch 前 400ms 密快绘.
-  // 0.4.45: GMGN 仅首屏可视(~10–12 卡) + K→战壕 <1s 铺满；禁止屏外 DOM 操作；Debot 不动.
-  // 0.4.44: GMGN K→战壕即时徽章 — 轻量 soft+fastPaint（无 keep-alive）；Debot 路径不动.
-  // 0.4.43: GMGN-only jank — scroll cooldown + mutation relevance filter + stable/Tax cache (Debot untouched).
-  // 0.4.42: GMGN 列表 mutation 禁止 force 扫（对齐 0.4.22 900ms 限流）+ href-only 候选 + roots≤3.
-  // 0.4.41: GMGN 彻底对齐 0.4.22 — 关 soft/DOM-watch/click-arm 风暴；K 线 settled 不扫三列.
-  // 0.4.40: GMGN 回 0.4.22 轻量 progressive（砍 keep-alive/Tax 狂扫）；Debot 仍用加速路径.
-  // 0.4.39: js-mcp — GMGN K→战壕 Tax@1.1s 但徽章@~6s：list-return 锚点+续扫+禁止 22px 假卡.
-  // 0.4.38: 搜索/历史弹层 ~1s 出徽章 — dialog-first + cache 直绘 + 矮行 climb + API 回补扫.
-  // 0.4.37: GMGN 进出 K 线减负 + 回战壕加速（header-only token scan + list-return DOM watch）.
-  // 0.4.36: list-return 三栏轮询（已迁移/右列不再饿死）+ GMGN 同策略.
-  // 0.4.35: Debot SPA meme→K 线激活链加固 + 回战壕加速 + token 页减负.
-  // 0.4.34: Debot「使用卡片坐标」时 K 线顶栏仍强制贴合（不走 absolute，修登录无徽章）.
-  // 0.4.33: Debot login K-line badge + list-return mount pos; GMGN return first-frame fast-only.
-  // 0.4.32: GMGN token→home — cache-first 6–8 card burst + 6ms slices (kill ~0.8s longtask).
-  // 0.4.31: js-mcp report — Debot token dwell jank + 0 badge; GMGN return still ~0.6–0.8s.
-  // 0.4.30: token↔list return — viewport-first soft rescan (jank↓, first-paint still snappy).
-  // 0.4.29: cut SPA force-scan storm (meme→K-line jank) — coalesce + fewer progressive.
-  // 0.4.28: Debot SPA — normalize route key (id_0x), click-arm, no thrash reset, paint in quiet.
-  // 0.4.27: Debot SPA cross-browser — page-world history hook + always-on header guardian.
-  // 0.4.26: Debot SPA meme→token — header watch + div short-CA + Release zip.
-  // 0.4.25: Debot SPA meme->token header badge (debot.ai + gungnir.bot).
-  // 0.4.24: dedupe per card only — 三栏同 CA 各显徽章 (fix按 token 全页只留 1 个).
-  // 0.4.23: popup EN/ZH + display prefs collapsed by default.
-  // 0.4.22: K-line side 战壕 rows share home trench absolute coords (header stays Tax).
-  // 0.4.21: K-line side board — prioritize unpainted, higher light caps, light continue.
-  // 0.4.20: light→高对比; token settled still light-scan dialog/side boards; drag auto-off.
-  // 0.4.19: light theme always solid dark chip (no bg toggle); dark keeps optional solid.
-  // 0.4.18: default classic translucent; optional solid dark card bg; no hybrid gradient.
-  // 0.4.17: dark theme optional transparent bg toggle.
-  // 0.4.16: dark theme solid #000 chip bg for contrast on colorful cards.
-  // 0.4.15: hard double-badge dedupe (Debot drag); outermost card only; remount on abs.
-  // 0.4.14: trench-only abs/drag; bsc scan gate; fix Debot 新创建 + double badge.
-  // 0.4.13: badge pos — default beside Tax; optional card top-left absolute + page drag.
-  // 0.4.12: K-line — stop mutation scans after badge; cache 总税率 lookup; per-site badge offset.
-  // 0.4.11: SPA progressive scans cut to ~1.3–2s (was 6× up to 3s) — fix home→K-line jank.
-  // Debot/GMGN list boards still get 4 light passes; token pages 3 + early-stop when badge exists.
-  // 0.4.10: pool quote prefer API quote_symbol.
+  // 逐版本补丁备注已迁到仓库根目录 CHANGELOG.md（此处只保留仍约束下方代码的注释）。
   // 0.7.1b: 降负载 — 热路径/回列表/滚动/扫卡间隔放宽（见下方常量）
   const SCAN_INTERVAL_MS = 650;
   // 0.4.29: even force full-scans must coalesce (guardian/watch/progressive stacked = jank).
@@ -656,9 +318,6 @@
     // 鼠标悬停徽章显示详细浮窗（默认关）
     hoverTip: false
   };
-  const FLAP_TAXINFO_BASE = "https://flap.sh/bnb";
-  /** Four.meme tax token page (suffix ffff) */
-  const FOUR_TOKEN_PAGE_BASE = "https://four.meme/zh-TW/token";
   // Popup language (zh|en) — tooltip copy follows this.
   const UI_LANG_KEY = "flapFeeInfo.uiLang.v1";
   // Stock / index vault segment emoji (replaces 🎁 when basket present).
@@ -709,7 +368,9 @@
     enabled: false,
     hideTaxVault: false,
     hideStockVault: false,
-    hideGenius: false
+    hideGenius: false,
+    // 勾选后：税收 100% 进金库（🎁→X，无分红/销毁/回流/慈善）不屏蔽
+    keepPureTaxVault: false
   };
   const DEFAULT_SEARCH_HIDE = { enabled: false };
   const SEARCH_HIDE_ATTR = "data-flap-search-hidden";
@@ -839,6 +500,8 @@
   };
   const ponsV2AddrSet = new Set();
   const geniusFunAddrSet = new Set();
+  /** GMGN 带 tax_allocation 的 Long.xyz（走 Pons v2 同一条 host-fee 通道）；仅用于点击跳转。 */
+  const longxyzAddrSet = new Set();
   const ponsV2FiberCache = new WeakMap();
   /** Robinhood 已确认非 pons_v2（long/bankr/v1）：禁止反复 fiber 扒卡 */
   const PONS_SKIP_TTL_MS = 45000;
@@ -1109,13 +772,6 @@
     return catalogTitleForQuoteAddr(a) || "";
   }
 
-  function isSingleAssetStockVault(entry) {
-    if (!entry || !entry.is_vault) return false;
-    const assets = normalizeBasketAssets(entry.basket_assets);
-    if (assets.length !== 1) return false;
-    return (Number(entry.market_bps) || 0) >= 10000 && (Number(entry.dividend_bps) || 0) === 0;
-  }
-
   /** Flap 指数包装币 IB-COCO / IBCOCO，不是篮子成分。 */
   function looksLikeIbWrapperSymbol(sym) {
     const s = String(sym || "")
@@ -1180,94 +836,6 @@
     const qSym = compactBasketSymbol(entry.quote_symbol || "");
     if (aSym && qSym && aSym === qSym && !quoteSymbolLooksNative(qSym)) return true;
     return false;
-  }
-
-  function basketSymbolMatchesDom(domSym, rowSym) {
-    const d = compactBasketSymbol(domSym);
-    const r = compactBasketSymbol(rowSym);
-    if (!d || !r) return false;
-    if (d === r) return true;
-    const dr = String(domSym || "")
-      .replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "")
-      .toUpperCase();
-    const rr = String(rowSym || "")
-      .replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "")
-      .toUpperCase();
-    if (dr.length >= 5 && dr.endsWith("B") && dr.slice(0, -1) === r) return true;
-    if (rr.length >= 5 && rr.endsWith("B") && rr.slice(0, -1) === d) return true;
-    return false;
-  }
-
-  function dedupeBasketAssets(rows) {
-    const out = [];
-    const seenAddr = new Set();
-    for (const row of rows) {
-      if (!row || typeof row !== "object") continue;
-      const address = String(row.address || "").toLowerCase();
-      const symbol = compactBasketSymbol(row.symbol || row.name || "");
-      const name = String(row.name || symbol || "")
-        .replace(/[<>]/g, "")
-        .trim()
-        .slice(0, 48);
-      if (!symbol && !name) continue;
-      if (address) {
-        if (seenAddr.has(address)) continue;
-        seenAddr.add(address);
-      }
-      // 无 address 时不去 symbol 重：同 symbol 双成分（如两个 SPCX）只能靠 address 区分
-      out.push({ address, symbol: symbol || compactBasketSymbol(name), name: name || symbol });
-    }
-    return out;
-  }
-
-  function mergeBasketWithTaxDomSymbols(assets, domSyms, entry) {
-    const rows = normalizeBasketAssets(assets);
-    if (!domSyms.length) return rows;
-    if (basketLikelyTruncated(rows, entry)) return rows;
-    if (rows.length >= 5 && domSyms.length < rows.length) return rows;
-    const usedAddr = new Set();
-    const usedSym = new Set();
-    const next = [];
-    for (const sym of domSyms) {
-      if (usedSym.has(sym)) continue;
-      const matched =
-        rows.find(
-          (a) =>
-            a &&
-            basketSymbolMatchesDom(sym, a.symbol) &&
-            (!a.address || !usedAddr.has(a.address))
-        ) ||
-        rows.find((a) => a && a.address && !usedAddr.has(a.address) && !a.symbol) ||
-        null;
-      if (!matched?.address && rows.length >= 5) continue;
-      usedSym.add(sym);
-      if (matched?.address) usedAddr.add(matched.address);
-      if (matched) {
-        const msym = compactBasketSymbol(matched.symbol) || sym;
-        usedSym.add(msym);
-        next.push({
-          address: matched.address || "",
-          symbol: msym,
-          name: matched.name || msym
-        });
-        continue;
-      }
-      // 禁止用 Tax 残留图发明新成分（地推币纯金库 leftover FXIO → 📈）
-      if (entry && entry.is_stocks_vault === true && rows.length === 0) {
-        next.push({ address: "", symbol: sym, name: sym });
-      }
-    }
-    for (const row of rows) {
-      if (isSingleAssetStockVault(entry) && domSyms.length === 1) break;
-      const sym = compactBasketSymbol(row.symbol);
-      const addr = String(row.address || "").toLowerCase();
-      if (addr && usedAddr.has(addr)) continue;
-      if (!addr && sym && usedSym.has(sym)) continue;
-      if (addr) usedAddr.add(addr);
-      else if (sym) usedSym.add(sym);
-      next.push(row);
-    }
-    return dedupeBasketAssets(next);
   }
 
   function enrichBasketFromTaxDom(card, entry) {
@@ -1433,20 +1001,13 @@
     const href =
       extractCardHrefToken(card) ||
       String(card.getAttribute("href") || card.dataset[CARD_MARK] || "").toLowerCase();
-    const sig = gmgnTaxInnerStemSig(card);
-    const prev = gmgnTaxInnerReuseState.get(card);
-    if (prev && prev.href && href && prev.href !== href) {
-      const stale = Boolean(sig) && sig === prev.sig;
-      gmgnTaxInnerReuseState.set(card, { href, sig: stale ? prev.sig : sig, frozen: stale });
-      return stale;
-    }
-    if (prev && prev.frozen && prev.href === href) {
-      if (sig === prev.sig) return true;
-      gmgnTaxInnerReuseState.set(card, { href, sig, frozen: false });
-      return false;
-    }
-    gmgnTaxInnerReuseState.set(card, { href, sig, frozen: false });
-    return false;
+    const step = Core.taxInnerReuseStep(
+      gmgnTaxInnerReuseState.get(card),
+      href,
+      gmgnTaxInnerStemSig(card)
+    );
+    gmgnTaxInnerReuseState.set(card, step.next);
+    return step.stale;
   }
 
   function taxInnerUntrustedAsDividend(inner, outer, entry) {
@@ -3966,17 +3527,40 @@
     const a = String(addr || "").toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(a)) return;
     geniusFunAddrSet.add(a);
+    ponsSkipAddrAt.delete(a);
     if (geniusFunAddrSet.size <= 400) return;
     const first = geniusFunAddrSet.keys().next().value;
     if (first) geniusFunAddrSet.delete(first);
   }
 
-  function isGeniusFunSuffix(addr) {
-    return GENIUS_FUN_SUFFIX_RE.test(String(addr || ""));
+  /** page-hook 见过宿主 launchpad≠geniusfun 的 6666（Debot cheesepad_melt 等）。 */
+  const notGeniusAddrSet = new Set();
+
+  function applyNotGeniusAddrs(addrs) {
+    if (!Array.isArray(addrs)) return;
+    for (let i = 0; i < addrs.length; i += 1) {
+      const a = String(addrs[i] || "").toLowerCase();
+      if (!/^0x[a-f0-9]{40}$/.test(a) || notGeniusAddrSet.has(a)) continue;
+      notGeniusAddrSet.add(a);
+      geniusFunAddrSet.delete(a);
+      requestQueue.delete(a);
+      modeCache.delete(a);
+      try {
+        document.querySelectorAll(`[${ICON_DATA}="1"][data-fee-token="${a}"]`).forEach((icon) => {
+          icon.remove();
+        });
+      } catch (_rm) {
+        // ignore
+      }
+    }
+    while (notGeniusAddrSet.size > 400) {
+      notGeniusAddrSet.delete(notGeniusAddrSet.keys().next().value);
+    }
   }
 
   function isGeniusFunToken(addr) {
     const a = String(addr || "").toLowerCase();
+    if (notGeniusAddrSet.has(a)) return false;
     if (isGeniusFunSuffix(a)) {
       rememberGeniusFunAddr(a);
       return true;
@@ -3996,7 +3580,8 @@
     const a = String(addr || "").toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(a) || ponsV2AddrSet.has(a)) return;
     // BSC 税币绝不当「非 pons」负缓存，否则点 RH K 线会把侧栏 7777 徽章拆光。
-    if (TARGET_TOKEN_RE.test(a)) return;
+    // Genius 同理：战壕全局选 HOOD 时进 BSC Genius K 线，顶栏徽章会被 pons-skip 挡掉。
+    if (TARGET_TOKEN_RE.test(a) || isGeniusFunToken(a)) return;
     ponsSkipAddrAt.set(a, Date.now());
     if (ponsSkipAddrAt.size <= 400) return;
     const now = Date.now();
@@ -4059,6 +3644,13 @@
     return s === "pons_v2" || s.indexOf("pons_v2") !== -1 || s === "ponsv2" || s.indexOf("ponsv2") !== -1;
   }
 
+  /** Long.xyz 只有 GMGN 给了 tax_allocation 才算 RH host-fee 卡；没给就与 bankr/v1 一样不画。 */
+  function isLongxyzWithTal(lp, d) {
+    if (!d || String(lp || "").toLowerCase().indexOf("longxyz") === -1) return false;
+    const tal = d.s_tal || d.tax_allocation;
+    return Boolean(tal && typeof tal === "object" && Object.keys(tal).length > 0);
+  }
+
   /** TokenItem fiber：Robinhood 只认 pons_v2，不认尾号 / pons v1。Debot 读 meta.launchpad。 */
   function scrapePonsV2FromCard(card) {
     if (!(card instanceof HTMLElement)) return false;
@@ -4096,7 +3688,7 @@
               d.launchpad ||
               (d.meta && d.meta.launchpad);
             if (lp && !sawLaunchpad) sawLaunchpad = String(lp);
-            if (isPonsV2LaunchpadRaw(lp)) {
+            if (isPonsV2LaunchpadRaw(lp) || isLongxyzWithTal(lp, d)) {
               ok = true;
               const addr = extractAnyToken(
                 d.address || d.a || d.contract || card.getAttribute("href") || ""
@@ -4112,6 +3704,7 @@
     } catch (_e) {
       ok = false;
     }
+    // longxyz 缺 tax_allocation 同样进负缓存；GMGN 之后补齐时 host-fee __pons_v2 会解除。
     if (!ok && hrefTok && sawLaunchpad && !isPonsV2LaunchpadRaw(sawLaunchpad)) {
       rememberPonsSkipAddr(hrefTok);
     }
@@ -4332,7 +3925,7 @@
     return lp;
   }
 
-  /** RH K 线 URL 代币：只认已确认 pons_v2；longxyz/bankr/v1/未知都不画（含 ⏳）。 */
+  /** RH K 线 URL 代币：只认已确认 pons_v2（含 GMGN 带 tax_allocation 的 longxyz）；bankr/v1/未知/缺数据都不画（含 ⏳）。 */
   function isRhKlineFeeTarget(addr) {
     const a = String(addr || "").toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(a)) return false;
@@ -4488,7 +4081,7 @@
       if (!isFeeBadgeChainPrefOn("bsc")) return false;
       const tok = extractAnyToken(href);
       if (tok && isGeniusFunToken(tok)) return true;
-      if (TARGET_TOKEN_RE.test(tok || "") || isGeniusFunSuffix(tok || "")) return true;
+      if (TARGET_TOKEN_RE.test(tok || "")) return true;
       return Boolean(card && scrapeGeniusFromCard(card));
     }
     if (isRobinhoodTokenRouteHref(href) && (isGmgnHost() || isDebotLikeHost())) {
@@ -8788,7 +8381,8 @@
     });
   }
 
-  const PAGE_HOOK_VER = "202";
+  // 必须等于 page-hook.js HOOK_VER（打包脚本会校验），否则每页都会重复注入 page-hook。
+  const PAGE_HOOK_VER = "205";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -8854,6 +8448,12 @@
     }
     const src = chrome.runtime.getURL("page-hook.js");
     try {
+      // fee-core 必须先于 page-hook 执行（async=false 按插入顺序）。
+      const core = document.createElement("script");
+      core.src = chrome.runtime.getURL("fee-core.js");
+      core.async = false;
+      core.onload = core.onerror = () => core.remove();
+      (document.documentElement || document.head || document.body).appendChild(core);
       const s = document.createElement("script");
       s.src = src;
       s.async = false;
@@ -14655,57 +14255,6 @@
     return raw.length > 6 ? raw.slice(0, 6) : raw;
   }
 
-  /** 币股篮子专用：保留 FXION/NVDAON 等区分度，仅剥 Flap 常见尾缀 B（NVDAB→NVDA） */
-  const STOCK_CHIP_ALIASES = {
-    FXION: "FXIO",
-    NVDAON: "NVDA"
-  };
-
-  function compactBasketSymbol(symbol) {
-    const s = String(symbol || "").trim();
-    if (!s) return "";
-    const cleaned = s.replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "");
-    if (!cleaned) return "";
-    if (/[\u4e00-\u9fff]/.test(cleaned)) {
-      return cleaned.length > 6 ? cleaned.slice(0, 6) : cleaned;
-    }
-    const raw = cleaned.toUpperCase();
-    if (raw === "WBNB") return "BNB";
-    // NVDAB→NVDA（{5,}B 会先吃掉整串导致永远不剥尾缀 B）
-    if (raw.length >= 5 && raw.endsWith("B") && raw !== "BNB") {
-      return raw.slice(0, -1);
-    }
-    const aliased = STOCK_CHIP_ALIASES[raw];
-    if (aliased) return aliased.length > 6 ? aliased.slice(0, 6) : aliased;
-    return raw.length > 6 ? raw.slice(0, 6) : raw;
-  }
-
-  function basketDisplaySymbols(assets) {
-    return (assets || []).map((a) => compactBasketSymbol(a.symbol)).filter(Boolean);
-  }
-
-  function basketSymbolsReady(assets) {
-    const rows = normalizeBasketAssets(assets);
-    if (!rows.length) return false;
-    if (rows.length < 2) return Boolean(rows[0]?.symbol);
-    const syms = basketDisplaySymbols(rows);
-    if (syms.length < 2) return false;
-    return syms[0] !== syms[1];
-  }
-
-  function basketLikelyTruncated(assets, entry) {
-    if (!entry || !entry.is_vault) return false;
-    const stockish =
-      entry.is_stocks_vault === true ||
-      (Array.isArray(assets) && assets.length >= 2);
-    if (!stockish) return false;
-    const n = normalizeBasketAssets(assets).length;
-    if (n < 3 || n > 4) return false;
-    const mkt = Number(entry.market_bps) || 0;
-    const div = Number(entry.dividend_bps) || 0;
-    return mkt >= 9000 || div >= 9000;
-  }
-
   function hostFeeAllocationBps(entry) {
     if (!entry) return 0;
     return (
@@ -14765,23 +14314,6 @@
     }
     if (entry.source_host) return !hostFeeCanSkipModes(entry);
     return entry.__needsChain === true;
-  }
-
-  function normalizeBasketAssets(raw) {
-    if (!Array.isArray(raw)) return [];
-    const out = [];
-    for (const row of raw) {
-      if (!row || typeof row !== "object") continue;
-      const address = typeof row.address === "string" ? row.address.toLowerCase() : "";
-      const symbol = compactBasketSymbol(row.symbol || row.name || "");
-      const name = String(row.name || symbol || "")
-        .replace(/[<>]/g, "")
-        .trim()
-        .slice(0, 48);
-      if (!symbol && !name) continue;
-      out.push({ address, symbol: symbol || compactBasketSymbol(name), name: name || symbol });
-    }
-    return dedupeBasketAssets(out);
   }
 
   function normalizeResult(result) {
@@ -16138,6 +15670,7 @@
       vault.enabled ? 1 : 0,
       vault.hideTaxVault ? 1 : 0,
       vault.hideStockVault ? 1 : 0,
+      vault.keepPureTaxVault ? 1 : 0,
       reason || ""
     ].join("|");
   }
@@ -16282,28 +15815,6 @@
       });
     }
     return out;
-  }
-
-  function normalizeCardMarkHandle(raw) {
-    let s = String(raw || "").trim();
-    if (!s) return "";
-    s = s.replace(/^https?:\/\/(www\.)?(twitter\.com|x\.com)\//i, "");
-    s = s.replace(/^@+/, "");
-    s = s.split(/[/?#\s]/)[0] || "";
-    s = s.replace(/\u2026|\.{2,}$/g, "");
-    s = s.toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 32);
-    if (
-      !s ||
-      s === "search" ||
-      s === "intent" ||
-      s === "i" ||
-      s === "home" ||
-      s === "share" ||
-      s === "explore"
-    ) {
-      return "";
-    }
-    return s;
   }
 
   function normalizeTwHandleMarkPrefs(raw) {
@@ -17769,12 +17280,32 @@
     );
   }
 
+  /** 「纯金库不屏蔽」勾选且本卡是纯税收金库：优先 fee 缓存，退回徽章文案（🎁 无百分比、无其它段）。 */
+  function keepPureTaxVault(token, card) {
+    if (!vaultHidePrefs || vaultHidePrefs.keepPureTaxVault !== true) return false;
+    const fee =
+      modeCache.get(token) ||
+      (typeof isPersistentCacheHit === "function" && isPersistentCacheHit(token)
+        ? persistentCache.get(token)
+        : null);
+    if (fee && typeof fee === "object" && fee.is_vault === true) return feeEntryIsPureVault(fee);
+    let text = "";
+    try {
+      const badge = card && card.querySelector?.(".gmgn-fee-mode-icon");
+      text = badge ? String(badge.textContent || "") : "";
+    } catch (_b) {
+      text = "";
+    }
+    const feePart = text.includes("|") ? text.slice(text.indexOf("|") + 1) : text;
+    return /🎁(?!\d)/.test(feePart) && !/[💎🔥💧🎓💛📈]|👨‍🍳/u.test(feePart);
+  }
+
   function shouldHideVaultCard(token, card) {
     if (!vaultHidePrefs || vaultHidePrefs.enabled !== true) return false;
     if (isGeniusFunToken(token)) return vaultHidePrefs.hideGenius === true;
     const vk = vaultKindFromFeeOrBadge(token, card);
     if (vk === "stock") return vaultHidePrefs.hideStockVault === true;
-    if (vk === "tax") return vaultHidePrefs.hideTaxVault === true;
+    if (vk === "tax") return vaultHidePrefs.hideTaxVault === true && !keepPureTaxVault(token, card);
     return false;
   }
 
@@ -17853,7 +17384,9 @@
     const vk = vaultKindFromFeeOrBadge(addr, card);
     if (vaultHidePrefs && vaultHidePrefs.enabled === true && vk) {
       if (vk === "stock" && vaultHidePrefs.hideStockVault === true) return true;
-      if (vk === "tax" && vaultHidePrefs.hideTaxVault === true) return true;
+      if (vk === "tax" && vaultHidePrefs.hideTaxVault === true && !keepPureTaxVault(addr, card)) {
+        return true;
+      }
     }
     if (taxRecvHidePrefs && taxRecvHidePrefs.enabled === true) {
       const info = resolveTaxRecvInfo(addr);
@@ -18178,7 +17711,10 @@
       const hideGenius = vaultHidePrefs.hideGenius === true;
       const taxOn = hideTax || (!hideTax && !hideStock && !hideGenius);
       if (entry.is_stocks_vault === true && hideStock) return true;
-      if (entry.is_vault === true && entry.is_stocks_vault !== true && taxOn) return true;
+      const keepPure = vaultHidePrefs.keepPureTaxVault === true && feeEntryIsPureVault(entry);
+      if (entry.is_vault === true && entry.is_stocks_vault !== true && taxOn && !keepPure) {
+        return true;
+      }
     }
     if (taxRecvHidePrefs && taxRecvHidePrefs.enabled === true) {
       if (entry.is_vault === true || entry.is_stocks_vault === true) return false;
@@ -18757,10 +18293,13 @@
       const token = String(raw.address || "")
         .trim()
         .toLowerCase();
-      if (raw.__pons_v2 === true) rememberPonsV2Addr(token);
-      if (raw.__geniusfun === true || raw.platform === "geniusfun") {
-        rememberGeniusFunAddr(token);
-      }
+      // 平台由 page-hook 按 fee-core 注册表判定；有 platform 时以它为准推导旧标记，
+      // 没有（Genius stub 等旧路径）才退回 __pons_v2 / __geniusfun。
+      const platformSpec = Core.platformSpec(raw.platform);
+      const hostOnly = platformSpec ? platformSpec.source === "host" : raw.__pons_v2 === true;
+      const genius = platformSpec ? platformSpec.id === "geniusfun" : raw.__geniusfun === true;
+      if (hostOnly) rememberPonsV2Addr(token);
+      if (genius) rememberGeniusFunAddr(token);
       if (!isFeeTargetToken(token)) continue;
       const derived = deriveHostFeeMode(raw);
       const tax_symbol = String(raw.tax_symbol || "").trim();
@@ -18796,8 +18335,13 @@
       };
       const entry = normalizeResult(payload);
       if (!entry) continue;
-      entry.__pons_v2 = raw.__pons_v2 === true;
-      entry.__geniusfun = raw.__geniusfun === true;
+      if (platformSpec) entry.platform = platformSpec.id;
+      entry.__pons_v2 = hostOnly;
+      entry.__geniusfun = genius;
+      if (entry.platform === "longxyz" && token) {
+        longxyzAddrSet.add(token);
+        if (longxyzAddrSet.size > 400) longxyzAddrSet.delete(longxyzAddrSet.values().next().value);
+      }
       if (entry.__geniusfun) {
         rememberGeniusFunAddr(token);
         if (!entry.platform) entry.platform = "geniusfun";
@@ -18813,7 +18357,7 @@
       entry.__paintComplete = raw.__paintComplete === true || hostFeePaintComplete(entry);
       entry.__needsChain = raw.__needsChain === true;
       entry.__fromFiber = raw.__fromFiber === true;
-      if (raw.__pons_v2 === true) entry.__needsChain = false;
+      if (hostOnly) entry.__needsChain = false;
       entry.__awaitSecurity = raw.__awaitSecurity === true;
       entry.__basketPendingUntil =
         typeof raw.__basketPendingUntil === "number" ? raw.__basketPendingUntil : 0;
@@ -18968,6 +18512,10 @@
         }
         if (data.type === "pons-skip-map") {
           applyPonsSkipAddrs(data.addrs);
+          return;
+        }
+        if (data.type === "genius-reject-map") {
+          applyNotGeniusAddrs(data.addrs);
           return;
         }
         if (data.type !== "host-fee-map") return;
@@ -20088,6 +19636,10 @@
         } else {
           topSym = "";
         }
+        // 分红币就是底池币：箭头与底池同一套展示名（AMZNB/XAUT0 → AMZN/XAUT，与 🦋AMZN 一致）。
+        if (topSym && divIsQuote && !selfDiv) {
+          topSym = formatPoolQuoteSymbol(topSym) || topSym;
+        }
       } else if (top === "gift") {
         const srcGift =
           entry.dividend_symbol ||
@@ -20126,7 +19678,8 @@
             ? compactDisplaySymbol(vaultDefaultPoolQuote())
             : compactDisplaySymbol(fallback);
         } else {
-          topSym = compactDisplaySymbol(srcQ);
+          // 厨师/回流/慈善付的就是底池币：与 🦋底池 同一套展示名（MRNAB → MRNA）
+          topSym = formatPoolQuoteSymbol(srcQ) || compactDisplaySymbol(srcQ);
         }
       } else if (top === entry.top_segment && top !== "burn") {
         topSym = compactDisplaySymbol(entry.top_payout_symbol || "");
@@ -20656,15 +20209,9 @@
     const addr = String(token || "")
       .trim()
       .toLowerCase();
+    // DOM 兜底只管税币卡；page-hook 数据层对任意 CA 生效。
     if (!TARGET_TOKEN_RE.test(addr)) return false;
-    const rules = suffixHidePrefs.rules || [];
-    for (let i = 0; i < rules.length; i++) {
-      const r = rules[i];
-      if (!r || r.enabled === false) continue;
-      const s = String(r.suffix || "").toLowerCase();
-      if (s && addr.endsWith(s)) return true;
-    }
-    return false;
+    return Core.suffixRulesMatch(suffixHidePrefs.rules, addr);
   }
 
   function normalizeVaultHidePrefs(raw) {
@@ -20674,6 +20221,7 @@
     out.hideTaxVault = raw.hideTaxVault === true;
     out.hideStockVault = raw.hideStockVault === true;
     out.hideGenius = raw.hideGenius === true;
+    out.keepPureTaxVault = raw.keepPureTaxVault === true;
     return out;
   }
 
@@ -20682,7 +20230,8 @@
       enabled: vaultHidePrefs.enabled === true,
       hideTaxVault: vaultHidePrefs.hideTaxVault === true,
       hideStockVault: vaultHidePrefs.hideStockVault === true,
-      hideGenius: vaultHidePrefs.hideGenius === true
+      hideGenius: vaultHidePrefs.hideGenius === true,
+      keepPureTaxVault: vaultHidePrefs.keepPureTaxVault === true
     };
     const payload = JSON.stringify(prefs);
     try {
@@ -20749,21 +20298,16 @@
    * - Flap 8888/7777 → flap.sh taxinfo
    * - Four ffff → four.meme 代币页（用户指定 zh-TW/token/{ca}）
    * - Genius.fun → genius.fun/token/{ca}
+   * - Long.xyz（RH）→ app.long.xyz/tokens/{ca}
    */
   function buildTaxDetailUrl(token) {
     const ca = String(token || "").toLowerCase();
-    if (isGeniusFunToken(ca)) {
-      return `${GENIUS_FUN_PAGE_BASE}/${ca}`;
-    }
-    if (!TARGET_TOKEN_RE.test(ca)) return "";
-    if (isFourTaxToken(ca)) {
-      return `${FOUR_TOKEN_PAGE_BASE}/${ca}`;
-    }
-    if (isFlapTaxToken(ca)) {
-      const lang = uiLang === "en" ? "en" : "zh";
-      return `${FLAP_TAXINFO_BASE}/${ca}/taxinfo?lang=${lang}`;
-    }
-    return "";
+    let platform = "";
+    if (longxyzAddrSet.has(ca)) platform = "longxyz";
+    else if (isGeniusFunToken(ca)) platform = "geniusfun";
+    else if (TARGET_TOKEN_RE.test(ca) && isFourTaxToken(ca)) platform = "four";
+    else if (TARGET_TOKEN_RE.test(ca) && isFlapTaxToken(ca)) platform = "flap";
+    return Core.taxDetailUrl(platform, ca, uiLang);
   }
 
   function buildFlapTaxinfoUrl(token) {

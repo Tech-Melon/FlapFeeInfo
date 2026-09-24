@@ -17,7 +17,8 @@
     enabled: false,
     hideTaxVault: false,
     hideStockVault: false,
-    hideGenius: false
+    hideGenius: false,
+    keepPureTaxVault: false
   };
   const SUFFIX_MAX = 24;
 
@@ -84,6 +85,7 @@
     out.hideTaxVault = raw.hideTaxVault === true;
     out.hideStockVault = raw.hideStockVault === true;
     out.hideGenius = raw.hideGenius === true;
+    out.keepPureTaxVault = raw.keepPureTaxVault === true;
     return out;
   }
 
@@ -192,11 +194,7 @@
 
   function publishVault(prefs) {
     const p = normalizeVault(prefs);
-    const payload = JSON.stringify({
-      enabled: p.enabled === true,
-      hideTaxVault: p.hideTaxVault === true,
-      hideStockVault: p.hideStockVault === true
-    });
+    const payload = JSON.stringify(p);
     try {
       if (document.documentElement) {
         document.documentElement.setAttribute(VAULT_ATTR, payload);
@@ -214,11 +212,7 @@
         {
           source: "flap-fee-info",
           type: "vault-hide-prefs",
-          prefs: {
-            enabled: p.enabled === true,
-            hideTaxVault: p.hideTaxVault === true,
-            hideStockVault: p.hideStockVault === true
-          }
+          prefs: p
         },
         "*"
       );
@@ -320,7 +314,8 @@
 
   /** MAIN world page-hook：manifest 为主；仅缺失时单次 script 兜底（禁止并发重试风暴） */
   const PAGE_HOOK_FILE = "page-hook.js";
-  const PAGE_HOOK_VER = "197";
+  // 必须等于 page-hook.js HOOK_VER（打包脚本会校验），否则每页都会重复注入 page-hook。
+  const PAGE_HOOK_VER = "205";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
 
   function pageHookHostFeeReady() {
@@ -394,6 +389,12 @@
       // ignore
     }
     try {
+      // fee-core 必须先于 page-hook 执行（async=false 按插入顺序）。
+      const core = document.createElement("script");
+      core.src = chrome.runtime.getURL("fee-core.js");
+      core.async = false;
+      core.onload = core.onerror = () => core.remove();
+      (document.documentElement || document.head || document.body).appendChild(core);
       const s = document.createElement("script");
       s.src = src;
       s.async = false;

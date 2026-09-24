@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.248",
-  "description": "FlapFeeInfo 0.8.248: Genius badge shows the largest share only; percents in tooltip.",
+  "version": "0.8.250",
+  "description": "FlapFeeInfo 0.8.250: shared fee-core (platform registry + tested pure logic); keep 100% tax-vault option; Long.xyz ready.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",
@@ -45,7 +45,7 @@
         "https://gungnir.bot/*",
         "https://*.gungnir.bot/*"
       ],
-      "js": ["page-hook.js"],
+      "js": ["fee-core.js", "page-hook.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },
@@ -57,14 +57,14 @@
         "https://gungnir.bot/*",
         "https://*.gungnir.bot/*"
       ],
-      "js": ["content.js"],
+      "js": ["fee-core.js", "content.js"],
       "css": ["style.css"],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["page-hook.js"],
+      "resources": ["fee-core.js", "page-hook.js"],
       "matches": [
         "https://gmgn.ai/*",
         "https://debot.ai/*",

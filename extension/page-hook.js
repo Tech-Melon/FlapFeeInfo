@@ -9,7 +9,10 @@
  * ★ 链+平台 host-fee：BSC Flap/Four 尾号、BSC geniusfun、RH pons_v2
  */
 (() => {
-  const HOOK_VER = 203;
+  const HOOK_VER = 205;
+  // fee-core.js 必须先于本文件进 MAIN world（manifest 与所有兜底注入都按此顺序）。
+  const Core = window.__flapFeeCore;
+  if (!Core) return;
   /** @type {""|"shared-worker"|"main-thread"} */
   let gmgnLiveTransport = "";
   let gmgnFiberNoted = false;
@@ -41,9 +44,21 @@
   const VAULT_HIDE_ATTR = "data-flap-vault-hide";
   const VAULT_HIDE_LS_KEY = "flapFeeInfo.vaultHide.v1";
   const SUFFIX_MAX_RULES = 24;
-  /** 与 content.js 一致：Flap 8888/7777 + Four.meme ffff；Genius.fun 6666 另走后缀 */
-  const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
-  const GENIUS_FUN_SUFFIX_RE = /^0x[a-fA-F0-9]{36}6666$/i;
+  /** Flap 8888/7777 + Four.meme ffff；Genius.fun 6666 另走后缀（fee-core 单一来源） */
+  const TARGET_TOKEN_RE = Core.TARGET_TOKEN_RE;
+  const {
+    ratioToBps,
+    pctToBps,
+    compactBasketSymbol,
+    basketSymbolMatchesDom,
+    normalizeCardMarkHandle,
+    isGeniusFunSuffix,
+    dedupeBasketAssets,
+    basketSymbolsReady,
+    basketLikelyTruncated,
+    isSingleAssetStockVault,
+    mergeBasketWithTaxDomSymbols
+  } = Core;
   /**
    * 新创建保留池（仅过滤开启时）：
    * - 宿主 API 常在 ~2 分钟后把币移出 new_creation。
@@ -232,12 +247,13 @@
   /** @type {{ enabled: boolean, rules: Array<{suffix:string, enabled:boolean}> }} */
   let suffixHidePrefs = { enabled: false, rules: [] };
   let suffixHideEnabled = false;
-  /** @type {{ enabled: boolean, hideTaxVault: boolean, hideStockVault: boolean, hideGenius: boolean }} */
+  /** @type {{ enabled: boolean, hideTaxVault: boolean, hideStockVault: boolean, hideGenius: boolean, keepPureTaxVault: boolean }} */
   let vaultHidePrefs = {
     enabled: false,
     hideTaxVault: false,
     hideStockVault: false,
-    hideGenius: false
+    hideGenius: false,
+    keepPureTaxVault: false
   };
   let vaultHideEnabled = false;
 
@@ -381,7 +397,8 @@
       if (
         entry.is_vault === true &&
         entry.is_stocks_vault !== true &&
-        vaultHidePrefs.hideTaxVault === true
+        vaultHidePrefs.hideTaxVault === true &&
+        !(vaultHidePrefs.keepPureTaxVault === true && Core.feeEntryIsPureVault(entry))
       ) {
         return true;
       }
@@ -659,7 +676,8 @@
       enabled: p?.enabled === true,
       hideTaxVault: p?.hideTaxVault === true,
       hideStockVault: p?.hideStockVault === true,
-      hideGenius: p?.hideGenius === true
+      hideGenius: p?.hideGenius === true,
+      keepPureTaxVault: p?.keepPureTaxVault === true
     };
     vaultHideEnabled = vaultHidePrefs.enabled === true;
   }
@@ -683,18 +701,7 @@
   /** 地址是否命中自定义尾号屏蔽（调用方保证 BSC + enabled） */
   function shouldHideByCustomSuffix(addr) {
     if (!suffixHideEnabled) return false;
-    const a = String(addr || "")
-      .trim()
-      .toLowerCase();
-    if (!a.startsWith("0x") || a.length < 6) return false;
-    const rules = suffixHidePrefs.rules || [];
-    for (let i = 0; i < rules.length; i++) {
-      const r = rules[i];
-      if (!r || r.enabled === false) continue;
-      const s = String(r.suffix || "").toLowerCase();
-      if (s && a.endsWith(s)) return true;
-    }
-    return false;
+    return Core.suffixRulesMatch(suffixHidePrefs.rules, addr);
   }
 
   /** 最近误杀排查用：最多保留 40 条被滤地址 + s_tal 摘要 */
@@ -792,11 +799,7 @@
   function gmgnNormalizePlatform(item) {
     const lp = gmgnLaunchpadFamily(item);
     if (!lp) return "";
-    if (lp.indexOf("pons_v2") !== -1) return "pons_v2";
-    if (lp.indexOf("genius") !== -1) return "geniusfun";
-    if (lp.indexOf("four") !== -1) return "four";
-    if (lp.indexOf("flap") !== -1) return "flap";
-    return lp;
+    return Core.platformFromLaunchpad(lp) || lp;
   }
 
   function gmgnItemIsBsc(item) {
@@ -832,12 +835,41 @@
     if (first) geniusFunAddrSet.delete(first);
   }
 
-  function isGeniusFunSuffix(addr) {
-    return GENIUS_FUN_SUFFIX_RE.test(String(addr || ""));
+  /** 尾号 6666 但宿主明确给了别的 launchpad（Debot cheesepad_melt 等）：不是 Genius。 */
+  const notGeniusAddrSet = new Set();
+  const notGeniusPending = [];
+  let notGeniusFlushTimer = 0;
+
+  function flushNotGeniusPending() {
+    notGeniusFlushTimer = 0;
+    if (!notGeniusPending.length) return;
+    const addrs = notGeniusPending.splice(0, 64);
+    try {
+      window.postMessage({ source: "flap-fee-info", type: "genius-reject-map", addrs }, "*");
+    } catch (_pm) {
+      // ignore
+    }
+    if (notGeniusPending.length) {
+      notGeniusFlushTimer = window.setTimeout(flushNotGeniusPending, 0);
+    }
+  }
+
+  function rememberNotGeniusAddr(addr) {
+    const a = String(addr || "").toLowerCase();
+    if (!isGeniusFunSuffix(a) || notGeniusAddrSet.has(a)) return;
+    notGeniusAddrSet.add(a);
+    geniusFunAddrSet.delete(a);
+    if (notGeniusAddrSet.size > 400) {
+      const first = notGeniusAddrSet.keys().next().value;
+      if (first) notGeniusAddrSet.delete(first);
+    }
+    notGeniusPending.push(a);
+    if (!notGeniusFlushTimer) notGeniusFlushTimer = window.setTimeout(flushNotGeniusPending, 0);
   }
 
   function isGeniusFunAddr(addr) {
     const a = String(addr || "").toLowerCase();
+    if (notGeniusAddrSet.has(a)) return false;
     if (isGeniusFunSuffix(a)) {
       rememberGeniusFunAddr(a);
       return true;
@@ -1002,9 +1034,26 @@
     return "";
   }
 
+  /**
+   * Long.xyz（RH，Uniswap v4 hook 动态费）：只用 GMGN 原始 tax_allocation，与 Pons v2 同一条
+   * host-fee 通道（不打 /modes、不画 ⏳）。js-mcp 2026-09：GMGN 尚未给 longxyz 带 tax_allocation → 不画。
+   */
+  function gmgnIsLongxyzWithTal(item) {
+    if (!item || typeof item !== "object") return false;
+    if (gmgnLaunchpadFamily(item).indexOf("longxyz") === -1) return false;
+    const chain = String(
+      item.chain || item.network || (item.f && (item.f.chain || item.f.network)) || ""
+    ).toLowerCase();
+    // Long.xyz 也在 Base；只接 Robinhood。
+    if (chain && chain !== "robinhood" && chain !== "rh") return false;
+    const tal = gmgnTal(item);
+    return Boolean(tal && Object.keys(tal).length > 0);
+  }
+
   function gmgnIsPonsV2(item) {
     const lp = gmgnLaunchpadFamily(item);
-    return lp === "pons_v2" || lp.indexOf("pons_v2") !== -1;
+    if (lp === "pons_v2" || lp.indexOf("pons_v2") !== -1) return true;
+    return gmgnIsLongxyzWithTal(item);
   }
 
   /** 这条 token 是不是 Robinhood。混链不能用整页 isRobinhoodPageContext。 */
@@ -1020,7 +1069,12 @@
     if (/\/bsc\/token\//i.test(href) || /\/token\/bsc\//i.test(href)) return false;
     if (gmgnIsPonsV2(item)) return true;
     const lp = gmgnLaunchpadFamily(item);
-    if (lp.indexOf("flap") !== -1 || lp.indexOf("four") !== -1) return false;
+    if (lp.indexOf("flap") !== -1 || lp.indexOf("four") !== -1 || lp.indexOf("genius") !== -1) {
+      return false;
+    }
+    // BSC K 线页自身 token（token_fee_info.launchpad 等无 chain 字段）：战壕全局选了 HOOD 也不是 RH。
+    const urlBsc = String(location.pathname || "").match(/\/bsc\/token\/(0x[a-fA-F0-9]{40})/i);
+    if (urlBsc && gmgnAddr(item) === urlBsc[1].toLowerCase()) return false;
     if (gmgnSelectedChains().length > 1) return false;
     return isRobinhoodPageContext();
   }
@@ -1117,8 +1171,35 @@
     return null;
   }
 
-  function shouldHideVaultKind(kind) {
+  /** GMGN s_tal 纯税收金库：marketing≈100% 且分红/销毁/回流/慈善全 0（🎁→CYPH）。 */
+  function gmgnTalIsPureVault(tal) {
+    if (!tal || typeof tal !== "object") return false;
+    const bps = (keys) => ratioToBps(pickTalField(tal, keys));
+    const others =
+      bps(["dividend", "dvtx", "dividend_tax", "holder_tax", "holder", "dividend_pct", "dividend_rate"]) +
+      bps(["burn", "burn_rate", "brtx", "deflation"]) +
+      bps(["liquidity", "lp", "lp_tax", "lqtx", "liquidity_tax"]) +
+      bps(["giggle_charity_tax", "giggle_charity", "giggle"]) +
+      bps(["binance_charity_tax", "binance_charity", "binance"]);
+    return Core.isPureVaultShares(bps(["marketing", "marketing_tax", "mktx"]), others);
+  }
+
+  function debotExtraIsPureVault(extra) {
+    if (!extra || typeof extra !== "object") return false;
+    const others =
+      pctToBps(extra.dividend_pct ?? extra.holder_pct) +
+      pctToBps(extra.burn_pct) +
+      pctToBps(extra.liquidity_pct ?? extra.lp_pct) +
+      pctToBps(extra.giggle_charity_pct ?? extra.giggle_pct) +
+      pctToBps(extra.binance_charity_pct ?? extra.binance_pct);
+    return Core.isPureVaultShares(pctToBps(debotVaultMarketPct(extra)), others);
+  }
+
+  function shouldHideVaultKind(kind, pureVault) {
     if (!vaultHideEnabled || !kind) return false;
+    if (kind === "tax" && pureVault === true && vaultHidePrefs.keepPureTaxVault === true) {
+      return false;
+    }
     const hideTax = vaultHidePrefs.hideTaxVault === true;
     const hideStock = vaultHidePrefs.hideStockVault === true;
     const hideGenius = vaultHidePrefs.hideGenius === true;
@@ -1217,14 +1298,6 @@
     }
   }
 
-  function ratioToBps(v) {
-    if (v == null || v === "") return 0;
-    const n = Number(v);
-    if (!Number.isFinite(n) || n <= 0) return 0;
-    const pct = n > 1.0001 ? n : n * 100;
-    return Math.round(Math.min(100, pct) * 100);
-  }
-
   function pickTalField(tal, keys) {
     if (!tal || typeof tal !== "object") return null;
     for (let i = 0; i < keys.length; i++) {
@@ -1302,12 +1375,6 @@
     "0xf2ec508422174ee564de98187db9359d318afb6b": "DJTB"
   };
 
-  /** GMGN /quotes 芯片名 → 链上 symbol（FXION 等无尾缀 B，compact 剥不掉） */
-  const STOCK_CHIP_ALIASES = {
-    FXION: "FXIO",
-    NVDAON: "NVDA"
-  };
-
   function loadVaultStockAddrCache() {
     try {
       const raw = localStorage.getItem(VAULT_STOCK_ADDR_LS);
@@ -1360,25 +1427,6 @@
 
   loadVaultStockAddrCache();
 
-  function compactBasketSymbol(symbol) {
-    const s = String(symbol || "").trim();
-    if (!s) return "";
-    const cleaned = s.replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "");
-    if (!cleaned) return "";
-    if (/[\u4e00-\u9fff]/.test(cleaned)) {
-      return cleaned.length > 6 ? cleaned.slice(0, 6) : cleaned;
-    }
-    const raw = cleaned.toUpperCase();
-    if (raw === "WBNB") return "BNB";
-    // NVDAB→NVDA（{5,}B 会先吃掉整串导致永远不剥尾缀 B）
-    if (raw.length >= 5 && raw.endsWith("B") && raw !== "BNB") {
-      return raw.slice(0, -1);
-    }
-    const aliased = STOCK_CHIP_ALIASES[raw];
-    if (aliased) return aliased.length > 6 ? aliased.slice(0, 6) : aliased;
-    return raw.length > 6 ? raw.slice(0, 6) : raw;
-  }
-
   function resolveStockBasketSymbol(sym, address) {
     const a = String(address || "")
       .trim()
@@ -1425,28 +1473,6 @@
       if (cjk && /[\u4e00-\u9fff]/.test(cjk)) return compactBasketSymbol(cjk) || cjk.slice(0, 6);
     }
     return resolveStockBasketSymbol(sym, address);
-  }
-
-  /** GMGN 列表/WS 常只 preview 3–4 个 dividend_tokens；2 成分 vault 常为完整篮子 */
-  function basketLikelyTruncated(basket_assets, entry) {
-    if (!entry || !entry.is_vault) return false;
-    const stockish =
-      entry.is_stocks_vault === true ||
-      (Array.isArray(basket_assets) && basket_assets.length >= 2);
-    if (!stockish) return false;
-    const n = Array.isArray(basket_assets) ? basket_assets.length : 0;
-    if (n < 3 || n > 4) return false;
-    const mkt = Number(entry.market_bps) || 0;
-    const div = Number(entry.dividend_bps) || 0;
-    return mkt >= 9000 || div >= 9000;
-  }
-
-  function basketSymbolsReady(assets) {
-    if (!Array.isArray(assets) || !assets.length) return false;
-    if (assets.length < 2) return Boolean(assets[0]?.symbol);
-    const syms = assets.map((a) => compactBasketSymbol(a?.symbol || "")).filter(Boolean);
-    if (syms.length < 2) return false;
-    return syms[0] !== syms[1];
   }
 
   function hostFeeBasketNeedsHydration(basket_assets, isStockVault, entry) {
@@ -1753,9 +1779,10 @@
         c.launchpad_platform || c.launchpad || c.lpp || (c.pool && c.pool.exchange) || ""
       ).toLowerCase();
       const genius = lp.indexOf("genius") !== -1;
-      if (!TARGET_TOKEN_RE.test(addr) && !genius && !isGeniusFunSuffix(addr)) return;
-      if (isGeniusFunSuffix(addr)) rememberGeniusFunAddr(addr);
-      if (genius) rememberGeniusFunAddr(addr);
+      if (lp && !genius) rememberNotGeniusAddr(addr);
+      const suffixGenius = !lp && isGeniusFunAddr(addr);
+      if (!TARGET_TOKEN_RE.test(addr) && !genius && !suffixGenius) return;
+      if (genius || suffixGenius) rememberGeniusFunAddr(addr);
       seen.add(addr);
       out.push(addr);
     };
@@ -1953,20 +1980,9 @@
   function gmgnTaxInnerStaleAfterReuse(el) {
     if (!(el instanceof HTMLElement)) return false;
     const href = gmgnAddrFromCard(el) || String(el.getAttribute("href") || "").toLowerCase();
-    const sig = gmgnTaxInnerStemSig(el);
-    const prev = gmgnTaxInnerReuseState.get(el);
-    if (prev && prev.href && href && prev.href !== href) {
-      const stale = Boolean(sig) && sig === prev.sig;
-      gmgnTaxInnerReuseState.set(el, { href, sig: stale ? prev.sig : sig, frozen: stale });
-      return stale;
-    }
-    if (prev && prev.frozen && prev.href === href) {
-      if (sig === prev.sig) return true;
-      gmgnTaxInnerReuseState.set(el, { href, sig, frozen: false });
-      return false;
-    }
-    gmgnTaxInnerReuseState.set(el, { href, sig, frozen: false });
-    return false;
+    const step = Core.taxInnerReuseStep(gmgnTaxInnerReuseState.get(el), href, gmgnTaxInnerStemSig(el));
+    gmgnTaxInnerReuseState.set(el, step.next);
+    return step.stale;
   }
 
   function gmgnInnerInfosMatchTal(infos, tal) {
@@ -2020,105 +2036,6 @@
     return syms;
   }
 
-  function isSingleAssetStockVault(entry) {
-    if (!entry || !entry.is_vault) return false;
-    const n = Array.isArray(entry.basket_assets) ? entry.basket_assets.length : 0;
-    if (n !== 1) return false;
-    return (Number(entry.market_bps) || 0) >= 10000 && (Number(entry.dividend_bps) || 0) === 0;
-  }
-
-  function basketSymbolMatchesDom(domSym, rowSym) {
-    const d = compactBasketSymbol(domSym);
-    const r = compactBasketSymbol(rowSym);
-    if (!d || !r) return false;
-    if (d === r) return true;
-    const dr = String(domSym || "")
-      .replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "")
-      .toUpperCase();
-    const rr = String(rowSym || "")
-      .replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "")
-      .toUpperCase();
-    if (dr.length >= 5 && dr.endsWith("B") && dr.slice(0, -1) === r) return true;
-    if (rr.length >= 5 && rr.endsWith("B") && rr.slice(0, -1) === d) return true;
-    return false;
-  }
-
-  function dedupeBasketAssets(rows) {
-    const out = [];
-    const seenAddr = new Set();
-    for (const row of rows) {
-      if (!row || typeof row !== "object") continue;
-      const address = String(row.address || "").toLowerCase();
-      const symbol = compactBasketSymbol(row.symbol || row.name || "");
-      const name = String(row.name || symbol || "").trim().slice(0, 48);
-      if (!symbol && !name) continue;
-      if (address) {
-        if (seenAddr.has(address)) continue;
-        seenAddr.add(address);
-      }
-      out.push({ address, symbol: symbol || compactBasketSymbol(name), name: name || symbol });
-    }
-    return out;
-  }
-
-  function mergeBasketWithTaxDomSymbols(assets, domSyms, entry) {
-    const rows = dedupeBasketAssets(
-      (assets || []).map((row) => {
-        if (!row || typeof row !== "object") return null;
-        const address = String(row.address || "").toLowerCase();
-        const symbol = compactBasketSymbol(row.symbol || row.name || "");
-        const name = String(row.name || symbol || "").trim().slice(0, 48);
-        if (!symbol && !name) return null;
-        return { address, symbol: symbol || compactBasketSymbol(name), name: name || symbol };
-      }).filter(Boolean)
-    );
-    if (!domSyms.length) return rows;
-    if (basketLikelyTruncated(rows, entry)) return rows;
-    if (rows.length >= 5 && domSyms.length < rows.length) return rows;
-    const usedAddr = new Set();
-    const usedSym = new Set();
-    const next = [];
-    for (const sym of domSyms) {
-      if (usedSym.has(sym)) continue;
-      const matched =
-        rows.find(
-          (a) =>
-            a &&
-            basketSymbolMatchesDom(sym, a.symbol) &&
-            (!a.address || !usedAddr.has(a.address))
-        ) ||
-        rows.find((a) => a && a.address && !usedAddr.has(a.address) && !a.symbol) ||
-        null;
-      if (!matched?.address && rows.length >= 5) continue;
-      usedSym.add(sym);
-      if (matched?.address) usedAddr.add(matched.address);
-      if (matched) {
-        const msym = compactBasketSymbol(matched.symbol) || sym;
-        usedSym.add(msym);
-        next.push({
-          address: matched.address || "",
-          symbol: msym,
-          name: matched.name || msym
-        });
-        continue;
-      }
-      if (entry && entry.is_stocks_vault === true && rows.length === 0) {
-        next.push({ address: "", symbol: sym, name: sym });
-      }
-    }
-    for (const row of rows) {
-      if (isSingleAssetStockVault(entry) && domSyms.length === 1) break;
-      const sym = compactBasketSymbol(row.symbol);
-      const addr = String(row.address || "").toLowerCase();
-      if (addr && usedAddr.has(addr)) continue;
-      if (!addr && sym && usedSym.has(sym)) continue;
-      if (addr) usedAddr.add(addr);
-      else if (sym) usedSym.add(sym);
-      next.push(row);
-    }
-    return dedupeBasketAssets(next);
-  }
-
   function hydrateHostFeeBasket(entry, scopeEl, source) {
     if (!entry || !entry.is_vault) return entry;
     const assets = Array.isArray(entry.basket_assets) ? entry.basket_assets : [];
@@ -2164,6 +2081,7 @@
     return out;
   }
 
+  /** 首帧粗判（需报价地址）；content 同名函数另认 WBNB 分红/报价名就绪，两者有意不同，勿合并。 */
   function hostFeePaintComplete(entry) {
     if (!entry) return false;
     const bps =
@@ -2441,9 +2359,9 @@
   function gmgnHostFeeFromItem(item) {
     const addr = gmgnAddr(item);
     const pons = gmgnIsPonsV2(item);
+    const plat = gmgnNormalizePlatform(item);
     const genius =
-      (gmgnNormalizePlatform(item) === "geniusfun" && gmgnItemIsBsc(item)) ||
-      isGeniusFunSuffix(addr);
+      (plat === "geniusfun" && gmgnItemIsBsc(item)) || (!plat && isGeniusFunAddr(addr));
     if (pons) {
       if (!addr) return null;
     } else if (genius) {
@@ -2630,7 +2548,17 @@
       }),
       __needsChain: genius ? !geniusSplitReady : needsChain,
       __pons_v2: pons,
-      __geniusfun: genius
+      __geniusfun: genius,
+      // 平台只在 page-hook 判定一次；content 以 entry.platform 为准（点击跳转 / 平台集合）
+      platform: pons
+        ? gmgnIsLongxyzWithTal(item)
+          ? "longxyz"
+          : "pons_v2"
+        : genius
+          ? "geniusfun"
+          : Core.platformSpec(plat)
+            ? plat
+            : Core.platformFromSuffix(addr)
     });
   }
 
@@ -2737,7 +2665,7 @@
   function queuePonsSkipAddr(addr) {
     const a = String(addr || "").toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(a) || rhFeeDone.has(a)) return;
-    if (TARGET_TOKEN_RE.test(a)) return;
+    if (TARGET_TOKEN_RE.test(a) || isGeniusFunAddr(a)) return;
     debotRememberRhSkip(addr);
     if (ponsSkipPendingSeen.has(a)) return;
     ponsSkipPendingSeen.add(a);
@@ -2814,7 +2742,7 @@
       .trim()
       .toLowerCase();
     const genius =
-      (debotRowIsGeniusFun(row) && debotRowIsBsc(row)) || isGeniusFunSuffix(addr);
+      (debotRowIsGeniusFun(row) && debotRowIsBsc(row)) || isGeniusFunAddr(addr);
     if (pons) {
       if (!/^0x[a-f0-9]{40}$/.test(addr)) return null;
     } else if (genius) {
@@ -2854,21 +2782,21 @@
       };
     }
     if (!extra || typeof extra !== "object") return null;
-    const dividend_bps = ratioToBps(extra.dividend_pct ?? extra.holder_pct);
+    const dividend_bps = pctToBps(extra.dividend_pct ?? extra.holder_pct);
     const is_vault_early =
       extra.is_vault === true ||
       extra.is_stocks_vault === true ||
       debotVaultKind(extra) === "tax" ||
       debotVaultKind(extra) === "stock";
-    const market_bps = ratioToBps(
+    const market_bps = pctToBps(
       is_vault_early ? debotVaultMarketPct(extra) : debotChefPct(extra)
     );
-    const deflation_bps = ratioToBps(extra.burn_pct);
-    const lp_bps = ratioToBps(extra.liquidity_pct ?? extra.lp_pct);
-    const giggle_charity_bps = ratioToBps(
+    const deflation_bps = pctToBps(extra.burn_pct);
+    const lp_bps = pctToBps(extra.liquidity_pct ?? extra.lp_pct);
+    const giggle_charity_bps = pctToBps(
       extra.giggle_charity_pct ?? extra.giggle_pct ?? extra.rate_giggle_charity
     );
-    const binance_charity_bps = ratioToBps(
+    const binance_charity_bps = pctToBps(
       extra.binance_charity_pct ?? extra.binance_pct ?? extra.rate_binance_charity
     );
     const is_vault =
@@ -3036,11 +2964,20 @@
       }),
       __pons_v2: pons,
       __geniusfun: genius,
-      __needsChain: genius ? true : pons ? false : needsChain
+      __needsChain: genius ? true : pons ? false : needsChain,
+      platform: genius
+        ? "geniusfun"
+        : Core.platformFromLaunchpad(debotRowLaunchpad(row)) || Core.platformFromSuffix(addr)
     });
   }
 
   function collectHostFeesFromGmgnItem(item) {
+    try {
+      const plat = gmgnNormalizePlatform(item);
+      if (plat && plat !== "geniusfun") rememberNotGeniusAddr(gmgnAddr(item));
+    } catch (_ng) {
+      // ignore
+    }
     try {
       if (gmgnItemIsRobinhood(item)) {
         const addr = gmgnAddr(item);
@@ -3065,28 +3002,6 @@
   const cardMarkPending = [];
   const cardMarkDedupe = new Map();
   let cardMarkFlushTimer = 0;
-
-  function normalizeCardMarkHandle(raw) {
-    let s = String(raw || "").trim();
-    if (!s) return "";
-    s = s.replace(/^https?:\/\/(www\.)?(twitter\.com|x\.com)\//i, "");
-    s = s.replace(/^@+/, "");
-    s = s.split(/[/?#\s]/)[0] || "";
-    s = s.replace(/\u2026|\.{2,}$/g, "");
-    s = s.toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 32);
-    if (
-      !s ||
-      s === "search" ||
-      s === "intent" ||
-      s === "i" ||
-      s === "home" ||
-      s === "share" ||
-      s === "explore"
-    ) {
-      return "";
-    }
-    return s;
-  }
 
   function pickCardMarkMeta(item, addrHint) {
     if (!item || typeof item !== "object") item = {};
@@ -3230,6 +3145,7 @@
         debotRowChain(row) === "robinhood" || /\/token\/robinhood\/|\/robinhood\/token\//i.test(href);
       const lp = debotRowLaunchpad(row);
       const pons = debotRowIsPonsV2(row);
+      if (!rh && lp && !debotRowIsGeniusFun(row)) rememberNotGeniusAddr(addr);
       if (rh && addr) {
         if (pons) debotClearRhSkip(addr);
         else if (lp) queuePonsSkipAddr(addr);
@@ -5528,7 +5444,7 @@
     const tal = gmgnTal(t);
     if (vaultHideEnabled) {
       const vKind = gmgnVaultKind(tal, t);
-      if (shouldHideVaultKind(vKind)) return true;
+      if (shouldHideVaultKind(vKind, vKind === "tax" && gmgnTalIsPureVault(tal))) return true;
     }
     // 资金接收方：仅目标税币 + s_tal
     if (!taxRecvEnabled) return false;
@@ -5589,7 +5505,7 @@
     const extra = debotRowExtra(row);
     if (vaultHideEnabled && extra) {
       const vKind = debotVaultKind(extra);
-      if (shouldHideVaultKind(vKind)) return true;
+      if (shouldHideVaultKind(vKind, vKind === "tax" && debotExtraIsPureVault(extra))) return true;
     }
     if (!taxRecvEnabled) return false;
     if (!isTargetTaxTokenAddr(contract)) return false;
@@ -7099,7 +7015,9 @@
             const payload = JSON.stringify({
               enabled: vaultHidePrefs.enabled === true,
               hideTaxVault: vaultHidePrefs.hideTaxVault === true,
-              hideStockVault: vaultHidePrefs.hideStockVault === true
+              hideStockVault: vaultHidePrefs.hideStockVault === true,
+              hideGenius: vaultHidePrefs.hideGenius === true,
+              keepPureTaxVault: vaultHidePrefs.keepPureTaxVault === true
             });
             document.documentElement?.setAttribute(VAULT_HIDE_ATTR, payload);
             localStorage.setItem(VAULT_HIDE_LS_KEY, payload);
@@ -7822,7 +7740,7 @@
             suffixHideEnabled ? 1 : 0
           }:${suf}|v${vaultHideEnabled ? 1 : 0}:${
             vaultHidePrefs.hideTaxVault ? 1 : 0
-          }:${vaultHidePrefs.hideStockVault ? 1 : 0}`;
+          }:${vaultHidePrefs.hideStockVault ? 1 : 0}:${vaultHidePrefs.keepPureTaxVault ? 1 : 0}`;
         };
 
         const filteredText = (xhr) => {
