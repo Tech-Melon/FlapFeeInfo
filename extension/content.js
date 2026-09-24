@@ -23,6 +23,7 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.244: 自分红（dividend=CA）禁止用底池 quote 画 →BNCB（人生好物）。
   // 0.8.243: Genius 链上 unknown 不得挡住 GMGN token_fee_info；AMCB 写入报价表；K 线顶栏吃 header fiber。
   // 0.8.242: Genius 底池跟 qa（GENIUS/AMCB/GMEB）；非 BNCB 地址禁止默认 BNCB，缺名等 /modes。
   // 0.8.241: Genius 仍按 launchpad 认卡；GMGN s_tal 齐套 skip /modes；K 线顶栏刮一次发射台。
@@ -14088,6 +14089,22 @@
       rememberPayoutSymbol(token, entry.tax_symbol);
       searchOverlayModesTokens.delete(token);
       const prev = modeCache.get(token);
+      const selfDivIncoming =
+        token && String(entry.dividend_token || "").toLowerCase() === token;
+      if (prev && selfDivIncoming) {
+        const qSym = compactDisplaySymbol(entry.quote_symbol || "");
+        const nextDiv = compactDisplaySymbol(entry.dividend_symbol || "");
+        const prevSelf = compactDisplaySymbol(
+          prev.tax_symbol || prev.dividend_symbol || ""
+        );
+        if (!entry.tax_symbol && prev.tax_symbol) entry.tax_symbol = prev.tax_symbol;
+        if (prevSelf && prevSelf !== qSym && (!nextDiv || nextDiv === qSym)) {
+          entry.dividend_symbol = prev.tax_symbol || prev.dividend_symbol;
+        }
+        if (compactDisplaySymbol(entry.top_payout_symbol || "") === qSym && qSym) {
+          entry.top_payout_symbol = entry.dividend_symbol || "";
+        }
+      }
       if (prev && prev.source_host && prev.is_vault && !entry.is_vault) {
         const nextBag = normalizeBasketAssets(entry.basket_assets).length;
         // 宿主金库 vs 旧 KV 🔥：不要用销毁盖掉金库。
@@ -19928,15 +19945,32 @@
         topSym = burnPayoutSymbol(entry, domQuote);
       } else if (top === "holder") {
         const src = entry.dividend_symbol || entry.top_payout_symbol || "";
+        const divTok = String(entry.dividend_token || entry.top_payout_token || "")
+          .trim()
+          .toLowerCase();
+        const selfTok = String(token || entry.address || "")
+          .trim()
+          .toLowerCase();
+        const selfDiv = Boolean(divTok && selfTok && divTok === selfTok);
+        const poolSym = compactDisplaySymbol(entry.quote_symbol || domQuote || "");
+        const srcCompact = tickerSymbolForArrow(src);
+        const srcIsPool = Boolean(srcCompact && poolSym && srcCompact === poolSym);
         const guessedNative =
           entry.source_host &&
           dividendPayoutLooksNative(entry) &&
           !dividendTokenIsConfirmedWbnb(entry);
-        // 任意分红币（含 币安人生）都要 →；仅 WBNB 地址确认时覆盖成 BNB，避免残留中文名。
+        // 自分红（dividend=CA）禁止用底池 BNCB 冒充 →。真分红=底池时仍要 →QQQB。
         if (dividendTokenIsConfirmedWbnb(entry)) {
           topSym = "BNB";
+        } else if (selfDiv) {
+          const remembered = payoutSymbolByAddr.has(selfTok)
+            ? payoutSymbolByAddr.get(selfTok)
+            : "";
+          topSym = tickerSymbolForArrow(
+            entry.tax_symbol || (!srcIsPool ? src : "") || remembered || ""
+          );
         } else if (src && !guessedNative) {
-          topSym = tickerSymbolForArrow(src);
+          topSym = srcCompact;
         } else if (
           entry.__pons_v2 === true &&
           (Number(entry.dividend_bps) || 0) > 0
@@ -19946,7 +19980,12 @@
             robinhoodQuoteSymbolFromAddr(entry.dividend_token) ||
             (quoteTokenLooksNative(entry.dividend_token) ? "ETH" : "");
         } else if (!entry.source_host) {
-          topSym = tickerSymbolForArrow(src || entry.quote_symbol || domQuote || "");
+          const qTok = String(entry.quote_token || "").toLowerCase();
+          const divIsQuote =
+            !divTok || divTok === qTok || quoteTokenLooksNative(divTok);
+          topSym = tickerSymbolForArrow(
+            divIsQuote ? src || entry.quote_symbol || domQuote || "" : src
+          );
         } else {
           topSym = "";
         }
