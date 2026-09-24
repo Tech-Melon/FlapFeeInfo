@@ -515,7 +515,7 @@ python tools/ctl.py watchdog-run
 | Robinhood 新创建 👨‍🍳/💎 闪变 | BSC leftover💎 / dividendBecameReal 把 JSON 半包盖到 fiber 厨师上 | 升到 **0.8.150+**；Robinhood 禁止类型对打，BSC 合并逻辑不动 |
 | Robinhood 💎→USDG / 🪙WETH 不显示 | quotes.json 无 USDG/WETH；0x0 当 BNB 把 ETH 分红藏掉 | 升到 **0.8.151+**；重载完整包并硬刷页 |
 | Genius `6666` K 线 `🪙WETH \| ❓️未` | Helper 对新曲线 revert 成 unknown；`/modes` 负缓存挡住后续 `token_fee_info` 金库分配；顶栏把 WETH 图标当底池 | 升到 **0.8.243+**；重载插件并硬刷页（清 unknown 后走 GMGN s_tal，底池 AMCB） |
-| Flap `人生好物` `🦋BNCB \| 💎→BNCB` | 自分红地址=本币、GMGN `dividend_tokens.symbol` 为空，`/modes` 用底池 BNCB 填箭头 | 升到 **0.8.244+**；自分红只用发射名，空着也不要 →BNCB |
+| Flap `人生好物` `🦋BNCB \| 💎→BNCB` | 自分红地址=本币、GMGN `dividend_tokens.symbol` 为空，脏缓存把底池写成分红名 | 升到 **0.8.245+**；顶栏刮发射名 `💎→人生好物` |
 | Robinhood 底池总是 🪙ETH | 每张卡都有 `IconRobinhoodeth` 链标，旧逻辑当底池，盖住 QQQ/SPY quotes 图 | 升到 **0.8.152+**；重载完整包并硬刷页 |
 | Robinhood 改完 BSC 底池/分红变了 | USDG/WETH 地址表曾写入共用 quotes 目录 | 升到 **0.8.153+**；BSC 与 RH 目录按链隔离 |
 | Debot `?chain=robinhood` 无徽章 | 旧版整页当非 BSC 清掉；混合战壕要按卡 `/token/robinhood/` + pons_v2 | 升到 **0.8.154+**；重载完整包并硬刷 Debot |
@@ -921,7 +921,8 @@ python tools/ctl.py watchdog-run
  - `0.8.242`：Genius 底池跟 `qa`（GENIUS/AMCB/GMEB）；非 BNCB 地址禁止默认 `BNCB`
  - `0.8.243`：Genius 链上 unknown 不得挡住 GMGN `token_fee_info`；AMCB 写入报价表；K 线顶栏扫 header
  - `0.8.244`：自分红（`dividend_token=CA`）禁止用底池 quote 画 `💎→BNCB`（人生好物）
-- 插件当前版本：见 `extension/manifest.json`（**0.8.244**，公开无剪切板）
+ - `0.8.245`：自分红用发射名；丢掉 `dividend_symbol=底池` 脏缓存；K 线顶栏刮「人生好物」
+- 插件当前版本：见 `extension/manifest.json`（**0.8.245**，公开无剪切板）
 - page-hook：`HOOK_VER` **203**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）

@@ -23,6 +23,7 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.245: 自分红箭头用发射名；缓存 dividend_symbol=底池 的脏行丢掉。
   // 0.8.244: 自分红（dividend=CA）禁止用底池 quote 画 →BNCB（人生好物）。
   // 0.8.243: Genius 链上 unknown 不得挡住 GMGN token_fee_info；AMCB 写入报价表；K 线顶栏吃 header fiber。
   // 0.8.242: Genius 底池跟 qa（GENIUS/AMCB/GMEB）；非 BNCB 地址禁止默认 BNCB，缺名等 /modes。
@@ -1041,6 +1042,8 @@
     if (!/^0x[a-f0-9]{40}$/.test(a) || !s) return;
     if (s === "BNB" || s === "WBNB") return;
     if (a === "0x0000000000000000000000000000000000000000") return;
+    // 税币 CA 不能记成底池 BNCB（自分红脏缓存会让 💎→BNCB 复活）。
+    if (TARGET_TOKEN_RE.test(a) && /^(BNCB|BNB|WBNB)$/.test(s)) return;
     payoutSymbolByAddr.set(a, s);
   }
 
@@ -1461,6 +1464,79 @@
     return false;
   }
 
+  /** K 线顶栏发射名（人生好物）。只认当前 URL CA，禁止泄漏到侧栏其它 7777。 */
+  function extractGmgnTokenSelfName(card, token) {
+    if (!isGmgnHost()) return "";
+    const read = (root) => {
+      if (!root || !root.querySelector) return "";
+      const el =
+        root.querySelector("span.text-xl.font-semibold") ||
+        root.querySelector("span.text-text-100.text-xl");
+      const t = compactDisplaySymbol((el && el.textContent) || "");
+      if (t && !/^(BNB|WBNB|BNCB|ETH|WETH)$/i.test(t)) return t;
+      return "";
+    };
+    if (card instanceof HTMLElement) {
+      const fromCard = read(card);
+      if (fromCard) return fromCard;
+    }
+    const tok = String(token || "").toLowerCase();
+    let urlTok = "";
+    try {
+      urlTok = String(extractTokenFromUrl() || "").toLowerCase();
+    } catch (_u) {
+      urlTok = "";
+    }
+    if (!tok || !urlTok || tok !== urlTok) return "";
+    try {
+      const leaf = document.querySelector("#token-base-address");
+      if (leaf instanceof HTMLElement) {
+        const col = leaf.closest("div.flex.flex-col");
+        const fromHdr = read(col || leaf.parentElement);
+        if (fromHdr) return fromHdr;
+      }
+    } catch (_hdr) {
+      // ignore
+    }
+    return "";
+  }
+
+  function stampSelfDividendName(entry, token, card) {
+    if (!entry || isFeeLoadingEntry(entry)) return entry;
+    const tok = String(token || entry.address || "").toLowerCase();
+    const name = extractGmgnTokenSelfName(card, tok);
+    if (name && tok) rememberPayoutSymbol(tok, name);
+    const divTok = String(entry.dividend_token || entry.top_payout_token || "").toLowerCase();
+    let urlTok = "";
+    try {
+      urlTok = String(extractTokenFromUrl() || "").toLowerCase();
+    } catch (_u) {
+      urlTok = "";
+    }
+    const onThisKline = Boolean(tok && urlTok && tok === urlTok);
+    const selfDiv = Boolean(
+      (divTok && tok && divTok === tok) ||
+        (onThisKline &&
+          (Number(entry.dividend_bps) || 0) > 0 &&
+          (!divTok || divTok === tok))
+    );
+    const named = compactDisplaySymbol(name || entry.tax_symbol || "");
+    if (!named) return entry;
+    const q = compactDisplaySymbol(entry.quote_symbol || "");
+    const needTax =
+      onThisKline &&
+      (!entry.tax_symbol || compactDisplaySymbol(entry.tax_symbol) === q);
+    const needDiv =
+      selfDiv &&
+      (!entry.dividend_symbol || compactDisplaySymbol(entry.dividend_symbol) === q);
+    if (!needTax && !needDiv) return entry;
+    const out = { ...entry };
+    if (needTax) out.tax_symbol = named;
+    if (needDiv) out.dividend_symbol = named;
+    if (tok) modeCache.set(tok, out);
+    return out;
+  }
+
   /** GMGN Tax 芯片内图标 → 分红代币（TaxDividendTokenIcon；非底池）。多枚=篮子，不当单一分红。 */
   function extractDividendSymbolFromTaxDom(card) {
     if (!card?.querySelector || !isGmgnHost()) return "";
@@ -1627,6 +1703,12 @@
     if (divFromTax && out.dividend_bps > 0) {
       const cur = compactBasketSymbol(out.dividend_symbol || "");
       const outer = compactBasketSymbol(domQuote || "");
+      const selfTok = String(want || out.address || "").toLowerCase();
+      const divTok = String(out.dividend_token || out.top_payout_token || "").toLowerCase();
+      const selfDiv = Boolean(divTok && selfTok && divTok === selfTok);
+      if (selfDiv && outer && compactBasketSymbol(divFromTax) === outer) {
+        // Tax 内图其实是底池芯片，不能写进自分红。
+      } else {
       const leftoverInner = taxInnerUntrustedAsDividend(divFromTax, outer, out);
       const curCjk = /[\u4e00-\u9fff]/.test(cur);
       const taxLatin = Boolean(divFromTax && !/[\u4e00-\u9fff]/.test(divFromTax));
@@ -1648,6 +1730,7 @@
           out.top_payout_symbol = divFromTax;
         }
         changed = true;
+      }
       }
     }
     if (out.__needsChain) {
@@ -5234,9 +5317,14 @@
         existingGood.closest(`[${CARD_DATA}]`) ||
         climbGmgnHeaderCardFromLeaf(existingGood) ||
         existingGood.parentElement;
-      const entryHit = getEntryForCard(
+      const entryHitRaw = getEntryForCard(
         headerCard instanceof HTMLElement ? headerCard : existingGood,
         urlTok
+      );
+      const entryHit = stampSelfDividendName(
+        entryHitRaw,
+        urlTok,
+        headerCard instanceof HTMLElement ? headerCard : existingGood
       );
       if (entryHit && !isFeeLoadingEntry(entryHit)) {
         try {
@@ -5275,7 +5363,11 @@
     if (!pageUrlIsRobinhoodToken()) {
       trySeedHostFeeForCard(markHost, urlTok);
     }
-    const entry = getEntryForCard(markHost, urlTok) || resolveEntry(urlTok);
+    const entry = stampSelfDividendName(
+      getEntryForCard(markHost, urlTok) || resolveEntry(urlTok),
+      urlTok,
+      markHost
+    );
     markHost.dataset[CARD_MARK] = urlTok;
     try {
       markHost.setAttribute(CARD_DATA, urlTok);
@@ -19955,36 +20047,41 @@
         const poolSym = compactDisplaySymbol(entry.quote_symbol || domQuote || "");
         const srcCompact = tickerSymbolForArrow(src);
         const srcIsPool = Boolean(srcCompact && poolSym && srcCompact === poolSym);
+        const qTok = String(entry.quote_token || "").toLowerCase();
+        const divIsQuote = Boolean(divTok && qTok && divTok === qTok);
+        const srcMasquerade = Boolean(srcIsPool && !divIsQuote);
+        const srcUse = srcMasquerade ? "" : src;
+        const remembered = selfTok && payoutSymbolByAddr.has(selfTok)
+          ? payoutSymbolByAddr.get(selfTok)
+          : "";
+        const selfName = tickerSymbolForArrow(
+          entry.tax_symbol || remembered || ""
+        );
         const guessedNative =
           entry.source_host &&
           dividendPayoutLooksNative(entry) &&
           !dividendTokenIsConfirmedWbnb(entry);
-        // 自分红（dividend=CA）禁止用底池 BNCB 冒充 →。真分红=底池时仍要 →QQQB。
+        // 自分红 / 脏缓存把底池写成 dividend_symbol：禁止 →BNCB。真分红=底池仍 →QQQB。
         if (dividendTokenIsConfirmedWbnb(entry)) {
           topSym = "BNB";
-        } else if (selfDiv) {
-          const remembered = payoutSymbolByAddr.has(selfTok)
-            ? payoutSymbolByAddr.get(selfTok)
-            : "";
-          topSym = tickerSymbolForArrow(
-            entry.tax_symbol || (!srcIsPool ? src : "") || remembered || ""
+        } else if (selfDiv || (srcMasquerade && selfName)) {
+          const named = tickerSymbolForArrow(
+            selfName || srcUse || ""
           );
-        } else if (src && !guessedNative) {
-          topSym = srcCompact;
+          topSym = named && !(poolSym && named === poolSym && !divIsQuote) ? named : selfName;
+        } else if (srcUse && !guessedNative) {
+          topSym = tickerSymbolForArrow(srcUse);
         } else if (
           entry.__pons_v2 === true &&
           (Number(entry.dividend_bps) || 0) > 0
         ) {
           topSym =
-            tickerSymbolForArrow(src) ||
+            tickerSymbolForArrow(srcUse) ||
             robinhoodQuoteSymbolFromAddr(entry.dividend_token) ||
             (quoteTokenLooksNative(entry.dividend_token) ? "ETH" : "");
         } else if (!entry.source_host) {
-          const qTok = String(entry.quote_token || "").toLowerCase();
-          const divIsQuote =
-            !divTok || divTok === qTok || quoteTokenLooksNative(divTok);
           topSym = tickerSymbolForArrow(
-            divIsQuote ? src || entry.quote_symbol || domQuote || "" : src
+            divIsQuote ? srcUse || entry.quote_symbol || domQuote || "" : srcUse
           );
         } else {
           topSym = "";
@@ -20900,6 +20997,7 @@
     if (shouldDeferGmgnTrenchResizeWork()) return false;
     // 仅 7777/8888/ffff 挂徽章；其它尾号直接清掉误挂
     const tok = String(token || "").toLowerCase();
+    entry = stampSelfDividendName(entry, tok, card);
     if (!isFeeTargetToken(tok, card)) {
       try {
         removeAllBadgesForCard(card, tok);
@@ -22018,6 +22116,8 @@
                   typeof value.top_payout_symbol === "string" ? value.top_payout_symbol : "",
                 dividend_symbol:
                   typeof value.dividend_symbol === "string" ? value.dividend_symbol : "",
+                dividend_token:
+                  typeof value.dividend_token === "string" ? value.dividend_token.toLowerCase() : "",
                 quote_symbol: typeof value.quote_symbol === "string" ? value.quote_symbol : "",
                 quote_token: typeof value.quote_token === "string" ? value.quote_token.toLowerCase() : "",
                 vault_address:
@@ -22031,6 +22131,19 @@
                 rememberGeniusFunAddr(token);
                 const cached = persistentCache.get(token);
                 if (cached) cached.__geniusfun = true;
+              }
+              const cached = persistentCache.get(token);
+              if (cached) {
+                const q = compactDisplaySymbol(cached.quote_symbol || "");
+                const d = compactDisplaySymbol(cached.dividend_symbol || "");
+                const divTok = String(cached.dividend_token || "").toLowerCase();
+                const qTok = String(cached.quote_token || "").toLowerCase();
+                if (q && d === q && (!divTok || divTok !== qTok)) {
+                  cached.dividend_symbol = "";
+                  if (compactDisplaySymbol(cached.top_payout_symbol || "") === q) {
+                    cached.top_payout_symbol = "";
+                  }
+                }
               }
             });
             broadcastBasketAddrCache([...persistentCache.values()]);
@@ -22098,6 +22211,7 @@
         top_segment: entry.top_segment || "unknown",
         top_payout_symbol: entry.top_payout_symbol || "",
         dividend_symbol: entry.dividend_symbol || "",
+        dividend_token: entry.dividend_token || "",
         quote_symbol: entry.quote_symbol || "",
         quote_token: entry.quote_token || "",
         vault_address: entry.vault_address || "",
@@ -22160,6 +22274,7 @@
           top_segment: entry.top_segment || "unknown",
           top_payout_symbol: entry.top_payout_symbol || "",
           dividend_symbol: entry.dividend_symbol || "",
+          dividend_token: entry.dividend_token || "",
           quote_symbol: entry.quote_symbol || "",
           quote_token: entry.quote_token || "",
           vault_address: entry.vault_address || "",
