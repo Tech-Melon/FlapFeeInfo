@@ -23,6 +23,8 @@
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
   // 不能挂进 16px 内芯，也不能 name-after 掉到标题下一行（K 线返回必现）。
   const GMGN_TRENCH_TAX_SELECTOR = ".trenches-tax";
+  // 0.8.248: Genius 主文案只显示占用最高的 🎁/👨‍🍳/🔥 + →底池；比例只在 tooltip。
+  // 0.8.247: 混选 HOOD 时 quotes.json 的 0x0=WETH 不得盖 BSC 0x0=BNB（GENGO / 7777 误画 WETH）。
   // 0.8.246: Genius Pancake 明确 BNB 才画 BNB；曲线 WBNB 仍 BNCB；徽章含 🔥 多段。
   // 0.8.245: 自分红箭头用发射名；缓存 dividend_symbol=底池 的脏行丢掉。
   // 0.8.244: 自分红（dividend=CA）禁止用底池 quote 画 →BNCB（人生好物）。
@@ -15195,7 +15197,15 @@
         gmgnQuoteByStem.set(stem, title);
         n += 1;
       }
-      if (ca && /^0x[a-f0-9]{40}$/.test(ca) && title) gmgnQuoteByAddr.set(ca, title);
+      // 0x0 是各链原生报价（BSC=BNB / RH=WETH），混选时后写会把 BSC 底池打成 WETH。
+      if (
+        ca &&
+        /^0x[a-f0-9]{40}$/.test(ca) &&
+        ca !== "0x0000000000000000000000000000000000000000" &&
+        title
+      ) {
+        gmgnQuoteByAddr.set(ca, title);
+      }
     }
     if (chainKeys.has("robinhood")) {
       Object.keys(ROBINHOOD_QUOTE_BY_ADDR).forEach((a) => {
@@ -15248,6 +15258,7 @@
       .trim()
       .toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(a)) return "";
+    if (a === "0x0000000000000000000000000000000000000000") return "";
     return gmgnQuoteByAddr.get(a) || "";
   }
 
@@ -19930,6 +19941,39 @@
         !basketLooksLikeNativeOnly(basketAssets) &&
         isTrustedStockVault(entry)
     );
+    // Genius：主文案只显示占用最高的一段（🎁/👨‍🍳/🔥）+ →底池；比例与其它段只在 tooltip。
+    if (isGeniusFeeEntry(entry, token)) {
+      const giftBps = effectiveGeniusGiftBps(entry);
+      const chefBps = Number(entry.market_bps) || 0;
+      const burnBps = Number(entry.deflation_bps) || 0;
+      const payout = compactDisplaySymbol(
+        geniusDisplayQuote(entry, null, entry.quote_symbol || "", "") ||
+          entry.quote_symbol ||
+          domQuote ||
+          ""
+      );
+      const parts = [];
+      if (giftBps > 0 && prefs.gift !== false) {
+        parts.push({ kind: "gift", emoji: GIFT_EMOJI, bps: giftBps });
+      }
+      if (chefBps > 0 && prefs.creator !== false) {
+        parts.push({ kind: "creator", emoji: "👨‍🍳", bps: chefBps });
+      }
+      if (burnBps > 0 && prefs.burn !== false) {
+        parts.push({ kind: "burn", emoji: "🔥", bps: burnBps });
+      }
+      if (!parts.length) {
+        if (entry.mode === "unknown" && prefs.unknown !== false) {
+          return modeMeta.unknown.fallback;
+        }
+        return "";
+      }
+      parts.sort((a, b) => b.bps - a.bps);
+      const lead = parts[0];
+      if (lead.kind === "burn") return "🔥";
+      if (prefs.payoutArrow !== false && payout) return `${lead.emoji}→${payout}`;
+      return payout ? `${lead.emoji}${payout}` : lead.emoji;
+    }
     const candidates = [];
     if ((entry.dividend_bps || 0) > 0 && prefs.holder !== false) {
       candidates.push({ kind: "holder", emoji: "💎", bps: entry.dividend_bps, pri: 0 });
@@ -20264,13 +20308,20 @@
     const meta = modeMeta[entry.mode] || modeMeta.unknown;
     let colorClass = meta.className;
     if (isGeniusFeeEntry(entry, tok)) {
-      const top = String(entry.top_segment || "");
-      if (top && modeMeta[top] && top !== "hybrid" && top !== "unknown") {
-        colorClass = modeMeta[top].className;
-      } else if (effectiveGeniusGiftBps(entry) > 0) {
+      const giftBps = effectiveGeniusGiftBps(entry);
+      const chefBps = Number(entry.market_bps) || 0;
+      const burnBps = Number(entry.deflation_bps) || 0;
+      if (giftBps > 0 && giftBps >= chefBps && giftBps >= burnBps) {
         colorClass = "gift";
-      } else if ((Number(entry.market_bps) || 0) > 0) {
+      } else if (chefBps > 0 && chefBps >= burnBps) {
         colorClass = "creator";
+      } else if (burnBps > 0) {
+        colorClass = "burn";
+      } else {
+        const top = String(entry.top_segment || "");
+        if (top && modeMeta[top] && top !== "hybrid" && top !== "unknown") {
+          colorClass = modeMeta[top].className;
+        }
       }
     }
     const parts = buildDisplayParts(entry, quoteSymbol, tok);
@@ -20283,13 +20334,14 @@
       pairSyms.length >= 2 && (parts.feePart || label).includes(`${pairSyms[0]}&${pairSyms[1]}`)
         ? { left: pairSyms[0], right: pairSyms[1] }
         : null;
-    const segmentCount =
-      Number((entry.dividend_bps || 0) > 0) +
-      Number((entry.market_bps || 0) > 0) +
-      Number((entry.giggle_charity_bps || 0) > 0) +
-      Number((entry.binance_charity_bps || 0) > 0) +
-      Number((entry.deflation_bps || 0) > 0) +
-      Number((entry.lp_bps || 0) > 0);
+    const segmentCount = isGeniusFeeEntry(entry, tok)
+      ? 1
+      : Number((entry.dividend_bps || 0) > 0) +
+        Number((entry.market_bps || 0) > 0) +
+        Number((entry.giggle_charity_bps || 0) > 0) +
+        Number((entry.binance_charity_bps || 0) > 0) +
+        Number((entry.deflation_bps || 0) > 0) +
+        Number((entry.lp_bps || 0) > 0);
     const poolColor = parts.poolColor || "";
     const divColor = parts.divColor || "";
     const borderColor = parts.borderColor || poolColor || divColor;
