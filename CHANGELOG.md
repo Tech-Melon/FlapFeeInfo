@@ -3,6 +3,7 @@
 逐版本的实现备注（原先写在 `extension/content.js` 顶部的补丁注释，0.8.250 迁出）。
 面向用户的版本说明见 GitHub Releases；开发约定与完整版本表见 `CLAUDE.md` §10。
 
+- **0.8.252**：资金接收白名单每条地址可写备注（最多 32 字）。备注只给自己看，不参与匹配；只改备注不会重铺新创建列。
 - **0.8.251**：资金接收白名单认 Dev / `marketing_recipients` 收款地址。host-fee 与 `/modes` 不再绕过白名单把 CA 写进隐藏集合；名单变化会清掉已隐藏地址。尾号和金库规则仍然生效。
 - **0.8.250**：fee-core.js 共享纯逻辑（平台注册表 + 篮子/单位/纯金库等），平台只在 page-hook 判定、content 以 entry.platform 为准；纯金库不屏蔽选项；Long.xyz 预留（GMGN 带 tax_allocation 才画）；厨师/慈善箭头与底池同名。
 - **0.8.249**：战壕全局选 HOOD 后进 BSC Genius K 线，pons-skip 误收 Genius → 顶栏徽章不画；PAGE_HOOK_VER 对齐 204，不再每页重复注入 page-hook。

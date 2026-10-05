@@ -958,7 +958,8 @@ python tools/ctl.py watchdog-run
  - `0.8.249`：js-mcp 全面体检 — 战壕选 HOOD 后 BSC Genius K 线顶栏被 pons-skip 挡掉（Genius 不进 pons-skip、URL 自身 BSC token 不当 RH）；Debot `*_pct` 按百分比（1% 厨师不再变 100%）；尾号 6666 但宿主 launchpad≠geniusfun 不画；分红=底池时箭头与底池同名（AMZNB/XAUT0→AMZN/XAUT）；`PAGE_HOOK_VER` 三处对齐 204，不再每页重复注入 page-hook。后端同步：Genius v2 factory、Four/Genius/Flap 底池 symbol 先进缓存再拼 label（`🎓50%→GMEB`、`💎90%→SPCXB`）
  - `0.8.250`：`fee-core.js` 共享纯逻辑（平台注册表 + 单位换算/纯金库/篮子/尾号规则/复用状态机），`tests/` 17 项样本+结构守护，打包前必跑；平台只在 page-hook 判定，content 以 `entry.platform` 为准；金库屏蔽「纯金库不屏蔽」选项（`keepPureTaxVault`）；Long.xyz 预留（GMGN 带 `tax_allocation` 才画，点击 app.long.xyz）；厨师/慈善/回流箭头与底池同名（`💛→MRNAB`→`💛→MRNA`）；bootstrap 发金库 prefs 不再丢 `hideGenius`
  - `0.8.251`：资金接收白名单同时认 `marketing_recipients` / Dev / founder。host-fee 与 `/modes` 的 hide-addrs 不再绕过白名单；`hideAddrSet` 在有完整税字段时按当前名单重判，名单变化清空集合。尾号与金库不豁免
-- 插件当前版本：见 `extension/manifest.json`（**0.8.251**，公开无剪切板）
+ - `0.8.252`：资金接收白名单每条地址可写备注（`allow[].note`，最多 32 字）。备注只给自己看，不参与匹配；只改备注不推页面、不清 `hideAddrSet`
+- 插件当前版本：见 `extension/manifest.json`（**0.8.252**，公开无剪切板）
 - page-hook：`HOOK_VER` **206**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）；`content.js` / `tax-recv-bootstrap.js` 的 `PAGE_HOOK_VER` 必须相同（`_run_pack_extension.py` 会校验）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
@@ -966,7 +967,7 @@ python tools/ctl.py watchdog-run
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`；`chainBsc`/`chainRh` 默认 `true`，关则不画该链 CA 徽章）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  
 - 尾号屏蔽：`flapFeeInfo.suffixHide.v1` = `{ enabled, rules:[{id,suffix,enabled}] }`（最多 24 条 hex 1–12 位）
-- 资金接收：`flapFeeInfo.taxRecvHide.v1` = `{ enabled, thresholdPct, hideGenius, allow:[{id,address,enabled}] }`（`hideGenius` 默认 false；勾选后 Genius 👨‍🍳 按阈值挡，🎁 仍走金库开关）
+- 资金接收：`flapFeeInfo.taxRecvHide.v1` = `{ enabled, thresholdPct, hideGenius, allow:[{id,address,enabled,note?}] }`（`hideGenius` 默认 false；勾选后 Genius 👨‍🍳 按阈值挡，🎁 仍走金库开关。`note` 最多 32 字，只用于弹窗辨认，不参与匹配）
 - 金库屏蔽：`flapFeeInfo.vaultHide.v1` = `{ enabled, hideTaxVault, hideStockVault, hideGenius, keepPureTaxVault }`（`keepPureTaxVault` 默认 false；勾选后税收 **100% 进金库**（🎁→X，分红/销毁/回流/慈善全 0）的税收金库不屏蔽，🎁50%🔥50%、🎁96%💎4% 仍屏蔽；只作用于税收金库，不影响币股/Genius。page-hook `gmgnTalIsPureVault` / `debotExtraIsPureVault` / `hostFeeEntryIsPureVault`，content `keepPureTaxVault` 兜底 DOM）
 - 搜索框也屏蔽：`flapFeeInfo.searchHide.v1` = `{ enabled:false }`（默认关；开启后把已启用的资金接收/金库规则套到 GMGN 搜索弹层）
 - Dev 发币次数标记：`flapFeeInfo.devCountMark.v1` = `{ enabled, rules:[{id,op,min,color,enabled}] }`（`op` 为 `lt|lte|eq|gte|gt`，缺省按 `gte`；最多 12 条；默认关）

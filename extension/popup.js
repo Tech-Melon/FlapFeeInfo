@@ -32,6 +32,7 @@
     hideGenius: false
   };
   const TAX_RECV_ALLOW_MAX = 24;
+  const TAX_RECV_NOTE_MAX = 32;
   const DEFAULT_SUFFIX_HIDE = { enabled: false, rules: [] };
   const DEFAULT_VAULT_HIDE = {
     enabled: false,
@@ -206,7 +207,8 @@
       taxRecvAllowLabel: "接收地址白名单",
       taxRecvAllowPh: "0x… 接收地址",
       taxRecvAllowHint:
-        "资金打到这些地址的代币不屏蔽（GMGN：market_address / creator / Dev 收款；Debot：fee_receiver / founder）。尾号和金库仍屏蔽。最多 24 条。",
+        "资金打到这些地址的代币不屏蔽（GMGN：market_address / creator / Dev 收款；Debot：fee_receiver / founder）。备注只给自己看，不参与匹配。尾号和金库仍屏蔽。最多 24 条。",
+      taxRecvAllowNotePh: "备注",
       taxRecvAllowEmpty: "还没有白名单地址。",
       taxRecvAllowInvalid: "请粘贴完整 0x 地址（40 位 hex）",
       taxRecvAllowDup: "已添加过",
@@ -418,7 +420,8 @@
       taxRecvAllowLabel: "Recipient allowlist",
       taxRecvAllowPh: "0x… recipient",
       taxRecvAllowHint:
-        "Tokens paying these wallets are not hidden (GMGN: market_address / creator / Dev; Debot: fee_receiver / founder). Suffix and vault rules still hide. Max 24.",
+        "Tokens paying these wallets are not hidden (GMGN: market_address / creator / Dev; Debot: fee_receiver / founder). Notes are labels only. Suffix and vault rules still hide. Max 24.",
+      taxRecvAllowNotePh: "note",
       taxRecvAllowEmpty: "No allowlist addresses yet.",
       taxRecvAllowInvalid: "Paste a full 0x address (40 hex chars)",
       taxRecvAllowDup: "Already added",
@@ -611,6 +614,7 @@
   let saveTimer = null;
   let taxRecvState = { ...DEFAULT_TAX_RECV_HIDE };
   let taxRecvSaveTimer = null;
+  let taxRecvSaveGen = 0;
   /** @type {{ enabled: boolean, rules: Array<{id:string, suffix:string, enabled:boolean}> }} */
   let suffixHideState = { enabled: false, rules: [] };
   let suffixHideSaveTimer = null;
@@ -671,6 +675,13 @@
     return `${a.slice(0, 6)}…${a.slice(-4)}`;
   }
 
+  function normalizeAllowNote(raw) {
+    return String(raw == null ? "" : raw)
+      .replace(/[\u0000-\u001f\u007f]/g, "")
+      .trim()
+      .slice(0, TAX_RECV_NOTE_MAX);
+  }
+
   function normalizeTaxRecvHide(raw) {
     const out = { enabled: false, thresholdPct: 100, allow: [], hideGenius: false };
     if (!raw || typeof raw !== "object") return out;
@@ -687,11 +698,14 @@
       const address = normalizeEvmAllowAddress(row && (row.address || row.addr || row));
       if (!address || seen.has(address)) continue;
       seen.add(address);
-      out.allow.push({
+      const item = {
         id: row && row.id ? String(row.id) : `a${out.allow.length}`,
         address,
         enabled: !row || row.enabled !== false
-      });
+      };
+      const note = normalizeAllowNote(row && typeof row === "object" ? row.note : "");
+      if (note) item.note = note;
+      out.allow.push(item);
     }
     return out;
   }
@@ -1726,13 +1740,29 @@
     });
   }
 
-  function scheduleSaveTaxRecv() {
+  function taxRecvNoteInputFocused() {
+    const el = document.activeElement;
+    return !!(
+      el &&
+      el.classList &&
+      el.classList.contains("tax-recv-note-input") &&
+      taxRecvAllowList &&
+      taxRecvAllowList.contains(el)
+    );
+  }
+
+  function scheduleSaveTaxRecv(delayMs) {
+    const gen = ++taxRecvSaveGen;
     if (taxRecvSaveTimer) window.clearTimeout(taxRecvSaveTimer);
+    const wait = delayMs == null ? 120 : delayMs;
     taxRecvSaveTimer = window.setTimeout(async () => {
       taxRecvSaveTimer = null;
-      taxRecvState = await saveTaxRecvHide(taxRecvState);
+      const saved = await saveTaxRecvHide(taxRecvState);
+      if (gen !== taxRecvSaveGen) return;
+      if (taxRecvNoteInputFocused()) return;
+      taxRecvState = saved;
       renderTaxRecvUI(taxRecvState);
-    }, 120);
+    }, wait);
   }
 
   function syncTaxRecvThresholdLabel() {
@@ -1780,9 +1810,36 @@
         scheduleSaveTaxRecv();
       });
       const text = document.createElement("span");
-      text.className = "suffix-rule-text" + (rule.enabled === false ? " is-off" : "");
+      text.className = "suffix-rule-text tax-recv-addr" + (rule.enabled === false ? " is-off" : "");
       text.textContent = shortAllowAddress(rule.address);
       text.title = rule.address;
+      const note = document.createElement("input");
+      note.type = "text";
+      note.className = "tax-recv-note-input";
+      note.maxLength = TAX_RECV_NOTE_MAX;
+      note.spellcheck = false;
+      note.autocomplete = "off";
+      note.placeholder = t("taxRecvAllowNotePh");
+      note.title = t("taxRecvAllowNotePh");
+      note.value = rule.note || "";
+      note.setAttribute("data-rule-id", rule.id);
+      note.addEventListener("input", () => {
+        const r = taxRecvState.allow.find((x) => x.id === rule.id);
+        if (!r) return;
+        r.note = note.value;
+        scheduleSaveTaxRecv();
+      });
+      note.addEventListener("blur", () => {
+        const r = taxRecvState.allow.find((x) => x.id === rule.id);
+        if (!r) return;
+        const cleaned = normalizeAllowNote(note.value);
+        r.note = cleaned;
+        if (note.value !== cleaned) note.value = cleaned;
+        scheduleSaveTaxRecv(0);
+      });
+      note.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") ev.preventDefault();
+      });
       const del = document.createElement("button");
       del.type = "button";
       del.className = "suffix-rule-del";
@@ -1791,7 +1848,7 @@
         taxRecvState.allow = taxRecvState.allow.filter((x) => x.id !== rule.id);
         scheduleSaveTaxRecv();
       });
-      row.append(cb, text, del);
+      row.append(cb, text, note, del);
       taxRecvAllowList.appendChild(row);
     }
   }
@@ -2967,8 +3024,10 @@
         renderPoolColorUI(poolColorState);
       }
       if (changes[TAX_RECV_HIDE_KEY]) {
-        taxRecvState = normalizeTaxRecvHide(changes[TAX_RECV_HIDE_KEY].newValue);
-        renderTaxRecvUI(taxRecvState);
+        if (!taxRecvSaveTimer && !taxRecvNoteInputFocused()) {
+          taxRecvState = normalizeTaxRecvHide(changes[TAX_RECV_HIDE_KEY].newValue);
+          renderTaxRecvUI(taxRecvState);
+        }
       }
       if (changes[SUFFIX_HIDE_KEY]) {
         suffixHideState = normalizeSuffixHide(changes[SUFFIX_HIDE_KEY].newValue);

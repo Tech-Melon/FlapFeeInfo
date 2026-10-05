@@ -447,10 +447,16 @@
       const address = normalizeEvmAddress(raw && (raw.address || raw.addr || raw));
       if (!address || seen.has(address)) continue;
       seen.add(address);
-      out.push({
+      const item = {
         address,
         enabled: !raw || raw.enabled !== false
-      });
+      };
+      const note = String(raw && typeof raw === "object" ? raw.note || "" : "")
+        .replace(/[\u0000-\u001f\u007f]/g, "")
+        .trim()
+        .slice(0, 32);
+      if (note) item.note = note;
+      out.push(item);
     }
     return out;
   }

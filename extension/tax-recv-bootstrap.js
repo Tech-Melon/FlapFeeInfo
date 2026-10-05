@@ -47,12 +47,30 @@
       const address = normalizeEvmAddress(row && (row.address || row.addr || row));
       if (!address || seen.has(address)) continue;
       seen.add(address);
-      out.allow.push({
+      const item = {
         address,
         enabled: !row || row.enabled !== false
-      });
+      };
+      const note = String(row && typeof row === "object" ? row.note || "" : "")
+        .replace(/[\u0000-\u001f\u007f]/g, "")
+        .trim()
+        .slice(0, 32);
+      if (note) item.note = note;
+      out.allow.push(item);
     }
     return out;
+  }
+
+  function taxRecvFilterSig(raw) {
+    const p = normalizeTax(raw);
+    const parts = [];
+    const list = p.allow || [];
+    for (let i = 0; i < list.length; i += 1) {
+      const row = list[i];
+      if (row && row.enabled !== false && row.address) parts.push(row.address);
+    }
+    parts.sort();
+    return `${p.enabled ? 1 : 0}|${p.thresholdPct}|${p.hideGenius ? 1 : 0}|${parts.join(",")}`;
   }
 
   function normalizeSuffix(raw) {
@@ -298,6 +316,14 @@
       chrome.storage.onChanged.addListener((changes, area) => {
         if (area !== "local") return;
         if (!changes[TAX_KEY] && !changes[SUFFIX_KEY] && !changes[VAULT_KEY]) return;
+        if (
+          changes[TAX_KEY] &&
+          !changes[SUFFIX_KEY] &&
+          !changes[VAULT_KEY] &&
+          taxRecvFilterSig(changes[TAX_KEY].oldValue) === taxRecvFilterSig(changes[TAX_KEY].newValue)
+        ) {
+          return;
+        }
         try {
           chrome.storage.local.get([TAX_KEY, SUFFIX_KEY, VAULT_KEY], (items) => {
             if (chrome.runtime?.lastError) return;

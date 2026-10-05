@@ -474,6 +474,28 @@ body {
   color: #e05;
 }
 
+.tax-recv-addr {
+  flex: 0 0 auto;
+}
+
+.tax-recv-note-input {
+  flex: 1 1 72px;
+  min-width: 72px;
+  width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 3px 6px;
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.tax-recv-note-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .suffix-add-row {
   display: flex;
   align-items: center;

@@ -15552,11 +15552,17 @@
       const address = normalizeEvmAllowAddress(row && (row.address || row.addr || row));
       if (!address || seen.has(address)) continue;
       seen.add(address);
-      out.allow.push({
+      const item = {
         id: row && row.id ? String(row.id) : `a${out.allow.length}`,
         address,
         enabled: !row || row.enabled !== false
-      });
+      };
+      const note = String(row && typeof row === "object" ? row.note || "" : "")
+        .replace(/[\u0000-\u001f\u007f]/g, "")
+        .trim()
+        .slice(0, 32);
+      if (note) item.note = note;
+      out.allow.push(item);
     }
     return out;
   }
@@ -19342,40 +19348,46 @@
           setBadgeDragEdit(changes[BADGE_DRAG_EDIT_KEY].newValue === true);
         }
         if (changes[TAX_RECV_HIDE_KEY]) {
-          const prevPrefs = { ...taxRecvHidePrefs };
-          taxRecvHidePrefs = normalizeTaxRecvHidePrefs(changes[TAX_RECV_HIDE_KEY].newValue);
-          const enabledNow = taxRecvHidePrefs.enabled === true;
-          const enabledWas = prevPrefs.enabled === true;
+          const prevPrefs = taxRecvHidePrefs;
+          const nextPrefs = normalizeTaxRecvHidePrefs(changes[TAX_RECV_HIDE_KEY].newValue);
+          const enabledNow = nextPrefs.enabled === true;
+          const enabledWas = prevPrefs && prevPrefs.enabled === true;
           const thrChanged =
-            Number(prevPrefs.thresholdPct) !== Number(taxRecvHidePrefs.thresholdPct);
-          const allowChanged = taxRecvAllowSig(prevPrefs) !== taxRecvAllowSig(taxRecvHidePrefs);
-          pushTaxRecvPrefsToPage({ refresh: enabledNow });
-          if (!enabledNow) {
-            // 关闭：清 DOM 标记 + 整页 reload（去掉 JSON 过滤后的残缺列表）
-            clearAllTaxRecvDomHide();
-            try {
-              sessionStorage.removeItem("flapFeeInfo.listFilterRefresh.v1");
-            } catch (_ss) {
-              // ignore
-            }
-            if (enabledWas && isTaxRecvListReflowPage()) {
-              scheduleTaxRecvListReflow("prefs-off");
+            Number(prevPrefs && prevPrefs.thresholdPct) !== Number(nextPrefs.thresholdPct);
+          const geniusChanged =
+            (prevPrefs && prevPrefs.hideGenius === true) !== (nextPrefs.hideGenius === true);
+          const allowChanged = taxRecvAllowSig(prevPrefs) !== taxRecvAllowSig(nextPrefs);
+          taxRecvHidePrefs = nextPrefs;
+          // 备注不参与屏蔽。只改备注时不推页面，避免新创建列被重铺。
+          if (thrChanged || geniusChanged || allowChanged || enabledNow !== enabledWas) {
+            pushTaxRecvPrefsToPage({ refresh: enabledNow });
+            if (!enabledNow) {
+              // 关闭：清 DOM 标记 + 整页 reload（去掉 JSON 过滤后的残缺列表）
+              clearAllTaxRecvDomHide();
+              try {
+                sessionStorage.removeItem("flapFeeInfo.listFilterRefresh.v1");
+              } catch (_ss) {
+                // ignore
+              }
+              if (enabledWas && isTaxRecvListReflowPage()) {
+                scheduleTaxRecvListReflow("prefs-off");
+                return;
+              }
+              scheduleTaxRecvHideApply(0);
               return;
             }
-            scheduleTaxRecvHideApply(0);
-            return;
-          }
-          // 开启或改阈值：清标记 + reload，document_start 即带 prefs 过滤首包
-          clearAllTaxRecvDomHide();
-          if (!enabledWas || thrChanged || allowChanged) {
-            try {
-              sessionStorage.removeItem("flapFeeInfo.listFilterRefresh.v1");
-            } catch (_ss2) {
-              // ignore
+            // 开启或改阈值：清标记 + reload，document_start 即带 prefs 过滤首包
+            clearAllTaxRecvDomHide();
+            if (!enabledWas || thrChanged || allowChanged) {
+              try {
+                sessionStorage.removeItem("flapFeeInfo.listFilterRefresh.v1");
+              } catch (_ss2) {
+                // ignore
+              }
+              scheduleTaxRecvListReflow("prefs-change");
             }
-            scheduleTaxRecvListReflow("prefs-change");
+            scheduleTaxRecvHideApply(0);
           }
-          scheduleTaxRecvHideApply(0);
         }
         if (changes[SUFFIX_HIDE_KEY]) {
           const wasOn = suffixHidePrefs.enabled === true;
