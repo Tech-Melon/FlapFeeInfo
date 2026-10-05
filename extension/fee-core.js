@@ -5,7 +5,7 @@
  */
 (function (root) {
   // API 变更必须 +1：插件重载不刷页时 MAIN world 里还留着旧版，同版号会跳过加载。
-  const CORE_VER = 2;
+  const CORE_VER = 3;
   if (root.__flapFeeCore && root.__flapFeeCore.ver === CORE_VER) return;
 
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
@@ -339,6 +339,98 @@
    * 虚拟列表复用 TokenItem：href 换了但 Tax 内图签名没变 → 内图是上一张卡的残留。
    * 纯状态机；DOM 取 href / sig 由调用方做。返回 { stale, next }，next 写回各自的 WeakMap。
    */
+  function evmAddr40(raw) {
+    const m = String(raw || "")
+      .toLowerCase()
+      .match(/0x[a-f0-9]{40}/);
+    return m ? m[0] : "";
+  }
+
+  function pushTaxRecvAddr(out, seen, raw) {
+    if (out.length >= 16) return;
+    const a = evmAddr40(raw);
+    if (!a || seen.has(a)) return;
+    seen.add(a);
+    out.push(a);
+  }
+
+  /** 收款钱包：market/fee/dev/founder/creator，以及 marketing_recipients。不收代币 CA。 */
+  function collectTaxRecvFields(out, seen, obj) {
+    if (!obj || typeof obj !== "object") return;
+    pushTaxRecvAddr(out, seen, obj.market_address);
+    pushTaxRecvAddr(out, seen, obj.fee_receiver);
+    pushTaxRecvAddr(out, seen, obj.vault_address);
+    pushTaxRecvAddr(out, seen, obj.dev_address);
+    pushTaxRecvAddr(out, seen, obj.founder_address);
+    pushTaxRecvAddr(out, seen, obj.creator);
+    pushTaxRecvAddr(out, seen, obj.creator_address);
+    pushTaxRecvAddr(out, seen, obj.d_ct);
+    const recs = obj.marketing_recipients;
+    if (!Array.isArray(recs)) return;
+    for (let i = 0; i < recs.length; i += 1) {
+      const row = recs[i];
+      if (!row || typeof row !== "object") {
+        pushTaxRecvAddr(out, seen, row);
+        continue;
+      }
+      pushTaxRecvAddr(out, seen, row.address);
+      pushTaxRecvAddr(out, seen, row.addr);
+      pushTaxRecvAddr(out, seen, row.wallet);
+    }
+  }
+
+  function taxRecvAddresses(item, talOrExtra) {
+    const out = [];
+    const seen = new Set();
+    collectTaxRecvFields(out, seen, talOrExtra);
+    collectTaxRecvFields(out, seen, item);
+    if (item && typeof item === "object") {
+      collectTaxRecvFields(out, seen, item.f);
+      collectTaxRecvFields(out, seen, item.meta);
+      if (item.launchpad_extra && item.launchpad_extra !== talOrExtra) {
+        collectTaxRecvFields(out, seen, item.launchpad_extra);
+      }
+      const meta = item.meta;
+      if (
+        meta &&
+        typeof meta === "object" &&
+        meta.launchpad_extra &&
+        meta.launchpad_extra !== talOrExtra
+      ) {
+        collectTaxRecvFields(out, seen, meta.launchpad_extra);
+      }
+    }
+    return out;
+  }
+
+  /** allow 为 Set（已规范化）或 {address,enabled}[]。空名单 / 规则关闭 → false。 */
+  function taxRecvAllowHit(allow, addrs) {
+    if (!allow || addrs == null) return false;
+    const list = Array.isArray(addrs) ? addrs : [addrs];
+    if (!list.length) return false;
+    const asSet = typeof Set !== "undefined" && allow instanceof Set;
+    if (asSet) {
+      if (!allow.size) return false;
+    } else if (!Array.isArray(allow) || !allow.length) {
+      return false;
+    }
+    for (let i = 0; i < list.length; i += 1) {
+      const a = evmAddr40(list[i]);
+      if (!a) continue;
+      if (asSet) {
+        if (allow.has(a)) return true;
+        continue;
+      }
+      for (let j = 0; j < allow.length; j += 1) {
+        const r = allow[j];
+        if (r && typeof r === "object" && r.enabled === false) continue;
+        const raw = r && typeof r === "object" ? r.address || r.addr : r;
+        if (evmAddr40(raw) === a) return true;
+      }
+    }
+    return false;
+  }
+
   function taxInnerReuseStep(prev, href, sig) {
     if (prev && prev.href && href && prev.href !== href) {
       const stale = Boolean(sig) && sig === prev.sig;
@@ -376,6 +468,8 @@
     isSingleAssetStockVault,
     mergeBasketWithTaxDomSymbols,
     suffixRulesMatch,
+    taxRecvAddresses,
+    taxRecvAllowHit,
     taxInnerReuseStep
   });
   try {

@@ -9,7 +9,7 @@
  * ★ 链+平台 host-fee：BSC Flap/Four 尾号、BSC geniusfun、RH pons_v2
  */
 (() => {
-  const HOOK_VER = 205;
+  const HOOK_VER = 206;
   // fee-core.js 必须先于本文件进 MAIN world（manifest 与所有兜底注入都按此顺序）。
   const Core = window.__flapFeeCore;
   if (!Core) return;
@@ -386,9 +386,7 @@
       if (vaultHideEnabled && vaultHidePrefs.hideGenius === true) return true;
       if (!taxRecvEnabled || taxRecvPrefs.hideGenius !== true) return false;
       if (entry.is_vault === true || entry.is_stocks_vault === true) return false;
-      const pct = (Number(entry.market_bps) || 0) / 100;
-      if (!(pct > 0)) return false;
-      return exceedsTaxRecvThreshold(pct, taxRecvPrefs.thresholdPct);
+      return hostFeeChefHidden(entry);
     }
     if (vaultHideEnabled) {
       if (entry.is_stocks_vault === true && vaultHidePrefs.hideStockVault === true) {
@@ -405,8 +403,21 @@
     }
     if (!taxRecvEnabled) return false;
     if (entry.is_vault === true || entry.is_stocks_vault === true) return false;
+    return hostFeeChefHidden(entry);
+  }
+
+  function hostFeeRecvAddrs(entry) {
+    if (!entry || typeof entry !== "object") return [];
+    if (Array.isArray(entry.recv_addrs) && entry.recv_addrs.length) return entry.recv_addrs;
+    if (entry.vault_address) return [entry.vault_address];
+    return [];
+  }
+
+  /** 只豁免资金接收（👨‍🍳）。尾号 / 金库在调用前已经 return。 */
+  function hostFeeChefHidden(entry) {
     const pct = (Number(entry.market_bps) || 0) / 100;
     if (!(pct > 0)) return false;
+    if (isTaxRecvAllowlisted(hostFeeRecvAddrs(entry))) return false;
     return exceedsTaxRecvThreshold(pct, taxRecvPrefs.thresholdPct);
   }
 
@@ -454,27 +465,22 @@
   }
 
   function isTaxRecvAllowlisted(addrs) {
-    if (!taxRecvAllow.size || !addrs || !addrs.length) return false;
-    for (let i = 0; i < addrs.length; i += 1) {
-      const a = normalizeEvmAddress(addrs[i]);
-      if (a && taxRecvAllow.has(a)) return true;
-    }
-    return false;
+    return Core.taxRecvAllowHit(taxRecvAllow, addrs);
   }
 
   function gmgnRecvAddresses(item, tal) {
-    const out = [];
-    if (tal && typeof tal === "object") {
-      out.push(tal.market_address, tal.fee_receiver);
+    return Core.taxRecvAddresses(item, tal);
+  }
+
+  function taxRecvAllowSig() {
+    const list = taxRecvPrefs.allow || [];
+    const parts = [];
+    for (let i = 0; i < list.length; i += 1) {
+      const r = list[i];
+      if (r && r.enabled !== false && r.address) parts.push(r.address);
     }
-    if (item && typeof item === "object") {
-      out.push(item.creator, item.creator_address);
-      const f = item.f;
-      if (f && typeof f === "object") {
-        out.push(f.creator, f.creator_address);
-      }
-    }
-    return out;
+    parts.sort();
+    return parts.join(",");
   }
 
   function applyPrefsObject(p) {
@@ -2217,6 +2223,9 @@
       if (hostFeeEntryShouldHide(entry)) {
         hideAddrSet.add(addr);
         ncKeepPool.delete(addr);
+      } else if (isTaxRecvAllowlisted(hostFeeRecvAddrs(entry))) {
+        // 后到的收款地址命中白名单：去掉此前按厨师比例塞进集合的 CA
+        hideAddrSet.delete(addr);
       }
     } catch (_hide) {
       // ignore
@@ -2528,6 +2537,7 @@
       vault_address: String(tal.market_address || tal.vault_address || "")
         .trim()
         .toLowerCase(),
+      recv_addrs: Core.taxRecvAddresses(item, tal),
       quote_symbol,
       quote_token: gmgnItemQuoteFields(item).address,
       dividend_token: divAddr,
@@ -2945,6 +2955,7 @@
       vault_address: String(extra.vault_address || extra.fee_receiver || "")
         .trim()
         .toLowerCase(),
+      recv_addrs: Core.taxRecvAddresses(row, extra),
       quote_symbol,
       quote_token,
       dividend_token: divAddr,
@@ -3382,6 +3393,68 @@
     return keys;
   }
 
+  /** 有 s_tal 才能按白名单重判。Genius 随机尾号也算；瘦行继续信任 hideAddrSet。 */
+  function gmgnRowHasTax(t) {
+    if (!t || typeof t !== "object" || !gmgnTal(t)) return false;
+    if (gmgnNormalizePlatform(t) === "geniusfun") return true;
+    return isTargetTaxTokenAddr(gmgnAddr(t));
+  }
+
+  function gmgnStickyHide(addr, raw) {
+    if (!addr) return false;
+    if (shouldHideByCustomSuffix(addr)) {
+      hideAddrSet.add(addr);
+      return true;
+    }
+    const t = unwrapGmgnTokenRow(raw);
+    if (gmgnRowHasTax(t)) {
+      if (gmgnTokenHide(t)) {
+        hideAddrSet.add(addr);
+        ncKeepPool.delete(addr);
+        return true;
+      }
+      // 半包 s_tal 看起来像纯分红时不要把已藏厨师放回来。只有白名单命中才放行。
+      if (hideAddrSet.has(addr) && isTaxRecvAllowlisted(gmgnRecvAddresses(t, gmgnTal(t)))) {
+        hideAddrSet.delete(addr);
+        return false;
+      }
+      if (hideAddrSet.has(addr)) return true;
+      return false;
+    }
+    return hideAddrSet.has(addr);
+  }
+
+  function debotRowCanRetrial(row) {
+    if (!row || typeof row !== "object" || !debotRowExtra(row)) return false;
+    if (debotRowIsGeniusFun(row)) return true;
+    return isTargetTaxTokenAddr(String(row.contract || ""));
+  }
+
+  function debotStickyHide(addr, row) {
+    if (!addr) return false;
+    if (shouldHideByCustomSuffix(addr)) {
+      hideAddrSet.add(addr);
+      return true;
+    }
+    if (debotRowCanRetrial(row)) {
+      if (debotRowHide(row)) {
+        hideAddrSet.add(addr);
+        ncKeepPool.delete(addr);
+        return true;
+      }
+      if (
+        hideAddrSet.has(addr) &&
+        isTaxRecvAllowlisted(Core.taxRecvAddresses(row, debotRowExtra(row)))
+      ) {
+        hideAddrSet.delete(addr);
+        return false;
+      }
+      if (hideAddrSet.has(addr)) return true;
+      return false;
+    }
+    return hideAddrSet.has(addr);
+  }
+
   function takeHiddenUpsertKeys(list) {
     const keys = [];
     if (!Array.isArray(list)) return keys;
@@ -3389,14 +3462,7 @@
       const row = list[i];
       const t = unwrapGmgnTokenRow(row);
       const addr = gmgnAddr(t);
-      if (!addr) continue;
-      const hide =
-        hideAddrSet.has(addr) ||
-        shouldHideByCustomSuffix(addr) ||
-        (isGmgnTokenItem(t) && gmgnTokenHide(t));
-      if (!hide) continue;
-      hideAddrSet.add(addr);
-      ncKeepPool.delete(addr);
+      if (!addr || !gmgnStickyHide(addr, t)) continue;
       const ks = hideKeysForAddr(addr, row);
       for (let k = 0; k < ks.length; k += 1) keys.push(ks[k]);
     }
@@ -3468,12 +3534,7 @@
     const t = unwrapGmgnTokenRow(tok);
     const addr = gmgnAddr(t) || addrFromPatchId(id);
     if (!addr) return false;
-    if (hideAddrSet.has(addr) || shouldHideByCustomSuffix(addr)) return true;
-    if (t && isGmgnTokenItem(t) && gmgnTokenHide(t)) {
-      ncMarkHidden(addr, t, "nc-hide");
-      return true;
-    }
-    return false;
+    return gmgnStickyHide(addr, t);
   }
 
   function patchReplaceShouldHide(rep) {
@@ -3481,8 +3542,7 @@
     const tok = unwrapGmgnTokenRow(rep.data);
     const addr = gmgnAddr(tok) || addrFromPatchId(rep.id);
     if (!addr) return false;
-    if (hideAddrSet.has(addr) || shouldHideByCustomSuffix(addr)) return true;
-    return Boolean(tok && isGmgnTokenItem(tok) && gmgnTokenHide(tok));
+    return gmgnStickyHide(addr, tok);
   }
 
   function filterNcServerToHost() {
@@ -5499,7 +5559,7 @@
       const fp = debotChefPct(extra);
       if (!(fp > 0)) return false;
       if (!exceedsTaxRecvThreshold(fp, taxRecvPrefs.thresholdPct)) return false;
-      if (isTaxRecvAllowlisted([extra.fee_receiver, extra.founder_address])) return false;
+      if (isTaxRecvAllowlisted(Core.taxRecvAddresses(row, extra))) return false;
       return true;
     }
     const extra = debotRowExtra(row);
@@ -5523,7 +5583,7 @@
     if (!(fp > 0)) return false;
     const pct = fp >= 99.9 && fp <= 100.0001 ? 100 : fp;
     if (!exceedsTaxRecvThreshold(pct, taxRecvPrefs.thresholdPct)) return false;
-    if (isTaxRecvAllowlisted([extra.fee_receiver, extra.founder_address])) return false;
+    if (isTaxRecvAllowlisted(Core.taxRecvAddresses(row, extra))) return false;
     return true;
   }
 
@@ -5570,9 +5630,14 @@
     const ca = String(arg.contract || arg.token?.contract || "")
       .trim()
       .toLowerCase();
-    if (ca && hideAddrSet.has(ca)) return true;
-    if (debotRowHide(arg)) return true;
-    if (arg.token && debotRowHide(arg.token)) return true;
+    if (arg.contract && ca && debotStickyHide(ca, arg)) return true;
+    if (arg.token && typeof arg.token === "object") {
+      const tca = String(arg.token.contract || ca || "")
+        .trim()
+        .toLowerCase();
+      if (tca && debotStickyHide(tca, arg.token)) return true;
+    }
+    if (!arg.contract && !arg.token && ca && hideAddrSet.has(ca)) return true;
     if (arg.data && typeof arg.data === "object") {
       if (debotSocketArgShouldHide(arg.data)) return true;
     }
@@ -5826,16 +5891,13 @@
       if (kind === "gmgn") {
         const t = unwrapGmgnTokenRow(item);
         const addr = gmgnAddr(t);
-        if (addr && hideAddrSet.has(addr)) return true;
-        // 尾号可拦任意 CA；资金接收仍走 s_tal 税币
-        if (addr && shouldHideByCustomSuffix(addr)) return true;
-        return isGmgnTokenItem(t) && gmgnTokenHide(t);
+        if (!addr) return false;
+        return gmgnStickyHide(addr, t);
       }
       if (kind === "debot") {
         const c = String(item?.contract || "").toLowerCase();
-        if (c && hideAddrSet.has(c)) return true;
-        if (c && shouldHideByCustomSuffix(c)) return true;
-        return debotRowHide(item);
+        if (!c) return debotRowHide(item);
+        return debotStickyHide(c, item);
       }
       return tokenShouldHide(item);
     };
@@ -6185,11 +6247,14 @@
       for (let i = 0; i < data.t.length; i++) {
         const row = data.t[i];
         const addr = gmgnAddr(row);
-        const bySuffix = addr && shouldHideByCustomSuffix(addr);
-        const byRecv = isGmgnTokenItem(row) && gmgnTokenHide(row);
-        if (bySuffix || byRecv) {
+        if (!addr) {
+          data.t[w++] = row;
+          continue;
+        }
+        const bySuffix = shouldHideByCustomSuffix(addr);
+        if (gmgnStickyHide(addr, row)) {
           removed += 1;
-          if (addr) hideAddrs.add(addr);
+          hideAddrs.add(addr);
           noteRemovedSample(addr, gmgnTal(row), bySuffix ? "delta-suffix" : "delta-nc");
           continue;
         }
@@ -6953,8 +7018,12 @@
           return;
         }
         if (data.type === "tax-recv-prefs") {
+          const prevAllowSig = taxRecvAllowSig();
           const was = anyFilterEnabled();
           applyPrefsObject(data.prefs || {});
+          const allowChanged = prevAllowSig !== taxRecvAllowSig();
+          // 地址一旦进 hideAddrSet，后续帧不再看白名单。名单变了先清掉。
+          if (allowChanged) hideAddrSet.clear();
           try {
             const payload = JSON.stringify({
               enabled: taxRecvPrefs.enabled,

@@ -8382,7 +8382,7 @@
   }
 
   // 必须等于 page-hook.js HOOK_VER（打包脚本会校验），否则每页都会重复注入 page-hook。
-  const PAGE_HOOK_VER = "205";
+  const PAGE_HOOK_VER = "206";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -17578,6 +17578,21 @@
     }, d);
   }
 
+  function taxRecvAllowListActive() {
+    const allow = taxRecvHidePrefs && taxRecvHidePrefs.allow;
+    if (!Array.isArray(allow)) return false;
+    for (let i = 0; i < allow.length; i += 1) {
+      const r = allow[i];
+      if (r && r.enabled !== false && r.address) return true;
+    }
+    return false;
+  }
+
+  function taxRecvEntryAddrs(entry) {
+    if (!entry || typeof entry !== "object" || !Array.isArray(entry.recv_addrs)) return [];
+    return entry.recv_addrs;
+  }
+
   function shouldHideTaxRecv(entry, token) {
     if (!taxRecvHidePrefs || taxRecvHidePrefs.enabled !== true) return false;
     if (!entry || typeof entry !== "object") return false;
@@ -17589,8 +17604,16 @@
     if (!Number.isFinite(pct) || pct <= 0) return false;
     const thr = Number(taxRecvHidePrefs.thresholdPct);
     const threshold = Number.isFinite(thr) ? thr : DEFAULT_TAX_RECV_HIDE.thresholdPct;
-    if (threshold <= 0) return true;
-    return pct + 1e-9 >= threshold;
+    const over = threshold <= 0 || pct + 1e-9 >= threshold;
+    if (!over) return false;
+    // 白名单开着但这条 entry 没有收款地址（/modes、徽章百分比）时，不要把 CA 塞进 hideAddrSet。
+    // 列表行上的 s_tal / launchpad_extra 由 page-hook 判定。
+    const addrs = taxRecvEntryAddrs(entry);
+    if (taxRecvAllowListActive()) {
+      if (!addrs.length) return false;
+      if (Core.taxRecvAllowHit(taxRecvHidePrefs.allow, addrs)) return false;
+    }
+    return true;
   }
 
   function mergeTaxRecvEntries(entries) {
@@ -17607,7 +17630,8 @@
       const next = {
         recvPct,
         isVault: row.isVault === true,
-        source: typeof row.source === "string" ? row.source : ""
+        source: typeof row.source === "string" ? row.source : "",
+        recv_addrs: taxRecvEntryAddrs(row)
       };
       const prev = taxRecvMap.get(addr);
       if (!prev) {
@@ -17618,15 +17642,31 @@
       // Host list (gmgn/debot) wins over fee; vault flag latches true; recvPct takes max.
       const hostNext = next.source === "gmgn" || next.source === "debot";
       const hostPrev = prev.source === "gmgn" || prev.source === "debot";
+      const mergedAddrs = [];
+      const seenAddrs = new Set();
+      const pushAddrs = (list) => {
+        if (!Array.isArray(list)) return;
+        for (let i = 0; i < list.length && mergedAddrs.length < 16; i += 1) {
+          const a = String(list[i] || "").toLowerCase();
+          if (!a || seenAddrs.has(a)) continue;
+          seenAddrs.add(a);
+          mergedAddrs.push(a);
+        }
+      };
+      pushAddrs(prev.recv_addrs);
+      pushAddrs(next.recv_addrs);
       const merged = {
         recvPct: Math.max(prev.recvPct, next.recvPct),
         isVault: Boolean(prev.isVault || next.isVault),
-        source: hostNext ? next.source : hostPrev ? prev.source : next.source || prev.source
+        source: hostNext ? next.source : hostPrev ? prev.source : next.source || prev.source,
+        recv_addrs: mergedAddrs
       };
+      const prevAddrSig = Array.isArray(prev.recv_addrs) ? prev.recv_addrs.join(",") : "";
       if (
         merged.recvPct !== prev.recvPct ||
         merged.isVault !== prev.isVault ||
-        merged.source !== prev.source
+        merged.source !== prev.source ||
+        prevAddrSig !== mergedAddrs.join(",")
       ) {
         taxRecvMap.set(addr, merged);
         changed = true;
@@ -17651,15 +17691,22 @@
       return false;
     }
     const recvPct = marketBps / 100; // 10000 bps → 100%
+    const recvAddrs = taxRecvEntryAddrs(entry);
     const merged = mergeTaxRecvEntries([
       {
         address: addr,
         recvPct,
         isVault: Boolean(entry.is_vault),
-        source: "fee"
+        source: "fee",
+        recv_addrs: recvAddrs
       }
     ]);
-    if (shouldHideTaxRecv({ recvPct, isVault: false, source: "fee" }, addr)) {
+    if (
+      shouldHideTaxRecv(
+        { recvPct, isVault: false, source: "fee", recv_addrs: recvAddrs },
+        addr
+      )
+    ) {
       notifyPageHookHideAddrs([addr]);
     }
     return merged;
@@ -17699,7 +17746,15 @@
       if (!taxRecvHidesGeniusTokens()) return false;
       if (entry.is_vault === true || entry.is_stocks_vault === true) return false;
       const pct = (Number(entry.market_bps) || 0) / 100;
-      return shouldHideTaxRecv({ recvPct: pct, isVault: false, source: "fee" }, addr);
+      return shouldHideTaxRecv(
+        {
+          recvPct: pct,
+          isVault: false,
+          source: "fee",
+          recv_addrs: taxRecvEntryAddrs(entry)
+        },
+        addr
+      );
     }
     if (!TARGET_TOKEN_RE.test(addr)) return false;
     if (typeof shouldHideByCustomSuffix === "function" && shouldHideByCustomSuffix(addr)) {
@@ -17719,7 +17774,18 @@
     if (taxRecvHidePrefs && taxRecvHidePrefs.enabled === true) {
       if (entry.is_vault === true || entry.is_stocks_vault === true) return false;
       const pct = (Number(entry.market_bps) || 0) / 100;
-      if (pct > 0 && shouldHideTaxRecv({ recvPct: pct, isVault: false, source: "fee" }, addr)) {
+      if (
+        pct > 0 &&
+        shouldHideTaxRecv(
+          {
+            recvPct: pct,
+            isVault: false,
+            source: "fee",
+            recv_addrs: taxRecvEntryAddrs(entry)
+          },
+          addr
+        )
+      ) {
         return true;
       }
     }
@@ -17830,7 +17896,8 @@
     return {
       recvPct: marketBps / 100,
       isVault: Boolean(fee.is_vault),
-      source: "fee"
+      source: "fee",
+      recv_addrs: taxRecvEntryAddrs(fee)
     };
   }
 

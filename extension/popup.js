@@ -206,7 +206,7 @@
       taxRecvAllowLabel: "接收地址白名单",
       taxRecvAllowPh: "0x… 接收地址",
       taxRecvAllowHint:
-        "资金打到这些地址的代币不屏蔽（GMGN：market_address / creator；Debot：fee_receiver）。最多 24 条。",
+        "资金打到这些地址的代币不屏蔽（GMGN：market_address / creator / Dev 收款；Debot：fee_receiver / founder）。尾号和金库仍屏蔽。最多 24 条。",
       taxRecvAllowEmpty: "还没有白名单地址。",
       taxRecvAllowInvalid: "请粘贴完整 0x 地址（40 位 hex）",
       taxRecvAllowDup: "已添加过",
@@ -418,7 +418,7 @@
       taxRecvAllowLabel: "Recipient allowlist",
       taxRecvAllowPh: "0x… recipient",
       taxRecvAllowHint:
-        "Tokens paying these wallets are not hidden (GMGN: market_address / creator; Debot: fee_receiver). Max 24.",
+        "Tokens paying these wallets are not hidden (GMGN: market_address / creator / Dev; Debot: fee_receiver / founder). Suffix and vault rules still hide. Max 24.",
       taxRecvAllowEmpty: "No allowlist addresses yet.",
       taxRecvAllowInvalid: "Paste a full 0x address (40 hex chars)",
       taxRecvAllowDup: "Already added",
