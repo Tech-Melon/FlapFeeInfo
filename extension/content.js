@@ -7,6 +7,7 @@
     basketSymbolMatchesDom,
     normalizeCardMarkHandle,
     isGeniusFunSuffix,
+    isFourPoolSuffix,
     feeEntryIsPureVault,
     normalizeBasketAssets,
     dedupeBasketAssets,
@@ -26,7 +27,7 @@
   const TARGET_TOKEN_RE = Core.TARGET_TOKEN_RE;
   // Ellipsis may be "..." or Unicode "…" (logged-in Debot header).
   const SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)[a-fA-F0-9]{2,6}/i;
-  const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777|ffff|6666)/i;
+  const TARGET_SHORT_TOKEN_RE = /0x[a-fA-F0-9]{2,6}(?:\.{2,}|\u2026|\u22ef)(8888|7777|ffff|6666|4444)/i;
   const GMGN_TRENCH_ROOT_SELECTOR =
     "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100";
   // Stable GMGN surfaces from the live DOM. Prefer these over page-wide wrappers;
@@ -500,6 +501,62 @@
   };
   const ponsV2AddrSet = new Set();
   const geniusFunAddrSet = new Set();
+  /** brew：GMGN 宿主底池/分红，尾号常是 6666，禁止当 Genius。 */
+  const brewAddrSet = new Set();
+  /** Four 已迁移 4444：只画底池。 */
+  const fourPoolAddrSet = new Set();
+  const notGeniusAddrSet = new Set();
+
+  function rememberBoundedAddr(set, addr) {
+    const a = String(addr || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(a)) return;
+    set.add(a);
+    if (set.size <= 400) return;
+    const first = set.keys().next().value;
+    if (first) set.delete(first);
+  }
+
+  function isHostOnlyPoolAddr(addr) {
+    const a = String(addr || "").toLowerCase();
+    return brewAddrSet.has(a) || fourPoolAddrSet.has(a) || isFourPoolSuffix(a);
+  }
+
+  /** 平台已确认后，丢掉另一种平台写下的内存和持久缓存，并拆掉旧徽章。 */
+  function forgetStalePlatformCache(token, platformId) {
+    const tok = String(token || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(tok)) return;
+    const keep = (entry) => Boolean(entry && entry.platform === platformId);
+    let changed = false;
+    if (modeCache.has(tok) && !keep(modeCache.get(tok))) {
+      modeCache.delete(tok);
+      changed = true;
+    }
+    if (persistentCache.has(tok) && !keep(persistentCache.get(tok))) {
+      persistentCache.delete(tok);
+      changed = true;
+    }
+    if (!changed) return;
+    try {
+      document.querySelectorAll(`[${ICON_DATA}="1"][data-fee-token="${tok}"]`).forEach((icon) => {
+        icon.remove();
+      });
+    } catch (_rm) {
+      // ignore
+    }
+    persistCacheSoon();
+  }
+
+  function absorbHigherBuySellTax(dst, src) {
+    if (!dst || !src) return false;
+    const buy = Math.max(Number(dst.buy_tax_bps) || 0, Number(src.buy_tax_bps) || 0);
+    const sell = Math.max(Number(dst.sell_tax_bps) || 0, Number(src.sell_tax_bps) || 0);
+    if (buy === (Number(dst.buy_tax_bps) || 0) && sell === (Number(dst.sell_tax_bps) || 0)) {
+      return false;
+    }
+    dst.buy_tax_bps = buy;
+    dst.sell_tax_bps = sell;
+    return true;
+  }
   /** GMGN 带 tax_allocation 的 Long.xyz（走 Pons v2 同一条 host-fee 通道）；仅用于点击跳转。 */
   const longxyzAddrSet = new Set();
   const ponsV2FiberCache = new WeakMap();
@@ -512,11 +569,11 @@
   let ponsFiberWindowN = 0;
   // GMGN TokenItem is often div[href="/bsc/token/0x…7777"] (not always <a>) — include bare [href*].
   const SUFFIX_SELECTORS =
-    "[href*='8888'], [href*='7777'], [href*='ffff'], [href*='FFFF'], " +
-    "[title*='8888'], [title*='7777'], [title*='ffff'], [title*='FFFF'], " +
-    "[aria-label*='8888'], [aria-label*='7777'], [aria-label*='ffff'], " +
-    "[data-token*='8888'], [data-token*='7777'], [data-token*='ffff'], " +
-    "[data-address*='8888'], [data-address*='7777'], [data-address*='ffff']";
+    "[href*='8888'], [href*='7777'], [href*='ffff'], [href*='FFFF'], [href*='4444'], " +
+    "[title*='8888'], [title*='7777'], [title*='ffff'], [title*='FFFF'], [title*='4444'], " +
+    "[aria-label*='8888'], [aria-label*='7777'], [aria-label*='ffff'], [aria-label*='4444'], " +
+    "[data-token*='8888'], [data-token*='7777'], [data-token*='ffff'], [data-token*='4444'], " +
+    "[data-address*='8888'], [data-address*='7777'], [data-address*='ffff'], [data-address*='4444']";
 
   const modeMeta = {
     holder: { fallback: "💎", title: "Fee mode: holder dividend", className: "holder" },
@@ -1599,6 +1656,14 @@
 
   function hostFeeCanSkipModes(entry) {
     if (!entry || isFeeLoadingEntry(entry)) return false;
+    // brew / 已迁移 Four 4444：只用宿主数据，没分配也只画底池，不打 /modes。
+    if (
+      entry.platform === "brew" ||
+      entry.platform === "four_pool" ||
+      entry.__poolOnly === true
+    ) {
+      return true;
+    }
     // pons_v2 无 /modes：有分配就画。BSC 仍要求 hostFeePaintComplete。
     if (entry.__pons_v2 === true) {
       return hostFeeAllocationBps(entry) > 0;
@@ -1657,6 +1722,8 @@
 
   function isModesQueueToken(tok) {
     const t = String(tok || "").toLowerCase();
+    if (isHostOnlyPoolAddr(t)) return false;
+    if (notGeniusAddrSet.has(t) && !TARGET_TOKEN_RE.test(t)) return false;
     return TARGET_TOKEN_RE.test(t) || isGeniusFunToken(t);
   }
 
@@ -1710,6 +1777,8 @@
       (isPersistentCacheHit(tok) ? persistentCache.get(tok) : null);
     if (cached && cached.__pons_v2 === true) return false;
     if (ponsV2AddrSet.has(tok)) return false;
+    if (isHostOnlyPoolAddr(tok)) return false;
+    if (notGeniusAddrSet.has(tok) && !TARGET_TOKEN_RE.test(tok)) return false;
     if (isGeniusFunToken(tok)) {
       if (shouldHideByCustomSuffix(tok)) return false;
       if (searchOverlayModesTokens.has(tok)) return true;
@@ -1757,6 +1826,8 @@
 
   function queueSearchOverlayModes(token, href) {
     const tok = String(token || "").toLowerCase();
+    if (isHostOnlyPoolAddr(tok)) return;
+    if (notGeniusAddrSet.has(tok) && !TARGET_TOKEN_RE.test(tok)) return;
     if (
       (!TARGET_TOKEN_RE.test(tok) && !isGeniusFunToken(tok)) ||
       !isExtensionContextValid()
@@ -1798,9 +1869,10 @@
 
   function forceModesForWaitingToken(tok) {
     const token = String(tok || "").toLowerCase();
-    if (ponsV2AddrSet.has(token)) {
+    if (ponsV2AddrSet.has(token) || isHostOnlyPoolAddr(token)) {
       return;
     }
+    if (notGeniusAddrSet.has(token) && !TARGET_TOKEN_RE.test(token)) return;
     if (
       (!TARGET_TOKEN_RE.test(token) && !isGeniusFunToken(token)) ||
       !isExtensionContextValid()
@@ -1829,9 +1901,10 @@
 
   function scheduleIncompleteModes(tok) {
     const token = String(tok || "").toLowerCase();
-    if (ponsV2AddrSet.has(token)) {
+    if (ponsV2AddrSet.has(token) || isHostOnlyPoolAddr(token)) {
       return;
     }
+    if (notGeniusAddrSet.has(token) && !TARGET_TOKEN_RE.test(token)) return;
     if (
       (!TARGET_TOKEN_RE.test(token) && !isGeniusFunToken(token)) ||
       incompleteModesTimers.has(token)
@@ -1883,6 +1956,23 @@
         scheduleIncompleteModes(tok);
         return false;
       }
+    }
+    if (isHostOnlyPoolAddr(tok)) {
+      const hostEntry = getEntryForCard(card, tok);
+      if (
+        hostEntry &&
+        !isFeeLoadingEntry(hostEntry) &&
+        (String(hostEntry.quote_symbol || "").trim() || hostFeeAllocationBps(hostEntry) > 0)
+      ) {
+        return paintListCardFromCacheFast(card, tok, hostEntry);
+      }
+      try {
+        const keep = card.querySelector(`[${ICON_DATA}="1"]`);
+        if (keep instanceof HTMLElement && keep.dataset.feeLoading === "1") keep.remove();
+      } catch (_pool) {
+        // ignore
+      }
+      return false;
     }
     // Robinhood 没有 /modes：有 host-fee 就画真徽章，绝不 ⏳。
     // 税币 7777/8888/ffff 即使人在 RH K 线侧栏，仍要 /modes，不能当 pons。
@@ -1984,8 +2074,9 @@
       const roots = document.querySelectorAll(GMGN_FIXED_TRENCH_ROOT_SELECTOR);
       const hrefSel =
         "[href*='/bsc/token/'][href*='7777'], [href*='/bsc/token/'][href*='8888'], " +
-        "[href*='/bsc/token/'][href*='ffff'], [href*='/token/'][href*='7777'], " +
-        "[href*='/token/'][href*='8888'], [href*='/token/'][href*='ffff']";
+        "[href*='/bsc/token/'][href*='ffff'], [href*='/bsc/token/'][href*='4444'], " +
+        "[href*='/token/'][href*='7777'], [href*='/token/'][href*='8888'], " +
+        "[href*='/token/'][href*='ffff'], [href*='/token/'][href*='4444']";
       let sawRoot = false;
       let sawCard = false;
       let sawViewportTarget = false;
@@ -2927,6 +3018,16 @@
         card.dataset.flapOverlayCard = "1";
         seen.add(card);
         const entry = getEntryForCard(card, token);
+        if (isHostOnlyPoolAddr(token)) {
+          if (
+            entry &&
+            !isFeeLoadingEntry(entry) &&
+            paintListCardFromCacheFast(card, token, entry)
+          ) {
+            painted += 1;
+          }
+          continue;
+        }
         if (overlayHasModesResult(entry)) {
           if (paintListCardFromCacheFast(card, token, entry)) painted += 1;
           continue;
@@ -2959,6 +3060,16 @@
             : siteStrategy.extractToken(card);
           if (!token) continue;
           const entry = getEntryForCard(card, token);
+          if (isHostOnlyPoolAddr(token)) {
+            if (
+              entry &&
+              !isFeeLoadingEntry(entry) &&
+              paintListCardFromCacheFast(card, token, entry)
+            ) {
+              painted += 1;
+            }
+            continue;
+          }
           if (overlayHasModesResult(entry)) {
             if (paintListCardFromCacheFast(card, token, entry)) painted += 1;
             continue;
@@ -3533,17 +3644,26 @@
     if (first) geniusFunAddrSet.delete(first);
   }
 
-  /** page-hook 见过宿主 launchpad≠geniusfun 的 6666（Debot cheesepad_melt 等）。 */
-  const notGeniusAddrSet = new Set();
+  /** page-hook 见过宿主 launchpad≠geniusfun 的 6666（Debot cheesepad_melt、brew 等）。 */
 
   function applyNotGeniusAddrs(addrs) {
     if (!Array.isArray(addrs)) return;
     for (let i = 0; i < addrs.length; i += 1) {
       const a = String(addrs[i] || "").toLowerCase();
-      if (!/^0x[a-f0-9]{40}$/.test(a) || notGeniusAddrSet.has(a)) continue;
-      notGeniusAddrSet.add(a);
-      geniusFunAddrSet.delete(a);
-      requestQueue.delete(a);
+      if (!/^0x[a-f0-9]{40}$/.test(a)) continue;
+      if (!notGeniusAddrSet.has(a)) {
+        notGeniusAddrSet.add(a);
+        geniusFunAddrSet.delete(a);
+        requestQueue.delete(a);
+        cancelIncompleteModes(a);
+      }
+      const cached = modeCache.get(a);
+      // 地址已进 brew 集合时，也不能留下先前的 Genius /modes 缓存。
+      const keep =
+        (cached && (cached.platform === "brew" || cached.platform === "four_pool")) ||
+        (!cached && (fourPoolAddrSet.has(a) || isFourPoolSuffix(a)));
+      if (keep) continue;
+      forgetStalePlatformCache(a, cached && cached.platform === "four_pool" ? "four_pool" : "brew");
       modeCache.delete(a);
       try {
         document.querySelectorAll(`[${ICON_DATA}="1"][data-fee-token="${a}"]`).forEach((icon) => {
@@ -3560,7 +3680,7 @@
 
   function isGeniusFunToken(addr) {
     const a = String(addr || "").toLowerCase();
-    if (notGeniusAddrSet.has(a)) return false;
+    if (notGeniusAddrSet.has(a) || brewAddrSet.has(a)) return false;
     if (isGeniusFunSuffix(a)) {
       rememberGeniusFunAddr(a);
       return true;
@@ -3723,6 +3843,7 @@
     if (s === "flap" || s.indexOf("flap") === 0) return "flap";
     if (s === "long.xyz" || s === "longxyz" || s.indexOf("long.xyz") !== -1) return "longxyz";
     if (s === "bankr" || s.indexOf("bankr.") === 0) return "bankr";
+    if (s === "brew") return "brew";
     return "";
   }
 
@@ -3974,6 +4095,7 @@
     if (isBscTokenRouteHref(href)) return "bsc";
     const a = String(addr || "").toLowerCase();
     if (a && ponsV2AddrSet.has(a)) return "rh";
+    if (a && isHostOnlyPoolAddr(a)) return "bsc";
     if (a && geniusFunAddrSet.has(a)) return "bsc";
     if (TARGET_TOKEN_RE.test(a)) return "bsc";
     if (pageUrlIsRobinhoodToken()) return "rh";
@@ -3992,6 +4114,11 @@
     if (!isFeeBadgeChainPrefOn(feeBadgeChainKind(a, card))) return false;
     if (isPonsSkipAddr(a)) return false;
     if (ponsV2AddrSet.has(a)) return true;
+    if (isHostOnlyPoolAddr(a)) {
+      const hrefEarly = card ? readCardTokenHref(card) : "";
+      if (isRobinhoodTokenRouteHref(hrefEarly)) return false;
+      return true;
+    }
     if (isGeniusFunToken(a)) return true;
     const href = card ? readCardTokenHref(card) : "";
     if (isRobinhoodTokenRouteHref(href)) {
@@ -4002,7 +4129,7 @@
       return false;
     }
     if (isBscTokenRouteHref(href)) {
-      if (TARGET_TOKEN_RE.test(a) || isGeniusFunToken(a)) return true;
+      if (TARGET_TOKEN_RE.test(a) || isHostOnlyPoolAddr(a) || isGeniusFunToken(a)) return true;
       return Boolean(card && scrapeGeniusFromCard(card));
     }
     if (!href && pageUrlIsRobinhoodToken()) {
@@ -4010,7 +4137,7 @@
       return isRhKlineFeeTarget(a);
     }
     if (!href && pageUrlIsBscToken()) {
-      if (TARGET_TOKEN_RE.test(a)) return true;
+      if (TARGET_TOKEN_RE.test(a) || isHostOnlyPoolAddr(a)) return true;
       return isGeniusFunToken(a);
     }
     return TARGET_TOKEN_RE.test(a);
@@ -4025,7 +4152,7 @@
     const a = String(addr || "").toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(a)) return false;
     if (!isFeeBadgeChainPrefOn("bsc")) return false;
-    if (TARGET_TOKEN_RE.test(a) || isGeniusFunToken(a)) return true;
+    if (TARGET_TOKEN_RE.test(a) || isHostOnlyPoolAddr(a) || isGeniusFunToken(a)) return true;
     return false;
   }
 
@@ -4080,6 +4207,7 @@
     if (isBscTokenRouteHref(href)) {
       if (!isFeeBadgeChainPrefOn("bsc")) return false;
       const tok = extractAnyToken(href);
+      if (tok && isHostOnlyPoolAddr(tok)) return true;
       if (tok && isGeniusFunToken(tok)) return true;
       if (TARGET_TOKEN_RE.test(tok || "")) return true;
       return Boolean(card && scrapeGeniusFromCard(card));
@@ -4320,28 +4448,88 @@
     const token = m[0].toLowerCase();
     if (isGmgnRobinhoodPage()) return token;
     if (isDebotLikeHost() && /\/token\/robinhood\//i.test(location.pathname || "")) return token;
-    if (isGeniusFunToken(token) || TARGET_TOKEN_RE.test(token) || ponsV2AddrSet.has(token)) {
+    if (
+      isFourPoolSuffix(token) ||
+      brewAddrSet.has(token) ||
+      fourPoolAddrSet.has(token) ||
+      TARGET_TOKEN_RE.test(token) ||
+      ponsV2AddrSet.has(token)
+    ) {
       return token;
     }
+    // 裸 6666 只用来定位顶栏地址。不要在这里调用 isGeniusFunToken：
+    // 它会把 brew 记进 Genius 集合，K 线随后打 /modes。
+    if (notGeniusAddrSet.has(token)) return null;
+    if (geniusFunAddrSet.has(token) || isGeniusFunSuffix(token)) return token;
     return null;
   }
 
   /** 仅顶栏试画调用：可刮一次 launchpad。Mutation 热路径必须用 extractTokenFromUrl。 */
   function resolveUrlFeeToken() {
-    const cheap = extractTokenFromUrl();
-    if (cheap) return cheap;
     const m = String(location.pathname || "").match(/0x[a-fA-F0-9]{40}/i);
     if (!m) return null;
     const token = m[0].toLowerCase();
+    if (isGmgnRobinhoodPage() || (isDebotLikeHost() && /\/token\/robinhood\//i.test(location.pathname || ""))) {
+      return isRhKlineFeeTarget(token) ? token : null;
+    }
     if (pageUrlIsBscToken() && isFeeBadgeChainPrefOn("bsc")) {
-      const lp = scrapeLaunchpadFromTokenPage(token);
-      if (isGeniusFunLaunchpadRaw(lp) || normalizeLaunchpadChip(lp) === "geniusfun") {
-        rememberGeniusFunAddr(token);
+      if (isFourPoolSuffix(token) || brewAddrSet.has(token) || fourPoolAddrSet.has(token)) {
         return token;
+      }
+      if (TARGET_TOKEN_RE.test(token)) return token;
+      if (notGeniusAddrSet.has(token)) return null;
+      // 6666 先刮 launchpad。brew / cheesepad 不能因尾号去打 /modes。
+      if (isGeniusFunSuffix(token) || geniusFunAddrSet.has(token)) {
+        const lp = scrapeLaunchpadFromTokenPage(token);
+        const plat = Core.platformFromLaunchpad(lp);
+        if (plat === "brew") {
+          rememberBoundedAddr(brewAddrSet, token);
+          notGeniusAddrSet.add(token);
+          geniusFunAddrSet.delete(token);
+          requestQueue.delete(token);
+          cancelIncompleteModes(token);
+          forgetStalePlatformCache(token, "brew");
+          return token;
+        }
+        if (lp && plat && plat !== "geniusfun") {
+          notGeniusAddrSet.add(token);
+          geniusFunAddrSet.delete(token);
+          requestQueue.delete(token);
+          cancelIncompleteModes(token);
+          forgetStalePlatformCache(token, "brew");
+          return null;
+        }
+        if (
+          isGeniusFunLaunchpadRaw(lp) ||
+          plat === "geniusfun" ||
+          normalizeLaunchpadChip(lp) === "geniusfun"
+        ) {
+          rememberGeniusFunAddr(token);
+          return token;
+        }
+        if (geniusFunAddrSet.has(token)) return token;
+        return null;
       }
     }
     if (pageUrlIsRobinhoodToken() && isRhKlineFeeTarget(token)) return token;
     return null;
+  }
+
+  /**
+   * K 线顶栏入队。裸 6666 先认 launchpad。
+   * 未确认前不要 queueToken：isGeniusFunToken 会把地址记进 Genius 并打 /modes。
+   */
+  function queueHeaderUrlToken(urlTok) {
+    const tok = String(urlTok || "").toLowerCase();
+    if (!tok) return;
+    if (isGeniusFunSuffix(tok)) {
+      const resolved = resolveUrlFeeToken();
+      if (resolved !== tok) return;
+      if (isHostOnlyPoolAddr(tok) || notGeniusAddrSet.has(tok)) return;
+    } else if (isHostOnlyPoolAddr(tok)) {
+      return;
+    }
+    queueToken(tok);
   }
 
   /**
@@ -4897,7 +5085,7 @@
       return !!getCachedGmgnHeaderBadge(urlTok);
     }
 
-    if (!pageUrlIsRobinhoodToken()) {
+    if (!pageUrlIsRobinhoodToken() && !isHostOnlyPoolAddr(urlTok)) {
       if (isGeniusFunToken(urlTok)) rememberGeniusFunAddr(urlTok);
       queueToken(urlTok);
     }
@@ -4974,7 +5162,7 @@
 
     // RH 无 /modes：没有 host-fee 就不画（含 ⏳）。BSC 才用待加载占位。
     if (!entry) {
-      if (pageUrlIsRobinhoodToken()) {
+      if (pageUrlIsRobinhoodToken() || isHostOnlyPoolAddr(urlTok)) {
         stripTokenHeaderBadge(urlTok);
         return false;
       }
@@ -7714,9 +7902,9 @@
     const linkSel = isDebotHost()
       ? DEBOT_TRENCH_HREF_SEL
       : "[href*='/token/'][href*='8888'], [href*='/token/'][href*='7777'], " +
-        "[href*='/token/'][href*='ffff'], " +
+        "[href*='/token/'][href*='ffff'], [href*='/token/'][href*='4444'], " +
         "[href*='/bsc/token/'][href*='8888'], [href*='/bsc/token/'][href*='7777'], " +
-        "[href*='/bsc/token/'][href*='ffff']";
+        "[href*='/bsc/token/'][href*='ffff'], [href*='/bsc/token/'][href*='4444']";
     const buckets = [[], [], []];
     const seenKey = new Set();
     const pushSeed = (el, key) => {
@@ -8382,7 +8570,7 @@
   }
 
   // 必须等于 page-hook.js HOOK_VER（打包脚本会校验），否则每页都会重复注入 page-hook。
-  const PAGE_HOOK_VER = "206";
+  const PAGE_HOOK_VER = "209";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -8634,7 +8822,7 @@
           } else {
             if (!gmgnHeaderMissSince) gmgnHeaderMissSince = Date.now();
             const missAge = Date.now() - gmgnHeaderMissSince;
-            queueToken(urlTok);
+            queueHeaderUrlToken(urlTok);
             const entry = resolveEntry(urlTok);
             if (!entry) {
               recoverStuckBatch(false);
@@ -8696,7 +8884,7 @@
             debotHeaderMissStreak += 1;
             const missAge = Date.now() - debotHeaderMissSince;
             // Ensure API in flight (js-mcp: 0 badge often = never queued / stuck batch).
-            queueToken(urlTok);
+            queueHeaderUrlToken(urlTok);
             if (debotHeaderMissStreak === 1 || debotHeaderMissStreak % 3 === 0) {
               recoverStuckBatch(false);
               scheduleBatchFlush({ immediate: true, delayMs: 0 });
@@ -9818,7 +10006,7 @@
     const urlTok = extractTokenFromUrl();
     if (!urlTok) return; // non-8888/7777 — nothing to paint
     if (!resolveEntry(urlTok)) {
-      queueToken(urlTok);
+      queueHeaderUrlToken(urlTok);
       scheduleBatchFlush({ immediate: true, delayMs: 0 });
       return;
     }
@@ -10003,7 +10191,7 @@
     }
 
     // Always ensure fee data is requested (js-mcp: SPA token often never hit /modes).
-    if (!pageUrlIsRobinhoodToken()) queueToken(urlTok);
+    if (!pageUrlIsRobinhoodToken() && !isHostOnlyPoolAddr(urlTok)) queueToken(urlTok);
     const entry = resolveEntry(urlTok);
 
     let header = findDebotTokenHeaderCard();
@@ -10031,7 +10219,7 @@
 
     // RH 无 /modes：没有 host-fee 就不画（含 ⏳）。BSC 才用待加载占位。
     if (!entry) {
-      if (pageUrlIsRobinhoodToken()) {
+      if (pageUrlIsRobinhoodToken() || isHostOnlyPoolAddr(urlTok)) {
         stripTokenHeaderBadge(urlTok);
         return false;
       }
@@ -12152,15 +12340,15 @@
         .querySelectorAll(
           overlayOnly
             ? "[href*='/bsc/token/'][href*='8888'], [href*='/bsc/token/'][href*='7777'], " +
-                "[href*='/bsc/token/'][href*='ffff'], " +
+                "[href*='/bsc/token/'][href*='ffff'], [href*='/bsc/token/'][href*='4444'], " +
                 "[href*='/token/bsc/'][href*='8888'], [href*='/token/bsc/'][href*='7777'], " +
-                "[href*='/token/bsc/'][href*='ffff']"
+                "[href*='/token/bsc/'][href*='ffff'], [href*='/token/bsc/'][href*='4444']"
             : isDebotHost()
               ? DEBOT_TRENCH_HREF_SEL
               : "[href*='/token/'][href*='8888'], [href*='/token/'][href*='7777'], " +
-                "[href*='/token/'][href*='ffff'], " +
+                "[href*='/token/'][href*='ffff'], [href*='/token/'][href*='4444'], " +
                 "[href*='/bsc/token/'][href*='8888'], [href*='/bsc/token/'][href*='7777'], " +
-                "[href*='/bsc/token/'][href*='ffff']"
+                "[href*='/bsc/token/'][href*='ffff'], [href*='/bsc/token/'][href*='4444']"
         )
         .forEach((n) => {
           if (overlayOnly) {
@@ -12174,11 +12362,18 @@
         });
       // 0.4.42 GMGN: also CA hrefs (flap/site) but NEVER leaf textContent walks.
       if (gmgnLite && !listReturnSoft) {
-        root.querySelectorAll("[href*='8888'], [href*='7777'], [href*='ffff']").forEach((n) => {
+        root.querySelectorAll("[href*='8888'], [href*='7777'], [href*='ffff'], [href*='4444']").forEach((n) => {
           const href = (n.getAttribute && n.getAttribute("href")) || "";
           if (/flap\.sh|bscscan|etherscan|lens\.google/i.test(href)) addNode(n, 1);
           else addNode(n, 2);
         });
+        if (brewAddrSet.size) {
+          root.querySelectorAll("[href*='6666']").forEach((n) => {
+            const href = (n.getAttribute && n.getAttribute("href")) || "";
+            const tok = extractAnyToken(href);
+            if (tok && brewAddrSet.has(tok)) addNode(n, 2);
+          });
+        }
         if (
           isGmgnRobinhoodPage() ||
           (isGmgnMixedChainPage() && rootHasRobinhoodTokenHref(root))
@@ -13017,7 +13212,7 @@
     // Last resort: textContent only（多命中则放弃，避免 short 碰撞猜错）
     const blob = card.textContent || "";
     if (blob.length < 8000) {
-      const re = /0x[a-fA-F0-9]{36}(8888|7777|ffff)/gi;
+      const re = /0x[a-fA-F0-9]{36}(8888|7777|ffff|4444)/gi;
       const textHits = [];
       let match = re.exec(blob);
       while (match) {
@@ -13740,6 +13935,9 @@
       if (!(icon instanceof HTMLElement)) return;
       const tok = String(icon.dataset.feeToken || "").toLowerCase();
       if (!/^0x[a-f0-9]{40}$/.test(tok) || seen.has(tok)) return;
+      if (isHostOnlyPoolAddr(tok) || (notGeniusAddrSet.has(tok) && !TARGET_TOKEN_RE.test(tok))) {
+        return;
+      }
       const text = String(icon.textContent || "");
       if (text.indexOf("🪙") !== -1 || isGeniusFunToken(tok)) {
         rememberGeniusFunAddr(tok);
@@ -13767,6 +13965,14 @@
     const confirmed = [];
     Object.entries(data.results || {}).forEach(([rawToken, result]) => {
       const token = String(rawToken).toLowerCase();
+      if (
+        isHostOnlyPoolAddr(token) ||
+        (notGeniusAddrSet.has(token) && !TARGET_TOKEN_RE.test(token))
+      ) {
+        requestQueue.delete(token);
+        cancelIncompleteModes(token);
+        return;
+      }
       const entry = normalizeResult(result);
       if (!entry) return;
       if (
@@ -13829,6 +14035,7 @@
         (Number(entry.buy_tax_bps) || 0) + (Number(entry.sell_tax_bps) || 0) <= 0;
       const fromChain = result.source === "chain" || result.source === "upstream";
       if (token) entry.address = token;
+      if (prev && prev.source_host) absorbHigherBuySellTax(entry, prev);
       if (entry.__geniusfun || isGeniusFunToken(token)) {
         // chain unknown 不是定案（host-fee 仍可覆盖），但不要钉死 __needsChain，否则 6h 内无法停 /modes。
         entry.__modesSettled = !emptyUnknown;
@@ -14291,6 +14498,13 @@
   function isHostFeeEntryPending(entry) {
     if (!entry || isFeeLoadingEntry(entry)) return false;
     if (entry && entry.__pons_v2 === true) return false;
+    if (
+      entry.__poolOnly === true ||
+      entry.platform === "brew" ||
+      entry.platform === "four_pool"
+    ) {
+      return false;
+    }
     if (isGeniusFeeEntry(entry)) {
       if (isGeniusModesSettled(entry)) return false;
       if ((Number(entry.gift_bps) || 0) > 0) return false;
@@ -14308,6 +14522,13 @@
   function hostFeeStillNeedsModes(entry) {
     if (!entry || isFeeLoadingEntry(entry)) return false;
     if (entry.__pons_v2 === true) return false;
+    if (
+      entry.__poolOnly === true ||
+      entry.platform === "brew" ||
+      entry.platform === "four_pool"
+    ) {
+      return false;
+    }
     if (isGeniusFeeEntry(entry) && hostFeeAllocationBps(entry) <= 0) {
       if (isFreshUnknown(entry, entry.address)) return false;
       return true;
@@ -14363,6 +14584,7 @@
         typeof result.vault_address === "string" ? result.vault_address.toLowerCase() : "",
       basket_assets: normalizeBasketAssets(result.basket_assets),
       source_host: typeof result.source_host === "string" ? result.source_host : "",
+      __poolOnly: result.__poolOnly === true,
       __needsChain: result.__needsChain === true,
       __awaitSecurity: result.__awaitSecurity === true,
       __basketPendingUntil:
@@ -18179,6 +18401,19 @@
 
   function hostFeeEntryShouldApply(prev, entry) {
     if (!prev) return true;
+    // 没有 s_tal 的后续 brew 包只补报价和税率，不能盖掉已经画出的分配。
+    if (
+      entry.platform === "brew" &&
+      entry.__poolOnly === true &&
+      prev.platform === "brew" &&
+      hostFeeAllocationBps(prev) > 0
+    ) {
+      return false;
+    }
+    // 后来的 brew / 4444 必须能补上底池；不要反过来让 Genius stub 盖掉它们。
+    if (entry.platform === "brew" || entry.platform === "four_pool" || entry.__poolOnly === true) {
+      return true;
+    }
     if (entry.__pons_v2 === true || prev.__pons_v2 === true) {
       return robinhoodHostFeeShouldApply(prev, entry);
     }
@@ -18369,9 +18604,27 @@
       // 平台由 page-hook 按 fee-core 注册表判定；有 platform 时以它为准推导旧标记，
       // 没有（Genius stub 等旧路径）才退回 __pons_v2 / __geniusfun。
       const platformSpec = Core.platformSpec(raw.platform);
-      const hostOnly = platformSpec ? platformSpec.source === "host" : raw.__pons_v2 === true;
-      const genius = platformSpec ? platformSpec.id === "geniusfun" : raw.__geniusfun === true;
-      if (hostOnly) rememberPonsV2Addr(token);
+      const platformId = platformSpec ? platformSpec.id : "";
+      const ponsHost =
+        platformId === "pons_v2" ||
+        platformId === "longxyz" ||
+        (!platformSpec && raw.__pons_v2 === true);
+      const poolHost = platformId === "brew" || platformId === "four_pool";
+      const genius = platformId === "geniusfun" || (!platformSpec && raw.__geniusfun === true);
+      if (brewAddrSet.has(token) && platformId !== "brew") continue;
+      if (fourPoolAddrSet.has(token) && platformId !== "four_pool") continue;
+      if (platformId === "brew") {
+        rememberBoundedAddr(brewAddrSet, token);
+        notGeniusAddrSet.add(token);
+        geniusFunAddrSet.delete(token);
+        requestQueue.delete(token);
+        cancelIncompleteModes(token);
+      } else if (platformId === "four_pool") {
+        rememberBoundedAddr(fourPoolAddrSet, token);
+        requestQueue.delete(token);
+        cancelIncompleteModes(token);
+      }
+      if (ponsHost) rememberPonsV2Addr(token);
       if (genius) rememberGeniusFunAddr(token);
       if (!isFeeTargetToken(token)) continue;
       const derived = deriveHostFeeMode(raw);
@@ -18404,13 +18657,15 @@
         quote_token: String(raw.quote_token || raw.quote_address || "").toLowerCase(),
         vault_address: String(raw.vault_address || "").toLowerCase(),
         basket_assets: normalizeBasketAssets(raw.basket_assets),
+        __poolOnly: raw.__poolOnly === true || platformId === "four_pool",
         fetched_at: Date.now()
       };
       const entry = normalizeResult(payload);
       if (!entry) continue;
       if (platformSpec) entry.platform = platformSpec.id;
-      entry.__pons_v2 = hostOnly;
-      entry.__geniusfun = genius;
+      entry.__poolOnly = raw.__poolOnly === true || platformId === "four_pool";
+      entry.__pons_v2 = ponsHost;
+      entry.__geniusfun = genius && platformId !== "brew";
       if (entry.platform === "longxyz" && token) {
         longxyzAddrSet.add(token);
         if (longxyzAddrSet.size > 400) longxyzAddrSet.delete(longxyzAddrSet.values().next().value);
@@ -18430,7 +18685,7 @@
       entry.__paintComplete = raw.__paintComplete === true || hostFeePaintComplete(entry);
       entry.__needsChain = raw.__needsChain === true;
       entry.__fromFiber = raw.__fromFiber === true;
-      if (hostOnly) entry.__needsChain = false;
+      if (ponsHost || poolHost || entry.__poolOnly === true) entry.__needsChain = false;
       entry.__awaitSecurity = raw.__awaitSecurity === true;
       entry.__basketPendingUntil =
         typeof raw.__basketPendingUntil === "number" ? raw.__basketPendingUntil : 0;
@@ -18450,7 +18705,29 @@
         }
       }
       const prev = modeCache.get(token);
-      if (prev && !prev.source_host && prev.__needsChain !== true) {
+      if (prev && !hostFeeEntryShouldApply(prev, entry)) {
+        if (
+          entry.platform === "brew" &&
+          entry.__poolOnly === true &&
+          prev.platform === "brew" &&
+          hostFeeAllocationBps(prev) > 0
+        ) {
+          let changed = absorbHigherBuySellTax(prev, entry);
+          const nextQ = String(entry.quote_symbol || "").trim();
+          if (nextQ && !String(prev.quote_symbol || "").trim()) {
+            prev.quote_symbol = nextQ;
+            if (entry.quote_token) prev.quote_token = entry.quote_token;
+            changed = true;
+          }
+          if (changed) {
+            modeCache.set(token, prev);
+            confirmed.push([token, prev]);
+          }
+        }
+        continue;
+      }
+      const incomingPoolHost = poolHost || entry.__poolOnly === true;
+      if (!incomingPoolHost && prev && !prev.source_host && prev.__needsChain !== true) {
         const prevEmpty =
           prev.mode === "unknown" && hostFeeAllocationBps(prev) <= 0;
         const nextHasAlloc = hostFeeAllocationBps(entry) > 0;
@@ -18462,16 +18739,28 @@
           (entry.is_stocks_vault === true || nextBag >= 2);
         // 空 unknown 负缓存不能挡住 GMGN host-fee；空篮子金库允许 flap_stocks 补篮子。
         if (!(prevEmpty && nextHasAlloc) && !stocksFill) {
+          if (absorbHigherBuySellTax(prev, entry)) {
+            modeCache.set(token, prev);
+            confirmed.push([token, prev]);
+          }
           continue;
         }
       }
-      if (prev && !hostFeeEntryShouldApply(prev, entry)) continue;
       takeStockBasket(prev, entry);
       if (isTrustedStockVault(entry)) entry.is_stocks_vault = true;
       if (prev && Number(prev.fetched_at) > 0) {
         entry.fetched_at = prev.fetched_at;
       }
       if (prev) {
+        absorbHigherBuySellTax(entry, prev);
+        if (
+          incomingPoolHost &&
+          !String(entry.quote_symbol || "").trim() &&
+          String(prev.quote_symbol || "").trim()
+        ) {
+          entry.quote_symbol = prev.quote_symbol;
+          entry.quote_token = prev.quote_token || entry.quote_token;
+        }
         if (
           !quoteSymbolLooksNative(prev.quote_symbol) &&
           quoteSymbolLooksNative(entry.quote_symbol)
@@ -18522,6 +18811,7 @@
         if (!isTokenDetailRoute()) {
           paintGmgnCachedViewportCards("host-fee");
         }
+        if (quickHasOpenOverlay()) scheduleGmgnOverlayPaint("host-fee", 0, false);
       } catch (_p) {
         // ignore
       }
@@ -19559,6 +19849,13 @@
 
   function buildFeeLabel(entry, domQuoteSymbol, token) {
     const prefs = displayPrefs || DEFAULT_DISPLAY_PREFS;
+    if (
+      entry &&
+      (entry.platform === "four_pool" ||
+        (entry.__poolOnly === true && hostFeeAllocationBps(entry) <= 0))
+    ) {
+      return "";
+    }
     const domQuote = compactDisplaySymbol(domQuoteSymbol || "");
     const basketAssets = getBasketAssetsForDisplay(entry);
     const basketPair = basketPairText(basketAssets);
@@ -19956,6 +20253,13 @@
         }
       }
     }
+    if (
+      entry.__poolOnly === true ||
+      entry.platform === "four_pool" ||
+      (entry.platform === "brew" && hostFeeAllocationBps(entry) <= 0)
+    ) {
+      colorClass = "hybrid";
+    }
     const parts = buildDisplayParts(entry, quoteSymbol, tok);
     const label = parts.label;
     const basketAssets = getBasketAssetsForDisplay(entry);
@@ -20242,8 +20546,15 @@
 
   /** 底池前缀：Four 🖐️ · Flap 🦋 · 其它 🪙 */
   function poolPrefixForToken(token) {
-    if (isFourTaxToken(token)) return POOL_PREFIX_FOUR;
-    if (isFlapTaxToken(token)) return POOL_PREFIX_FLAP;
+    const ca = String(token || "").toLowerCase();
+    if (isFourTaxToken(ca) || isFourPoolSuffix(ca) || fourPoolAddrSet.has(ca)) {
+      return POOL_PREFIX_FOUR;
+    }
+    const cached = ca ? modeCache.get(ca) : null;
+    if (cached && (cached.platform === "four" || cached.platform === "four_pool")) {
+      return POOL_PREFIX_FOUR;
+    }
+    if (isFlapTaxToken(ca)) return POOL_PREFIX_FLAP;
     return POOL_PREFIX_DEFAULT;
   }
 
@@ -20381,6 +20692,16 @@
    */
   function buildTaxDetailUrl(token) {
     const ca = String(token || "").toLowerCase();
+    if (brewAddrSet.has(ca)) return "";
+    const cachedPlat = modeCache.get(ca);
+    if (cachedPlat && cachedPlat.platform === "brew") return "";
+    if (
+      fourPoolAddrSet.has(ca) ||
+      isFourPoolSuffix(ca) ||
+      (cachedPlat && cachedPlat.platform === "four_pool")
+    ) {
+      return Core.taxDetailUrl("four_pool", ca, uiLang);
+    }
     let platform = "";
     if (longxyzAddrSet.has(ca)) platform = "longxyz";
     else if (isGeniusFunToken(ca)) platform = "geniusfun";

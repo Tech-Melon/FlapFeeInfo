@@ -6,10 +6,11 @@
  *   · MAIN_THREAD 才装 JSON.parse + 列表 WS
  *   · SOL / 非税币页不装过滤钩子
  *   · 禁止改 Object.prototype（0.8.123 挂 onmessage 导致 GMGN 打不开）
- * ★ 链+平台 host-fee：BSC Flap/Four 尾号、BSC geniusfun、RH pons_v2
+ * ★ 链+平台 host-fee：BSC Flap/Four 尾号、BSC geniusfun、RH pons_v2、
+ *   brew（GMGN 宿主，不打 /modes）、Four 已迁移 4444（只画底池）
  */
 (() => {
-  const HOOK_VER = 206;
+  const HOOK_VER = 209;
   // fee-core.js 必须先于本文件进 MAIN world（manifest 与所有兜底注入都按此顺序）。
   const Core = window.__flapFeeCore;
   if (!Core) return;
@@ -53,6 +54,7 @@
     basketSymbolMatchesDom,
     normalizeCardMarkHandle,
     isGeniusFunSuffix,
+    isFourPoolSuffix,
     dedupeBasketAssets,
     basketSymbolsReady,
     basketLikelyTruncated,
@@ -828,7 +830,12 @@
     }
     const plat = gmgnNormalizePlatform(item);
     // 无链字段时只信 BSC 平台，禁止把整页当 BSC 去判断任意卡。
-    return plat === "geniusfun" || plat === "flap" || plat === "four";
+    if (plat === "geniusfun" || plat === "flap" || plat === "four" || plat === "brew") {
+      return true;
+    }
+    const addr = gmgnAddr(item);
+    if (addr && (brewAddrSet.has(addr) || isFourPoolSuffix(addr))) return true;
+    return false;
   }
 
   function isFlapFourSuffixAddr(addr) {
@@ -847,7 +854,20 @@
     if (first) geniusFunAddrSet.delete(first);
   }
 
-  /** 尾号 6666 但宿主明确给了别的 launchpad（Debot cheesepad_melt 等）：不是 Genius。 */
+  /** brew 尾号常是 6666，但不能走 Genius /modes。上限与其它集合一样 FIFO。 */
+  const brewAddrSet = new Set();
+
+  function rememberBrewAddr(addr) {
+    const a = String(addr || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(a)) return;
+    brewAddrSet.add(a);
+    geniusFunAddrSet.delete(a);
+    if (brewAddrSet.size <= 400) return;
+    const first = brewAddrSet.keys().next().value;
+    if (first) brewAddrSet.delete(first);
+  }
+
+  /** 尾号 6666 但宿主明确给了别的 launchpad（Debot cheesepad_melt、brew 等）：不是 Genius。 */
   const notGeniusAddrSet = new Set();
   const notGeniusPending = [];
   let notGeniusFlushTimer = 0;
@@ -879,9 +899,25 @@
     if (!notGeniusFlushTimer) notGeniusFlushTimer = window.setTimeout(flushNotGeniusPending, 0);
   }
 
+  function replayNotGeniusAddrs() {
+    if (!notGeniusAddrSet.size) return;
+    const addrs = [];
+    notGeniusAddrSet.forEach((a) => addrs.push(a));
+    for (let i = 0; i < addrs.length; i += 64) {
+      try {
+        window.postMessage(
+          { source: "flap-fee-info", type: "genius-reject-map", addrs: addrs.slice(i, i + 64) },
+          "*"
+        );
+      } catch (_pm) {
+        // ignore
+      }
+    }
+  }
+
   function isGeniusFunAddr(addr) {
     const a = String(addr || "").toLowerCase();
-    if (notGeniusAddrSet.has(a)) return false;
+    if (notGeniusAddrSet.has(a) || brewAddrSet.has(a)) return false;
     if (isGeniusFunSuffix(a)) {
       rememberGeniusFunAddr(a);
       return true;
@@ -924,11 +960,12 @@
     const plat = gmgnNormalizePlatform(item);
     if (gmgnItemIsRobinhood(item)) return plat === "pons_v2";
     if (!gmgnItemIsBsc(item)) return false;
+    if (plat === "brew" || brewAddrSet.has(addr)) return true;
     if (plat === "geniusfun") return true;
-    if (plat === "four") return /ffff$/i.test(addr);
+    if (plat === "four") return /ffff$/i.test(addr) || isFourPoolSuffix(addr);
     if (plat === "flap") return /(8888|7777)$/i.test(addr);
     if (plat) return false;
-    return isFlapFourSuffixAddr(addr) || isGeniusFunSuffix(addr);
+    return isFlapFourSuffixAddr(addr) || isFourPoolSuffix(addr) || isGeniusFunSuffix(addr);
   }
 
   function isDomFeeTargetAddr(addr, href) {
@@ -938,11 +975,14 @@
     if (/\/robinhood\/token\//i.test(h) || /\/token\/robinhood\//i.test(h)) {
       return true;
     }
+    if (isFourPoolSuffix(a) || brewAddrSet.has(a)) return true;
     if (/\/bsc\/token\//i.test(h) || /\/token\/bsc\//i.test(h)) {
-      if (isFlapFourSuffixAddr(a) || isGeniusFunAddr(a)) return true;
+      if (isFlapFourSuffixAddr(a)) return true;
+      if (notGeniusAddrSet.has(a)) return false;
       const path = String(location.pathname || "");
       const m = path.match(/0x[a-fA-F0-9]{40}/i);
-      return Boolean(m && m[0].toLowerCase() === a);
+      if (m && m[0].toLowerCase() === a) return true;
+      return isGeniusFunAddr(a);
     }
     if (isFlapFourSuffixAddr(a) || isGeniusFunAddr(a)) return true;
     const path = String(location.pathname || "");
@@ -1037,11 +1077,20 @@
       item?.f?.launchpad ||
       "";
     if (raw) return String(raw).toLowerCase();
+    const migrated = String(
+      item?.migrated_pool_exchange ||
+        item?.f?.migrated_pool_exchange ||
+        (pool && pool.migrated_pool_exchange) ||
+        ""
+    ).toLowerCase();
+    // 精确等于 brew，避免 homebrew 一类误伤。
+    if (migrated === "brew") return "brew";
     const poolEx = String(
       (pool && (pool.exchange || pool.pool_type || pool.launchpad)) ||
         item?.exchange ||
         ""
     ).toLowerCase();
+    if (poolEx === "brew") return "brew";
     if (/genius|flap|four|pons/.test(poolEx)) return poolEx;
     return "";
   }
@@ -1275,6 +1324,7 @@
       window.clearTimeout(hostFeeFlushTimer);
       hostFeeFlushTimer = 0;
     }
+    replayNotGeniusAddrs();
     flushHostFeeReplayToContent();
     flushGeniusAddrIndex();
   }
@@ -1791,10 +1841,32 @@
         c.launchpad_platform || c.launchpad || c.lpp || (c.pool && c.pool.exchange) || ""
       ).toLowerCase();
       const genius = lp.indexOf("genius") !== -1;
+      const platId = Core.platformFromLaunchpad(lp);
+      const brew = platId === "brew";
+      const fourPool =
+        isFourPoolSuffix(addr) && (!lp || platId === "four" || platId === "four_pool");
+      if (brew || fourPool) {
+        if (brew) {
+          rememberBrewAddr(addr);
+          rememberNotGeniusAddr(addr);
+        }
+        seen.add(addr);
+        try {
+          collectHostFeesFromGmgnItem(c);
+        } catch (_host) {
+          // ignore
+        }
+        return;
+      }
       if (lp && !genius) rememberNotGeniusAddr(addr);
-      const suffixGenius = !lp && isGeniusFunAddr(addr);
+      const suffixGenius = !lp && !brewAddrSet.has(addr) && isGeniusFunAddr(addr);
       if (!TARGET_TOKEN_RE.test(addr) && !genius && !suffixGenius) return;
       if (genius || suffixGenius) rememberGeniusFunAddr(addr);
+      try {
+        collectHostFeesFromGmgnItem(c);
+      } catch (_fee) {
+        // ignore
+      }
       seen.add(addr);
       out.push(addr);
     };
@@ -1820,6 +1892,8 @@
     try {
       const json = nativeJsonParse(text);
       const tokens = collectBscTaxSearchTokens(json);
+      // 先把 brew / 合计税率送到 content，再让搜索去打 /modes。
+      flushHostFeePendingNow();
       if (!tokens.length) return;
       window.postMessage(
         { source: "flap-fee-info", type: "search-overlay-tokens", tokens },
@@ -2096,6 +2170,9 @@
   /** 首帧粗判（需报价地址）；content 同名函数另认 WBNB 分红/报价名就绪，两者有意不同，勿合并。 */
   function hostFeePaintComplete(entry) {
     if (!entry) return false;
+    if (entry.__poolOnly === true || entry.platform === "four_pool") {
+      return Boolean(String(entry.quote_symbol || "").trim());
+    }
     const bps =
       (Number(entry.dividend_bps) || 0) +
       (Number(entry.market_bps) || 0) +
@@ -2136,22 +2213,32 @@
       entry.__basketPendingUntil = 0;
     }
     entry.__paintComplete = hostFeePaintComplete(entry);
-    if (entry.__pons_v2 === true) entry.__needsChain = false;
+    if (
+      entry.__poolOnly === true ||
+      entry.platform === "brew" ||
+      entry.platform === "four_pool" ||
+      entry.__pons_v2 === true
+    ) {
+      entry.__needsChain = false;
+    }
     return entry;
   }
 
   function gmgnSecurityTaxBps(item) {
-    const sec =
-      (item && item.security) ||
-      (item && item.s) ||
-      (item && item.f && item.f.security) ||
-      (item && item.f && item.f.s) ||
-      null;
-    if (!sec || typeof sec !== "object") return { buy: 0, sell: 0 };
-    return {
-      buy: ratioToBps(sec.buy_tax ?? sec.buy_tax_rate ?? sec.buyTax),
-      sell: ratioToBps(sec.sell_tax ?? sec.sell_tax_rate ?? sec.sellTax)
+    const bags = [];
+    const push = (obj) => {
+      if (obj && typeof obj === "object") bags.push(obj);
     };
+    // item.s 在战壕里经常是 symbol 字符串，不能当 security。
+    push(item);
+    push(item && item.f);
+    push(item && item.security);
+    push(item && item.s);
+    const f = item && item.f;
+    push(f && f.security);
+    push(f && f.s);
+    const tax = Core.gmgnDisplayedTaxBps(bags);
+    return { buy: tax.buy_tax_bps, sell: tax.sell_tax_bps };
   }
 
   function hostFeeSig(entry) {
@@ -2172,7 +2259,9 @@
       entry.quote_symbol || "",
       entry.quote_token || "",
       entry.dividend_symbol || "",
-      entry.tax_symbol || ""
+      entry.tax_symbol || "",
+      entry.platform || "",
+      entry.__poolOnly ? 1 : 0
     ].join("|");
   }
 
@@ -2208,9 +2297,15 @@
     if (!entry || !entry.address) return;
     const pons = entry.__pons_v2 === true;
     const genius = entry.__geniusfun === true;
-    if (!TARGET_TOKEN_RE.test(entry.address) && !pons && !genius) return;
+    const plat = String(entry.platform || "");
+    const poolHost = plat === "brew" || plat === "four_pool" || entry.__poolOnly === true;
+    if (!TARGET_TOKEN_RE.test(entry.address) && !pons && !genius && !poolHost) return;
     const addr = String(entry.address).toLowerCase();
-    if (genius) rememberGeniusFunAddr(addr);
+    if (plat === "brew") {
+      rememberBrewAddr(addr);
+      rememberNotGeniusAddr(addr);
+    }
+    if (genius && plat !== "brew") rememberGeniusFunAddr(addr);
     if (pons) {
       rhFeeDone.add(addr);
       if (rhFeeDone.size > 400) {
@@ -2343,6 +2438,7 @@
   }
 
   function gmgnGeniusStubFromItem(item, addr) {
+    const tax = gmgnSecurityTaxBps(item);
     const quote_symbol = gmgnResolveQuoteSymbol(item, null);
     const quote_token = String(
       item.launch_quote_address ||
@@ -2362,8 +2458,8 @@
       binance_charity_bps: 0,
       is_vault: false,
       is_stocks_vault: false,
-      buy_tax_bps: 200,
-      sell_tax_bps: 200,
+      buy_tax_bps: tax.buy,
+      sell_tax_bps: tax.sell,
       quote_symbol,
       quote_token,
       __geniusfun: true,
@@ -2371,24 +2467,101 @@
     };
   }
 
+  function gmgnPoolOnlyFromItem(item, addr, platform) {
+    const q = gmgnItemQuoteFields(item);
+    const tax = gmgnSecurityTaxBps(item);
+    return finalizeHostFeeEntry({
+      address: addr,
+      source: "gmgn",
+      dividend_bps: 0,
+      market_bps: 0,
+      gift_bps: 0,
+      deflation_bps: 0,
+      lp_bps: 0,
+      giggle_charity_bps: 0,
+      binance_charity_bps: 0,
+      is_vault: false,
+      is_stocks_vault: false,
+      buy_tax_bps: tax.buy,
+      sell_tax_bps: tax.sell,
+      basket_assets: [],
+      quote_symbol: q.symbol,
+      quote_token: q.address,
+      dividend_symbol: "",
+      tax_symbol: gmgnItemSelfSymbol(item),
+      __needsChain: false,
+      __poolOnly: true,
+      __pons_v2: false,
+      __geniusfun: false,
+      platform
+    });
+  }
+
   function gmgnHostFeeFromItem(item) {
     const addr = gmgnAddr(item);
     const pons = gmgnIsPonsV2(item);
     const plat = gmgnNormalizePlatform(item);
+    const knownBrew = Boolean(addr) && (plat === "brew" || brewAddrSet.has(addr));
+    const fourPool =
+      Boolean(addr) &&
+      isFourPoolSuffix(addr) &&
+      !gmgnItemIsRobinhood(item) &&
+      (!plat || plat === "four" || plat === "four_pool");
+    if (fourPool) return gmgnPoolOnlyFromItem(item, addr, "four_pool");
+    if (knownBrew) {
+      rememberBrewAddr(addr);
+      rememberNotGeniusAddr(addr);
+    }
     const genius =
-      (plat === "geniusfun" && gmgnItemIsBsc(item)) || (!plat && isGeniusFunAddr(addr));
+      !knownBrew &&
+      ((plat === "geniusfun" && gmgnItemIsBsc(item)) ||
+        (!plat && !brewAddrSet.has(addr) && isGeniusFunAddr(addr)));
     if (pons) {
       if (!addr) return null;
-    } else if (genius) {
+    } else if (knownBrew || genius) {
       if (!addr) return null;
     } else if (!TARGET_TOKEN_RE.test(addr)) {
       return null;
     }
     const tal = gmgnTal(item);
+    if (knownBrew && (!tal || typeof tal !== "object")) {
+      return gmgnPoolOnlyFromItem(item, addr, "brew");
+    }
     if (genius && (!tal || typeof tal !== "object")) {
       return gmgnGeniusStubFromItem(item, addr);
     }
-    if (!tal || typeof tal !== "object") return null;
+    if (!tal || typeof tal !== "object") {
+      // 搜索和首帧经常没有 s_tal，但卡片 Tax 已经是合计税率。先记下，/modes 不能把它盖小。
+      const taxOnly = gmgnSecurityTaxBps(item);
+      if ((taxOnly.buy > 0 || taxOnly.sell > 0) && TARGET_TOKEN_RE.test(addr)) {
+        return finalizeHostFeeEntry({
+          address: addr,
+          source: "gmgn",
+          dividend_bps: 0,
+          market_bps: 0,
+          gift_bps: 0,
+          deflation_bps: 0,
+          lp_bps: 0,
+          giggle_charity_bps: 0,
+          binance_charity_bps: 0,
+          is_vault: false,
+          is_stocks_vault: false,
+          buy_tax_bps: taxOnly.buy,
+          sell_tax_bps: taxOnly.sell,
+          basket_assets: [],
+          quote_symbol: gmgnResolveQuoteSymbol(item, null),
+          quote_token: gmgnItemQuoteFields(item).address,
+          dividend_symbol: "",
+          tax_symbol: gmgnItemSelfSymbol(item),
+          __needsChain: true,
+          __poolOnly: false,
+          __pons_v2: false,
+          __geniusfun: false,
+          platform: Core.platformFromSuffix(addr)
+        });
+      }
+      return null;
+    }
     let dividend_bps = ratioToBps(
       pickTalField(tal, [
         "dividend",
@@ -2562,19 +2735,22 @@
         quote_symbol,
         tax_symbol: selfSym
       }),
-      __needsChain: genius ? !geniusSplitReady : needsChain,
+      __needsChain: knownBrew ? false : genius ? !geniusSplitReady : needsChain,
+      __poolOnly: false,
       __pons_v2: pons,
-      __geniusfun: genius,
+      __geniusfun: knownBrew ? false : genius,
       // 平台只在 page-hook 判定一次；content 以 entry.platform 为准（点击跳转 / 平台集合）
-      platform: pons
-        ? gmgnIsLongxyzWithTal(item)
-          ? "longxyz"
-          : "pons_v2"
-        : genius
-          ? "geniusfun"
-          : Core.platformSpec(plat)
-            ? plat
-            : Core.platformFromSuffix(addr)
+      platform: knownBrew
+        ? "brew"
+        : pons
+          ? gmgnIsLongxyzWithTal(item)
+            ? "longxyz"
+            : "pons_v2"
+          : genius
+            ? "geniusfun"
+            : Core.platformSpec(plat)
+              ? plat
+              : Core.platformFromSuffix(addr)
     });
   }
 
@@ -2623,6 +2799,8 @@
     )
       .trim()
       .toLowerCase();
+    if (isFourPoolSuffix(addr)) return true;
+    if (Core.platformFromLaunchpad(debotRowLaunchpad(row)) === "brew") return true;
     return TARGET_TOKEN_RE.test(addr) || isGeniusFunSuffix(addr);
   }
 
@@ -2681,6 +2859,7 @@
   function queuePonsSkipAddr(addr) {
     const a = String(addr || "").toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(a) || rhFeeDone.has(a)) return;
+    if (brewAddrSet.has(a) || isFourPoolSuffix(a)) return;
     if (TARGET_TOKEN_RE.test(a) || isGeniusFunAddr(a)) return;
     debotRememberRhSkip(addr);
     if (ponsSkipPendingSeen.has(a)) return;
@@ -2747,6 +2926,51 @@
     return lp.indexOf("genius") !== -1;
   }
 
+  function debotPoolOnlyFromRow(row, addr, platform) {
+    const meta = row.meta && typeof row.meta === "object" ? row.meta : null;
+    const extra = (meta && meta.launchpad_extra) || row.launchpad_extra;
+    const ex = extra && typeof extra === "object" ? extra : {};
+    const quote_token = String(
+      ex.base_token || ex.quote_token || ex.quote_address || row.quote_address || row.base_token || ""
+    )
+      .trim()
+      .toLowerCase();
+    let quote_symbol = String(
+      ex.base_token_symbol || ex.quote_symbol || row.quote_symbol || ""
+    ).trim();
+    if (/\.png|\.jpg|https?:/i.test(quote_symbol)) quote_symbol = "";
+    if (!quote_symbol && /^0x[a-f0-9]{40}$/.test(quote_token)) {
+      quote_symbol = symbolFromKnownTokenAddress(quote_token, false) || "";
+    }
+    if (/^WBNB$/i.test(quote_symbol)) quote_symbol = "BNB";
+    const tax = Core.gmgnDisplayedTaxBps([row, ex]);
+    return finalizeHostFeeEntry({
+      address: addr,
+      source: "debot",
+      dividend_bps: 0,
+      market_bps: 0,
+      gift_bps: 0,
+      deflation_bps: 0,
+      lp_bps: 0,
+      giggle_charity_bps: 0,
+      binance_charity_bps: 0,
+      is_vault: false,
+      is_stocks_vault: false,
+      buy_tax_bps: tax.buy_tax_bps,
+      sell_tax_bps: tax.sell_tax_bps,
+      basket_assets: [],
+      quote_symbol,
+      quote_token,
+      dividend_symbol: "",
+      tax_symbol: debotRowSelfSymbol(row, meta),
+      __needsChain: false,
+      __poolOnly: true,
+      __pons_v2: false,
+      __geniusfun: false,
+      platform
+    });
+  }
+
   function debotHostFeeFromRow(row) {
     if (!row || typeof row !== "object") return null;
     const pons = debotRowIsPonsV2(row);
@@ -2757,8 +2981,21 @@
     )
       .trim()
       .toLowerCase();
+    const lp = debotRowLaunchpad(row);
+    const platId = Core.platformFromLaunchpad(lp);
+    const brew = platId === "brew";
+    const fourPool =
+      isFourPoolSuffix(addr) && (!lp || platId === "four" || platId === "four_pool");
+    if ((brew || fourPool) && /^0x[a-f0-9]{40}$/.test(addr)) {
+      if (brew) {
+        rememberBrewAddr(addr);
+        rememberNotGeniusAddr(addr);
+      }
+      return debotPoolOnlyFromRow(row, addr, brew ? "brew" : "four_pool");
+    }
     const genius =
-      (debotRowIsGeniusFun(row) && debotRowIsBsc(row)) || isGeniusFunAddr(addr);
+      (debotRowIsGeniusFun(row) && debotRowIsBsc(row)) ||
+      (!brewAddrSet.has(addr) && isGeniusFunAddr(addr));
     if (pons) {
       if (!/^0x[a-f0-9]{40}$/.test(addr)) return null;
     } else if (genius) {
@@ -2789,8 +3026,12 @@
         gift_bps: 0,
         is_vault: false,
         is_stocks_vault: false,
-        buy_tax_bps: Number(ex.buy_tax_bps || ex.buy_fee_bps) || 200,
-        sell_tax_bps: Number(ex.sell_tax_bps || ex.sell_fee_bps) || 200,
+        buy_tax_bps:
+          Number(ex.buy_tax_bps || ex.buy_fee_bps) ||
+          Core.gmgnDisplayedTaxBps([row, ex]).buy_tax_bps,
+        sell_tax_bps:
+          Number(ex.sell_tax_bps || ex.sell_fee_bps) ||
+          Core.gmgnDisplayedTaxBps([row, ex]).sell_tax_bps,
         quote_token,
         quote_symbol,
         __geniusfun: true,
@@ -2822,12 +3063,9 @@
       debotVaultKind(extra) === "stock";
     const basket_assets = normalizeDebotBasket(extra);
     const is_stocks_vault = extra.is_stocks_vault === true || basket_assets.length >= 2;
-    const buy_tax_bps = ratioToBps(
-      row.buy_tax ?? row.buy_tax_rate ?? extra.buy_tax ?? extra.buy_tax_rate
-    );
-    const sell_tax_bps = ratioToBps(
-      row.sell_tax ?? row.sell_tax_rate ?? extra.sell_tax ?? extra.sell_tax_rate
-    );
+    const shownTax = Core.gmgnDisplayedTaxBps([row, extra]);
+    const buy_tax_bps = shownTax.buy_tax_bps;
+    const sell_tax_bps = shownTax.sell_tax_bps;
     const quote_token = String(
       extra.quote_token ||
         extra.quote_address ||
@@ -3186,10 +3424,12 @@
   function gmgnItemLooksLikeFeeTarget(item) {
     const addr = gmgnAddr(item);
     if (!addr) return false;
-    if (isFlapFourSuffixAddr(addr) || isGeniusFunAddr(addr)) return true;
+    if (isFlapFourSuffixAddr(addr) || isFourPoolSuffix(addr) || brewAddrSet.has(addr)) return true;
     const lp = gmgnLaunchpadFamily(item);
-    if (!lp) return false;
-    return lp.indexOf("genius") !== -1 || lp.indexOf("pons_v2") !== -1;
+    if (!lp) return isGeniusFunAddr(addr);
+    if (lp === "brew" || Core.platformFromLaunchpad(lp) === "brew") return true;
+    if (notGeniusAddrSet.has(addr)) return false;
+    return lp.indexOf("genius") !== -1 || lp.indexOf("pons_v2") !== -1 || isGeniusFunAddr(addr);
   }
 
   /**
@@ -3202,13 +3442,25 @@
     const addr = gmgnAddr(tok);
     if (!addr) return;
     const suffix = isFlapFourSuffixAddr(addr);
+    const lp = gmgnLaunchpadFamily(tok);
+    const platId = Core.platformFromLaunchpad(lp);
+    let brew = platId === "brew" || brewAddrSet.has(addr);
+    const fourPool =
+      isFourPoolSuffix(addr) && (!lp || platId === "four" || platId === "four_pool");
     let genius = false;
     let pons = false;
-    if (!suffix) {
-      const lp = gmgnLaunchpadFamily(tok);
+    if (brew) {
+      rememberBrewAddr(addr);
+      rememberNotGeniusAddr(addr);
+    } else if (fourPool) {
+      // 4444 只画底池，不记 Genius。
+    } else if (!suffix) {
       if (lp) {
-        if (lp.indexOf("genius") !== -1) genius = true;
+        if (lp.indexOf("genius") !== -1 && !notGeniusAddrSet.has(addr)) genius = true;
         else if (lp.indexOf("pons_v2") !== -1) pons = true;
+        else if (isGeniusFunSuffix(addr)) rememberNotGeniusAddr(addr);
+      } else if (isGeniusFunSuffix(addr) && !notGeniusAddrSet.has(addr) && !brewAddrSet.has(addr)) {
+        genius = true;
       }
     }
     if (genius) {
@@ -3216,11 +3468,11 @@
       scheduleGeniusAddrIndexFlush();
     }
     if (mode === "index") {
-      if (suffix || pons) collectHostFeesFromGmgnItem(tok);
+      if (suffix || pons || brew || fourPool) collectHostFeesFromGmgnItem(tok);
       return;
     }
     queueCardMarkFromItem(tok);
-    if (suffix || genius || pons || isGeniusFunAddr(addr)) {
+    if (suffix || genius || pons || brew || fourPool) {
       collectHostFeesFromGmgnItem(tok);
     }
   }
@@ -4202,48 +4454,90 @@
         const ca = String(
           json?.data?.address || sec?.address || lp?.address || ""
         ).toLowerCase();
-        const lpBag = {
-          launchpad: typeof lp === "string" ? lp : lp && lp.launchpad,
+        const dataBag = json?.data && typeof json.data === "object" ? json.data : {};
+        const lpObj = lp && typeof lp === "object" ? lp : null;
+        // 发射台可能在 launchpad / lpp / pool.exchange，不能只看 data.launchpad。
+        const lpItem = {
           launchpad_platform:
-            (lp && typeof lp === "object" && (lp.launchpad_platform || lp.lpp || lp.launchpad)) ||
-            (typeof lp === "string" ? lp : "")
+            dataBag.launchpad_platform ||
+            dataBag.lpp ||
+            (lpObj && (lpObj.launchpad_platform || lpObj.lpp)) ||
+            "",
+          lpp: dataBag.lpp || (lpObj && lpObj.lpp) || "",
+          launchpad:
+            (typeof lp === "string" ? lp : "") ||
+            (lpObj && lpObj.launchpad) ||
+            dataBag.launchpad ||
+            "",
+          pool: dataBag.pool || (lpObj && lpObj.pool) || null,
+          migrated_pool_exchange:
+            dataBag.migrated_pool_exchange || (lpObj && lpObj.migrated_pool_exchange) || "",
+          exchange: dataBag.exchange || ""
         };
-        const plat = gmgnNormalizePlatform(lpBag);
+        const plat = Core.platformFromLaunchpad(gmgnLaunchpadFamily(lpItem));
         const quoteAddr = String(
           (lp && typeof lp === "object" && (lp.launch_quote_address || lp.qa || lp.quote_address)) ||
+            dataBag.launch_quote_address ||
+            dataBag.quote_address ||
+            dataBag.qa ||
             ""
         ).toLowerCase();
-        if (ca && (plat === "geniusfun" || isGeniusFunAddr(ca))) {
-          rememberGeniusFunAddr(ca);
+        const feeItem = {
+          a: ca,
+          s_tal: tal,
+          tax_allocation: tal,
+          security: sec,
+          buy_tax: dataBag.buy_tax,
+          sell_tax: dataBag.sell_tax,
+          total_buy_tax: dataBag.total_buy_tax,
+          total_sell_tax: dataBag.total_sell_tax,
+          qa: quoteAddr,
+          quote_address: quoteAddr,
+          launch_quote_address: quoteAddr,
+          pool: dataBag.pool,
+          symbol: dataBag.symbol || dataBag.name
+        };
+        if (ca && plat === "brew") {
+          rememberBrewAddr(ca);
+          rememberNotGeniusAddr(ca);
           collectHostFeesFromGmgnItem({
-            a: ca,
-            s_tal: tal,
-            tax_allocation: tal,
-            security: sec,
-            qa: quoteAddr,
-            quote_address: quoteAddr,
-            launch_quote_address: quoteAddr,
-            launchpad: lpBag.launchpad || "geniusfun",
-            launchpad_platform: "geniusfun",
-            f: {
-              launchpad: lpBag.launchpad || "geniusfun",
-              launchpad_platform: "geniusfun"
-            }
+            ...feeItem,
+            launchpad: "brew",
+            launchpad_platform: "brew",
+            f: { launchpad: "brew", launchpad_platform: "brew" }
           });
         } else if (
-          tal &&
-          (TARGET_TOKEN_RE.test(ca) || gmgnIsPonsV2(lpBag))
+          ca &&
+          isFourPoolSuffix(ca) &&
+          (!plat || plat === "four" || plat === "four_pool")
         ) {
           collectHostFeesFromGmgnItem({
-            a: ca,
-            s_tal: tal,
-            tax_allocation: tal,
-            security: sec,
-            launchpad: lpBag.launchpad,
-            launchpad_platform: lpBag.launchpad_platform,
+            ...feeItem,
+            launchpad: lpItem.launchpad || "fourmeme",
+            launchpad_platform: lpItem.launchpad_platform || "fourmeme",
             f: {
-              launchpad: lpBag.launchpad,
-              launchpad_platform: lpBag.launchpad_platform
+              launchpad: lpItem.launchpad || "fourmeme",
+              launchpad_platform: lpItem.launchpad_platform || "fourmeme"
+            }
+          });
+        } else if (ca && plat && plat !== "geniusfun" && isGeniusFunSuffix(ca)) {
+          rememberNotGeniusAddr(ca);
+        } else if (ca && plat === "geniusfun") {
+          rememberGeniusFunAddr(ca);
+          collectHostFeesFromGmgnItem({
+            ...feeItem,
+            launchpad: "geniusfun",
+            launchpad_platform: "geniusfun",
+            f: { launchpad: "geniusfun", launchpad_platform: "geniusfun" }
+          });
+        } else if (tal && (TARGET_TOKEN_RE.test(ca) || gmgnIsPonsV2(lpItem))) {
+          collectHostFeesFromGmgnItem({
+            ...feeItem,
+            launchpad: lpItem.launchpad,
+            launchpad_platform: lpItem.launchpad_platform,
+            f: {
+              launchpad: lpItem.launchpad,
+              launchpad_platform: lpItem.launchpad_platform
             }
           });
         }
@@ -4268,6 +4562,8 @@
       text.indexOf("pons_v2") !== -1 ||
       text.indexOf("geniusfun") !== -1 ||
       text.indexOf("genius.fun") !== -1 ||
+      text.indexOf("fourmeme") !== -1 ||
+      text.indexOf('"brew"') !== -1 ||
       text.indexOf("pumpRank") !== -1
     );
   }
@@ -4870,9 +5166,15 @@
       launchpad_platform,
       quote_symbol,
       quote_address,
+      buy_tax: row?.buy_tax ?? row?.buy_tax_rate,
+      sell_tax: row?.sell_tax ?? row?.sell_tax_rate,
+      total_buy_tax: row?.total_buy_tax,
+      total_sell_tax: row?.total_sell_tax,
       security: {
         buy_tax: row?.buy_tax ?? row?.buy_tax_rate,
-        sell_tax: row?.sell_tax ?? row?.sell_tax_rate
+        sell_tax: row?.sell_tax ?? row?.sell_tax_rate,
+        total_buy_tax: row?.total_buy_tax,
+        total_sell_tax: row?.total_sell_tax
       },
       f: {
         launchpad_platform,

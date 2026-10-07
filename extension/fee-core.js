@@ -5,11 +5,13 @@
  */
 (function (root) {
   // API 变更必须 +1：插件重载不刷页时 MAIN world 里还留着旧版，同版号会跳过加载。
-  const CORE_VER = 3;
+  const CORE_VER = 4;
   if (root.__flapFeeCore && root.__flapFeeCore.ver === CORE_VER) return;
 
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
   const GENIUS_FUN_SUFFIX_RE = /^0x[a-fA-F0-9]{36}6666$/i;
+  // 已迁移 Four 底池（四公主）。只画底池，不进 TARGET、不打 /modes。
+  const FOUR_POOL_SUFFIX_RE = /^0x[a-fA-F0-9]{36}4444$/i;
 
   /**
    * 平台注册表：识别一律「链 + 平台」。
@@ -34,11 +36,27 @@
       detailUrl: (ca) => `https://genius.fun/token/${ca}`
     },
     {
+      // 精确匹配，避免 homebrew / cheesepad 误伤。尾号常是 6666，不能占 suffix。
+      id: "brew",
+      chain: "bsc",
+      source: "host",
+      launchpad: /^brew$/,
+      detailUrl: null
+    },
+    {
       id: "four",
       chain: "bsc",
       source: "modes",
       launchpad: /four/,
       suffix: /^0x[a-fA-F0-9]{36}ffff$/i,
+      detailUrl: (ca) => `https://four.meme/zh-TW/token/${ca}`
+    },
+    {
+      // 不设 launchpad：/four/ 必须仍落到上面的 four（ffff 税币打 /modes）。
+      id: "four_pool",
+      chain: "bsc",
+      source: "host",
+      suffix: FOUR_POOL_SUFFIX_RE,
       detailUrl: (ca) => `https://four.meme/zh-TW/token/${ca}`
     },
     {
@@ -68,7 +86,8 @@
     const lp = String(raw || "").trim().toLowerCase();
     if (!lp) return "";
     for (let i = 0; i < PLATFORMS.length; i += 1) {
-      if (PLATFORMS[i].launchpad.test(lp)) return PLATFORMS[i].id;
+      const re = PLATFORMS[i].launchpad;
+      if (re && re.test(lp)) return PLATFORMS[i].id;
     }
     return "";
   }
@@ -196,6 +215,49 @@
 
   function isGeniusFunSuffix(addr) {
     return GENIUS_FUN_SUFFIX_RE.test(String(addr || ""));
+  }
+
+  function isFourPoolSuffix(addr) {
+    return FOUR_POOL_SUFFIX_RE.test(String(addr || ""));
+  }
+
+  /**
+   * GMGN 卡片「Tax N%」跟合计税率（默认 trenches.useTotalTax）。
+   * bags 按优先级；任一侧出现 total_*（含 "0"）就只用合计，不回落到 buy_tax。
+   * 别名：s_tbt/s_tst、totalBuyTax/totalSellTax、s_bt/s_st。
+   */
+  function gmgnDisplayedTaxBps(bags) {
+    const list = Array.isArray(bags) ? bags : [];
+    const totalBuyKeys = ["total_buy_tax", "s_tbt", "totalBuyTax"];
+    const totalSellKeys = ["total_sell_tax", "s_tst", "totalSellTax"];
+    const buyKeys = ["buy_tax", "s_bt", "buyTax"];
+    const sellKeys = ["sell_tax", "s_st", "sellTax"];
+    const pick = (obj, keys) => {
+      if (!obj || typeof obj !== "object") return null;
+      for (let i = 0; i < keys.length; i += 1) {
+        const k = keys[i];
+        if (!Object.prototype.hasOwnProperty.call(obj, k)) continue;
+        const v = obj[k];
+        if (v == null || v === "") continue;
+        return ratioToBps(v);
+      }
+      return null;
+    };
+    for (let i = 0; i < list.length; i += 1) {
+      const bag = list[i];
+      const tb = pick(bag, totalBuyKeys);
+      const ts = pick(bag, totalSellKeys);
+      if (tb == null && ts == null) continue;
+      return { buy_tax_bps: tb == null ? 0 : tb, sell_tax_bps: ts == null ? 0 : ts };
+    }
+    for (let i = 0; i < list.length; i += 1) {
+      const bag = list[i];
+      const b = pick(bag, buyKeys);
+      const s = pick(bag, sellKeys);
+      if (b == null && s == null) continue;
+      return { buy_tax_bps: b == null ? 0 : b, sell_tax_bps: s == null ? 0 : s };
+    }
+    return { buy_tax_bps: 0, sell_tax_bps: 0 };
   }
 
   // ---------- 币股篮子（host-fee / 链上 basket_assets 与 Tax 内图对齐） ----------
@@ -447,6 +509,7 @@
     ver: CORE_VER,
     TARGET_TOKEN_RE,
     GENIUS_FUN_SUFFIX_RE,
+    FOUR_POOL_SUFFIX_RE,
     PLATFORMS,
     platformFromLaunchpad,
     platformSpec,
@@ -460,6 +523,8 @@
     basketSymbolMatchesDom,
     normalizeCardMarkHandle,
     isGeniusFunSuffix,
+    isFourPoolSuffix,
+    gmgnDisplayedTaxBps,
     dedupeBasketAssets,
     normalizeBasketAssets,
     basketDisplaySymbols,
