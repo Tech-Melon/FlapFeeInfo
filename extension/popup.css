@@ -1088,3 +1088,29 @@ body {
   min-height: 16px;
   margin: 6px 0 0;
 }
+
+.chart-jump-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0 4px;
+  font-size: 13px;
+}
+
+.chart-jump-select {
+  flex: 0 0 148px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2, transparent);
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.chart-jump-select:disabled {
+  opacity: 0.45;
+  cursor: default;
+}

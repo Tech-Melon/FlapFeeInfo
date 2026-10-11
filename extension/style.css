@@ -131,10 +131,15 @@
   pointer-events: auto;
 }
 
+/* Search rows: sit on the short-address line. left/top come from the card, not the clipped name stack. */
+.gmgn-fee-mode-icon--gmgn[data-fee-overlay-pos="address"],
 .gmgn-fee-mode-icon--debot[data-fee-overlay-pos="title"] {
-  align-self: center;
-  margin-left: 4px;
-  margin-right: 0;
+  position: absolute !important;
+  margin: 0 !important;
+  z-index: 5 !important;
+  max-width: none !important;
+  pointer-events: auto;
+  flex: 0 0 auto !important;
 }
 
 .gmgn-fee-mode-icon--gmgn[data-fee-mount-side="tax-after"] {

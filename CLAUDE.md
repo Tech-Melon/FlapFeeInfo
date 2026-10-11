@@ -321,7 +321,7 @@ TokenItem 字段与 BSC 同套，开 Robinhood 扫卡门禁后三项都能用（
 
 | 功能 | 数据 | 兼容 |
 |------|------|------|
-| Dev 发币次数 | `creator_created_count`（见过 1 / 7 / 473） | **可**。缺/0 仍不上色 |
+| Dev 发币次数 | GMGN `creator_created_count`；inner=1 且已有开盘时改对 `dev_created_tokens` 的 inner+open（迁移后卡片 inner 会多 1）。Debot `dev_token_stats.created_count` | **可**。缺/0 仍不上色 |
 | 推特备注 | fiber `twitter` 或 DOM `x.com/{handle}` / `@handle` | **可**。`normalizeCardMarkHandle` 取 path 第一段 |
 | 新创建重复代号 | `symbol`/`s`；仅「新创建」列 | **可**。已开盘列不标 |
 | 资金接收 / 自定义尾号屏蔽 | 仍仅 BSC | **不扩** Robinhood |
@@ -343,9 +343,9 @@ TokenItem 字段与 BSC 同套，开 Robinhood 扫卡门禁后三项都能用（
 - 文中**第一个** EVM / Solana 地址才作为跳转候选（句子/推文中间可以）
 - EVM：`0x` + 40 hex；Solana：32 字节 base58（含 `…pump`）
 - 已知代币 URL 带链名时尊重链（`gmgn.ai/base/token/...` → base）；`fromUrl` 直接当代币
-- BSC 税币尾号 `8888` / `7777` / `ffff`：裸地址直接当 `bsc` 代币，**不打** GMGN 定链
-- 其它裸 EVM：优先已开 GMGN 页内 `POST /api/v1/token_info_brief_multi_chain`（最多 3 标签并行），再 SW 同接口（空包当 fail 不当钱包），最后 `search_v3`；`coins` **精确匹配**才当代币；只出现在 `wallets`、或 coins 是「拿钱包地址当名字的山寨币」→ **不开 K 线**
-- 搜索失败 / 超时同样不开 K 线（避免钱包被默认成 BSC 代币）；普通 fail **2s** 退避，429/403 **20s**
+- 裸 EVM（含 `7777` / `8888` / `ffff`）不靠尾号定链。占位 `chain:"bsc"` 且 `resolved:false`，走下面同一条 `search_v3`。链接里已经写了链（`gmgn.ai/robinhood/token/…7777`、`/bsc/token/…ffff`）仍按链接，不搜索
+- 其它裸 EVM：后台先打 `search_v3`（不依赖当前标签是不是 GMGN）。`coins` **精确匹配**才当代币，链用返回的 `chain`（longxyz → `robinhood`，K 线 `/robinhood/token/{ca}`）。brief 空包或 403、以及页内把空 brief 当成钱包，都不能挡住这次 search。search 没有定论时再看 SW brief（空包当 fail 不当钱包），最后才问已开的 GMGN 页，并且只接受页内的 `token`。只出现在 `wallets`、或 coins 是「拿钱包地址当名字的山寨币」→ **不开 K 线**
+- 搜索失败 / 超时同样不开 K 线（避免钱包被默认成 BSC 代币）；普通 fail **2s** 退避，429/403 **20s**。同一段连续失败 **3** 次后改为 **15s** 再试，不把剪切板记成已处理。未确认是代币前不聚焦、不切标签。人在别的软件里时，用页面有没有焦点判断（不用 `chrome.windows.focused`，Windows 切走后经常仍是 true）。确认是代币后：当前标签已是允许的站点就在该站打开；否则切到已开的目标站（默认 GMGN，没有就新建）并拉到前台
 - 定链缓存 `chainCache.v2` 只存已确认代币（`kind=token`）；非代币仅内存记 10 分钟
 - 只把 `{kind,address,chain}` 传给后台，**原文不进 SW / storage / 日志**
 - 复制即搜仍要求整段短文本且字数在范围内；文中已有 CA 时走跳转分流（再由 search_v3 过滤钱包）
@@ -353,7 +353,7 @@ TokenItem 字段与 BSC 同套，开 Robinhood 扫卡门禁后三项都能用（
 跳转：
 
 - **主路径（推荐）**：GMGN/Debot 标签里的 content script 常驻。页可见且聚焦时轮询剪切板；切回该标签立刻读一次（未变则不跳）。定链可走同源 `search_v3`，真正导航交给后台（负责聚焦标签）。
-- **offscreen 后台**：人不在 GMGN/Debot 时轮询剪切板；先 `execCommand('paste')`（offscreen 不能聚焦，`readText` 常失败）。确认是代币后才激活已开站点标签并站内跳，不必先点标签页。钱包 / 超时 / 非代币**禁止**抢焦点。SW 用 offscreen 长连接保活。页内定链 `fail` 不否决整次查找。
+- **offscreen 后台**：人不在 GMGN/Debot 时轮询剪切板；先 `execCommand('paste')`（offscreen 不能聚焦，`readText` 常失败）。剪贴板变化且页面没有焦点时才开一次读窗，窗口不钉在屏幕左上角。确认是代币后只 `windows.update` 拉已有窗口，**不再**创建左上角 `clip-focus` 小窗。当前标签已是允许的站点就用它，否则用已开的目标站（默认 GMGN）。钱包 / 超时 / 非代币**禁止**抢焦点。SW 用 offscreen 长连接保活。页内定链 `fail` 不否决整次查找。
 - **禁止** `chrome.tabs.update` 换地址栏（整页重载很慢）
 - 同一地址：切标签 / 轮询 / `clipboardchange` **不重复跳**；仅页内 copy/cut/writeText 可再跳，且 2.5s 内不连跳
 
@@ -528,9 +528,15 @@ python tools/ctl.py watchdog-run
 | 拖 K 线分隔条时卡顿 | 拖动中仍扫 DOM | **0.7.6+** 拖动 pause，松手 settle 再扫 |
 | 开资金接收后新创建只剩很少卡 | 宿主 ~2 分钟轮出 + 屏蔽砍 👨‍🍳 + 无 SW 累积 | **0.7.4+** 保留池 10 分钟/40 卡；网页筛选+阈值配合 |
 | 抽样 feeMatch:false（行 CA≠徽章） | 虚拟列表复用短窗 | **0.7.4+** 无身份不 stable + scrub 后 cache 重画 |
+| 剪切板是钱包地址时，别的输入框打不了字 | 定链失败不记已处理，每 200ms 重试并把 Chrome 窗口抢到前台 | 升到 **0.8.254+** 完整包并重载。未确认是代币前不再聚焦 |
+| 不在 GMGN 上、从别的软件复制 CA 不跳 | Windows 把最后一个 Chrome 窗口当成仍在前台，读窗和拉前台都被跳过 | 升到 **0.8.257+** 完整包并重载。确认是代币后，当前标签不是允许的站点就切到已开的 GMGN |
+| 别的网页复制 CA 不跳，longxyz（`…1e18`）也不跳；左上角闪一下小窗 | brief 空包/403 把 `search_v3` 停掉，页内还会把空 brief 记成钱包；跳转时在 (0,0) 开 `clip-focus` | 升到 **0.8.258+** 完整包并重载。longxyz 走 `/robinhood/token/…`。不再开左上角小窗 |
+| 搜索框已勾选屏蔽，厨师行仍在 | `/modes` 没有收款地址，白名单把搜索行放过；`search_v4` 的地址又被已有链上缓存丢掉 | 升到 **0.8.255+**。资金接收或金库的「启用」也要开着。有地址按白名单，没地址先按 👨‍🍳 百分比藏行 |
 | 剪切板跳转不生效 | 未授权 / iOS 禁后台读 / 文本过长或不像地址 | 弹窗里确认开启；Windows 允许读取剪切板；iOS 用「立即检测」或粘贴框 |
 | 别处复制 CA 很慢 / 不跳 / 战壕跟着卡 | 定链串行超时、SW 空包当钱包、失败每 200ms 扫 GMGN 标签 | 升到 **0.8.182+** 完整包；重载插件。Chrome 完全最小化时系统仍可能不让后台读剪贴板 |
 | GMGN 在后台、当前在 X 等标签复制 CA 不跳，切回 GMGN 才跳 | 页内监听要求 GMGN 有焦点；其它标签没有复制中继 | 升到 **0.8.183+** 完整包；打开弹窗允许访问所有网站；重载插件并硬刷 X/GMGN |
+| GMGN「✦创建」闪过粗周期后又回到最近的 1 秒图，或停在 1 小时/日线 | 0.8.270 把换档的第一次默认 `getBars` 当成已经到达创建时间，数据还没落地就切走 | 升到 **0.8.271+**。粗周期要先拉到开盘，再回到跳之前的周期（或弹窗选定的档）的创建位置 |
+| 复制裸 `7777` / `8888` / `ffff` 打开了 BSC K 线 | 尾号被当成已经定链，跳过 `search_v3` | 升到 **0.8.264+** 完整包。裸地址走 GMGN 搜索；链接里已写链、Solana 仍直接跳 |
 | 复制几遍才跳对 K 线 / 搜索不灵 | 0.8.138 点短地址 copy 先读到旧剪贴板并开跳 | 升到 **0.8.142+** 完整包；重载插件并硬刷 GMGN/Debot |
 | 别处复制 CA 要点 GMGN 标签才跳 | 后台读到后 SPA 仍要求页有焦点（`not-front`） | 升到 **0.8.143+** 完整包；重载插件并硬刷页 |
 | 复制短名没有弹出 GMGN 搜索 | 未开「复制即搜」/ 未授权 / 不在 GMGN 前台 / 字数超出或含空格 / 已搜过这段 | 完整包弹窗开启并刷新 GMGN；再复制一次才再搜 |
@@ -540,6 +546,9 @@ python tools/ctl.py watchdog-run
 | 刷新或多开 GMGN 新创建无法屏蔽 | SharedWorker 已有约 60 条，新页不打 HTTP，改走 `getFullFrame` RPC（`request_plugin.response.body`）；旧钩子不拆 `response` | **0.8.125+** 重载插件并硬刷每个 GMGN 标签 |
 | Robinhood 徽章一直 ⏳待加载 | 0.8.148 把缺 quote/分红名的 host-fee 当 pending，又不能打 `/modes` | 升到 **0.8.149+**；重载完整包并硬刷页 |
 | RH K 线 Long.xyz / bankr 挂 ⏳ | 顶栏在确认 pons 前就画待加载 | 升到 **0.8.185+**；非 pons 不画，未知也不占位 |
+| Debot brew K 线一直 ⏳；悬浮买卖税是 0% 但卡片是 Tax 3% | 纤维丢掉 brew/4444；买卖税没读 `meta.total_buy_tax` | 升到 **0.8.259+**；重载插件并硬刷 Debot |
+| 搜索「币安公主」徽章看不见，或 Debot 第一条压在名称上 | GMGN 把战壕绝对坐标套到 72px 搜索行；Debot 第一条对不上标题挂点，战壕坐标（如 92,34）留在名称上 | 升到 **0.8.262+**；重载插件并硬刷。徽章在短地址右侧，整枚都在结果行里 |
+| Debot brew K 线 `🪙BNB \| ❓️未`（NOEL）；搜索框 Dev 屏蔽没藏行 | 顶栏 launchpad 在滚动条小链接，纤维不读 `address`，裸 6666 被当成 Genius 打 `/modes`。搜索不认 `/api/market/search` 和 `hot_token`，输入结果的地址是 `tokenAddress` | 升到 **0.8.260+**；重载插件并硬刷 Debot。无分配只画底池。搜索要开「搜索框结果也屏蔽」和资金接收「启用」 |
 | 新创建 7777 ⏳ 几十秒，鼠标移上去才出 💎→QQQB | 185 无 href 税币误走 RH 门禁；host-fee 缺分红名一直当 pending | 升到 **0.8.186+**；有分配先画，/modes 再补箭头 |
 | 点徽章看税收后回 GMGN 按空格又打开税收 | 徽章 tabindex 抢焦点，空格当再次点击 | 升到 **0.8.187+**；点击后 blur，空格不再开税收 |
 | Robinhood 新创建 👨‍🍳/💎 闪变 | BSC leftover💎 / dividendBecameReal 把 JSON 半包盖到 fiber 厨师上 | 升到 **0.8.150+**；Robinhood 禁止类型对打，BSC 合并逻辑不动 |
@@ -576,6 +585,7 @@ python tools/ctl.py watchdog-run
 | 点 RH K 线后侧栏 BSC 7777 徽章消失 | URL `/robinhood/token` 把整页当 RH，BSC 卡被当非目标拆掉，还可能写入 pons-skip | 升到 **0.8.173+**；按卡 href 认链 |
 | Debot 点 `/token/robinhood` 后 BSC 徽章消失 | page-hook 不认 Debot RH K 线路径，整页 host-fee/门禁偏掉 | 升到 **0.8.174+** |
 | 卡片标记（发币次数/推特备注）没出现 | 未开开关 / 没加规则 / GMGN 新币 count 仍为 0 / 非战壕行卡 | **0.8.130+** 弹窗启用并加规则；Debot 看 ranks `created_count`；Robinhood 战壕 **0.8.148+** 与 BSC 同套字段 |
+| GMGN 发币次数比实际多 1（HIPPO/MINT ×2，卡片文案是 1/2） | 战壕 `creator_created_count` 把已迁移代币留在 inner | 升到 **0.8.263+**；重载插件并硬刷。Debot 仍用 `created_count`，不减 `migrated_count` |
 | 推特备注只标部分同 handle 卡 | 新卡 twitter 常是 `i/status/{id}`，旧逻辑把 `/i/` 当无效链丢掉 | 升到 **0.8.147+**；重载插件并硬刷页 |
 | 新卡先闪一下发币次数色条/`×0` 再变对 | 缺次数时被当成 0，默认 `<N` 先命中 | 升到 **0.8.146+**；没拿到正数次数不上色 |
 | 新创建重复代号没高亮 | 未开开关 / 窗口内只有 1 个且开了「等相同代号」 / 不在新创建列 | **0.8.131+** 弹窗「卡片标记 → 新创建重复代号」；关「等相同」则首次立刻上色 |
@@ -966,9 +976,38 @@ python tools/ctl.py watchdog-run
  - `0.8.250`：`fee-core.js` 共享纯逻辑（平台注册表 + 单位换算/纯金库/篮子/尾号规则/复用状态机），`tests/` 17 项样本+结构守护，打包前必跑；平台只在 page-hook 判定，content 以 `entry.platform` 为准；金库屏蔽「纯金库不屏蔽」选项（`keepPureTaxVault`）；Long.xyz 预留（GMGN 带 `tax_allocation` 才画，点击 app.long.xyz）；厨师/慈善/回流箭头与底池同名（`💛→MRNAB`→`💛→MRNA`）；bootstrap 发金库 prefs 不再丢 `hideGenius`
  - `0.8.251`：资金接收白名单同时认 `marketing_recipients` / Dev / founder。host-fee 与 `/modes` 的 hide-addrs 不再绕过白名单；`hideAddrSet` 在有完整税字段时按当前名单重判，名单变化清空集合。尾号与金库不豁免
  - `0.8.252`：资金接收白名单每条地址可写备注（`allow[].note`，最多 32 字）。备注只给自己看，不参与匹配；只改备注不推页面、不清 `hideAddrSet`
+ - `0.8.285`：「↩当前」不再借 1 小时/4 小时。周期不同直接切回；相同则拉回保存的时间窗。整段寿命不超过 9000 根时一次拉全。`HOOK_VER` / `PAGE_HOOK_VER` 233
+ - `0.8.284`：创建跳转不再先用粗周期扫整段寿命。`gmgnSeekChart` 在目标周期序列出现后立刻 `modifySeries` 拉开盘窗口，左沿到达即停，不再等创建时间之前的空档探测。`HOOK_VER` / `PAGE_HOOK_VER` 232
+ - `0.8.283`：创建跳转的自动升档停在能看清开盘的周期。6 小时内 1 秒，36 小时内最细 15 秒，3 天内最细 30 秒，90 天内最细 1 分钟，更久最细 5 分钟。用户已在 5 分钟或更粗则不动。请求窗口最多约 2400 根，视口最多约 480 根，不再把 40 天铺满一屏。`HOOK_VER` / `PAGE_HOOK_VER` 231
+ - `0.8.282`：创建跳转不再 `gmgnTrimSeriesGap`，也不再包 `getBars`。GMGN 原生往左翻在 SpaceXSI（约 5.3 天）上：1 秒翻到 4.9 小时仍连续，15 秒翻到 32 小时仍连续，30 秒 8738 根翻到开盘，最大缺口 56 分钟是没成交。`HOOK_VER` / `PAGE_HOOK_VER` 230
+ - `0.8.281`：创建跳转若 `age / 周期秒数 > 9000`，落到 `15S/30S/1/5/15/60/240/1D` 里还能一次覆盖开盘到现在的最细档，避免 1 秒片段后接实时尾巴形成多天空洞。落地请求根数提高到能盖住币龄（上限 1 万）。`HOOK_VER` / `PAGE_HOOK_VER` 229
+ - `0.8.280`：✦创建每次点击都重新量当前周期和底部间隔。同一周期来回切换后不再沿用第一次进入时的 `axisStep` / `axisFit`。只有视口仍在本次创建窗且周期未变时，↩当前才保留更早的快照。用户中途改周期会清掉创建窗标记。`HOOK_VER` / `PAGE_HOOK_VER` 228
+ - `0.8.279`：创建跳转的底部间隔改为分组平均（每 4 个标签一组，再加 4 段），不再把相邻差收成 1 分钟。柱距 = 标签像素间距 × K 线秒数 / 平均间隔。1 秒图因此不会被 16px 缩成每秒一格。超过 30 天且细于 15 秒时，在 15 秒、30 秒、1 分钟、5 分钟里选还能放下同一间隔的最细档。`HOOK_VER` / `PAGE_HOOK_VER` 227
+ - `0.8.278`：底部刻度只使用图表能稳住的档。15 秒连续 K 线：柱距 16 为整 1 分钟，柱距 5 为整 5 分钟；30 秒柱距 8 为整 5 分钟。2 分钟会在 2 分钟和 3 分钟之间晃，不作为目标。超过 30 天且细于 15 秒时，刻度 ≤1 分钟用 `15S`，更粗用 `30S`。弹窗只留跟随当前、15 秒、30 秒、1 分钟、5 分钟、1 小时、4 小时、1 日。`HOOK_VER` / `PAGE_HOOK_VER` 226
+ - `0.8.275`：创建窗沿用用户当前柱距。币龄 ≥30 天且周期小于 15 秒时，创建位置用 `15S`，`↩当前` 仍回原周期。`gmgnTrimSeriesGap` 剪掉超过 6 小时的实时尾部，落地多预取一段（15 秒及以上 4000 根）。用户中途改周期则 `gmgnLoadRecentWindow`，不再把创建跨度套到新周期上。`HOOK_VER` / `PAGE_HOOK_VER` 223
+ - `0.8.273`：创建窗落地后 400/1200/2500/4500ms 再摆一次视口，避免数据到达把画面拽回现在。图表里出现 pointerdown、wheel、touchstart、keydown 就取消后续摆正。「↩当前」的补摆同样停。`HOOK_VER` / `PAGE_HOOK_VER` 221
+ - `0.8.272`：「跟随当前」用点击时的 `getResolution()`，不再用上一次 `gmgnChartViewMemory`。用户换周期后再点「✦创建」，落点跟着新周期；这份新画面也是「↩当前」的恢复点。跳转未完成时忽略连点，避免把临时 4 小时记成原周期。`HOOK_VER` / `PAGE_HOOK_VER` 220
+ - `0.8.271`：创建跳转等粗周期的左沿真正到 `creation_timestamp` 附近，再 `setResolution` 回目标档，并用 `modifySeries` 把该档窗口放在创建时刻。不再把换档的第一次默认 `getBars` 当成完成。同档「↩当前」先借 1 小时再切回，避免序列粘在开盘。`HOOK_VER` / `PAGE_HOOK_VER` 219
+ - `0.8.270`：创建跳转不再 `stop` 序列。活着的序列只改 `getBars` 窗口；`stop/start` 会停在非 Active，下一次 `setResolution` 把图停空。指定档从渡船第一根往右取。`HOOK_VER` / `PAGE_HOOK_VER` 218。实测仍会在数据落地前切走并回到最近画面，以 0.8.271 为准
+ - `0.8.269`：指定档创建跳转不再停空。渡船没到 `creation_timestamp` 附近不落地；探针只盖住渡船那一桶，不把 5 分钟拉成可见根数那么宽的「现在」。加载中不 `stop`。失败则回到目标档的普通画面。`HOOK_VER` / `PAGE_HOOK_VER` 217
+ - `0.8.268`：GMGN「✦创建」最终停在目标周期的创建 K 线。目标默认是点击时的周期；弹窗 `flapFeeInfo.chartJump.v1` 默认开，也可指定 1s/3s/5s/15s/30s/1m/3m/5m/15m/30m/1H/4H/12H/1D。币龄超过该档约 9000 根时，先借更粗周期找到第一根，再重开目标档并把第一次 `getBars` 的右沿指到那段。关掉开关会拆掉按钮。`HOOK_VER` / `PAGE_HOOK_VER` 216
+ - `0.8.267`：GMGN 图表按钮记住跳之前的分辨率、barSpacing 和可见时间。换周期后数据到达会改视口，所以「↩当前」在 K 线就绪后连放三次画面。地址不再只认 `0x`，Solana / Tron / 各 EVM 链的 `/token/` 都能跳。按钮改成插件胶囊（琥珀 ✦创建、绿色 ↩当前），不再抄 GMGN 工具条。`HOOK_VER` / `PAGE_HOOK_VER` 215
+ - `0.8.266`：GMGN「创建」不再固定切 1 分钟。图表大约只回 1 万根，按币龄选能盖住 `creation_timestamp` 的最细周期（约一年用 `60`，几小时用 `5S`/`1`，40 分钟内保持当前周期并看到现在）。换周期须等 K 线加载完再移动视口，避免空图。视口 8 秒内到不了创建则再粗一档，最多两次。「当前」等原周期加载完再 `scrollToRealtime`。`HOOK_VER` / `PAGE_HOOK_VER` 214
+ - `0.8.265`：GMGN K 线底部「创建 / 当前」。创建时间取 `mutil_window_token_info.creation_timestamp`。币龄超过 20 分钟先切 1 分钟再 `setVisibleTimeRange` 到创建后约 40 分钟（1 秒图历史不够）。「当前」恢复原周期并 `scrollToRealtime`。`HOOK_VER` / `PAGE_HOOK_VER` 213
+ - `0.8.264`：完整包剪切板。裸 EVM 不靠尾号定链，`7777` / `8888` / `ffff` 都走现有 `search_v3`。链接里已写链、Solana、钱包拒绝、搜索失败不开 K 线都不变。徽章扫描与 `/modes` 尾号规则不改
+ - `0.8.263`：GMGN 发币次数。inner=1 且已开盘（`created = inner + open`，open≤40）时先画 open，再按 chain+creator 缓存请求 `dev_created_tokens`，用 `inner_count+open_count`。HIPPO/MINT ×2→1，PONS100 ×3→2。SPEEDRUN（inner≥2）、LUMPY（inner=0）、纯内盘、大户、Debot `created_count` 不改。`CORE_VER` 6，`HOOK_VER` / `PAGE_HOOK_VER` 212
+ - `0.8.262`：Debot 搜索第一条不再吃战壕绝对坐标。对话框内的卡禁止坐标模式；挂点改为结果行本身，短地址右侧。
+ - `0.8.261`：搜索弹层徽章挂在短地址行右侧，父级是结果行而不是 overflow 名称列。GMGN 不再把战壕绝对坐标套到 72px 搜索行上（往下滚徽章被裁没）。Debot 标题行不再把 `🦋…→…` 裁成半截。
+ - `0.8.260`：Debot brew K 线（NOEL `0x673a66dc…b76666`）顶栏从小链接 fiber 读 `launchpad=brew` + `address`，无分配只画 `🪙BNB`，不再当 Genius 打 `/modes` 变成 `🪙BNB \| ❓️未`。已画出的 ⏳/❓️未 会被底池徽章换掉。搜索弹层认 `/api/market/search`（`tokenAddress`）与 `hot_token`（`address`），Debot 行用 `launchpad_extra` 写 `recv_addrs`；白名单开着按地址放行，没地址按 👨‍🍳 百分比只藏约 70px 的结果行。`HOOK_VER` / `PAGE_HOOK_VER` 211
+ - `0.8.259`：Debot 对齐。悬浮买卖税读 `meta.total_buy_tax`（卡片 Tax，含池子费）；`buy_tax_bps` 已是 bps，没有合计时再加 `buy_fee_bps`。K 线纤维放行 brew / 4444（NOEL 不再停在 ⏳）。4444 只画底池。brew 有 `*_pct` 才画分配，否则只画底池且不打 `/modes`。搜索里的 Debot 行走 `debotHostFeeFromRow`。`CORE_VER` 5，`HOOK_VER` / `PAGE_HOOK_VER` 210
+ - `0.8.258`：完整包剪切板。后台先打 `search_v3`，brief 空包/403 和页内「空 brief=钱包」都不能挡住。longxyz 打开 Robinhood K 线。确认代币后不再创建左上角小窗，只激活已有窗口。选站、钱包不跳、失败重试不变
+ - `0.8.257`：完整包剪切板。外部复制的前台判断改看页面焦点，不用 `windows.focused`。当前标签已是允许的站点仍在该站打开；否则切到已开目标站（默认 GMGN）并拉到前台。钱包 / 定链重试 / 去重不变
+ - `0.8.256`：完整包剪切板。不在前台时读空开一次读窗；确认代币后才聚焦 GMGN。页内定链失败交给后台。失败 3 次后 15s 再试，不把剪切板记死
+ - `0.8.255`：搜索弹层屏蔽。厨师行用搜索回包 `recv_addrs` 对白名单；没有地址时按 👨‍🍳 百分比先藏，命中白名单后再显示。🎁 只走金库开关。`hideAddrSet` 仍要求有收款地址
+ - `0.8.254`：完整包剪切板。钱包地址 / 定链失败不再抢其它输入框焦点；同一段 GMGN 定链最多 3 次（2s / 20s），之后停住。确认钱包仍不打开 K 线
  - `0.8.253`：悬浮窗买卖税对齐 GMGN 合计税率（`total_buy_tax`，含池子费；宿主更高则保留）。战壕纤维、搜索和 K 线同一套。尾号 4444 只画底池（`🖐️`，不打 `/modes`）。brew 只用 GMGN 宿主数据，有 `s_tal` 再画分配，不打 `/modes`；无分配的后续包不盖已画出的分红。K 线先认 launchpad，裸 6666 未确认前不打 `/modes`，认出 brew 后丢掉 Genius 缓存。`CORE_VER` 4，`HOOK_VER` / `PAGE_HOOK_VER` 209
-- 插件当前版本：见 `extension/manifest.json`（**0.8.253**，公开无剪切板）
-- page-hook：`HOOK_VER` **209**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）；`content.js` / `tax-recv-bootstrap.js` 的 `PAGE_HOOK_VER` 必须相同（`_run_pack_extension.py` 会校验）
+- 插件当前版本：见 `extension/manifest.json`（**0.8.306**，公开无剪切板）
+- page-hook：`HOOK_VER` **262**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）；`content.js` / `tax-recv-bootstrap.js` 的 `PAGE_HOOK_VER` 必须相同（`_run_pack_extension.py` 会校验）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
@@ -977,8 +1016,9 @@ python tools/ctl.py watchdog-run
 - 尾号屏蔽：`flapFeeInfo.suffixHide.v1` = `{ enabled, rules:[{id,suffix,enabled}] }`（最多 24 条 hex 1–12 位）
 - 资金接收：`flapFeeInfo.taxRecvHide.v1` = `{ enabled, thresholdPct, hideGenius, allow:[{id,address,enabled,note?}] }`（`hideGenius` 默认 false；勾选后 Genius 👨‍🍳 按阈值挡，🎁 仍走金库开关。`note` 最多 32 字，只用于弹窗辨认，不参与匹配）
 - 金库屏蔽：`flapFeeInfo.vaultHide.v1` = `{ enabled, hideTaxVault, hideStockVault, hideGenius, keepPureTaxVault }`（`keepPureTaxVault` 默认 false；勾选后税收 **100% 进金库**（🎁→X，分红/销毁/回流/慈善全 0）的税收金库不屏蔽，🎁50%🔥50%、🎁96%💎4% 仍屏蔽；只作用于税收金库，不影响币股/Genius。page-hook `gmgnTalIsPureVault` / `debotExtraIsPureVault` / `hostFeeEntryIsPureVault`，content `keepPureTaxVault` 兜底 DOM）
-- 搜索框也屏蔽：`flapFeeInfo.searchHide.v1` = `{ enabled:false }`（默认关；开启后把已启用的资金接收/金库规则套到 GMGN 搜索弹层）
-- Dev 发币次数标记：`flapFeeInfo.devCountMark.v1` = `{ enabled, rules:[{id,op,min,color,enabled}] }`（`op` 为 `lt|lte|eq|gte|gt`，缺省按 `gte`；最多 12 条；默认关）
+- 搜索框也屏蔽：`flapFeeInfo.searchHide.v1` = `{ enabled:false }`（默认关；开启后把已启用的资金接收/金库规则套到搜索弹层。厨师行优先用搜索回包的收款地址对白名单；没有地址时按 👨‍🍳 百分比藏行，地址命中白名单后再显示。🎁 只走金库开关）
+- K 线创建跳转：`flapFeeInfo.chartJump.v1` = `{ enabled:true, interval:"follow" }`（默认开。`interval` 为 `follow` 或 `15S|30S|1|5|60|240|1D`。旧的 1 秒/3 秒/12 小时等读出来当跟随当前。content 写到 `data-flap-chart-jump`。只影响 GMGN 图表按钮，不刷新战壕）
+- Dev 发币次数标记：`flapFeeInfo.devCountMark.v1` = `{ enabled, rules:[{id,op,min,color,enabled}] }`（`op` 为 `lt|lte|eq|gte|gt`，缺省按 `gte`；最多 12 条；默认关。GMGN 在 inner=1 且已开盘时按创作者核对 `dev_created_tokens`；Debot 仍用 `created_count`）
 - 推特备注描边：`flapFeeInfo.twHandleMark.v1` = `{ enabled, rules:[{id,handle,note,color,enabled}] }`（最多 24 条 handle，备注如「何一」；默认关）
 - 新创建重复代号：`flapFeeInfo.symbolDupMark.v1` = `{ enabled, waitDup:true, windowMin:5, color:"#facc15" }`（默认关；`waitDup` 默认开；session 计数 `symbolDupSeen.v2`，按 CA 合并；同秒不靠 created）
 - 剪切板跳转：`flapFeeInfo.clipJump.v1` = `{ enabled:false, target:"gmgn"|"debot", sites:"both"|"gmgn"|"debot", activeTabOnly:true, reuseSiteTab:false, pageMarkCa:false, overrideHostCa:false }`（默认关；开启需确认 + `clipboardRead` 可选权限）

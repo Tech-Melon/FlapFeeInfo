@@ -5,7 +5,7 @@
  */
 (function (root) {
   // API 变更必须 +1：插件重载不刷页时 MAIN world 里还留着旧版，同版号会跳过加载。
-  const CORE_VER = 4;
+  const CORE_VER = 6;
   if (root.__flapFeeCore && root.__flapFeeCore.ver === CORE_VER) return;
 
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
@@ -260,6 +260,68 @@
     return { buy_tax_bps: 0, sell_tax_bps: 0 };
   }
 
+  function bagHasDisplayedTotal(bag) {
+    if (!bag || typeof bag !== "object") return false;
+    const keys = [
+      "total_buy_tax",
+      "s_tbt",
+      "totalBuyTax",
+      "total_sell_tax",
+      "s_tst",
+      "totalSellTax"
+    ];
+    for (let i = 0; i < keys.length; i += 1) {
+      if (!Object.prototype.hasOwnProperty.call(bag, keys[i])) continue;
+      const v = bag[keys[i]];
+      if (v != null && v !== "") return true;
+    }
+    return false;
+  }
+
+  /** extra.*_bps 已是 bps。买税 = 代币税 + 平台费（XULTURE 190+100=290）。 */
+  function debotBpsSum(obj, keys) {
+    if (!obj || typeof obj !== "object") return 0;
+    let sum = 0;
+    for (let i = 0; i < keys.length; i += 1) {
+      const k = keys[i];
+      if (!Object.prototype.hasOwnProperty.call(obj, k)) continue;
+      const n = Number(obj[k]);
+      if (!Number.isFinite(n) || n <= 0) continue;
+      sum += n;
+    }
+    return sum > 0 ? Math.round(Math.min(10000, sum)) : 0;
+  }
+
+  /**
+   * Debot 卡片「Tax N%」。
+   * 合计税率在 row.meta.total_*（比例，含池子费）；没有合计时才用 extra 的 bps+fee。
+   * buy_tax_bps:300 是 3%，不能再走 ratioToBps。
+   */
+  function debotDisplayedTaxBps(row, extra) {
+    const meta =
+      row && typeof row === "object" && row.meta && typeof row.meta === "object" ? row.meta : null;
+    const ex = extra && typeof extra === "object" ? extra : null;
+    const bags = [row, meta, ex];
+    const shown = gmgnDisplayedTaxBps(bags);
+    let sawTotal = false;
+    for (let i = 0; i < bags.length; i += 1) {
+      if (bagHasDisplayedTotal(bags[i])) sawTotal = true;
+    }
+    if (sawTotal) return shown;
+    const sources = [ex, meta && meta.launchpad_extra, row && row.launchpad_extra];
+    let buy = shown.buy_tax_bps;
+    let sell = shown.sell_tax_bps;
+    for (let i = 0; i < sources.length; i += 1) {
+      const src = sources[i];
+      if (!src || typeof src !== "object") continue;
+      const b = debotBpsSum(src, ["buy_tax_bps", "buy_fee_bps"]);
+      const s = debotBpsSum(src, ["sell_tax_bps", "sell_fee_bps"]);
+      if (b > buy) buy = b;
+      if (s > sell) sell = s;
+    }
+    return { buy_tax_bps: buy, sell_tax_bps: sell };
+  }
+
   // ---------- 币股篮子（host-fee / 链上 basket_assets 与 Tax 内图对齐） ----------
 
   function dedupeBasketAssets(rows) {
@@ -383,6 +445,46 @@
   }
 
   // ---------- 其它共享规则 ----------
+
+  function readDevCount(raw) {
+    if (raw == null || raw === "") return null;
+    const n = Math.floor(Number(raw));
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  }
+
+  /**
+   * GMGN 战壕 creator_created_count = inner + open。
+   * 代币迁出后，dev_created_tokens 的 inner 已是 0，卡片有时仍留 inner=1
+   * （HIPPO/MINT：卡片 2 = 1+1，列表只有 1 个已开盘）。
+   * 只在 inner===1 且 open 为 1..40 且三者相加成立时，先用 open，并让调用方按创作者核对。
+   * Debot 只有 created_count、纯内盘、inner>=2、大户总数都不改。
+   * @returns {{ count: number, raw: number, verify: boolean }}
+   */
+  function gmgnDevCreatedCount(row, createdFallback) {
+    const src = row && typeof row === "object" ? row : {};
+    const createdField = src.creator_created_count != null ? src.creator_created_count : src.d_ccc;
+    const created = readDevCount(createdField != null ? createdField : createdFallback);
+    const inner = readDevCount(
+      src.creator_created_inner_count != null ? src.creator_created_inner_count : src.d_cic
+    );
+    const open = readDevCount(
+      src.creator_created_open_count != null ? src.creator_created_open_count : src.d_coc
+    );
+    const raw = created != null && created > 0 ? created : 0;
+    if (inner === 1 && open != null && open >= 1 && open <= 40 && created != null && created === inner + open) {
+      return { count: open, raw, verify: true };
+    }
+    return { count: raw, raw, verify: false };
+  }
+
+  /** dev_created_tokens 的 inner_count + open_count。缺字段或合计为 0 → 0（调用方保持原值）。 */
+  function gmgnDevCreatedCountFromApi(innerCount, openCount) {
+    const inner = readDevCount(innerCount);
+    const open = readDevCount(openCount);
+    if (inner == null || open == null) return 0;
+    const sum = inner + open;
+    return sum > 0 ? sum : 0;
+  }
 
   /** 自定义尾号规则匹配（门禁各自在 content / page-hook 做）。 */
   function suffixRulesMatch(rules, addr) {
@@ -525,6 +627,7 @@
     isGeniusFunSuffix,
     isFourPoolSuffix,
     gmgnDisplayedTaxBps,
+    debotDisplayedTaxBps,
     dedupeBasketAssets,
     normalizeBasketAssets,
     basketDisplaySymbols,
@@ -533,6 +636,8 @@
     isSingleAssetStockVault,
     mergeBasketWithTaxDomSymbols,
     suffixRulesMatch,
+    gmgnDevCreatedCount,
+    gmgnDevCreatedCountFromApi,
     taxRecvAddresses,
     taxRecvAllowHit,
     taxInnerReuseStep

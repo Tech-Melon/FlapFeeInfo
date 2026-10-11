@@ -127,6 +127,33 @@
       </div>
       <div class="cat-body">
         <section class="section">
+          <button type="button" class="collapse-head" data-collapse="chartJump" aria-expanded="false">
+            <span class="collapse-head-left">
+              <span class="collapse-icon" aria-hidden="true">✦</span>
+              <span class="collapse-title" data-i18n="chartJumpSection">K线创建跳转</span>
+            </span>
+            <span class="collapse-chevron">▸</span>
+          </button>
+          <div class="collapse-body" id="chartJumpCollapseBody" hidden>
+            <p class="theme-hint" data-i18n="chartJumpHint">
+              GMGN K 线底部「✦创建」。默认跟随正在看的周期。6 小时内可留 1 秒，36 小时内最细 15 秒，3 天内最细 30 秒，3–90 天最细 1 分钟，90–180 天 5 分钟，180 天–1 年 15 分钟，超过 1 年 30 分钟。已经更粗则保持。下拉里选了更细的档也会按这个下限抬高，一年以上选 1 分钟会落到 30 分钟。创建窗里向右拖补下一页。「↩当前」回到跳之前的周期和画面。
+            </p>
+            <label class="row drag-row" for="chartJumpEnabled">
+              <input type="checkbox" id="chartJumpEnabled" checked />
+              <span class="emoji">✦</span>
+              <div class="label">
+                <strong data-i18n="chartJumpEnableTitle">启用创建跳转</strong>
+                <span data-i18n="chartJumpEnableDesc">关掉后不显示按钮</span>
+              </div>
+            </label>
+            <label class="chart-jump-row" for="chartJumpInterval">
+              <span data-i18n="chartJumpIntervalLabel">跳转后的周期</span>
+              <select id="chartJumpInterval" class="chart-jump-select"></select>
+            </label>
+          </div>
+        </section>
+
+        <section class="section">
           <button type="button" class="collapse-head" data-collapse="theme" aria-expanded="false">
             <span class="collapse-head-left">
               <span class="collapse-icon" aria-hidden="true">🎨</span>

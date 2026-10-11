@@ -10,7 +10,7 @@
  *   brew（GMGN 宿主，不打 /modes）、Four 已迁移 4444（只画底池）
  */
 (() => {
-  const HOOK_VER = 209;
+  const HOOK_VER = 262;
   // fee-core.js 必须先于本文件进 MAIN world（manifest 与所有兜底注入都按此顺序）。
   const Core = window.__flapFeeCore;
   if (!Core) return;
@@ -918,11 +918,21 @@
   function isGeniusFunAddr(addr) {
     const a = String(addr || "").toLowerCase();
     if (notGeniusAddrSet.has(a) || brewAddrSet.has(a)) return false;
-    if (isGeniusFunSuffix(a)) {
-      rememberGeniusFunAddr(a);
-      return true;
+    if (geniusFunAddrSet.has(a)) return true;
+    if (!isGeniusFunSuffix(a)) return false;
+    // Debot K 线裸 6666 先等纤维认出 launchpad。先记成 Genius 会打 /modes，空结果变成 ❓️未。
+    const path = String(location.pathname || "");
+    const um = path.match(/0x[a-fA-F0-9]{40}/i);
+    if (
+      um &&
+      um[0].toLowerCase() === a &&
+      /\/token\/bsc\//i.test(path) &&
+      /debot\.ai|gungnir\.bot/i.test(location.hostname || "")
+    ) {
+      return false;
     }
-    return geniusFunAddrSet.has(a);
+    rememberGeniusFunAddr(a);
+    return true;
   }
 
   let geniusAddrFlushTimer = 0;
@@ -1027,6 +1037,21 @@
 
   function debotVaultMarketPct(extra) {
     return debotFirstPositivePct(extra, ["founder_pct_vault", "marketing_pct_vault"]);
+  }
+
+  /** brew 有分红/厨师/金库/销毁/回流才画分配；否则只画底池。 */
+  function debotExtraHasAllocation(extra) {
+    if (!extra || typeof extra !== "object") return false;
+    if (extra.is_vault === true || extra.is_stocks_vault === true) return true;
+    return (
+      pctToBps(extra.dividend_pct ?? extra.holder_pct) > 0 ||
+      debotChefPct(extra) > 0 ||
+      debotVaultMarketPct(extra) > 0 ||
+      pctToBps(extra.burn_pct) > 0 ||
+      pctToBps(extra.liquidity_pct ?? extra.lp_pct) > 0 ||
+      pctToBps(extra.giggle_charity_pct ?? extra.giggle_pct ?? extra.rate_giggle_charity) > 0 ||
+      pctToBps(extra.binance_charity_pct ?? extra.binance_pct ?? extra.rate_binance_charity) > 0
+    );
   }
 
   function isDebotTokenItem(item) {
@@ -1822,7 +1847,23 @@
     if (/\/vas\/api\/v1\/search/i.test(u)) return true;
     if (/meme\/v\d+\/search/i.test(u)) return true;
     if (/\/search\/(token|coin|meme)/i.test(u)) return true;
+    // Debot 搜索弹层：输入后的结果，以及打开弹层时的热门列表。不要把代币详情 progress 算进来。
+    if (/\/api\/market\/search/i.test(u)) return true;
+    if (/dashboard\/chain\/recommend\/hot_token/i.test(u)) return true;
     return false;
+  }
+
+  function hostFeeItemIsDebotRow(item) {
+    if (!item || typeof item !== "object") return false;
+    // GMGN 搜索币带 s_tal，必须留在 GMGN 路径。
+    if (item.s_tal || item.tax_allocation || item.taxAllocation) return false;
+    const meta = item.meta && typeof item.meta === "object" ? item.meta : null;
+    const extra = (meta && meta.launchpad_extra) || item.launchpad_extra;
+    if (!extra || typeof extra !== "object") return false;
+    const addr = String(
+      item.contract || item.address || item.token_address || item.tokenAddress || ""
+    ).trim();
+    return /^0x[a-fA-F0-9]{40}$/i.test(addr);
   }
 
   function collectBscTaxSearchTokens(json) {
@@ -1834,39 +1875,50 @@
       if (chain && chain !== "bsc" && chain !== "56") return;
       if (!chain && !isBscPageContext()) return;
       const addr = String(
-        c.address || c.contract || c.token_address || c.ca || ""
+        c.address ||
+          c.contract ||
+          c.tokenAddress ||
+          c.token_address ||
+          c.ca ||
+          ""
       ).toLowerCase();
       if (!addr || seen.has(addr)) return;
+      const meta = c.meta && typeof c.meta === "object" ? c.meta : null;
       const lp = String(
-        c.launchpad_platform || c.launchpad || c.lpp || (c.pool && c.pool.exchange) || ""
+        c.launchpad_platform ||
+          c.launchpad ||
+          c.lpp ||
+          (meta && (meta.launchpad || meta.launchpad_platform)) ||
+          (c.pool && c.pool.exchange) ||
+          ""
       ).toLowerCase();
       const genius = lp.indexOf("genius") !== -1;
       const platId = Core.platformFromLaunchpad(lp);
       const brew = platId === "brew";
       const fourPool =
         isFourPoolSuffix(addr) && (!lp || platId === "four" || platId === "four_pool");
+      const pushSearchHostFee = () => {
+        try {
+          if (hostFeeItemIsDebotRow(c)) collectHostFeesFromDebotRow(c);
+          else collectHostFeesFromGmgnItem(c);
+        } catch (_host) {
+          // ignore
+        }
+      };
       if (brew || fourPool) {
         if (brew) {
           rememberBrewAddr(addr);
           rememberNotGeniusAddr(addr);
         }
         seen.add(addr);
-        try {
-          collectHostFeesFromGmgnItem(c);
-        } catch (_host) {
-          // ignore
-        }
+        pushSearchHostFee();
         return;
       }
       if (lp && !genius) rememberNotGeniusAddr(addr);
       const suffixGenius = !lp && !brewAddrSet.has(addr) && isGeniusFunAddr(addr);
       if (!TARGET_TOKEN_RE.test(addr) && !genius && !suffixGenius) return;
       if (genius || suffixGenius) rememberGeniusFunAddr(addr);
-      try {
-        collectHostFeesFromGmgnItem(c);
-      } catch (_fee) {
-        // ignore
-      }
+      pushSearchHostFee();
       seen.add(addr);
       out.push(addr);
     };
@@ -2943,7 +2995,7 @@
       quote_symbol = symbolFromKnownTokenAddress(quote_token, false) || "";
     }
     if (/^WBNB$/i.test(quote_symbol)) quote_symbol = "BNB";
-    const tax = Core.gmgnDisplayedTaxBps([row, ex]);
+    const tax = Core.debotDisplayedTaxBps(row, ex);
     return finalizeHostFeeEntry({
       address: addr,
       source: "debot",
@@ -2991,7 +3043,13 @@
         rememberBrewAddr(addr);
         rememberNotGeniusAddr(addr);
       }
-      return debotPoolOnlyFromRow(row, addr, brew ? "brew" : "four_pool");
+      const poolMeta = row.meta && typeof row.meta === "object" ? row.meta : null;
+      const poolExtra = (poolMeta && poolMeta.launchpad_extra) || row.launchpad_extra;
+      const poolEx = poolExtra && typeof poolExtra === "object" ? poolExtra : {};
+      // 4444 只画底池。brew 没有分配时同样只画底池；有 *_pct 再往下画分红。
+      if (fourPool || !debotExtraHasAllocation(poolEx)) {
+        return debotPoolOnlyFromRow(row, addr, brew ? "brew" : "four_pool");
+      }
     }
     const genius =
       (debotRowIsGeniusFun(row) && debotRowIsBsc(row)) ||
@@ -3000,7 +3058,7 @@
       if (!/^0x[a-f0-9]{40}$/.test(addr)) return null;
     } else if (genius) {
       if (!/^0x[a-f0-9]{40}$/.test(addr)) return null;
-    } else if (!TARGET_TOKEN_RE.test(addr)) {
+    } else if (!TARGET_TOKEN_RE.test(addr) && !brew) {
       return null;
     }
     const meta = row.meta && typeof row.meta === "object" ? row.meta : null;
@@ -3026,12 +3084,8 @@
         gift_bps: 0,
         is_vault: false,
         is_stocks_vault: false,
-        buy_tax_bps:
-          Number(ex.buy_tax_bps || ex.buy_fee_bps) ||
-          Core.gmgnDisplayedTaxBps([row, ex]).buy_tax_bps,
-        sell_tax_bps:
-          Number(ex.sell_tax_bps || ex.sell_fee_bps) ||
-          Core.gmgnDisplayedTaxBps([row, ex]).sell_tax_bps,
+        buy_tax_bps: Core.debotDisplayedTaxBps(row, ex).buy_tax_bps,
+        sell_tax_bps: Core.debotDisplayedTaxBps(row, ex).sell_tax_bps,
         quote_token,
         quote_symbol,
         __geniusfun: true,
@@ -3063,7 +3117,7 @@
       debotVaultKind(extra) === "stock";
     const basket_assets = normalizeDebotBasket(extra);
     const is_stocks_vault = extra.is_stocks_vault === true || basket_assets.length >= 2;
-    const shownTax = Core.gmgnDisplayedTaxBps([row, extra]);
+    const shownTax = Core.debotDisplayedTaxBps(row, extra);
     const buy_tax_bps = shownTax.buy_tax_bps;
     const sell_tax_bps = shownTax.sell_tax_bps;
     const quote_token = String(
@@ -3258,6 +3312,15 @@
   const cardMarkDedupe = new Map();
   let cardMarkFlushTimer = 0;
 
+  function gmgnDevCountChain(nested) {
+    const raw = String((nested && (nested.chain || nested.network)) || "")
+      .trim()
+      .toLowerCase();
+    if (raw === "rh") return "robinhood";
+    if (raw === "bsc" || raw === "robinhood" || raw === "eth" || raw === "base") return raw;
+    return "";
+  }
+
   function pickCardMarkMeta(item, addrHint) {
     if (!item || typeof item !== "object") item = {};
     const nested =
@@ -3283,9 +3346,15 @@
       .trim()
       .toLowerCase();
     if (!CARD_MARK_ADDR_RE.test(addr)) return null;
-    const countRaw =
-      nested.creator_created_count ?? nested.d_ccc ?? (stats && stats.created_count);
-    const count = Math.floor(Number(countRaw));
+    const decision =
+      Core && typeof Core.gmgnDevCreatedCount === "function"
+        ? Core.gmgnDevCreatedCount(nested, stats && stats.created_count)
+        : null;
+    const count = decision
+      ? decision.count
+      : Math.floor(
+          Number(nested.creator_created_count ?? nested.d_ccc ?? (stats && stats.created_count))
+        );
     const twitter = normalizeCardMarkHandle(
       (social && (social.twitter_screen_name || social.twitter)) ||
         nested.twitter_username ||
@@ -3312,13 +3381,20 @@
       .slice(0, 32);
     const created = createdAtFromHostRow(nested, meta);
     if (!(Number.isFinite(count) && count > 0) && !twitter && !creatorOk && !symbol) return null;
-    return {
+    const pub = {
       address: addr,
       count: Number.isFinite(count) && count > 0 ? count : 0,
       twitter,
       creator: creatorOk,
       symbol,
       created
+    };
+    const chain = gmgnDevCountChain(nested);
+    return {
+      pub,
+      verify: Boolean(decision && decision.verify && creatorOk && chain),
+      raw: decision && decision.raw > 0 ? decision.raw : pub.count,
+      chain
     };
   }
 
@@ -3375,10 +3451,151 @@
 
   function queueCardMarkFromItem(item, addrHint) {
     try {
-      queueCardMarkMeta(pickCardMarkMeta(item, addrHint));
+      const picked = pickCardMarkMeta(item, addrHint);
+      if (!picked || !picked.pub) return;
+      queueCardMarkMeta(picked.pub);
+      if (picked.verify) noteGmgnDevCreatedVerify(picked);
     } catch (_q) {
       // ignore
     }
+  }
+
+  const devCreatedSlots = new Map();
+  const cardMarkLastByAddr = new Map();
+  const devCreatedVerifyCache = new Map();
+  const devCreatedVerifyQueued = new Set();
+  const devCreatedVerifyQueue = [];
+  let devCreatedVerifyActive = 0;
+  let devCountVerifyOn = false;
+
+  function isGmgnDevCountHost() {
+    return /(^|\.)gmgn\.ai$/i.test(location.hostname || "");
+  }
+
+  function rememberCardMarkPub(pub) {
+    if (!pub || !pub.address) return;
+    cardMarkLastByAddr.set(pub.address, pub);
+    if (cardMarkLastByAddr.size <= 800) return;
+    const extra = cardMarkLastByAddr.size - 600;
+    let n = 0;
+    for (const key of cardMarkLastByAddr.keys()) {
+      cardMarkLastByAddr.delete(key);
+      n += 1;
+      if (n >= extra) break;
+    }
+  }
+
+  function applyGmgnDevCreatedCount(key, count) {
+    const slot = devCreatedSlots.get(key);
+    if (!slot || !(count > 0)) return;
+    for (const addr of slot.addrs) {
+      const prev = cardMarkLastByAddr.get(addr);
+      if (!prev || prev.count === count) continue;
+      const next = {
+        address: prev.address,
+        count,
+        twitter: prev.twitter,
+        creator: prev.creator,
+        symbol: prev.symbol,
+        created: prev.created
+      };
+      cardMarkLastByAddr.set(addr, next);
+      queueCardMarkMeta(next);
+    }
+  }
+
+  function noteGmgnDevCreatedVerify(picked) {
+    const pub = picked && picked.pub;
+    if (!pub) return;
+    rememberCardMarkPub(pub);
+    const chain = picked.chain;
+    const creator = pub.creator;
+    if (!chain || !creator || !isGmgnDevCountHost()) return;
+    const key = `${chain}|${creator}`;
+    let slot = devCreatedSlots.get(key);
+    if (!slot) {
+      slot = { chain, creator, raw: picked.raw, tries: 0, addrs: new Set() };
+      devCreatedSlots.set(key, slot);
+      if (devCreatedSlots.size > 300) {
+        const oldest = devCreatedSlots.keys().next().value;
+        if (oldest) devCreatedSlots.delete(oldest);
+      }
+    }
+    slot.raw = picked.raw;
+    slot.addrs.add(pub.address);
+    const hit = devCreatedVerifyCache.get(key);
+    if (hit && Date.now() - hit.at < hit.ttl && hit.count > 0) {
+      applyGmgnDevCreatedCount(key, hit.count);
+      return;
+    }
+    if (devCountVerifyOn) scheduleGmgnDevCreatedVerify(key);
+  }
+
+  function scheduleGmgnDevCreatedVerify(key) {
+    if (!devCountVerifyOn || !isGmgnDevCountHost() || !devCreatedSlots.has(key)) return;
+    if (devCreatedVerifyQueued.has(key)) return;
+    const hit = devCreatedVerifyCache.get(key);
+    if (hit && Date.now() - hit.at < hit.ttl) {
+      if (hit.count > 0) applyGmgnDevCreatedCount(key, hit.count);
+      return;
+    }
+    devCreatedVerifyQueued.add(key);
+    devCreatedVerifyQueue.push(key);
+    pumpGmgnDevCreatedVerify();
+  }
+
+  function pumpGmgnDevCreatedVerify() {
+    while (devCreatedVerifyActive < 3 && devCreatedVerifyQueue.length > 0) {
+      const key = devCreatedVerifyQueue.shift();
+      devCreatedVerifyQueued.delete(key);
+      if (!key || !devCreatedSlots.has(key)) continue;
+      devCreatedVerifyActive += 1;
+      verifyGmgnDevCreated(key).finally(() => {
+        devCreatedVerifyActive -= 1;
+        pumpGmgnDevCreatedVerify();
+      });
+    }
+  }
+
+  function verifyGmgnDevCreated(key) {
+    const slot = devCreatedSlots.get(key);
+    if (!slot) return Promise.resolve();
+    const ctrl = new AbortController();
+    const timer = window.setTimeout(() => ctrl.abort(), 2500);
+    return fetch(`/api/v1/dev_created_tokens/${slot.chain}/${slot.creator}`, {
+      credentials: "include",
+      signal: ctrl.signal
+    })
+      .then((res) => {
+        if (!res || !res.ok) throw new Error("status");
+        return res.json();
+      })
+      .then((body) => {
+        const data = body && typeof body.data === "object" && body.data ? body.data : null;
+        const total =
+          Core && typeof Core.gmgnDevCreatedCountFromApi === "function"
+            ? Core.gmgnDevCreatedCountFromApi(data && data.inner_count, data && data.open_count)
+            : 0;
+        if (!(total > 0)) throw new Error("empty");
+        devCreatedVerifyCache.set(key, { count: total, at: Date.now(), ttl: 120000 });
+        slot.tries = 0;
+        applyGmgnDevCreatedCount(key, total);
+      })
+      .catch(() => {
+        slot.tries = (slot.tries || 0) + 1;
+        devCreatedVerifyCache.set(key, { count: 0, at: Date.now(), ttl: 15000 });
+        if (slot.tries < 3 && devCountVerifyOn) {
+          window.setTimeout(() => scheduleGmgnDevCreatedVerify(key), 16000);
+        }
+      })
+      .finally(() => {
+        window.clearTimeout(timer);
+      });
+  }
+
+  function flushGmgnDevCreatedVerify() {
+    if (!devCountVerifyOn) return;
+    for (const key of devCreatedSlots.keys()) scheduleGmgnDevCreatedVerify(key);
   }
 
   function collectHostFeesFromDebotRow(row) {
@@ -4431,7 +4648,14 @@
         const lim = Math.min(rows.length, 24);
         for (let i = 0; i < lim; i += 1) {
           ingestGmgnTokenLike(rows[i], "full");
+          noteGmgnChartCreatedAt(rows[i]);
         }
+      } else if (
+        /mutil_window_token_info|multi_token_info|token_info_brief/i.test(u) &&
+        json?.data &&
+        typeof json.data === "object"
+      ) {
+        noteGmgnChartCreatedAt(json.data);
       }
       if (/meme\/v\d+\/ranks/i.test(u)) {
         flushHostFeePendingNow();
@@ -4961,7 +5185,9 @@
           ? bag.meta
           : { launchpad_extra: extra };
       return {
-        contract: String(bag.contract || p.contract || "").toLowerCase(),
+        contract: String(
+          bag.contract || bag.address || bag.token_address || p.contract || p.address || ""
+        ).toLowerCase(),
         symbol: String(bag.symbol || bag.token_symbol || meta.symbol || "").trim(),
         name: String(bag.name || meta.name || "").trim(),
         quote_symbol: String(bag.quote_symbol || extra.quote_symbol || "").trim(),
@@ -5192,12 +5418,20 @@
 
   function processDebotReactTaxCard(card) {
     if (!(card instanceof HTMLElement)) return;
-    const scope = resolveDebotCardElement(card);
-    const href = String(scope?.getAttribute?.("href") || card.getAttribute("href") || "");
+    const href = String(card.getAttribute?.("href") || "");
     const hrefAddr = (href.match(/0x[a-fA-F0-9]{40}/i) || [])[0];
     if (/\/token\/robinhood\//i.test(href) && debotRhSkipFresh(hrefAddr)) return;
-    const scraped = scrapeDebotLaunchpadFromFiber(scope);
-    const addr = debotAddrFromCard(scope) || String(scraped?.contract || "").toLowerCase();
+    // 顶栏滚动条的 launchpad 挂在小 <a> 自己的 fiber 上。先 resolve 会离开这个节点。
+    let scraped = scrapeDebotLaunchpadFromFiber(card);
+    const scope = resolveDebotCardElement(card);
+    if (!scraped && scope && scope !== card) {
+      scraped = scrapeDebotLaunchpadFromFiber(scope);
+    }
+    const addr =
+      String(hrefAddr || "").toLowerCase() ||
+      debotAddrFromCard(card) ||
+      debotAddrFromCard(scope) ||
+      String(scraped?.contract || "").toLowerCase();
     if (!scraped) return;
     const scrapedAddr = String(scraped.contract || "").toLowerCase();
     if (/\/token\/robinhood\//i.test(href) && (!scrapedAddr || scrapedAddr !== addr)) return;
@@ -5205,7 +5439,11 @@
     const row = { ...scraped, contract: addr };
     const pons = debotRowIsPonsV2(row);
     const genius = debotRowIsGeniusFun(row) && debotRowIsBsc(row);
-    if (!TARGET_TOKEN_RE.test(addr) && !pons && !genius) {
+    const lpId = Core.platformFromLaunchpad(debotRowLaunchpad(row));
+    const brewCard = lpId === "brew";
+    const fourPoolCard =
+      isFourPoolSuffix(addr) && (!lpId || lpId === "four" || lpId === "four_pool");
+    if (!TARGET_TOKEN_RE.test(addr) && !pons && !genius && !brewCard && !fourPoolCard) {
       const lp = debotRowLaunchpad(row);
       if (/\/token\/robinhood\//i.test(href) && addr && lp && !pons) {
         queuePonsSkipAddr(addr);
@@ -5216,8 +5454,9 @@
     if (pons && addr) debotClearRhSkip(addr);
     let entry = debotHostFeeFromRow(row);
     if (!entry) return;
-    entry = applyDomSymbolsToHostFee(entry, scope, "debot");
-    entry = hydrateHostFeeBasket(entry, scope, "debot");
+    const paintOn = card;
+    entry = applyDomSymbolsToHostFee(entry, paintOn, "debot");
+    entry = hydrateHostFeeBasket(entry, paintOn, "debot");
     queueHostFeeEntry(finalizeHostFeeEntry(entry));
   }
 
@@ -5240,6 +5479,11 @@
     };
     if (/debot\.ai|gungnir\.bot/i.test(host)) {
       if (/\/token\//i.test(path)) {
+        const pathCa = (String(path).match(/0x[a-fA-F0-9]{40}/i) || [])[0];
+        if (pathCa) {
+          const link = document.querySelector(`a[href*="${pathCa}"]`);
+          if (link instanceof HTMLElement) push(link);
+        }
         const header = document.querySelector(
           "[title^='0x'], [data-clipboard-text^='0x'], .ca-text"
         );
@@ -5358,8 +5602,7 @@
             if (debotRhSkipFresh(hrefAddr)) return;
           }
           budget -= 1;
-          const card = resolveDebotCardElement(el);
-          if (card instanceof HTMLElement) schedule(card, "debot");
+          schedule(el, "debot");
         });
         return;
       }
@@ -5420,7 +5663,13 @@
         let hits = 0;
         try {
           const path = String(location.pathname || "").toLowerCase();
-          if (!hostIsDebot() && path.indexOf(token) !== -1) {
+          if (hostIsDebot() && path.indexOf(token) !== -1) {
+            const link = document.querySelector(`a[href*="${token}"]`);
+            if (link instanceof HTMLElement) {
+              schedule(link, "debot");
+              hits += 1;
+            }
+          } else if (!hostIsDebot() && path.indexOf(token) !== -1) {
             const leaf = document.querySelector("#token-base-address");
             if (leaf instanceof HTMLElement) {
               schedule(leaf, "gmgn");
@@ -5440,7 +5689,7 @@
               if (!(el instanceof HTMLElement)) return;
               hits += 1;
               if (hostIsDebot()) {
-                schedule(resolveDebotCardElement(el) || el, "debot");
+                schedule(el, "debot");
               } else {
                 const c = resolveGmgnCardElement(el);
                 if (c) schedule(c, "gmgn");
@@ -5495,7 +5744,7 @@
             if (
               n instanceof HTMLElement &&
               n.matches?.(
-                '[data-sentry-source-file="TokenItem.tsx"], [href*="/bsc/token/0x"], [data-contract]'
+                '[data-sentry-source-file="TokenItem.tsx"], [href*="/bsc/token/0x"], [href*="/token/bsc/"], [href*="/token/robinhood/"], [data-contract]'
               )
             ) {
               scanRoot(n);
@@ -5524,7 +5773,9 @@
               href &&
               /\/token\//i.test(href) &&
               !/\/bsc\/token\//i.test(href) &&
-              !/\/robinhood\/token\//i.test(href)
+              !/\/robinhood\/token\//i.test(href) &&
+              !/\/token\/bsc\//i.test(href) &&
+              !/\/token\/robinhood\//i.test(href)
             ) {
               return;
             }
@@ -5740,6 +5991,7 @@
                   }
                   if (wantSearch) {
                     const tokens = collectBscTaxSearchTokens(xhr.response);
+                    flushHostFeePendingNow();
                     if (tokens.length) {
                       window.postMessage(
                         { source: "flap-fee-info", type: "search-overlay-tokens", tokens },
@@ -7385,6 +7637,12 @@
             queueMicrotask(softRefreshLists);
           }
         }
+        if (data.type === "dev-count-verify") {
+          const nextOn = data.enabled === true;
+          const wasOn = devCountVerifyOn;
+          devCountVerifyOn = nextOn;
+          if (nextOn && !wasOn) flushGmgnDevCreatedVerify();
+        }
         if (data.type === "vault-hide-prefs") {
           const was = anyFilterEnabled();
           applyVaultHideObject(data.prefs || {});
@@ -8469,6 +8727,2573 @@
     }
   }
 
+  // ---------- GMGN K 线：跳到创建时刻 / 回到当前 ----------
+  const gmgnChartCreatedAt = new Map();
+  let gmgnChartViewMemory = null;
+  let gmgnChartJumpGen = 0;
+  let gmgnChartJumpWhenReady = false;
+  let gmgnChartJumpBusy = false;
+  let gmgnChartJumpRetriedGen = -1;
+  let gmgnChartOwnedRes = "";
+  let gmgnChartUserDrove = false;
+  let gmgnChartLandedRes = "";
+  let gmgnChartJumpAxis = null;
+  let gmgnChartJumpCa = "";
+  let gmgnChartJumpFrame = "";
+
+  function gmgnNormalizeTokenId(raw) {
+    const text = String(raw || "").trim();
+    if (/^0x[a-fA-F0-9]{40}$/.test(text)) return text.toLowerCase();
+    if (/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(text)) return text;
+    if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(text)) return text;
+    return "";
+  }
+
+  function gmgnChartTimeSec(value) {
+    let ts = Number(value);
+    if (!Number.isFinite(ts)) return 0;
+    if (ts > 1e12) ts = Math.floor(ts / 1000);
+    if (ts < 1500000000) return 0;
+    if (ts > Math.floor(Date.now() / 1000) + 86400) return 0;
+    return ts;
+  }
+
+  function noteGmgnChartCreatedAt(row) {
+    if (!row || typeof row !== "object") return;
+    const addr = gmgnNormalizeTokenId(
+      row.address || row.token_address || row.tokenAddress || row.ca || ""
+    );
+    const pool = row.pool && typeof row.pool === "object" ? row.pool : null;
+    const times = [
+      gmgnChartTimeSec(row.creation_timestamp),
+      gmgnChartTimeSec(row.created_timestamp),
+      gmgnChartTimeSec(row.open_timestamp),
+      gmgnChartTimeSec(row.migrated_timestamp),
+      pool ? gmgnChartTimeSec(pool.open_timestamp) : 0,
+      pool ? gmgnChartTimeSec(pool.creation_timestamp) : 0
+    ].filter((item) => item > 0);
+    // 代币创建日常常早于当前池子开盘。年龄和跳转起点用较晚的那个，否则 30 分钟的币会被当成一周，1 秒被抬成 1 分钟。
+    const ts = times.length ? Math.max.apply(null, times) : 0;
+    if (!addr || !ts) return;
+    const known = gmgnChartCreatedAt.get(addr) === ts;
+    if (!known) gmgnChartCreatedAt.set(addr, ts);
+    if (gmgnChartJumpWhenReady && addr === gmgnTokenIdFromLocation()) {
+      gmgnChartJumpWhenReady = false;
+      setTimeout(() => {
+        try {
+          gmgnChartJumpToCreation();
+        } catch (_jump) {
+          // ignore
+        }
+      }, 0);
+    }
+    if (known) return;
+    if (gmgnChartCreatedAt.size > 80) {
+      const keep = gmgnTokenIdFromLocation();
+      for (const key of gmgnChartCreatedAt.keys()) {
+        if (key === keep) continue;
+        gmgnChartCreatedAt.delete(key);
+        if (gmgnChartCreatedAt.size <= 60) break;
+      }
+    }
+  }
+
+  function gmgnTokenIdFromLocation() {
+    const match = location.pathname.match(/\/token\/([^/?#]+)/);
+    if (!match) return "";
+    let segment = match[1];
+    try {
+      segment = decodeURIComponent(segment);
+    } catch (_dec) {
+      // ignore
+    }
+    return gmgnNormalizeTokenId(segment.split("_")[0]);
+  }
+
+  function gmgnTradingViewFrame() {
+    const iframe = document.querySelector('iframe[id^="tradingview"]');
+    if (!iframe) return null;
+    let cw = null;
+    let doc = null;
+    try {
+      doc = iframe.contentDocument;
+      cw = iframe.contentWindow && iframe.contentWindow.chartWidget;
+    } catch (_e) {
+      return null;
+    }
+    if (!doc || !cw || typeof cw.setResolution !== "function" || typeof cw.model !== "function") {
+      return null;
+    }
+    return { iframe, doc, cw };
+  }
+
+  function gmgnApplyVisibleRange(cw, from, to) {
+    const model = cw.model();
+    const series = model && model.mainSeries && model.mainSeries();
+    const source = series && series.seriesSource && series.seriesSource();
+    const session = cw._chartSession;
+    const api = session && session._getChartApi && session._getChartApi();
+    if (!source || !session || !api || typeof api.setVisibleTimeRange !== "function") return false;
+    if (typeof source.instanceId !== "function" || typeof source.turnaround !== "function") return false;
+    api.setVisibleTimeRange(
+      session.sessionId(),
+      source.instanceId(),
+      source.turnaround(),
+      from,
+      to,
+      true,
+      {},
+      null,
+      undefined,
+      null
+    );
+    return true;
+  }
+
+  // 图表一次大约只回 1 万根。渡船用还能盖住币龄的最细档，落地档由弹窗决定。
+  const GMGN_CHART_RES_STEPS = [
+    ["1S", 1],
+    ["3S", 3],
+    ["5S", 5],
+    ["15S", 15],
+    ["30S", 30],
+    ["1", 60],
+    ["3", 180],
+    ["5", 300],
+    ["15", 900],
+    ["30", 1800],
+    ["60", 3600],
+    ["240", 14400],
+    ["720", 43200],
+    ["1D", 86400],
+  ];
+  const GMGN_CHART_BAR_BUDGET = 9000;
+  // 这一跳还没被用户拖动之前，挡住整段寿命和创建时间之前的空探。拖了再交还 GMGN。
+  let gmgnChartBarsPatch = null;
+
+  function gmgnResolutionSeconds(res) {
+    const text = String(res || "");
+    if (text === "1D" || text === "D") return 86400;
+    if (text === "1W" || text === "W") return 604800;
+    const seconds = /^(\d+)S$/i.exec(text);
+    if (seconds) return Number(seconds[1]);
+    const hours = /^(\d+)H$/i.exec(text);
+    if (hours) return Number(hours[1]) * 3600;
+    if (/^\d+$/.test(text)) return Number(text) * 60;
+    return 0;
+  }
+
+  function gmgnSameResolution(a, b) {
+    if (String(a || "") === String(b || "")) return true;
+    const left = gmgnResolutionSeconds(a);
+    const right = gmgnResolutionSeconds(b);
+    return left > 0 && left === right;
+  }
+
+  function gmgnChartJumpPrefs() {
+    let raw = "";
+    try {
+      raw = document.documentElement.getAttribute("data-flap-chart-jump") || "";
+    } catch (_attr) {
+      raw = "";
+    }
+    if (!raw) return { enabled: true, interval: "follow" };
+    const cut = raw.indexOf(":");
+    const flag = cut >= 0 ? raw.slice(0, cut) : raw;
+    const interval = cut >= 0 ? raw.slice(cut + 1) : "follow";
+    return {
+      enabled: flag !== "0",
+      interval: gmgnResolutionSeconds(interval) > 0 ? interval : "follow"
+    };
+  }
+
+  function gmgnChartJumpTarget(cw) {
+    const prefs = gmgnChartJumpPrefs();
+    if (prefs.interval !== "follow" && gmgnResolutionSeconds(prefs.interval) > 0) return prefs.interval;
+    // 跟随当前只看这一下点击时图表上的周期，不用上一次跳转记下的周期。
+    return gmgnChartResolution(cw) || (gmgnChartViewMemory && gmgnChartViewMemory.resolution) || "1S";
+  }
+
+  function gmgnChartEdgeBar(cw, edge) {
+    try {
+      const bars = cw.model().mainSeries().bars();
+      const index = edge === "last" ? bars.lastIndex() : bars.firstIndex();
+      if (!Number.isFinite(index)) return null;
+      const row = bars.valueAt(index);
+      return Array.isArray(row) ? Number(row[0]) : null;
+    } catch (_bar) {
+      return null;
+    }
+  }
+
+  function gmgnChartFirstBar(cw) {
+    return gmgnChartEdgeBar(cw, "first");
+  }
+
+  function gmgnChartLastBar(cw) {
+    return gmgnChartEdgeBar(cw, "last");
+  }
+
+  function gmgnChartLoading(cw) {
+    try {
+      return Boolean(cw.model().mainSeries().isLoading());
+    } catch (_load) {
+      return false;
+    }
+  }
+
+  function gmgnChartResolution(cw) {
+    try {
+      return String(cw.getResolution() || "");
+    } catch (_res) {
+      return "";
+    }
+  }
+
+  function gmgnChartSourceResolution(cw) {
+    try {
+      return String(cw.model().mainSeries().seriesSource()._resolution || "");
+    } catch (_res) {
+      return "";
+    }
+  }
+
+  // 序列在服务端仍是 Active。stop 后再 start 会停在半成品，下一次换周期就把图停死。
+  function gmgnChartSeriesStable(cw, res) {
+    try {
+      const series = cw.model().mainSeries();
+      const src = series && series.seriesSource();
+      if (!src || typeof src.instanceId !== "function") return false;
+      if (res && !gmgnSameResolution(src._resolution, res)) return false;
+      if (src._status !== 3) return false;
+      if (series.isLoading()) return false;
+      if (src.instanceId() == null) return false;
+      const bars = series.bars();
+      const size = bars && typeof bars.size === "function" ? Number(bars.size()) : 0;
+      return size > 0;
+    } catch (_stable) {
+      return false;
+    }
+  }
+
+  function gmgnFinestCoveringResolution(ageSec) {
+    for (let i = 0; i < GMGN_CHART_RES_STEPS.length; i += 1) {
+      const step = GMGN_CHART_RES_STEPS[i];
+      if (ageSec / step[1] <= GMGN_CHART_BAR_BUDGET) return step[0];
+    }
+    return "1D";
+  }
+
+  function gmgnCoarserChartResolution(res) {
+    const sec = gmgnResolutionSeconds(res);
+    for (let i = 0; i < GMGN_CHART_RES_STEPS.length; i += 1) {
+      if (GMGN_CHART_RES_STEPS[i][1] > sec) return GMGN_CHART_RES_STEPS[i][0];
+    }
+    return "";
+  }
+
+  function gmgnChartBarTime(bars, index) {
+    if (!Number.isFinite(index)) return null;
+    try {
+      const row = bars.valueAt(index);
+      return Array.isArray(row) ? Number(row[0]) : null;
+    } catch (_row) {
+      return null;
+    }
+  }
+
+  function gmgnAxisLabelSeconds(label) {
+    const parts = String(label || "").split(":");
+    if (parts.length < 2 || parts.length > 3) return null;
+    const nums = parts.map((part) => Number(part));
+    if (nums.some((num) => !Number.isFinite(num))) return null;
+    let sec = nums[0] * 3600 + nums[1] * 60;
+    if (nums.length === 3) sec += nums[2];
+    return sec;
+  }
+
+  function gmgnMedian(values) {
+    if (!values.length) return 0;
+    const sorted = values.slice().sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    if (sorted.length % 2) return sorted[mid];
+    return (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  function gmgnAxisPoints(scale) {
+    let marks = [];
+    try {
+      marks = scale.marks() || [];
+    } catch (_marks) {
+      return [];
+    }
+    const points = [];
+    let carry = 0;
+    let prev = null;
+    for (let i = 0; i < marks.length; i += 1) {
+      const sec = gmgnAxisLabelSeconds(marks[i] && marks[i].label);
+      if (sec == null) {
+        prev = null;
+        continue;
+      }
+      let abs = sec + carry;
+      if (prev != null && abs < prev) {
+        carry += 86400;
+        abs = sec + carry;
+      }
+      const coord = Number(marks[i].coord);
+      points.push({ abs: abs, coord: Number.isFinite(coord) ? coord : null });
+      prev = abs;
+    }
+    return points;
+  }
+
+  // 底部刻度按几组标签的平均间隔来，不拿任意相邻两根去收成 1 分钟。
+  function gmgnAxisGroupSteps(points) {
+    const steps = [];
+    const size = 4;
+    for (let i = 0; i + size - 1 < points.length; i += 2) {
+      const span = points[i + size - 1].abs - points[i].abs;
+      const count = size - 1;
+      if (span >= count && span <= 6 * 3600 * count) steps.push(span / count);
+    }
+    const last = points.length - 1;
+    if (last >= 3) {
+      for (let band = 0; band < 4; band += 1) {
+        const start = Math.round((last * band) / 4);
+        const end = Math.round((last * (band + 1)) / 4);
+        if (end <= start) continue;
+        const span = points[end].abs - points[start].abs;
+        const count = end - start;
+        if (span >= count && span <= 6 * 3600 * count) steps.push(span / count);
+      }
+    }
+    return steps;
+  }
+
+  function gmgnAxisStepSeconds(scale) {
+    const points = gmgnAxisPoints(scale);
+    if (points.length < 4) return 0;
+    const steps = gmgnAxisGroupSteps(points);
+    if (!steps.length) return 0;
+    const mid = gmgnMedian(steps);
+    const near = steps.filter((step) => step >= mid * 0.55 && step <= mid * 1.8);
+    const pool = near.length >= 2 ? near : steps;
+    const avg = pool.reduce((sum, step) => sum + step, 0) / pool.length;
+    if (!(avg >= 1)) return 0;
+    return Math.round(avg);
+  }
+
+  function gmgnAxisTickPx(scale) {
+    const points = gmgnAxisPoints(scale);
+    const gaps = [];
+    for (let i = 1; i < points.length; i += 1) {
+      if (points[i].coord == null || points[i - 1].coord == null) continue;
+      const gap = points[i].coord - points[i - 1].coord;
+      if (gap >= 24 && gap <= 240) gaps.push(gap);
+    }
+    const mid = gmgnMedian(gaps);
+    return mid >= 24 ? mid : 78;
+  }
+
+  // 新周期上，一个刻度仍跨跳转前量到的那么多秒。
+  function gmgnSpacingForAxisStep(barSec, stepSec, tickPx) {
+    const pitch = tickPx >= 36 && tickPx <= 200 ? tickPx : 78;
+    const step = Math.max(stepSec, barSec);
+    const px = (pitch * barSec) / step;
+    return Math.max(0.5, Math.min(40, px));
+  }
+
+  function gmgnCaptureChartView(cw) {
+    const view = {
+      resolution: gmgnChartResolution(cw),
+      spacing: 0,
+      axisStep: 0,
+      tickPx: 0,
+      axisFit: 0,
+      atRealtime: true,
+      left: null,
+      right: null
+    };
+    try {
+      const bars = cw.model().mainSeries().bars();
+      const scale = cw.model().timeScale();
+      const range = scale.visibleBarsStrictRange();
+      const lastIdx = bars.lastIndex();
+      const leftIdx = range && range.firstBar();
+      const rightIdx = range && range.lastBar();
+      view.spacing = Number(scale.barSpacing()) || 0;
+      view.axisStep = gmgnAxisStepSeconds(scale);
+      view.tickPx = gmgnAxisTickPx(scale);
+      view.left = gmgnChartBarTime(bars, leftIdx);
+      view.right = gmgnChartBarTime(
+        bars,
+        Number.isFinite(rightIdx) && Number.isFinite(lastIdx) ? Math.min(rightIdx, lastIdx) : rightIdx
+      );
+      view.atRealtime = Number.isFinite(rightIdx) && Number.isFinite(lastIdx) && rightIdx >= lastIdx - 2;
+    } catch (_view) {
+      // 记不到视口时，恢复仍按周期滚到最新。
+    }
+    return view;
+  }
+
+  function gmgnApplySavedView(cw, saved) {
+    if (!saved) return;
+    const scale = cw.model().timeScale();
+    if (saved.spacing > 0) {
+      try {
+        scale.setBarSpacing(saved.spacing);
+      } catch (_space) {
+        // ignore
+      }
+    }
+    if (!saved.atRealtime && saved.left && saved.right && saved.right > saved.left) {
+      try {
+        if (!gmgnApplyVisibleRange(cw, saved.left, saved.right)) scale.scrollToRealtime();
+      } catch (_range) {
+        // ignore
+      }
+    } else {
+      try {
+        scale.scrollToRealtime();
+      } catch (_now) {
+        // ignore
+      }
+    }
+    if (saved.spacing > 0) {
+      try {
+        scale.setBarSpacing(saved.spacing);
+      } catch (_space2) {
+        // ignore
+      }
+    }
+  }
+
+  function gmgnChartVisibleBars(saved) {
+    let bars = 180;
+    if (saved && saved.left && saved.right && saved.right > saved.left) {
+      const sec = gmgnResolutionSeconds(saved.resolution);
+      if (sec > 0) bars = Math.round((saved.right - saved.left) / sec);
+    }
+    if (!Number.isFinite(bars) || bars < 80) return 80;
+    if (bars > 420) return 420;
+    return bars;
+  }
+
+  function gmgnChartDatafeed(cw) {
+    try {
+      const session = cw._chartSession;
+      const api = session && session._getChartApi && session._getChartApi();
+      const transport = api && api._transport;
+      const feed = transport && transport._factoryOptions && transport._factoryOptions.datafeed;
+      if (feed && typeof feed.getBars === "function") return feed;
+    } catch (_feed) {
+      // ignore
+    }
+    return null;
+  }
+
+  function gmgnUnbindChartBarsGate(doc) {
+    if (!doc || typeof doc.__flapChartBarsGate !== "function") return;
+    const stop = doc.__flapChartBarsGate;
+    doc.removeEventListener("pointerdown", stop, true);
+    doc.removeEventListener("wheel", stop, true);
+    doc.removeEventListener("touchstart", stop, true);
+    doc.removeEventListener("keydown", stop, true);
+    try {
+      delete doc.__flapChartBarsGate;
+    } catch (_del) {
+      doc.__flapChartBarsGate = null;
+    }
+  }
+
+  function gmgnChartResumePaging(cw) {
+    const seen = [];
+    const poke = (obj) => {
+      if (!obj || typeof obj !== "object" || seen.indexOf(obj) >= 0) return;
+      seen.push(obj);
+      try {
+        if (obj._endOfData) obj._endOfData = false;
+        if (obj.endOfData === true) obj.endOfData = false;
+      } catch (_flag) {
+        // ignore
+      }
+    };
+    try {
+      const series = cw.model().mainSeries();
+      poke(series);
+      if (series && typeof series.bars === "function") poke(series.bars());
+      if (series && typeof series.seriesSource === "function") poke(series.seriesSource());
+    } catch (_series) {
+      // ignore
+    }
+  }
+
+  function gmgnAnswerChartBarsLater(onResult, bars, meta) {
+    setTimeout(() => {
+      try {
+        onResult(Array.isArray(bars) ? bars : [], meta || {});
+      } catch (_answer) {
+        // ignore
+      }
+    }, 0);
+  }
+
+  function gmgnReleaseChartBarsPatch(feed) {
+    gmgnChartBarsPatch = null;
+    if (!feed || typeof feed.__flapChartGetBars !== "function") return;
+    feed.getBars = feed.__flapChartGetBars;
+    try {
+      delete feed.__flapChartGetBars;
+    } catch (_del) {
+      feed.__flapChartGetBars = null;
+    }
+    try {
+      const frame = gmgnTradingViewFrame();
+      if (frame) gmgnUnbindChartBarsGate(frame.doc);
+    } catch (_frame) {
+      // ignore
+    }
+  }
+
+  function gmgnClearChartBarsPatch() {
+    const frame = gmgnTradingViewFrame();
+    if (!frame) {
+      gmgnChartBarsPatch = null;
+      return;
+    }
+    gmgnReleaseChartBarsPatch(gmgnChartDatafeed(frame.cw));
+  }
+
+  // 用户一开始拖，就不再按开盘窗口改请求。普通翻页原样交给 GMGN；超过 1200 根的仍收成一小页，并且 700ms 内只放行一页，避免松手后把整段寿命打出去。包装留到换币或图表重载。
+  function gmgnRelaxChartBarsPatch(cw) {
+    const pending = gmgnChartBarsPatch;
+    if (!pending || pending.gen !== gmgnChartJumpGen) {
+      gmgnReleaseChartBarsPatch(gmgnChartDatafeed(cw));
+      return;
+    }
+    pending.relax = true;
+    pending.relaxUntil = Date.now() + 2500;
+    pending.relaxSent = 0;
+    gmgnChartResumePaging(cw);
+    try {
+      const frame = gmgnTradingViewFrame();
+      if (frame) gmgnUnbindChartBarsGate(frame.doc);
+    } catch (_frame) {
+      // ignore
+    }
+  }
+
+  function gmgnBindChartBarsGate(cw) {
+    let doc = null;
+    try {
+      const frame = gmgnTradingViewFrame();
+      if (frame && frame.cw === cw) doc = frame.doc;
+    } catch (_doc) {
+      doc = null;
+    }
+    if (!doc || typeof doc.__flapChartBarsGate === "function") return;
+    const stop = (event) => {
+      const node = event && event.target;
+      const el = node && node.nodeType === 1 ? node : (node && node.parentElement);
+      if (el && typeof el.closest === "function" && el.closest("#flap-chart-jump")) return;
+      gmgnUnbindChartBarsGate(doc);
+      gmgnRelaxChartBarsPatch(cw);
+    };
+    doc.__flapChartBarsGate = stop;
+    doc.addEventListener("pointerdown", stop, true);
+    doc.addEventListener("wheel", stop, true);
+    doc.addEventListener("touchstart", stop, true);
+    doc.addEventListener("keydown", stop, true);
+  }
+
+  function gmgnBarSecTime(bar) {
+    const t = bar && bar.time;
+    if (!t) return 0;
+    return t > 1e12 ? Math.floor(t / 1000) : Math.floor(t);
+  }
+
+  // 记录的创建时间可能早于第一根 K 线。空窗口不能当成结果，否则图表会停在「没有数据」。
+  function gmgnWalkToFirstBars(orig, symbolInfo, resolution, pending, deliver, giveUp) {
+    const sec = gmgnResolutionSeconds(resolution) || 60;
+    const count = Math.max(80, Math.min(pending.count || 480, 480));
+    const span = count * sec;
+    const now = Math.floor(Date.now() / 1000);
+    const start = pending.created || pending.from || now - span;
+    let tries = 0;
+    const ask = (to, done) => {
+      tries += 1;
+      if (pending.failed || pending.gen !== gmgnChartJumpGen) return;
+    if (tries > 10) {
+      giveUp();
+      return;
+    }
+      try {
+        orig(
+          symbolInfo,
+          resolution,
+          {
+            from: Math.max(0, to - span),
+            to: to,
+            countBack: count,
+            firstDataRequest: false
+          },
+          (bars) => done(Array.isArray(bars) ? bars : []),
+          () => done([])
+        );
+      } catch (_ask) {
+        giveUp();
+      }
+    };
+    let lastEmpty = pending.to || start + span;
+    let probe = lastEmpty;
+    const binary = (lo, hi) => {
+      if (hi - lo <= Math.max(span, sec * 40) || tries >= 10) {
+        ask(Math.min(now + sec, hi + span), (bars) => {
+          if (!bars.length) {
+            giveUp();
+            return;
+          }
+          const t0 = gmgnBarSecTime(bars[0]);
+          pending.foundFrom = t0 || hi;
+          pending.from = pending.foundFrom;
+          pending.to = pending.foundFrom + span;
+          deliver(bars);
+        });
+        return;
+      }
+      const mid = Math.floor((lo + hi) / 2);
+      ask(mid, (bars) => {
+        if (bars.length) binary(lo, mid);
+        else binary(mid, hi);
+      });
+    };
+    const grow = () => {
+      if (probe >= now - sec) {
+        giveUp();
+        return;
+      }
+      const to = Math.min(now + sec, probe + span);
+      ask(to, (bars) => {
+        if (!bars.length) {
+          lastEmpty = to;
+          const gap = Math.max(span, to - start);
+          probe = Math.min(now, to + gap);
+          grow();
+          return;
+        }
+        binary(lastEmpty, to);
+      });
+    };
+    grow();
+  }
+
+  // 1 秒图上开盘一小段和后面的实时段之间，缺口不到 6 小时，旧逻辑不当空洞。
+  function gmgnFirstShortHole(bars, sec) {
+    const first = bars && bars.firstIndex();
+    const last = bars && bars.lastIndex();
+    if (!Number.isFinite(first) || !Number.isFinite(last) || last <= first) return null;
+    // 1 秒图正常也会空几十秒。只有超过 3 分钟才当成断档去补。
+    const minGap = Math.max((sec || 60) * 120, 180);
+    const maxGap = 6 * 3600;
+    let prev = null;
+    let prevIndex = first;
+    const stop = Math.min(last, first + 8000);
+    for (let i = first; i <= stop; i += 1) {
+      const row = bars.valueAt(i);
+      const t = row && row[0];
+      if (!t) continue;
+      if (prev != null && t - prev > minGap && t - prev < maxGap) {
+        return { index: prevIndex, from: prev, to: t };
+      }
+      prev = t;
+      prevIndex = i;
+    }
+    return null;
+  }
+
+  function gmgnFillShortHole(cw, sec, state) {
+    if (!state || state.pulling || state.userMoved) return;
+    if ((state.holePulls || 0) >= 16) return;
+    if (state.coolUntil && Date.now() < state.coolUntil) return;
+    if (state.lastPull && Date.now() - state.lastPull < 700) return;
+    let bars = null;
+    let info = null;
+    let feed = null;
+    try {
+      const series = cw.model().mainSeries();
+      bars = series.bars();
+      info = series.symbolInfo();
+      const session = cw._chartSession;
+      const api = session && session._getChartApi && session._getChartApi();
+      feed = api && api._transport && api._transport._factoryOptions && api._transport._factoryOptions.datafeed;
+    } catch (_feed) {
+      return;
+    }
+    if (!bars || !info || !feed) return;
+    const hole = gmgnFirstShortHole(bars, sec);
+    if (!hole) return;
+    const orig = typeof feed.__flapChartGetBars === "function" ? feed.__flapChartGetBars : feed.getBars.bind(feed);
+    const res = gmgnChartResolution(cw);
+    if (!gmgnResolutionSeconds(res)) return;
+    const count = 300;
+    const from = hole.from;
+    const to = Math.min(hole.to, from + count * sec);
+    state.pulling = true;
+    state.lastPull = Date.now();
+    try {
+      orig(info, res, { from: from, to: to, countBack: count, firstDataRequest: false }, (got) => {
+        state.pulling = false;
+        if (state.gen !== gmgnChartJumpGen || gmgnChartGapClamp !== state) return;
+        const rows = Array.isArray(got) ? got : [];
+        if (!rows.length) {
+          state.holePulls = (state.holePulls || 0) + 1;
+          state.coolUntil = Date.now() + 2000;
+          return;
+        }
+        let liveBars = null;
+        try {
+          liveBars = cw.model().mainSeries().bars();
+        } catch (_live) {
+          return;
+        }
+        const liveHole = gmgnFirstShortHole(liveBars, sec);
+        if (!liveHole) return;
+        let tailCount = 0;
+        for (let i = liveHole.index + 1; i <= liveBars.lastIndex(); i += 1) {
+          const row = liveBars.valueAt(i);
+          if (row && row[0]) tailCount += 1;
+          if (tailCount > 2000) {
+            state.holePulls = 16;
+            return;
+          }
+        }
+        const saved = [];
+        for (let i = liveHole.index + 1; i <= liveBars.lastIndex() && saved.length < 2000; i += 1) {
+          const row = liveBars.valueAt(i);
+          if (row && row[0]) saved.push(row);
+        }
+        for (let i = liveBars.lastIndex(); i > liveHole.index; i -= 1) {
+          try {
+            liveBars.remove(i);
+          } catch (_cut) {
+            break;
+          }
+        }
+        gmgnAppendFeedBars(cw, rows, sec);
+        if (saved.length) {
+          gmgnAppendFeedBars(cw, saved.map((row) => ({
+            time: row[0],
+            open: row[1],
+            high: row[2],
+            low: row[3],
+            close: row[4],
+            volume: row[5] || 0
+          })), sec);
+        }
+        state.holePulls = (state.holePulls || 0) + 1;
+      }, () => {
+        state.pulling = false;
+        state.coolUntil = Date.now() + 4000;
+      });
+    } catch (_call) {
+      state.pulling = false;
+    }
+  }
+
+  function gmgnArmChartBarsPatch(cw, spec) {
+    const feed = gmgnChartDatafeed(cw);
+    if (!feed) return false;
+    const prev = gmgnChartBarsPatch;
+    if (
+      prev &&
+      prev.gen === spec.gen &&
+      !prev.relax &&
+      (prev.wideSent > 0 || prev.net > 0) &&
+      gmgnSameResolution(prev.res, spec.res)
+    ) {
+      prev.from = spec.from;
+      prev.to = spec.to;
+      prev.count = spec.count;
+      prev.created = spec.created || prev.created;
+      gmgnChartBarsPatch = prev;
+    } else {
+      spec.wideSent = 0;
+      spec.smallSent = 0;
+      spec.probeSent = 0;
+      spec.otherWide = 0;
+      spec.net = 0;
+      spec.cache = null;
+      spec.wideWait = [];
+      spec.probeQueued = false;
+      spec.followQueued = false;
+      spec.smallQueued = false;
+      spec.relax = false;
+      spec.relaxUntil = 0;
+      spec.relaxSent = 0;
+      gmgnChartBarsPatch = spec;
+    }
+    if (typeof feed.__flapChartGetBars !== "function") {
+      const orig = feed.getBars.bind(feed);
+      feed.__flapChartGetBars = orig;
+      feed.getBars = function (symbolInfo, resolution, periodParams, onResult, onError) {
+        const pending = gmgnChartBarsPatch;
+        if (!pending || pending.gen !== gmgnChartJumpGen) {
+          return orig(symbolInfo, resolution, periodParams, onResult, onError);
+        }
+        const same = gmgnSameResolution(resolution, pending.res);
+        if (!same) {
+          let chartRes = "";
+          try {
+            chartRes = gmgnChartResolution(cw);
+          } catch (_chart) {
+            chartRes = "";
+          }
+          // 创建跳转自己正在从 1 秒切到 1 分钟时，图表还停在旧周期。这时拆掉门禁，开盘搜索就没了。
+          if (chartRes && !gmgnSameResolution(chartRes, pending.res) && !gmgnChartJumpBusy) pending.gen = -1;
+          return orig(symbolInfo, resolution, periodParams, onResult, onError);
+        }
+        const asked = Number(periodParams && periodParams.countBack);
+        const fromRaw = Number(periodParams && periodParams.from);
+        const toRaw = Number(periodParams && periodParams.to);
+        const from = fromRaw > 1e12 ? Math.floor(fromRaw / 1000) : fromRaw;
+        const to = toRaw > 1e12 ? Math.floor(toRaw / 1000) : toRaw;
+        const barSec = gmgnResolutionSeconds(resolution) || gmgnResolutionSeconds(pending.res) || 60;
+        const span = Number.isFinite(from) && Number.isFinite(to) ? to - from : 0;
+        const wide = asked > 1200 || span > barSec * 1500;
+        const quench = (key, bars, meta) => {
+          if (pending[key]) return;
+          pending[key] = true;
+          gmgnAnswerChartBarsLater(onResult, bars, meta);
+          setTimeout(() => {
+            if (gmgnChartBarsPatch === pending) pending[key] = false;
+          }, 400);
+        };
+        const send = (params, after) => {
+          if (pending.net >= 8) {
+            quench("followQueued", pending.cache || [], { noData: true });
+            return undefined;
+          }
+          pending.net += 1;
+          return orig(
+            symbolInfo,
+            resolution,
+            params,
+            (bars, meta) => {
+              if (typeof after === "function") after(bars, meta);
+              try {
+                onResult(bars, meta);
+              } catch (_res) {
+                // ignore
+              }
+            },
+            (err) => {
+              try {
+                onError(err);
+              } catch (_err) {
+                // ignore
+              }
+            }
+          );
+        };
+        // 6 小时以内是普通翻页，不是整段寿命。1 秒图补这一小时不能被收成开盘 480 根。
+        // 这种大请求最多放行 6 次，再往后改成一页，避免同一段被反复全量拉取。
+        const beforeCreated = pending.created && Number.isFinite(to) && to + barSec < pending.created;
+        // 换周期后的第一页通常是「最近几小时」。开盘还没找到时不能把它放行，否则第一次点击只看到最近 K 线。
+        const openStillMissing = gmgnChartJumpBusy
+          && !pending.foundFrom
+          && !pending.failed
+          && pending.created
+          && Number.isFinite(to)
+          && to > pending.created + 86400;
+        if (same && Number.isFinite(span) && span > 0 && span <= 6 * 3600 && !beforeCreated && !openStillMissing) {
+          const heavy = asked > 800 || span > barSec * 400;
+          if (heavy) {
+            pending.shortSent = (pending.shortSent || 0) + 1;
+            if (pending.shortSent > 6) {
+              const edge = Number.isFinite(to) ? to : Math.floor(Date.now() / 1000);
+              const count = 480;
+              return orig(
+                symbolInfo,
+                resolution,
+                {
+                  from: edge - count * barSec,
+                  to: edge,
+                  countBack: count,
+                  firstDataRequest: false
+                },
+                onResult,
+                onError
+              );
+            }
+          }
+          return orig(symbolInfo, resolution, periodParams, onResult, onError);
+        }
+        // 用户已经在缩放或右拖。几天以内的请求按原范围放行，不要改成一小页把已有 K 线换掉。
+        if (same && gmgnChartUserDrove && Number.isFinite(span) && span > 0 && span <= 7 * 86400) {
+          return orig(symbolInfo, resolution, periodParams, onResult, onError);
+        }
+        if (pending.relax) {
+          if (!wide) return orig(symbolInfo, resolution, periodParams, onResult, onError);
+          const nowMs = Date.now();
+          if (pending.relaxAt && nowMs - pending.relaxAt < 700) {
+            quench("followQueued", pending.cache || [], { noData: true });
+            return undefined;
+          }
+          pending.relaxAt = nowMs;
+          const edge = Number.isFinite(to) ? to : Math.floor(Date.now() / 1000);
+          const count = 480;
+          return orig(
+            symbolInfo,
+            resolution,
+            {
+              from: edge - count * barSec,
+              to: edge,
+              countBack: count,
+              firstDataRequest: false
+            },
+            onResult,
+            onError
+          );
+        }
+        // 开盘窗口大约几十小时、几百根，够不上「整段寿命」，但空结果必须接着往后找。
+        const creationProbe = same && pending.created && Number.isFinite(to)
+          && to > pending.created
+          && to <= pending.created + 14 * 86400
+          && (!Number.isFinite(from) || from <= pending.created + barSec * 3);
+        if (wide && same && !creationProbe && pending.wideSent >= 1) {
+          pending.otherSame = (pending.otherSame || 0) + 1;
+          if (pending.otherSame > 4) {
+            quench("followQueued", pending.cache || [], { noData: true });
+            return undefined;
+          }
+          const edge = Number.isFinite(to) ? to : Math.floor(Date.now() / 1000);
+          const count = 480;
+          return orig(
+            symbolInfo,
+            resolution,
+            {
+              from: edge - count * barSec,
+              to: edge,
+              countBack: count,
+              firstDataRequest: false
+            },
+            onResult,
+            onError
+          );
+        }
+        if ((wide && same) || creationProbe || (same && pending.wideSent < 1 && !pending.foundFrom && !pending.failed)) {
+          if (pending.failed && !pending.searching) {
+            const nowMs = Date.now();
+            if (pending.failAt && nowMs - pending.failAt < 700) {
+              quench("followQueued", [], { noData: true });
+              return undefined;
+            }
+            pending.failAt = nowMs;
+            const edge = Number.isFinite(to) ? to : Math.floor(Date.now() / 1000);
+            const count = 480;
+            return orig(
+              symbolInfo,
+              resolution,
+              {
+                from: edge - count * barSec,
+                to: edge,
+                countBack: count,
+                firstDataRequest: false
+              },
+              onResult,
+              onError
+            );
+          }
+          if (pending.searching) {
+            pending.wideWait = pending.wideWait || [];
+            if (pending.wideWait.length < 4) pending.wideWait.push(onResult);
+            return undefined;
+          }
+          if (pending.wideSent < 1) {
+            pending.wideSent += 1;
+            pending.searching = true;
+            let settled = false;
+            const deliver = (bars) => {
+              if (settled || pending.aborted) {
+                pending.searching = false;
+                return;
+              }
+              settled = true;
+              pending.searching = false;
+              const list = Array.isArray(bars) ? bars : [];
+              if (list.length) pending.cache = list;
+              const wait = pending.wideWait || [];
+              pending.wideWait = [];
+              const meta = list.length ? {} : { noData: true };
+              try {
+                onResult(list, meta);
+              } catch (_res) {
+                // ignore
+              }
+              for (let i = 0; i < wait.length; i += 1) {
+                gmgnAnswerChartBarsLater(wait[i], list, meta);
+              }
+            };
+            const giveUp = () => {
+              pending.failed = true;
+              deliver([]);
+            };
+            try {
+              orig(
+                symbolInfo,
+                resolution,
+                {
+                  from: pending.from,
+                  to: pending.to,
+                  countBack: pending.count,
+                  firstDataRequest: false
+                },
+                (bars) => {
+                  if (pending.failed) return;
+                  const t0 = bars && bars.length ? gmgnBarSecTime(bars[0]) : 0;
+                  const nearStart = t0 && pending.created && t0 <= pending.created + 14 * 86400;
+                  if (bars && bars.length && (nearStart || !pending.created)) {
+                    if (t0) pending.foundFrom = t0;
+                    deliver(bars);
+                    return;
+                  }
+                  gmgnWalkToFirstBars(orig, symbolInfo, resolution, pending, deliver, giveUp);
+                },
+                () => giveUp()
+              );
+            } catch (_walk) {
+              giveUp();
+            }
+            return undefined;
+          }
+          if (!pending.cache) {
+            pending.wideWait = pending.wideWait || [];
+            if (pending.wideWait.length < 4) pending.wideWait.push(onResult);
+            return undefined;
+          }
+          quench("followQueued", pending.cache, { noData: true });
+          return undefined;
+        }
+        if (wide) {
+          if (pending.otherWide < 1) {
+            pending.otherWide += 1;
+            const edge = Number.isFinite(to) ? to : Math.floor(Date.now() / 1000);
+            const count = 320;
+            return send({
+              from: edge - count * barSec,
+              to: edge,
+              countBack: count,
+              firstDataRequest: false
+            });
+          }
+          quench("followQueued", [], { noData: true });
+          return undefined;
+        }
+        const leftProbe = same && (
+          (pending.created && Number.isFinite(to) && to <= pending.created) ||
+          (pending.wideSent > 0 && Number.isFinite(to) && to <= pending.from + barSec)
+        );
+        if (leftProbe) {
+          if (pending.probeSent < 2) {
+            pending.probeSent += 1;
+            return send(periodParams);
+          }
+          quench("probeQueued", [], pending.cache ? { noData: true } : {});
+          return undefined;
+        }
+        if (same && pending.smallSent >= 4) {
+          quench("smallQueued", pending.cache || [], pending.cache ? { noData: true } : {});
+          return undefined;
+        }
+        if (same) pending.smallSent += 1;
+        return send(periodParams);
+      };
+    }
+    gmgnBindChartBarsGate(cw);
+    return true;
+  }
+
+  // 活着的序列只改时间窗。stop/start 会把状态停在非 Active，之后换周期不再建序列。
+  function gmgnRefetchChartWindow(cw, res, from, to, count) {
+    let src = null;
+    try {
+      src = cw.model().mainSeries().seriesSource();
+    } catch (_series) {
+      return false;
+    }
+    if (!src || typeof src.modifySeries !== "function") return false;
+    let symbol = null;
+    let instanceId = null;
+    try {
+      symbol = typeof src.symbol === "function" ? src.symbol() : null;
+      instanceId = typeof src.instanceId === "function" ? src.instanceId() : null;
+    } catch (_symbol) {
+      return false;
+    }
+    if (!symbol || instanceId == null) return false;
+    gmgnArmChartBarsPatch(cw, {
+      gen: gmgnChartJumpGen,
+      res: res,
+      from: from,
+      to: to,
+      count: Math.max(80, Math.min(count || 600, 800)),
+      created: gmgnChartCreatedAt.get(gmgnTokenIdFromLocation()) || 0
+    });
+    try {
+      if (typeof src.setInitialRequestOptions === "function") src.setInitialRequestOptions({ count: Math.max(80, Math.min(count || 600, 800)) });
+    } catch (_opt) {
+      // ignore
+    }
+    try {
+      src.modifySeries(symbol, res, { type: "time-range", from: from, to: to });
+    } catch (_mod) {
+      return false;
+    }
+    return true;
+  }
+
+  function gmgnDriveResolution(cw, res) {
+    const cur = gmgnChartResolution(cw);
+    if (gmgnChartUserDrove) return false;
+    if (gmgnChartOwnedRes && cur && !gmgnSameResolution(cur, gmgnChartOwnedRes) && !gmgnSameResolution(cur, res)) {
+      gmgnChartUserDrove = true;
+      gmgnChartLandedRes = "";
+      gmgnChartJumpBusy = false;
+      gmgnLoadRecentWindow(cw, cur);
+      return false;
+    }
+    gmgnChartOwnedRes = String(res || "");
+    try {
+      cw.setResolution(res);
+    } catch (_res) {
+      return false;
+    }
+    return true;
+  }
+
+  // 用户中途改了周期时，按他选的周期拉最近画面，避免创建窗的大跨度把新周期卡死。
+  function gmgnLoadRecentWindow(cw, res) {
+    gmgnChartOwnedRes = String(res || "");
+    const sec = gmgnResolutionSeconds(res) || 60;
+    const now = Math.floor(Date.now() / 1000);
+    const count = 400;
+    let src = null;
+    try {
+      src = cw.model().mainSeries().seriesSource();
+    } catch (_series) {
+      src = null;
+    }
+    if (!gmgnSameResolution(gmgnChartResolution(cw), res)) {
+      try {
+        cw.setResolution(res);
+      } catch (_res) {
+        // ignore
+      }
+    }
+    try {
+      if (src && typeof src.setInitialRequestOptions === "function") src.setInitialRequestOptions({ count: count });
+      if (src && src.instanceId() != null && typeof src.modifySeries === "function" && typeof src.symbol === "function") {
+        src.modifySeries(src.symbol(), res, { type: "time-range", from: now - count * sec, to: now + 30 });
+      }
+    } catch (_mod) {
+      // ignore
+    }
+    try {
+      cw.model().timeScale().scrollToRealtime();
+    } catch (_scroll) {
+      // ignore
+    }
+  }
+
+  // 实时订阅会把「现在」接在创建窗口后面，中间空掉大半年，往后翻就是断线。
+  function gmgnTrimSeriesGap(cw, sec) {
+    let bars = null;
+    try {
+      bars = cw.model().mainSeries().bars();
+    } catch (_bars) {
+      return;
+    }
+    if (!bars || typeof bars.remove !== "function") return;
+    const first = bars.firstIndex();
+    const last = bars.lastIndex();
+    if (!Number.isFinite(first) || !Number.isFinite(last) || last - first > 20000) return;
+    // 只剪掉接到「现在」的实时柱。历史里安静几小时要留着，否则右拖会被拆掉。
+    let prev = null;
+    for (let idx = first; idx <= last; idx += 1) {
+      const row = bars.valueAt(idx);
+      const t = row && row[0];
+      if (!t) continue;
+      if (prev && gmgnIsLiveTailHole(prev, t, sec, last - idx + 1)) {
+        try {
+          bars.remove(idx);
+        } catch (_cut) {
+          // ignore
+        }
+        return;
+      }
+      prev = t;
+    }
+  }
+
+  function gmgnWatchSeriesGap(cw, gen, sec) {
+    let left = 900;
+    const timer = setInterval(() => {
+      left -= 1;
+      if (left <= 0 || gen !== gmgnChartJumpGen) {
+        clearInterval(timer);
+        return;
+      }
+      const cur = gmgnChartResolution(cw);
+      if (gmgnChartOwnedRes && cur && !gmgnSameResolution(cur, gmgnChartOwnedRes)) {
+        clearInterval(timer);
+        if (!gmgnChartUserDrove) {
+          gmgnChartUserDrove = true;
+          gmgnChartLandedRes = "";
+          gmgnChartJumpBusy = false;
+          gmgnLoadRecentWindow(cw, cur);
+        }
+        return;
+      }
+      gmgnTrimSeriesGap(cw, sec);
+    }, 1000);
+  }
+
+  // 开盘这一屏要还能看出拉升。372 天的币安人生，开盘起头 24 根：
+  // 5 分钟约 2 小时、39 倍；15 分钟约 6 小时、26 倍；30 分钟约 12 小时、15 倍；1 小时约 23 小时、只剩 5 倍。
+  // 整段根数：5 分钟约 10.7 万，15 分钟约 3.6 万，30 分钟约 1.8 万。90 天以上按这个拆，避免一年的币还停在 5 分钟。
+  // 6 小时内可 1 秒；36 小时内最细 15 秒；3 天内最细 30 秒；90 天内最细 1 分钟；
+  // 90–180 天最细 5 分钟；180 天–1 年最细 15 分钟；超过 1 年最细 30 分钟。
+  // 用户已经在更粗的档上时，保持他正在看的周期。
+  function gmgnCreationResolution(target, age, axisStep) {
+    void axisStep;
+    const sec = gmgnResolutionSeconds(target) || 60;
+    let floor = 1;
+    if (age > 6 * 3600) floor = 15;
+    if (age > 36 * 3600) floor = 30;
+    if (age > 3 * 86400) floor = 60;
+    if (age > 90 * 86400) floor = 300;
+    if (age > 180 * 86400) floor = 900;
+    if (age > 365 * 86400) floor = 1800;
+    if (sec >= floor) return target;
+    const ladder = ["15S", "30S", "1", "5", "15", "30"];
+    for (let i = 0; i < ladder.length; i += 1) {
+      if (gmgnResolutionSeconds(ladder[i]) >= floor) return ladder[i];
+    }
+    return "30";
+  }
+
+  // 失败时回到目标档的普通最近画面。同档卡在创建处时先借一档再切回来，避免 setResolution 被跳过。
+  function gmgnRescueChartResolution(cw, gen, res) {
+    gmgnChartJumpBusy = false;
+    if (!cw || !gmgnResolutionSeconds(res)) return;
+    const now = Math.floor(Date.now() / 1000);
+    const sec = gmgnResolutionSeconds(res) || 60;
+    const last = gmgnChartLastBar(cw);
+    const onTarget = gmgnChartSeriesStable(cw, res) && gmgnSameResolution(gmgnChartResolution(cw), res);
+    if (onTarget && last != null && last >= now - sec * 30) {
+      const first = gmgnChartFirstBar(cw);
+      const created = gmgnChartCreatedAt.get(gmgnTokenIdFromLocation()) || 0;
+      const far = created && first != null && first > created + Math.max(86400, sec * 80);
+      if (far && gmgnChartJumpRetriedGen !== gen && !gmgnChartUserDrove) {
+        gmgnChartJumpRetriedGen = gen;
+        gmgnChartJumpBusy = true;
+        const count = 480;
+        const from = created - sec;
+        const to = from + count * sec;
+        const accept = created + Math.max(sec * 3, 120);
+        gmgnSeekChart(cw, gen, res, from, to, count, accept, (bar0) => {
+          if (gen !== gmgnChartJumpGen) return;
+          if (bar0 != null && bar0 <= accept) {
+            gmgnShowCreationWindow(cw, gen, bar0, 320, sec);
+            return;
+          }
+          gmgnChartJumpBusy = false;
+        });
+      }
+      return;
+    }
+    const bounce = gmgnSameResolution(res, "60") ? "240" : "60";
+    const hop = onTarget ? bounce : res;
+    if (!gmgnDriveResolution(cw, hop)) return;
+    if (hop === res) return;
+    setTimeout(() => {
+      if (gen !== gmgnChartJumpGen || gmgnChartUserDrove) return;
+      gmgnDriveResolution(cw, res);
+    }, 900);
+  }
+
+  function gmgnEnsureResolution(cw, gen, res, done) {
+    const ready = () => gmgnChartSeriesStable(cw, res) && gmgnSameResolution(gmgnChartResolution(cw), res);
+    if (ready()) {
+      done(true);
+      return;
+    }
+    if (!gmgnSameResolution(gmgnChartResolution(cw), res) || !gmgnSameResolution(gmgnChartSourceResolution(cw), res)) {
+      if (!gmgnDriveResolution(cw, res)) {
+        done(false);
+        return;
+      }
+    } else {
+      try {
+        const src = cw.model().mainSeries().seriesSource();
+        if (src.instanceId() == null && typeof src.start === "function") src.start();
+      } catch (_start) {
+        // ignore
+      }
+    }
+    const fromRes = gmgnChartResolution(cw);
+    const deadline = Date.now() + 8000;
+    const tick = () => {
+      if (gen !== gmgnChartJumpGen || gmgnChartUserDrove) return;
+      const cur = gmgnChartResolution(cw);
+      if (cur && !gmgnSameResolution(cur, res) && fromRes && !gmgnSameResolution(cur, fromRes)) {
+        gmgnChartUserDrove = true;
+        gmgnChartLandedRes = "";
+        gmgnChartJumpBusy = false;
+        gmgnLoadRecentWindow(cw, cur);
+        done(false);
+        return;
+      }
+      if (ready()) {
+        done(true);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        done(false);
+        return;
+      }
+      setTimeout(tick, 150);
+    };
+    setTimeout(tick, 80);
+  }
+
+  // 等这次拉历史真正改到左沿。不能把换档当下的旧 K 线当成已经到达。
+  function gmgnWaitHistory(cw, gen, res, accept, before, ms, done) {
+    const deadline = Date.now() + ms;
+    let sawLoading = false;
+    const tick = () => {
+      if (gen !== gmgnChartJumpGen) return;
+      if (gmgnChartLoading(cw)) sawLoading = true;
+      const bar0 = gmgnChartFirstBar(cw);
+      const onRes = gmgnSameResolution(gmgnChartResolution(cw), res);
+      let size = 0;
+      try {
+        size = cw.model().mainSeries().bars().size();
+      } catch (_size) {
+        size = 0;
+      }
+      const changed = bar0 != null && bar0 !== before;
+      // 左沿已经到开盘就结束。图表还会继续往创建时间之前探空档，不能等那一串结束。
+      if (onRes && bar0 != null && bar0 <= accept && size >= 30 && (sawLoading || changed)) {
+        done(bar0);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        done(onRes && bar0 != null && bar0 <= accept && size >= 30 ? bar0 : null);
+        return;
+      }
+      setTimeout(tick, 200);
+    };
+    setTimeout(tick, 150);
+  }
+
+  // 周期一切过去、序列有了 instance，就拉创建窗口。不等默认的最近 K 线加载完。
+  function gmgnSeekChart(cw, gen, res, from, to, count, accept, done) {
+    const sec = gmgnResolutionSeconds(res) || 1;
+    const before = gmgnChartFirstBar(cw);
+    if (!gmgnSameResolution(gmgnChartResolution(cw), res) || !gmgnSameResolution(gmgnChartSourceResolution(cw), res)) {
+      gmgnDriveResolution(cw, res);
+    }
+    const deadline = Date.now() + 12000;
+    let requestedAt = 0;
+    let tries = 0;
+    const tick = () => {
+      if (gen !== gmgnChartJumpGen) return;
+      const onRes = gmgnSameResolution(gmgnChartResolution(cw), res);
+      const barNow = gmgnChartFirstBar(cw);
+      const stale = requestedAt > 0 && Date.now() - requestedAt > 1200 && barNow === before;
+      const searching = gmgnChartBarsPatch && gmgnChartBarsPatch.gen === gen && gmgnChartBarsPatch.searching;
+      if (onRes && !searching && tries < 2 && (requestedAt === 0 || stale)) {
+        if (gmgnRefetchChartWindow(cw, res, from, to, count)) {
+          tries += 1;
+          requestedAt = Date.now();
+        }
+      }
+      const bar0 = barNow;
+      let size = 0;
+      try {
+        size = cw.model().mainSeries().bars().size();
+      } catch (_size) {
+        size = 0;
+      }
+      const changed = bar0 != null && bar0 !== before;
+      const patch = gmgnChartBarsPatch;
+      const found = patch && patch.gen === gen && patch.foundFrom;
+      const anchor = from + sec;
+      let nearAnchor = null;
+      try {
+        const seriesBars = cw.model().mainSeries().bars();
+        const seg = gmgnSegmentContaining(seriesBars, sec, anchor);
+        const row = seg && seriesBars.valueAt(seg.first);
+        const t = row && row[0];
+        const slack = Math.max(sec * 40, 900);
+        if (t != null && t >= anchor - slack && t <= anchor + slack) nearAnchor = t;
+      } catch (_near) {
+        nearAnchor = null;
+      }
+      const closeEnough = nearAnchor != null || (
+        found && bar0 != null && bar0 >= from - 900 && Math.abs(bar0 - found) <= Math.max(sec * 5, 600)
+      );
+      const enough = size >= 30 || (found && size >= 8) || nearAnchor != null;
+      if (onRes && closeEnough && enough && (requestedAt > 0 || changed)) {
+        done(nearAnchor != null ? nearAnchor : bar0);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        const still = gmgnChartBarsPatch;
+        if (still && still.gen === gen && still.searching && Date.now() < deadline + 10000) {
+          setTimeout(tick, 200);
+          return;
+        }
+        if (still && still.gen === gen) still.aborted = true;
+        done(onRes && closeEnough && enough ? bar0 : null);
+        return;
+      }
+      setTimeout(tick, 80);
+    };
+    setTimeout(tick, 40);
+  }
+
+  // 数据到达后图表会自己把视口拽走，所以落地后短时间再摆几次。
+  // 用户已经拖动、滚轮或按键，就立刻停，不再把画面按回创建位置。
+  function gmgnScheduleChartPaint(cw, gen, paint, delays) {
+    let stopped = false;
+    const timers = [];
+    let doc = null;
+    try {
+      const frame = gmgnTradingViewFrame();
+      if (frame && frame.cw === cw) doc = frame.doc;
+    } catch (_doc) {
+      doc = null;
+    }
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      for (let i = 0; i < timers.length; i += 1) clearTimeout(timers[i]);
+      if (!doc) return;
+      doc.removeEventListener("pointerdown", stop, true);
+      doc.removeEventListener("wheel", stop, true);
+      doc.removeEventListener("touchstart", stop, true);
+      doc.removeEventListener("keydown", stop, true);
+    };
+    const run = () => {
+      if (stopped || gen !== gmgnChartJumpGen) {
+        stop();
+        return;
+      }
+      paint();
+    };
+    if (doc) {
+      doc.addEventListener("pointerdown", stop, true);
+      doc.addEventListener("wheel", stop, true);
+      doc.addEventListener("touchstart", stop, true);
+      doc.addEventListener("keydown", stop, true);
+    }
+    run();
+    for (let i = 0; i < delays.length; i += 1) timers.push(setTimeout(run, delays[i]));
+    timers.push(setTimeout(stop, (delays[delays.length - 1] || 0) + 80));
+  }
+
+  function gmgnChartOnCreationView(cw) {
+    const created = gmgnChartCreatedAt.get(gmgnTokenIdFromLocation());
+    if (!created) return false;
+    try {
+      const bars = cw.model().mainSeries().bars();
+      const scale = cw.model().timeScale();
+      const range = scale.visibleBarsStrictRange();
+      const left = gmgnChartBarTime(bars, range && range.firstBar());
+      const rightIdx = range && range.lastBar();
+      const lastIdx = bars.lastIndex();
+      const right = gmgnChartBarTime(
+        bars,
+        Number.isFinite(rightIdx) && Number.isFinite(lastIdx) ? Math.min(rightIdx, lastIdx) : rightIdx
+      );
+      if (left == null) return false;
+      const now = Math.floor(Date.now() / 1000);
+      if (right != null && right > now - 36 * 3600) return false;
+      return left < created + 21 * 86400;
+    } catch (_view) {
+      return false;
+    }
+  }
+
+  // 实时 K 线会接在开盘窗口右边，中间空掉几个月。视口一旦跨过这个缺口，坐标就会从开盘直接跳到今年。
+  // 历史里几小时没成交不是这个缺口。拖动时每帧都会问右沿。序列形状没变就用上次的结果。
+  let gmgnGapEdgeCache = null;
+
+  function gmgnIsUnloadedHole(prevTime, nextTime) {
+    if (!(prevTime > 0) || !(nextTime > prevTime)) return false;
+    if (nextTime - prevTime <= 24 * 3600) return false;
+    const anchor = gmgnChartCreatedAt.get(gmgnTokenIdFromLocation()) || 0;
+    if (anchor && prevTime < anchor - 6 * 3600) return false;
+    return true;
+  }
+
+  function gmgnIsLiveTailHole(prevTime, nextTime, sec, barsAfter) {
+    if (!(prevTime > 0) || !(nextTime > prevTime)) return false;
+    const now = Math.floor(Date.now() / 1000);
+    if (nextTime < now - 36 * 3600) return false;
+    // 隔夜、安静几小时都要能拖过去。只有跨过很多天、接到现在的那截才是实时尾巴。
+    const minGap = Math.max(2 * 86400, (sec || 60) * 30);
+    if (nextTime - prevTime <= minGap) return false;
+    const anchor = gmgnChartCreatedAt.get(gmgnTokenIdFromLocation()) || 0;
+    if (anchor && prevTime < anchor - 6 * 3600) return false;
+    if (barsAfter != null && barsAfter > 40) return false;
+    return true;
+  }
+
+  function gmgnBarsBeforeLargeGap(bars, sec) {
+    const first = bars && bars.firstIndex();
+    const last = bars && bars.lastIndex();
+    if (!Number.isFinite(first) || !Number.isFinite(last) || last < first) return null;
+    let size = -1;
+    try {
+      size = bars.size();
+    } catch (_size) {
+      size = -1;
+    }
+    const period = sec || 60;
+    const cached = gmgnGapEdgeCache;
+    if (
+      cached &&
+      cached.first === first &&
+      cached.last === last &&
+      cached.size === size &&
+      cached.sec === period
+    ) {
+      return { first: first, end: cached.end };
+    }
+    let prev = null;
+    let lastGood = first;
+    // 30 分钟一年大约 1.8 万根，15 分钟一年大约 3.5 万根。右沿必须盖住这段，否则拖过扫描上限又会停住。
+    const stop = Math.min(last, first + 40000);
+    for (let i = first; i <= stop; i += 1) {
+      const row = bars.valueAt(i);
+      const t = row && row[0];
+      if (!t) continue;
+      if (prev != null && gmgnIsUnloadedHole(prev, t)) {
+        gmgnGapEdgeCache = { first: first, last: last, size: size, sec: period, end: lastGood };
+        return { first: first, end: lastGood };
+      }
+      prev = t;
+      lastGood = i;
+    }
+    gmgnGapEdgeCache = { first: first, last: last, size: size, sec: period, end: lastGood };
+    return { first: first, end: lastGood };
+  }
+
+  // 迁移前的旧 K 线和开盘后的新 K 线会隔着几天。视口和右滑要跟开盘这一段，不要被左边的旧段挡住。
+  function gmgnSegmentContaining(bars, sec, time) {
+    const first = bars && bars.firstIndex();
+    const last = bars && bars.lastIndex();
+    if (!Number.isFinite(first) || !Number.isFinite(last)) return null;
+    const limit = Math.max(6 * 3600, (sec || 60) * 30);
+    let segFirst = first;
+    let prevT = null;
+    let prevI = first;
+    const stop = Math.min(last, first + 40000);
+    let matched = null;
+    for (let i = first; i <= stop; i += 1) {
+      const row = bars.valueAt(i);
+      const t = row && row[0];
+      if (!t) continue;
+      if (prevT != null && t - prevT > limit) {
+        if (time != null && time <= prevT + limit) {
+          const startRow = bars.valueAt(segFirst);
+          const startT = startRow && startRow[0];
+          if (startT != null && time >= startT - limit) matched = { first: segFirst, end: prevI };
+        }
+        segFirst = i;
+      }
+      prevT = t;
+      prevI = i;
+    }
+    const startRow = bars.valueAt(segFirst);
+    const startT = startRow && startRow[0];
+    if (time == null || (startT != null && prevT != null && time >= startT - limit && time <= prevT + limit)) {
+      matched = { first: segFirst, end: prevI };
+    }
+    return matched;
+  }
+
+  function gmgnPinCreationBars(cw, sec, barPx) {
+    let bars = null;
+    let scale = null;
+    try {
+      bars = cw.model().mainSeries().bars();
+      scale = cw.model().timeScale();
+    } catch (_bars) {
+      return false;
+    }
+    const anchor = gmgnChartCreatedAt.get(gmgnTokenIdFromLocation()) || 0;
+    const edge = (anchor && gmgnSegmentContaining(bars, sec, anchor)) || gmgnBarsBeforeLargeGap(bars, sec);
+    if (!edge || typeof scale.zoomToBarsRange !== "function") return false;
+    const width = Number(scale.width()) || 1200;
+    const px = Math.max(4, Math.min(40, barPx || 6));
+    let fit = Math.max(24, Math.round(width / px));
+    const run = edge.end - edge.first + 1;
+    if (run > 8) fit = Math.min(fit, run);
+    fit = Math.min(fit, 360);
+    // 安静缺口会让很少的柱子占掉很长的钟点。视口按开盘后的时间收住，避免把第二天的空白拉进这一屏。
+    const originRow = bars.valueAt(edge.first);
+    const originTime = originRow && originRow[0];
+    let clockCap = Math.max(fit * (sec || 60), 90 * 60);
+    if ((sec || 60) >= 1800) clockCap = Math.min(clockCap, 12 * 3600);
+    else if ((sec || 60) >= 900) clockCap = Math.min(clockCap, 18 * 3600);
+    let right = edge.first;
+    let count = 0;
+    for (let i = edge.first; i <= edge.end && count < fit; i += 1) {
+      const row = bars.valueAt(i);
+      const t = row && row[0];
+      if (originTime && t && count >= 24 && t - originTime > clockCap) break;
+      right = i;
+      count += 1;
+    }
+    if (!(right > edge.first)) return false;
+    const shown = right - edge.first + 1;
+    try {
+      scale.zoomToBarsRange(edge.first, right);
+      scale.setBarSpacing(Math.max(4, Math.min(40, width / shown)));
+    } catch (_zoom) {
+      return false;
+    }
+    return true;
+  }
+
+  // 拖进「开盘窗口 | 几个月空洞 | 现在」时，坐标会从开盘直接跳到今年。只把视口留在空洞的一侧。
+  let gmgnChartGapClamp = null;
+
+  function gmgnStopGapClamp() {
+    const state = gmgnChartGapClamp;
+    gmgnChartGapClamp = null;
+    if (state && typeof state.stop === "function") state.stop();
+  }
+
+  function gmgnDropLiveTail(bars, sec) {
+    const edge = gmgnBarsBeforeLargeGap(bars, sec);
+    if (!edge || edge.end >= bars.lastIndex()) return false;
+    const prev = bars.valueAt(edge.end);
+    const next = bars.valueAt(edge.end + 1);
+    let after = 0;
+    const tailLast = bars.lastIndex();
+    for (let i = edge.end + 1; i <= tailLast && after <= 40; i += 1) {
+      const row = bars.valueAt(i);
+      if (row && row[0]) after += 1;
+    }
+    if (!prev || !next || !gmgnIsLiveTailHole(prev[0], next[0], sec, after)) return false;
+    try {
+      bars.remove(edge.end + 1);
+    } catch (_remove) {
+      return false;
+    }
+    return true;
+  }
+
+  function gmgnAppendFeedBars(cw, rows, sec) {
+    let bars = null;
+    try {
+      bars = cw.model().mainSeries().bars();
+    } catch (_bars) {
+      return 0;
+    }
+    gmgnDropLiveTail(bars, sec);
+    const edge = gmgnBarsBeforeLargeGap(bars, sec);
+    const edgeIndex = edge ? edge.end : bars.lastIndex();
+    const lastRow = bars.valueAt(edgeIndex);
+    const lastTime = lastRow ? lastRow[0] : 0;
+    const values = [];
+    for (let i = 0; i < rows.length && values.length < 240; i += 1) {
+      const bar = rows[i];
+      if (!bar || !bar.time) continue;
+      const secTime = bar.time > 1e12 ? Math.floor(bar.time / 1000) : Math.floor(bar.time);
+      if (!(secTime > lastTime)) continue;
+      const prevT = values.length ? values[values.length - 1][0] : lastTime;
+      if (gmgnIsLiveTailHole(prevT, secTime, sec)) continue;
+      values.push([secTime, bar.open, bar.high, bar.low, bar.close, bar.volume || 0, null, null, null, null, null]);
+    }
+    if (!values.length) return 0;
+    const lastIndex = bars.lastIndex();
+    const tail = [];
+    if (lastIndex > edgeIndex) {
+      for (let i = edgeIndex + 1; i <= lastIndex && tail.length < 2000; i += 1) {
+        const row = bars.valueAt(i);
+        if (!row || !row[0]) continue;
+        tail.push([row[0], row[1], row[2], row[3], row[4], row[5] || 0, null, null, null, null, null]);
+      }
+      if (lastIndex - edgeIndex > tail.length) return 0;
+      for (let i = lastIndex; i > edgeIndex; i -= 1) {
+        try {
+          bars.remove(i);
+        } catch (_cut) {
+          return 0;
+        }
+      }
+    }
+    const items = [];
+    let index = edgeIndex + 1;
+    for (let i = 0; i < values.length; i += 1) {
+      items.push({ index: index, timeMs: values[i][0] * 1000, value: values[i] });
+      index += 1;
+    }
+    const floor = values[values.length - 1][0];
+    for (let i = 0; i < tail.length; i += 1) {
+      if (!(tail[i][0] > floor)) continue;
+      items.push({ index: index, timeMs: tail[i][0] * 1000, value: tail[i] });
+      index += 1;
+    }
+    try {
+      bars.merge(items);
+    } catch (_merge) {
+      return 0;
+    }
+    gmgnSyncTimeScale(cw, sec);
+    return values.length;
+  }
+
+  // 直接 merge 不会扩大时间轴的可拖范围。baseIndex 还停在补数据之前时，鼠标拖不进新柱。
+  // 右侧还有没接上的大段时，终点收回连续历史的右沿，避免直接拖进几个月后。
+  let gmgnSyncingScale = false;
+
+  function gmgnSyncTimeScale(cw, sec) {
+    const apply = () => {
+      if (gmgnSyncingScale) return;
+      let bars = null;
+      let scale = null;
+      try {
+        bars = cw.model().mainSeries().bars();
+        scale = cw.model().timeScale();
+      } catch (_scale) {
+        return;
+      }
+      if (!bars || !scale || typeof scale.setBaseIndex !== "function") return;
+      const live = gmgnResolutionSeconds(gmgnChartResolution(cw));
+      if (sec && live && live !== sec) return;
+      const period = sec || live || 60;
+      const edge = gmgnBarsBeforeLargeGap(bars, period);
+      const index = edge ? edge.end : bars.lastIndex();
+      if (!Number.isFinite(index)) return;
+      let base = NaN;
+      try {
+        base = Number(scale.baseIndex());
+      } catch (_baseRead) {
+        base = NaN;
+      }
+      const hasHole = edge && edge.end < bars.lastIndex();
+      const needsShrink = hasHole && Number.isFinite(base) && base > index;
+      const needsGrow = !Number.isFinite(base) || base < index;
+      if (!needsShrink && !needsGrow) return;
+      let left = null;
+      let right = null;
+      try {
+        const logical = scale.logicalRange();
+        if (logical) {
+          left = Number(logical._left);
+          right = Number(logical._right);
+        }
+      } catch (_range) {
+        left = null;
+      }
+      if (needsShrink && left != null && right > index) {
+        const span = Math.max(8, right - left);
+        right = index;
+        left = Math.max(edge.first, right - span);
+      }
+      gmgnSyncingScale = true;
+      try {
+        scale.setBaseIndex(index);
+        if (left != null && right > left && typeof scale.zoomToBarsRange === "function") {
+          scale.zoomToBarsRange(left, right);
+        }
+      } catch (_base) {
+        // ignore
+      }
+      gmgnSyncingScale = false;
+    };
+    apply();
+    try {
+      requestAnimationFrame(apply);
+    } catch (_raf) {
+      setTimeout(apply, 0);
+    }
+  }
+
+  function gmgnPullNextBars(cw, sec, state) {
+    if (!state.userMoved || state.pulling) return;
+    if (state.coolUntil && Date.now() < state.coolUntil) return;
+    if (state.lastPull && Date.now() - state.lastPull < 700) return;
+    let bars = null;
+    let scale = null;
+    let info = null;
+    let feed = null;
+    try {
+      const series = cw.model().mainSeries();
+      bars = series.bars();
+      scale = cw.model().timeScale();
+      info = series.symbolInfo();
+      const session = cw._chartSession;
+      const api = session && session._getChartApi && session._getChartApi();
+      feed = api && api._transport && api._transport._factoryOptions && api._transport._factoryOptions.datafeed;
+    } catch (_feed) {
+      return;
+    }
+    if (!bars || !scale || !info || !feed) return;
+    gmgnDropLiveTail(bars, sec);
+    const logical = scale.logicalRange();
+    const edge = gmgnBarsBeforeLargeGap(bars, sec);
+    const edgeIndex = edge ? edge.end : bars.lastIndex();
+    if (!logical || !Number.isFinite(edgeIndex)) return;
+    const right = Number(logical._right);
+    if (state.gapPaused) {
+      if (!(right > (state.hopRight || 0) + 1)) return;
+      state.gapPaused = false;
+      state.emptyHops = 0;
+      state.pullFrom = 0;
+    }
+    if (right < edgeIndex - 8) return;
+    const row = bars.valueAt(edgeIndex);
+    const now = Math.floor(Date.now() / 1000);
+    if (!row || !(row[0] > 0) || row[0] > now - 2 * sec) return;
+    if (state.pullFrom && state.pullFrom < row[0]) state.pullFrom = 0;
+    const orig = typeof feed.__flapChartGetBars === "function" ? feed.__flapChartGetBars : feed.getBars.bind(feed);
+    const res = gmgnChartResolution(cw);
+    if (!gmgnResolutionSeconds(res)) return;
+    const count = 300;
+    const from = state.pullFrom || row[0];
+    const to = from + count * sec;
+    const wall = edgeIndex;
+    state.pulling = true;
+    state.lastPull = Date.now();
+    try {
+      orig(info, res, { from: from, to: to, countBack: count, firstDataRequest: false }, (got, meta) => {
+        state.pulling = false;
+        if (state.gen !== gmgnChartJumpGen || gmgnChartGapClamp !== state) return;
+        const rows = Array.isArray(got) ? got : [];
+        const added = gmgnAppendFeedBars(cw, rows, sec);
+        if (added > 0) {
+          state.pulls = (state.pulls || 0) + 1;
+          state.emptyHops = 0;
+          state.pullFrom = 0;
+          state.gapPaused = false;
+          try {
+            const scaleNow = cw.model().timeScale();
+            const logicalNow = scaleNow.logicalRange();
+            const leftNow = logicalNow ? Number(logicalNow._left) : 0;
+            const rightNow = logicalNow ? Number(logicalNow._right) : 0;
+            if (rightNow >= wall - 2 && rightNow < wall + added) {
+              const span = Math.max(8, rightNow - leftNow);
+              const show = Math.min(wall + added - 4, rightNow + Math.min(added, 48));
+              if (show > rightNow && typeof scaleNow.zoomToBarsRange === "function") {
+                scaleNow.zoomToBarsRange(show - span, show);
+              }
+            }
+          } catch (_nudge) {
+            // ignore
+          }
+          return;
+        }
+        // 这一页是真的没成交。安静段继续往后找，不要停在同一段反复要。
+        const emptyPage = rows.length === 0 || (meta && meta.noData);
+        if (emptyPage && to < now - 36 * 3600) {
+          state.emptyHops = (state.emptyHops || 0) + 1;
+          if (state.emptyHops > 8) {
+            state.gapPaused = true;
+            state.hopRight = right;
+            state.coolUntil = Date.now() + 2000;
+            return;
+          }
+          state.pullFrom = to;
+          state.coolUntil = Date.now() + 450;
+          return;
+        }
+        state.coolUntil = Date.now() + 1500;
+      }, () => {
+        state.pulling = false;
+        state.coolUntil = Date.now() + 4000;
+      });
+    } catch (_call) {
+      state.pulling = false;
+    }
+  }
+
+  function gmgnClampAcrossGap(cw, sec) {
+    let bars = null;
+    let scale = null;
+    try {
+      bars = cw.model().mainSeries().bars();
+      scale = cw.model().timeScale();
+    } catch (_bars) {
+      return false;
+    }
+    const edge = gmgnBarsBeforeLargeGap(bars, sec);
+    const logical = scale.logicalRange();
+    if (!edge || !logical || typeof scale.zoomToBarsRange !== "function") return false;
+    if (edge.end >= bars.lastIndex()) return false;
+    const anchor = gmgnChartCreatedAt.get(gmgnTokenIdFromLocation()) || 0;
+    if (anchor) {
+      const vis = scale.visibleBarsStrictRange();
+      const visTime = gmgnChartBarTime(bars, vis && vis.firstBar());
+      const leftEnd = bars.valueAt(edge.end);
+      const leftEndTime = leftEnd && leftEnd[0];
+      if (visTime != null && leftEndTime != null && visTime > leftEndTime + 6 * 3600 && Math.abs(visTime - anchor) < 6 * 3600) {
+        return false;
+      }
+    }
+    const left = Number(logical._left);
+    const right = Number(logical._right);
+    if (!Number.isFinite(left) || !Number.isFinite(right) || right <= left) return false;
+    if (left > edge.end || right <= edge.end + 0.5) return false;
+    const span = Math.max(8, right - left);
+    let newRight = edge.end;
+    let newLeft = newRight - span;
+    if (newLeft < edge.first) newLeft = edge.first;
+    if (newRight - newLeft < 8) return false;
+    try {
+      scale.zoomToBarsRange(newLeft, newRight);
+    } catch (_zoom) {
+      return false;
+    }
+    return true;
+  }
+
+  function gmgnWatchGapClamp(cw, gen, sec) {
+    gmgnStopGapClamp();
+    let scale = null;
+    let doc = null;
+    try {
+      scale = cw.model().timeScale();
+      const frame = gmgnTradingViewFrame();
+      if (frame && frame.cw === cw) doc = frame.doc;
+    } catch (_scale) {
+      return;
+    }
+    const state = {
+      gen: gen,
+      sec: sec,
+      res: gmgnChartResolution(cw),
+      userMoved: false,
+      pulls: 0,
+      pulling: false,
+      lastPull: 0,
+      coolUntil: 0,
+      stop: null
+    };
+    gmgnChartGapClamp = state;
+    let stopped = false;
+    let lock = false;
+    const tick = () => {
+      if (stopped || lock || gen !== gmgnChartJumpGen || gmgnChartGapClamp !== state) return;
+      const liveSec = gmgnResolutionSeconds(gmgnChartResolution(cw));
+      if (liveSec && liveSec !== state.sec) {
+        state.sec = liveSec;
+        state.pullFrom = 0;
+        state.emptyHops = 0;
+        state.gapPaused = false;
+      }
+      const secNow = state.sec;
+      lock = true;
+      try {
+        const bars = cw.model().mainSeries().bars();
+        const logical = scale.logicalRange();
+        const edge = gmgnBarsBeforeLargeGap(bars, secNow);
+        const onTail = edge && logical && Number(logical._left) > edge.end + 1;
+        if (!onTail) gmgnDropLiveTail(bars, secNow);
+        // 只挡住还没加载的大空洞，避免从开盘直接跳到现在。换周期后也继续看当前这张图。
+        gmgnClampAcrossGap(cw, secNow);
+      } catch (_clamp) {
+        // ignore
+      }
+      lock = false;
+      gmgnSyncTimeScale(cw, secNow);
+      gmgnPullNextBars(cw, secNow, state);
+    };
+    let sub = null;
+    try {
+      sub = typeof scale.logicalRangeChanged === "function" ? scale.logicalRangeChanged() : null;
+      if (sub && typeof sub.subscribe === "function") sub.subscribe(null, tick);
+    } catch (_sub) {
+      sub = null;
+    }
+    const timer = setInterval(tick, 500);
+    const markMoved = (event) => {
+      const node = event && event.target;
+      const el = node && node.nodeType === 1 ? node : (node && node.parentElement);
+      if (el && typeof el.closest === "function" && el.closest("#flap-chart-jump")) return;
+      state.userMoved = true;
+      gmgnChartUserDrove = true;
+    };
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      if (gmgnChartGapClamp === state) gmgnChartGapClamp = null;
+      clearInterval(timer);
+      try {
+        if (sub && typeof sub.unsubscribe === "function") sub.unsubscribe(null, tick);
+      } catch (_unsub) {
+        // ignore
+      }
+      if (!doc) return;
+      doc.removeEventListener("pointerdown", markMoved, true);
+      doc.removeEventListener("mousedown", markMoved, true);
+      doc.removeEventListener("wheel", markMoved, true);
+    };
+    state.stop = stop;
+    if (doc) {
+      doc.addEventListener("pointerdown", markMoved, true);
+      doc.addEventListener("mousedown", markMoved, true);
+      doc.addEventListener("wheel", markMoved, true);
+    }
+  }
+
+  function gmgnWatchCreationPin(cw, gen, sec, barPx) {
+    let scale = null;
+    let doc = null;
+    try {
+      scale = cw.model().timeScale();
+      const frame = gmgnTradingViewFrame();
+      if (frame && frame.cw === cw) doc = frame.doc;
+    } catch (_scale) {
+      return;
+    }
+    let stopped = false;
+    let lock = false;
+    let sawTarget = false;
+    const tick = () => {
+      if (stopped || lock || gen !== gmgnChartJumpGen || gmgnChartUserDrove) {
+        if (gmgnChartUserDrove) stop();
+        return;
+      }
+      const liveSec = gmgnResolutionSeconds(gmgnChartResolution(cw));
+      if (liveSec !== sec) {
+        if (sawTarget) stop();
+        return;
+      }
+      sawTarget = true;
+      let logical = null;
+      let bars = null;
+      try {
+        logical = scale.logicalRange();
+        bars = cw.model().mainSeries().bars();
+      } catch (_range) {
+        return;
+      }
+      const edge = gmgnBarsBeforeLargeGap(bars, sec);
+      if (!edge || !logical) return;
+      const width = Number(scale.width()) || 1200;
+      const px = Math.max(4, Math.min(40, barPx || 6));
+      const fit = Math.min(360, Math.max(24, Math.round(width / px)), edge.end - edge.first + 1);
+      const right = Number(logical._right);
+      const spacing = Number(scale.barSpacing());
+      const tooWide = Number.isFinite(right) && right > edge.first + fit + 8;
+      const tooTight = Number.isFinite(spacing) && spacing < px * 0.55;
+      let spanTooWide = false;
+      try {
+        const vis = scale.visibleBarsStrictRange();
+        const leftRow = bars.valueAt(vis && vis.firstBar());
+        const rightRow = bars.valueAt(vis && vis.lastBar());
+        const span = leftRow && rightRow ? rightRow[0] - leftRow[0] : 0;
+        spanTooWide = span > Math.max(6 * 3600, (sec || 60) * Math.max(fit, 24) * 2);
+      } catch (_span) {
+        spanTooWide = false;
+      }
+      if (!tooWide && !tooTight && !spanTooWide) return;
+      lock = true;
+      try {
+        gmgnPinCreationBars(cw, sec, px);
+      } catch (_pin) {
+        // ignore
+      }
+      lock = false;
+    };
+    let sub = null;
+    try {
+      sub = typeof scale.logicalRangeChanged === "function" ? scale.logicalRangeChanged() : null;
+      if (sub && typeof sub.subscribe === "function") sub.subscribe(null, tick);
+    } catch (_sub) {
+      sub = null;
+    }
+    const timer = setInterval(tick, 400);
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      clearInterval(timer);
+      try {
+        if (sub && typeof sub.unsubscribe === "function") sub.unsubscribe(null, tick);
+      } catch (_unsub) {
+        // ignore
+      }
+      if (!doc) return;
+      doc.removeEventListener("pointerdown", onGesture, true);
+      doc.removeEventListener("wheel", onGesture, true);
+      doc.removeEventListener("touchstart", onGesture, true);
+      doc.removeEventListener("keydown", onGesture, true);
+    };
+    const onGesture = (event) => {
+      const node = event && event.target;
+      const el = node && node.nodeType === 1 ? node : (node && node.parentElement);
+      if (el && typeof el.closest === "function" && el.closest("#flap-chart-jump")) return;
+      gmgnChartUserDrove = true;
+      stop();
+    };
+    if (doc) {
+      doc.addEventListener("pointerdown", onGesture, true);
+      doc.addEventListener("mousedown", onGesture, true);
+      doc.addEventListener("wheel", onGesture, true);
+      doc.addEventListener("touchstart", onGesture, true);
+      doc.addEventListener("keydown", onGesture, true);
+    }
+    setTimeout(stop, 9000);
+  }
+
+  function gmgnShowCreationWindow(cw, gen, bar0, visible, sec) {
+    gmgnChartJumpBusy = false;
+    if (bar0 == null) return;
+    gmgnChartLandedRes = gmgnChartResolution(cw) || gmgnChartLandedRes;
+    let pinPx = 6;
+    gmgnScheduleChartPaint(cw, gen, () => {
+      if (gen !== gmgnChartJumpGen || gmgnChartUserDrove) return;
+      if (gmgnResolutionSeconds(gmgnChartResolution(cw)) !== sec) return;
+      const first = gmgnChartFirstBar(cw);
+      const origin = first != null && first <= bar0 && bar0 - first < Math.max(sec * 40, 900) ? first : bar0;
+      try {
+        const scale = cw.model().timeScale();
+        const axis = gmgnChartJumpAxis || {};
+        const step = axis.step > 0 ? axis.step : 0;
+        const tickPx = axis.tickPx > 0 ? axis.tickPx : 0;
+        let barPx = axis.fit > 0
+          ? axis.fit
+          : (axis.spacing > 0 ? axis.spacing : Number(scale.barSpacing()) || 6);
+        if (!(axis.fit > 0) && step > sec) {
+          barPx = gmgnSpacingForAxisStep(sec, step, tickPx);
+          let leftTime = null;
+          try {
+            const seriesBars = cw.model().mainSeries().bars();
+            const range = scale.visibleBarsStrictRange();
+            leftTime = gmgnChartBarTime(seriesBars, range && range.firstBar());
+          } catch (_left) {
+            leftTime = null;
+          }
+          const atCreation = leftTime != null && Math.abs(leftTime - origin) < Math.max(step, sec) * 8 + 600;
+          if (atCreation) {
+            const seen = gmgnAxisStepSeconds(scale);
+            if (seen > 0 && (seen < step * 0.65 || seen > step * 1.45)) {
+              const next = barPx * (seen / step);
+              if (Number.isFinite(next)) barPx = Math.max(0.5, Math.min(40, next));
+            }
+            if (seen > 0) axis.fit = barPx;
+          }
+        }
+        if (barPx < 4) barPx = 4;
+        if (barPx > 40) barPx = 40;
+        pinPx = barPx;
+        gmgnPinCreationBars(cw, sec, barPx);
+      } catch (_paint) {
+        // ignore
+      }
+    }, [200, 700, 1500, 3000, 5000, 8000]);
+  }
+
+  function gmgnLandOnTarget(cw, gen, target, anchor, bucketSec, visible) {
+    const sec = gmgnResolutionSeconds(target) || 1;
+    const bucketBars = Math.max(8, Math.min(8000, Math.ceil((bucketSec || sec) / sec) || 8));
+    const prefetch = Math.min(2400, Math.max(600, visible + 80));
+    const count = Math.min(2400, Math.max(bucketBars, visible, prefetch));
+    const from = anchor;
+    const to = anchor + count * sec;
+    const accept = anchor + Math.max(bucketSec || sec, sec) + 120;
+    gmgnSeekChart(cw, gen, target, from, to, count, accept, (bar0) => {
+      if (gen !== gmgnChartJumpGen) return;
+      if (bar0 != null && bar0 <= accept) {
+        gmgnShowCreationWindow(cw, gen, bar0, visible, sec);
+        return;
+      }
+      gmgnRescueChartResolution(cw, gen, target);
+    });
+  }
+
+  function gmgnFerryThenLand(cw, gen, ferryRes, target, created, visible, attempts) {
+    const ferrySec = gmgnResolutionSeconds(ferryRes) || 86400;
+    const now = Math.floor(Date.now() / 1000);
+    const count = Math.max(200, Math.min(GMGN_CHART_BAR_BUDGET, Math.ceil((now - created) / ferrySec) + 20));
+    const to = now + 30;
+    const from = Math.min(created - ferrySec, to - count * ferrySec);
+    const accept = created + ferrySec * 3;
+    const giveUp = () => {
+      const coarser = gmgnCoarserChartResolution(ferryRes);
+      if (coarser && attempts < 3) {
+        gmgnFerryThenLand(cw, gen, coarser, target, created, visible, attempts + 1);
+        return;
+      }
+      gmgnRescueChartResolution(cw, gen, target);
+    };
+    gmgnSeekChart(cw, gen, ferryRes, from, to, count, accept, (bar0) => {
+      if (gen !== gmgnChartJumpGen) return;
+      if (bar0 != null && bar0 <= accept) {
+        gmgnLandOnTarget(cw, gen, target, bar0, ferrySec, visible);
+        return;
+      }
+      giveUp();
+    });
+  }
+
+  function gmgnChartJumpDirect(cw, gen, target, created, now, age, visible) {
+    const sec = gmgnResolutionSeconds(target) || 60;
+    // 只预取开盘这一屏再多一点。整段寿命不在这里拉，用户拖坐标时由 GMGN 自己翻页。
+    const count = Math.max(visible + 80, 480);
+    const from = created - sec;
+    const to = from + count * sec;
+    const accept = created + Math.max(sec * 3, 120);
+    // 换周期可能立刻要整段。先装上限，再让 seek 去改周期。
+    gmgnArmChartBarsPatch(cw, {
+      gen: gen,
+      res: target,
+      from: from,
+      to: to,
+      count: Math.max(80, Math.min(count, 800)),
+      created: created
+    });
+    const fail = () => {
+      gmgnRescueChartResolution(cw, gen, target);
+    };
+    gmgnWatchCreationPin(cw, gen, sec, Math.max(4, Math.min(40, 1200 / Math.max(visible, 24))));
+    gmgnWatchGapClamp(cw, gen, sec);
+    gmgnSeekChart(cw, gen, target, from, to, count, accept, (bar0) => {
+      if (gen !== gmgnChartJumpGen) return;
+      if (bar0 != null && bar0 <= accept) {
+        gmgnShowCreationWindow(cw, gen, bar0, visible, sec);
+        return;
+      }
+      fail();
+    });
+  }
+
+  function gmgnChartJumpToCreation() {
+    if (!gmgnChartJumpPrefs().enabled) return;
+    if (gmgnChartJumpBusy) return;
+    const frame = gmgnTradingViewFrame();
+    if (!frame) return;
+    const created = gmgnChartCreatedAt.get(gmgnTokenIdFromLocation());
+    if (!created) {
+      gmgnChartJumpWhenReady = true;
+      return;
+    }
+    gmgnChartJumpWhenReady = false;
+    const cw = frame.cw;
+    const now = Math.floor(Date.now() / 1000);
+    const age = Math.max(0, now - created);
+    const live = gmgnChartResolution(cw);
+    // 这一下点击时画面上的周期和底部间隔都重新量。
+    // 只有还停在插件刚放下的创建窗、且周期没变时，↩当前才继续回到更早的那张图。
+    const current = gmgnCaptureChartView(cw);
+    const landedHere = gmgnChartOnCreationView(cw)
+      && gmgnChartLandedRes
+      && gmgnSameResolution(gmgnChartLandedRes, live);
+    if (!landedHere) gmgnChartViewMemory = current;
+    gmgnChartJumpAxis = {
+      step: current.axisStep,
+      tickPx: current.tickPx,
+      spacing: current.spacing,
+      fit: 0
+    };
+    const axisStep = current.axisStep;
+    const target = gmgnCreationResolution(gmgnChartJumpTarget(cw), age, axisStep);
+    const sec = gmgnResolutionSeconds(target);
+    if (!sec) return;
+    const axisBars = axisStep > sec
+      ? Math.round(1250 / gmgnSpacingForAxisStep(sec, axisStep, current.tickPx))
+      : 0;
+    const visible = Math.max(160, Math.min(480, axisBars || 320));
+    const gen = ++gmgnChartJumpGen;
+    gmgnStopGapClamp();
+    gmgnChartUserDrove = false;
+    gmgnChartOwnedRes = live;
+    gmgnChartJumpBusy = true;
+    // 只拉开盘附近一段，不必先用粗周期把整段寿命扫一遍。限额在 direct 里先装上。
+    gmgnChartJumpDirect(cw, gen, target, created, now, age, visible);
+  }
+
+  function gmgnVisibleRightTime(cw) {
+    try {
+      const bars = cw.model().mainSeries().bars();
+      const scale = cw.model().timeScale();
+      const vis = scale.visibleBarsStrictRange();
+      const last = bars.lastIndex();
+      let idx = vis && vis.lastBar();
+      if (!Number.isFinite(idx)) idx = last;
+      if (Number.isFinite(last) && idx > last) idx = last;
+      const row = Number.isFinite(idx) ? bars.valueAt(idx) : null;
+      return row && row[0] ? Number(row[0]) : null;
+    } catch (_vis) {
+      return null;
+    }
+  }
+
+  // ↩当前刚画到今天后，GMGN 会把开盘那段再接到序列左边，视口跟着回到最左。
+  // 末尾已经是目标时间、画面却离开它时，拉回跳之前的位置。用户一拖就停。
+  function gmgnWatchRestoreView(cw, gen, saved) {
+    let doc = null;
+    try {
+      const frame = gmgnTradingViewFrame();
+      if (frame && frame.cw === cw) doc = frame.doc;
+    } catch (_doc) {
+      doc = null;
+    }
+    const sec = gmgnResolutionSeconds((saved && saved.resolution) || gmgnChartResolution(cw)) || 60;
+    const slack = Math.max(6 * 3600, sec * 40);
+    let stopped = false;
+    let lock = false;
+    let lastFix = 0;
+    const targetTime = () => {
+      if (saved && !saved.atRealtime && saved.right) return saved.right;
+      return Math.floor(Date.now() / 1000);
+    };
+    const tick = () => {
+      if (stopped || lock || gen !== gmgnChartJumpGen) return;
+      const target = targetTime();
+      const last = gmgnChartLastBar(cw);
+      if (last == null || Math.abs(last - target) > slack) return;
+      const shown = gmgnVisibleRightTime(cw);
+      if (shown != null && Math.abs(shown - target) <= slack) return;
+      if (Date.now() - lastFix < 280) return;
+      lastFix = Date.now();
+      lock = true;
+      try {
+        const scale = cw.model().timeScale();
+        if (!saved || saved.atRealtime || !(saved.left && saved.right > saved.left)) {
+          scale.scrollToRealtime();
+        } else if (!gmgnApplyVisibleRange(cw, saved.left, saved.right)) {
+          scale.scrollToRealtime();
+        }
+      } catch (_fix) {
+        // ignore
+      }
+      lock = false;
+    };
+    let sub = null;
+    let scale = null;
+    try {
+      scale = cw.model().timeScale();
+      sub = typeof scale.logicalRangeChanged === "function" ? scale.logicalRangeChanged() : null;
+      if (sub && typeof sub.subscribe === "function") sub.subscribe(null, tick);
+    } catch (_sub) {
+      sub = null;
+    }
+    const timer = setInterval(tick, 400);
+    const stop = (event) => {
+      if (event) {
+        const node = event.target;
+        const el = node && node.nodeType === 1 ? node : (node && node.parentElement);
+        if (el && typeof el.closest === "function" && el.closest("#flap-chart-jump")) return;
+      }
+      if (stopped) return;
+      stopped = true;
+      clearInterval(timer);
+      try {
+        if (sub && typeof sub.unsubscribe === "function") sub.unsubscribe(null, tick);
+      } catch (_unsub) {
+        // ignore
+      }
+      if (!doc) return;
+      doc.removeEventListener("pointerdown", stop, true);
+      doc.removeEventListener("wheel", stop, true);
+      doc.removeEventListener("touchstart", stop, true);
+      doc.removeEventListener("keydown", stop, true);
+    };
+    if (doc) {
+      doc.addEventListener("pointerdown", stop, true);
+      doc.addEventListener("wheel", stop, true);
+      doc.addEventListener("touchstart", stop, true);
+      doc.addEventListener("keydown", stop, true);
+    }
+    setTimeout(() => stop(), 10000);
+  }
+
+  function gmgnChartRestoreNow() {
+    gmgnStopGapClamp();
+    gmgnChartJumpBusy = false;
+    gmgnChartUserDrove = false;
+    gmgnChartOwnedRes = "";
+    gmgnChartLandedRes = "";
+    gmgnChartJumpAxis = null;
+    const frame = gmgnTradingViewFrame();
+    if (!frame) return;
+    const cw = frame.cw;
+    const saved = gmgnChartViewMemory;
+    gmgnChartViewMemory = null;
+    const gen = ++gmgnChartJumpGen;
+    gmgnWatchRestoreView(cw, gen, saved);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const wantEarly = saved && gmgnResolutionSeconds(saved.resolution)
+      ? saved.resolution
+      : (gmgnChartResolution(cw) || "1");
+    const earlySec = gmgnResolutionSeconds(wantEarly) || 60;
+    const earlyCount = saved && saved.left && saved.right > saved.left
+      ? Math.max(120, Math.min(800, Math.ceil((saved.right - saved.left) / earlySec) + 30))
+      : 400;
+    gmgnArmChartBarsPatch(cw, {
+      gen: gen,
+      res: wantEarly,
+      from: saved && saved.left ? saved.left : nowSec - earlyCount * earlySec,
+      to: saved && saved.right ? saved.right : nowSec + 30,
+      count: earlyCount,
+      created: gmgnChartCreatedAt.get(gmgnTokenIdFromLocation()) || 0
+    });
+    if (!saved || !gmgnResolutionSeconds(saved.resolution)) {
+      try {
+        cw.model().timeScale().scrollToRealtime();
+      } catch (_bare) {
+        // ignore
+      }
+      return;
+    }
+    const want = saved.resolution;
+    const paint = () => {
+      if (gen !== gmgnChartJumpGen) return;
+      gmgnApplySavedView(cw, saved);
+    };
+    const sec = gmgnResolutionSeconds(want) || 60;
+    const sameRes = gmgnSameResolution(gmgnChartResolution(cw), want);
+    let reasked = false;
+    const seriesFresh = () => {
+      const last = gmgnChartLastBar(cw);
+      const targetTime = saved.atRealtime ? Math.floor(Date.now() / 1000) : (saved.right || 0);
+      if (last == null || !targetTime) return false;
+      return Math.abs(last - targetTime) <= Math.max(6 * 3600, sec * 40);
+    };
+    const pull = () => {
+      // 开盘跳转会拿掉序列末尾的「现在」。同周期返回时末尾仍是开盘那天，必须重新要最近的 K 线。
+      if (sameRes && !seriesFresh()) {
+        if (!reasked) {
+          reasked = true;
+          try {
+            cw.model().mainSeries().rerequestData();
+          } catch (_again) {
+            // ignore
+          }
+        }
+        return false;
+      }
+      if (saved.atRealtime || !(saved.left && saved.right && saved.right > saved.left)) {
+        try {
+          cw.model().timeScale().scrollToRealtime();
+        } catch (_scroll) {
+          // ignore
+        }
+        return true;
+      }
+      const count = Math.max(120, Math.min(2000, Math.ceil((saved.right - saved.left) / sec) + 30));
+      gmgnRefetchChartWindow(cw, want, saved.left, saved.right, count);
+      return true;
+    };
+    if (!sameRes) gmgnDriveResolution(cw, want);
+    const deadline = Date.now() + 6000;
+    const tick = () => {
+      if (gen !== gmgnChartJumpGen) return;
+      if (gmgnSameResolution(gmgnChartResolution(cw), want) && pull()) {
+        gmgnScheduleChartPaint(cw, gen, paint, [250, 800]);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        paint();
+        return;
+      }
+      setTimeout(tick, 120);
+    };
+    setTimeout(tick, 40);
+  }
+
+  function gmgnEnsureChartJumpButtons() {
+    const frame = gmgnTradingViewFrame();
+    if (!frame) return;
+    if (!gmgnChartJumpPrefs().enabled) {
+      const old = frame.doc.getElementById("flap-chart-jump");
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+      return;
+    }
+    const range = frame.doc.querySelector('[class*="dateRangeWrapper"]:not([class*="collapsed"])');
+    const bar = range && range.parentElement;
+    if (!bar) return;
+    let box = frame.doc.getElementById("flap-chart-jump");
+    if (!box) {
+      box = frame.doc.createElement("div");
+      box.id = "flap-chart-jump";
+      const add = (label, title, fn, kind) => {
+        const button = frame.doc.createElement("button");
+        button.type = "button";
+        button.dataset.flapChart = kind;
+        button.textContent = label;
+        button.title = title;
+        const amber = kind === "create";
+        button.style.cssText = [
+          "height:22px",
+          "margin:0 0 0 6px",
+          "padding:0 9px",
+          "border-radius:999px",
+          "cursor:pointer",
+          "font:600 12px/20px Segoe UI,PingFang SC,sans-serif",
+          "border:1px solid " + (amber ? "#ffca45" : "#27e984"),
+          "background:" + (amber ? "rgba(255,184,52,.24)" : "rgba(37,211,102,.22)"),
+          "color:" + (amber ? "#ffca45" : "#27e984"),
+          "box-shadow:0 0 8px " + (amber ? "rgba(255,184,52,.28)" : "rgba(39,233,132,.24)"),
+        ].join(";");
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          fn();
+        });
+        box.appendChild(button);
+      };
+      add("✦创建", "跳到代币创建时的K线", gmgnChartJumpToCreation, "create");
+      add("↩当前", "回到跳转前的周期和画面", gmgnChartRestoreNow, "now");
+      bar.appendChild(box);
+    }
+    const barRect = bar.getBoundingClientRect();
+    const rangeRect = range.getBoundingClientRect();
+    box.style.position = "absolute";
+    box.style.left = Math.max(0, Math.round(rangeRect.right - barRect.left + 4)) + "px";
+    box.style.top = "0";
+    box.style.height = "38px";
+    box.style.display = "flex";
+    box.style.alignItems = "center";
+    box.style.zIndex = "3";
+  }
+
+  function installGmgnChartJump() {
+    if (!/(^|\.)gmgn\.ai$/i.test(location.hostname)) return;
+    setInterval(() => {
+      try {
+        const ca = gmgnTokenIdFromLocation();
+        const frame = document.querySelector('iframe[id^="tradingview"]');
+        const frameId = frame ? frame.id : "";
+        if (ca !== gmgnChartJumpCa || frameId !== gmgnChartJumpFrame) {
+          gmgnChartJumpCa = ca;
+          gmgnChartJumpFrame = frameId;
+          gmgnChartViewMemory = null;
+          gmgnChartJumpAxis = null;
+          gmgnChartLandedRes = "";
+          gmgnChartJumpBusy = false;
+          gmgnChartJumpGen += 1;
+          gmgnChartJumpWhenReady = false;
+          gmgnClearChartBarsPatch();
+        }
+        if (!ca) return;
+        gmgnEnsureChartJumpButtons();
+      } catch (_tick) {
+        // ignore
+      }
+    }, 1000);
+  }
+
   // ---------- boot：SPA 已装；host-fee 按通道装；过滤 enabled 时装网络过滤 ----------
   readPrefsSync();
   try {
@@ -8478,6 +11303,11 @@
     // ignore
   }
   installHostFeeNetworkHooks();
+  try {
+    installGmgnChartJump();
+  } catch (_chartJump) {
+    // ignore
+  }
   try {
     installDomHostFeeReactTap();
   } catch (_rt) {

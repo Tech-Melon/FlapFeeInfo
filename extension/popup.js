@@ -10,6 +10,18 @@
   const SUFFIX_HIDE_KEY = "flapFeeInfo.suffixHide.v1";
   const VAULT_HIDE_KEY = "flapFeeInfo.vaultHide.v1";
   const SEARCH_HIDE_KEY = "flapFeeInfo.searchHide.v1";
+  const CHART_JUMP_KEY = "flapFeeInfo.chartJump.v1";
+  const DEFAULT_CHART_JUMP = { enabled: true, interval: "follow" };
+  const CHART_JUMP_CHOICES = [
+    ["follow", "chartJumpFollow"],
+    ["15S", "chartJump15S"],
+    ["30S", "chartJump30S"],
+    ["1", "chartJump1m"],
+    ["5", "chartJump5m"],
+    ["60", "chartJump1H"],
+    ["240", "chartJump4H"],
+    ["1D", "chartJump1D"]
+  ];
   const DEV_COUNT_MARK_KEY = "flapFeeInfo.devCountMark.v1";
   const TW_HANDLE_MARK_KEY = "flapFeeInfo.twHandleMark.v1";
   const SYMBOL_DUP_MARK_KEY = "flapFeeInfo.symbolDupMark.v1";
@@ -87,7 +99,7 @@
       catMarkDesc: "发币次数 · 推特备注 · 重复代号",
       devCountSection: "Dev 发币次数",
       devCountHint:
-        "仅 GMGN / Debot 战壕卡。GMGN 用 creator_created_count；Debot 用 ranks 的 dev_token_stats.created_count。左侧光条 + 「×次数」。比较符可选 < ≤ = ≥ >（默认 <）。多条命中时精确相等优先。",
+        "仅 GMGN / Debot 战壕卡。GMGN 用创作者真实发币数：迁移后卡片 inner 有时多记 1，开启后按创作者再核对一次。Debot 仍用 ranks 的 created_count。左侧光条 + 「×次数」。比较符可选 < ≤ = ≥ >（默认 <）。多条命中时精确相等优先。",
       devCountEnableTitle: "启用发币次数标记",
       devCountEnableDesc: "左侧光条颜色自定义；次数贴在左侧色条旁",
       devCountMinPh: "次数",
@@ -115,6 +127,27 @@
       symbolDupColorLabel: "首次颜色",
       searchHideTitle: "搜索框结果也屏蔽",
       searchHideDesc: "默认关。开启后，已启用的资金接收/金库规则同样作用于搜索弹层",
+      chartJumpSection: "K线创建跳转",
+      chartJumpHint:
+        "GMGN K 线底部「✦创建」。默认跟随正在看的周期。6 小时内可留 1 秒，36 小时内最细 15 秒，3 天内最细 30 秒，3–90 天最细 1 分钟，90–180 天 5 分钟，180 天–1 年 15 分钟，超过 1 年 30 分钟。已经更粗则保持。下拉里选了更细的档也会按这个下限抬高，一年以上选 1 分钟会落到 30 分钟。创建窗里向右拖补下一页。「↩当前」回到跳之前的周期和画面。",
+      chartJumpEnableTitle: "启用创建跳转",
+      chartJumpEnableDesc: "关掉后不显示按钮",
+      chartJumpIntervalLabel: "跳转后的周期",
+      chartJumpFollow: "跟随当前",
+      chartJump1S: "1秒",
+      chartJump3S: "3秒",
+      chartJump5S: "5秒",
+      chartJump15S: "15秒",
+      chartJump30S: "30秒",
+      chartJump1m: "1分钟",
+      chartJump3m: "3分钟",
+      chartJump5m: "5分钟",
+      chartJump15m: "15分钟",
+      chartJump30m: "30分钟",
+      chartJump1H: "1小时",
+      chartJump4H: "4小时",
+      chartJump12H: "12小时",
+      chartJump1D: "1日",
       catPosition: "徽章位置",
       catPositionDesc: "坐标与拖拽",
       themeSection: "颜色主题",
@@ -298,7 +331,7 @@
       catMarkDesc: "Dev count · Twitter notes · Repeat ticker",
       devCountSection: "Dev launch count",
       devCountHint:
-        "GMGN and Debot trench cards. GMGN uses creator_created_count; Debot uses ranks dev_token_stats.created_count. Left bar + ×count. Choose < ≤ = ≥ > (default <). Exact match wins, then the tighter threshold.",
+        "GMGN and Debot trench cards. GMGN uses the creator's real launch count; a migrated token sometimes stays in the card inner count, so the chip checks once per creator. Debot still uses ranks created_count. Left bar + ×count. Choose < ≤ = ≥ > (default <). Exact match wins, then the tighter threshold.",
       devCountEnableTitle: "Mark by launch count",
       devCountEnableDesc: "Custom bar color; count chip beside the left bar",
       devCountMinPh: "count",
@@ -326,6 +359,27 @@
       symbolDupColorLabel: "First-hit color",
       searchHideTitle: "Also hide in search",
       searchHideDesc: "Off by default. When on, enabled fund-recipient/vault rules also apply to the search overlay",
+      chartJumpSection: "Jump to creation",
+      chartJumpHint:
+        "GMGN chart buttons. Follows the interval you are viewing. 1s is kept within 6 hours; finest is 15s within 36 hours, 30s within 3 days, 1m within 90 days, 5m until 180 days, 15m until 1 year, and 30m after that. A coarser interval stays. Picking a finer preset is raised the same way, so 1m on a token older than a year lands on 30m. Right-drag in the creation view loads the next page. Back restores the previous interval and view.",
+      chartJumpEnableTitle: "Enable creation jump",
+      chartJumpEnableDesc: "Off hides the buttons",
+      chartJumpIntervalLabel: "Interval after jump",
+      chartJumpFollow: "Follow current",
+      chartJump1S: "1s",
+      chartJump3S: "3s",
+      chartJump5S: "5s",
+      chartJump15S: "15s",
+      chartJump30S: "30s",
+      chartJump1m: "1m",
+      chartJump3m: "3m",
+      chartJump5m: "5m",
+      chartJump15m: "15m",
+      chartJump30m: "30m",
+      chartJump1H: "1H",
+      chartJump4H: "4H",
+      chartJump12H: "12H",
+      chartJump1D: "1D",
       catPosition: "Badge position",
       catPositionDesc: "Coords & drag",
       themeSection: "Color theme",
@@ -566,6 +620,8 @@
   const suffixAddInput = document.getElementById("suffixAddInput");
   const suffixAddBtn = document.getElementById("suffixAddBtn");
   const searchHideEnabled = document.getElementById("searchHideEnabled");
+  const chartJumpEnabled = document.getElementById("chartJumpEnabled");
+  const chartJumpInterval = document.getElementById("chartJumpInterval");
   const vaultHideEnabled = document.getElementById("vaultHideEnabled");
   const vaultHideTax = document.getElementById("vaultHideTax");
   const vaultHideStock = document.getElementById("vaultHideStock");
@@ -622,6 +678,8 @@
   let vaultHideSaveTimer = null;
   let searchHideState = { ...DEFAULT_SEARCH_HIDE };
   let searchHideSaveTimer = null;
+  let chartJumpState = { ...DEFAULT_CHART_JUMP };
+  let chartJumpSaveTimer = null;
   let devCountMarkState = { ...DEFAULT_DEV_COUNT_MARK };
   let devCountSaveTimer = null;
   let twHandleMarkState = { ...DEFAULT_TW_HANDLE_MARK };
@@ -741,6 +799,15 @@
 
   function normalizeSearchHide(raw) {
     return { enabled: raw && raw.enabled === true };
+  }
+
+  function normalizeChartJump(raw) {
+    const interval = raw && typeof raw.interval === "string" ? raw.interval : "follow";
+    const known = CHART_JUMP_CHOICES.some((row) => row[0] === interval);
+    return {
+      enabled: !raw || raw.enabled !== false,
+      interval: known ? interval : "follow"
+    };
   }
 
   function normalizeHexColor(raw, fallback) {
@@ -1648,6 +1715,7 @@
             SUFFIX_HIDE_KEY,
             VAULT_HIDE_KEY,
             SEARCH_HIDE_KEY,
+            CHART_JUMP_KEY,
             LICENSE_KEY,
             DEV_COUNT_MARK_KEY,
             TW_HANDLE_MARK_KEY,
@@ -1669,6 +1737,7 @@
                 suffixHide: { ...DEFAULT_SUFFIX_HIDE },
                 vaultHide: { ...DEFAULT_VAULT_HIDE },
                 searchHide: { ...DEFAULT_SEARCH_HIDE },
+                chartJump: { ...DEFAULT_CHART_JUMP },
                 license: { ...DEFAULT_LICENSE },
                 devCountMark: { ...DEFAULT_DEV_COUNT_MARK },
                 twHandleMark: { ...DEFAULT_TW_HANDLE_MARK },
@@ -1696,6 +1765,7 @@
               suffixHide: normalizeSuffixHide(items?.[SUFFIX_HIDE_KEY]),
               vaultHide: normalizeVaultHide(items?.[VAULT_HIDE_KEY]),
               searchHide: normalizeSearchHide(items?.[SEARCH_HIDE_KEY]),
+              chartJump: normalizeChartJump(items?.[CHART_JUMP_KEY]),
               license: normalizeLicense(items?.[LICENSE_KEY]) || { ...DEFAULT_LICENSE },
               devCountMark: normalizeDevCountMark(items?.[DEV_COUNT_MARK_KEY]),
               twHandleMark: normalizeTwHandleMark(items?.[TW_HANDLE_MARK_KEY]),
@@ -1716,6 +1786,7 @@
           suffixHide: { ...DEFAULT_SUFFIX_HIDE },
           vaultHide: { ...DEFAULT_VAULT_HIDE },
           searchHide: { ...DEFAULT_SEARCH_HIDE },
+          chartJump: { ...DEFAULT_CHART_JUMP },
           license: { ...DEFAULT_LICENSE },
           devCountMark: { ...DEFAULT_DEV_COUNT_MARK },
           twHandleMark: { ...DEFAULT_TW_HANDLE_MARK },
@@ -1959,6 +2030,47 @@
   function renderSearchHideUI(state) {
     searchHideState = normalizeSearchHide(state);
     if (searchHideEnabled) searchHideEnabled.checked = searchHideState.enabled === true;
+  }
+
+  function saveChartJump(state) {
+    const normalized = normalizeChartJump(state);
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.set({ [CHART_JUMP_KEY]: normalized }, () => {
+          void chrome.runtime?.lastError;
+          resolve(normalized);
+        });
+      } catch {
+        resolve(normalized);
+      }
+    });
+  }
+
+  function scheduleSaveChartJump() {
+    if (chartJumpSaveTimer) window.clearTimeout(chartJumpSaveTimer);
+    chartJumpSaveTimer = window.setTimeout(async () => {
+      chartJumpSaveTimer = null;
+      chartJumpState = await saveChartJump(chartJumpState);
+      renderChartJumpUI(chartJumpState);
+    }, 120);
+  }
+
+  function renderChartJumpUI(state) {
+    chartJumpState = normalizeChartJump(state);
+    if (chartJumpEnabled) chartJumpEnabled.checked = chartJumpState.enabled === true;
+    if (chartJumpInterval) {
+      chartJumpInterval.textContent = "";
+      CHART_JUMP_CHOICES.forEach((row) => {
+        const option = document.createElement("option");
+        option.value = row[0];
+        option.textContent = t(row[1]);
+        chartJumpInterval.appendChild(option);
+      });
+      chartJumpInterval.value = CHART_JUMP_CHOICES.some((row) => row[0] === chartJumpState.interval)
+        ? chartJumpState.interval
+        : "follow";
+      chartJumpInterval.disabled = chartJumpState.enabled !== true;
+    }
   }
 
   function renderVaultHideUI(state) {
@@ -2827,6 +2939,23 @@
     scheduleSaveSearchHide();
   });
 
+  chartJumpEnabled?.addEventListener("change", () => {
+    chartJumpState = normalizeChartJump({
+      ...chartJumpState,
+      enabled: chartJumpEnabled.checked === true
+    });
+    renderChartJumpUI(chartJumpState);
+    scheduleSaveChartJump();
+  });
+  chartJumpInterval?.addEventListener("change", () => {
+    chartJumpState = normalizeChartJump({
+      ...chartJumpState,
+      interval: chartJumpInterval.value
+    });
+    renderChartJumpUI(chartJumpState);
+    scheduleSaveChartJump();
+  });
+
   vaultHideEnabled?.addEventListener("change", () => {
     vaultHideState = readVaultHideFromUI();
     if (
@@ -3018,6 +3147,7 @@
         renderSuffixHideUI(suffixHideState);
         renderVaultHideUI(vaultHideState);
         renderSearchHideUI(searchHideState);
+        renderChartJumpUI(chartJumpState);
         renderDevCountMarkUI(devCountMarkState);
         renderTwHandleMarkUI(twHandleMarkState);
         renderSymbolDupMarkUI(symbolDupMarkState);
@@ -3040,6 +3170,12 @@
       if (changes[SEARCH_HIDE_KEY]) {
         searchHideState = normalizeSearchHide(changes[SEARCH_HIDE_KEY].newValue);
         renderSearchHideUI(searchHideState);
+      }
+      if (changes[CHART_JUMP_KEY]) {
+        if (!chartJumpSaveTimer) {
+          chartJumpState = normalizeChartJump(changes[CHART_JUMP_KEY].newValue);
+          renderChartJumpUI(chartJumpState);
+        }
       }
       if (changes[DEV_COUNT_MARK_KEY]) {
         devCountMarkState = normalizeDevCountMark(changes[DEV_COUNT_MARK_KEY].newValue);
@@ -3100,6 +3236,7 @@
       suffixHide: loadedSuffixHide,
       vaultHide: loadedVaultHide,
       searchHide: loadedSearchHide,
+      chartJump: loadedChartJump,
       license: loadedLicense,
       devCountMark: loadedDevCount,
       twHandleMark: loadedTwHandle,
@@ -3117,6 +3254,7 @@
       suffixHideState = normalizeSuffixHide(loadedSuffixHide);
       vaultHideState = normalizeVaultHide(loadedVaultHide);
       searchHideState = normalizeSearchHide(loadedSearchHide);
+      chartJumpState = normalizeChartJump(loadedChartJump);
       devCountMarkState = normalizeDevCountMark(loadedDevCount);
       twHandleMarkState = normalizeTwHandleMark(loadedTwHandle);
       symbolDupMarkState = normalizeSymbolDupMark(loadedSymbolDup);
@@ -3128,6 +3266,7 @@
       renderSuffixHideUI(suffixHideState);
       renderVaultHideUI(vaultHideState);
       renderSearchHideUI(searchHideState);
+      renderChartJumpUI(chartJumpState);
       renderDevCountMarkUI(devCountMarkState);
       renderTwHandleMarkUI(twHandleMarkState);
       renderSymbolDupMarkUI(symbolDupMarkState);
@@ -3135,6 +3274,7 @@
       renderLicenseUI(loadedLicense);
       void refreshStoredLicense();
       bindCollapseHeads();
+      setSectionExpanded("chartJump", false);
       setSectionExpanded("theme", false);
       setSectionExpanded("taxRecv", false);
       setSectionExpanded("vaultHide", false);

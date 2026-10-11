@@ -339,6 +339,7 @@
   /** 金库屏蔽：税收金库 🎁 vs 币股金库 📈 */
   const VAULT_HIDE_KEY = "flapFeeInfo.vaultHide.v1";
   const SEARCH_HIDE_KEY = "flapFeeInfo.searchHide.v1";
+  const CHART_JUMP_KEY = "flapFeeInfo.chartJump.v1";
   const DEV_COUNT_MARK_KEY = "flapFeeInfo.devCountMark.v1";
   const TW_HANDLE_MARK_KEY = "flapFeeInfo.twHandleMark.v1";
   const SYMBOL_DUP_MARK_KEY = "flapFeeInfo.symbolDupMark.v1";
@@ -2415,6 +2416,7 @@
   /** @type {{ enabled: boolean, hideTaxVault: boolean, hideStockVault: boolean }} */
   let vaultHidePrefs = { ...DEFAULT_VAULT_HIDE };
   let searchHidePrefs = { ...DEFAULT_SEARCH_HIDE };
+  let chartJumpPrefs = { enabled: true, interval: "follow" };
   let devCountMarkPrefs = { ...DEFAULT_DEV_COUNT_MARK };
   let twHandleMarkPrefs = { ...DEFAULT_TW_HANDLE_MARK };
   let symbolDupMarkPrefs = { ...DEFAULT_SYMBOL_DUP_MARK };
@@ -2424,6 +2426,7 @@
   const symbolDupSigCache = new WeakMap();
   let symbolDupSeenSaveTimer = 0;
   let symbolDupPaintRaf = 0;
+  let trenchMarkPaintRaf = 0;
   let symbolDupPersistSig = "";
   let cardMarkMutAt = 0;
   let cachedReactFiberKey = "";
@@ -2713,14 +2716,14 @@
       },
       findIconTarget(card) {
         if (card?.dataset?.flapOverlayCard === "1") {
-          return findGmgnOverlayLiquidityHeadMount(card);
+          return markGmgnOverlayAddressCard(card);
         }
         if (isGmgnTokenPage() && isGmgnTokenHeaderCard(card)) {
           // 0.4.50: address ONLY — never 总税率 (user: 徽章必须在地址旁).
           return findGmgnHeaderAddressMount();
         }
         if (isInsideOverlayDialog(card)) {
-          return findGmgnOverlayLiquidityHeadMount(card);
+          return markGmgnOverlayAddressCard(card);
         }
         // K-line trench default placement is strict: only the card's real Tax chip.
         // Falling back to the short-CA row can escape into avatar/trade-control columns.
@@ -2756,7 +2759,15 @@
         return findCompactRowMount(card);
       },
       placeIcon(target, icon) {
+        if (target?.dataset?.flapMount === "gmgn-overlay-address") {
+          placeGmgnOverlayAddressBadge(target, icon);
+          return;
+        }
         if (target?.dataset?.flapMount === "gmgn-overlay-liquidity-head") {
+          clearAbsoluteBadgeStyles(icon);
+          delete icon.dataset.feeOx;
+          delete icon.dataset.feeOy;
+          icon.dataset.feePosMode = "default";
           icon.dataset.feeOverlayPos = "liquidity-head";
           target.insertAdjacentElement("afterbegin", icon);
           return;
@@ -3681,11 +3692,47 @@
   function isGeniusFunToken(addr) {
     const a = String(addr || "").toLowerCase();
     if (notGeniusAddrSet.has(a) || brewAddrSet.has(a)) return false;
-    if (isGeniusFunSuffix(a)) {
-      rememberGeniusFunAddr(a);
-      return true;
+    if (geniusFunAddrSet.has(a)) return true;
+    if (!isGeniusFunSuffix(a)) return false;
+    // Debot K 线 URL 上的裸 6666 先刮 launchpad。直接记成 Genius 会打 /modes，空结果画成 ❓️未。
+    const path = String(location.pathname || "");
+    const um = path.match(/0x[a-fA-F0-9]{40}/i);
+    if (
+      um &&
+      um[0].toLowerCase() === a &&
+      isDebotLikeHost() &&
+      /\/token\/bsc\//i.test(path)
+    ) {
+      const lp = scrapeLaunchpadFromTokenPage(a);
+      const plat = Core.platformFromLaunchpad(lp);
+      if (plat === "brew") {
+        rememberBoundedAddr(brewAddrSet, a);
+        notGeniusAddrSet.add(a);
+        geniusFunAddrSet.delete(a);
+        requestQueue.delete(a);
+        cancelIncompleteModes(a);
+        forgetStalePlatformCache(a, "brew");
+        return false;
+      }
+      if (lp && plat && plat !== "geniusfun") {
+        notGeniusAddrSet.add(a);
+        geniusFunAddrSet.delete(a);
+        requestQueue.delete(a);
+        cancelIncompleteModes(a);
+        return false;
+      }
+      if (
+        isGeniusFunLaunchpadRaw(lp) ||
+        plat === "geniusfun" ||
+        normalizeLaunchpadChip(lp) === "geniusfun"
+      ) {
+        rememberGeniusFunAddr(a);
+        return true;
+      }
+      return false;
     }
-    return geniusFunAddrSet.has(a);
+    rememberGeniusFunAddr(a);
+    return true;
   }
 
   function rememberPonsV2Addr(addr) {
@@ -3932,6 +3979,20 @@
   function scrapeLaunchpadFromTokenPageFiber(wantAddr) {
     const want = String(wantAddr || "").toLowerCase();
     const seeds = [];
+    if (isDebotLikeHost() && want) {
+      try {
+        const link = document.querySelector(`a[href*="${want}"]`);
+        if (link instanceof HTMLElement) seeds.push(link);
+      } catch (_lnk) {
+        // ignore
+      }
+      try {
+        const short = findDebotHeaderShortCaLeaf(want);
+        if (short instanceof HTMLElement) seeds.push(short);
+      } catch (_ds) {
+        // ignore
+      }
+    }
     try {
       const idEl = document.querySelector("#token-base-address");
       if (idEl instanceof HTMLElement) seeds.push(idEl);
@@ -4360,6 +4421,15 @@
     // Search results always use their natural short-address row. Besides keeping
     // placement stable, this avoids probing the K-line header during overlay paint.
     if (card?.dataset?.flapOverlayCard === "1") return false;
+    // Debot search rows sit in a dialog on the trench page. Without the overlay
+    // mark, isTrenchListPage() would stamp the saved trench offset onto them.
+    if (
+      card &&
+      isDebotLikeHost() &&
+      card.closest?.(".MuiDialog-root, [role='dialog'], [role='alertdialog']")
+    ) {
+      return false;
+    }
     if (card && isGmgnTokenHeaderCard(card)) return false;
     // Debot/Gungnir K-line top strip: ALWAYS natural mount (popup: 不走坐标).
     // User may enable「使用卡片坐标」for 战壕 list only — if header zone uses absolute
@@ -4704,7 +4774,14 @@
     const m = String(location.pathname || "").match(/0x[a-fA-F0-9]{40}/i);
     if (!m) return false;
     const token = m[0].toLowerCase();
-    if (TARGET_TOKEN_RE.test(token) || isGeniusFunToken(token) || ponsV2AddrSet.has(token)) {
+    if (
+      TARGET_TOKEN_RE.test(token) ||
+      isFourPoolSuffix(token) ||
+      isHostOnlyPoolAddr(token) ||
+      isGeniusFunSuffix(token) ||
+      geniusFunAddrSet.has(token) ||
+      ponsV2AddrSet.has(token)
+    ) {
       return false;
     }
     return true;
@@ -8183,6 +8260,7 @@
     if (
       sync !== true &&
       card instanceof HTMLElement &&
+      !isSearchOverlayCard(card) &&
       ((isGmgnHost() && isGmgnFixedTrenchCard(card)) ||
         (isDebotHost() && isDebotTrenchRowCard(card)))
     ) {
@@ -8239,7 +8317,7 @@
 
       let icon = card.querySelector(`[${ICON_DATA}="1"]`);
       if (icon instanceof HTMLElement) {
-        if (isGmgnTrenchMisplacedBadge(card, icon)) {
+        if (isGmgnTrenchMisplacedBadge(card, icon) || searchBadgeNeedsRemount(card, icon)) {
           removeAllBadgesForCard(card, icon.dataset.feeToken || token);
           icon = null;
         } else {
@@ -8570,7 +8648,7 @@
   }
 
   // 必须等于 page-hook.js HOOK_VER（打包脚本会校验），否则每页都会重复注入 page-hook。
-  const PAGE_HOOK_VER = "209";
+  const PAGE_HOOK_VER = "262";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -10157,6 +10235,28 @@
     }
   }
 
+  /** 顶栏已经画了 ⏳ / ❓️未 时，brew 或 4444 的底池结果要换上去。已画出的分红不拆。 */
+  function debotHeaderPoolBadgeIsStale(icon, ent) {
+    if (!(icon instanceof HTMLElement) || !ent || isHostFeeEntryPending(ent)) return false;
+    if (
+      ent.__poolOnly !== true &&
+      ent.platform !== "brew" &&
+      ent.platform !== "four_pool"
+    ) {
+      return false;
+    }
+    const text = String(icon.textContent || "");
+    if (
+      icon.dataset.feeLoading === "1" ||
+      text.indexOf("未") !== -1 ||
+      text.indexOf("待加载") !== -1
+    ) {
+      return true;
+    }
+    if (hostFeeAllocationBps(ent) <= 0) return false;
+    return !/[💎🎁🔥💧📈🎓💛]/.test(text) && text.indexOf("👨") === -1;
+  }
+
   /**
    * Direct paint path for Debot/Gungnir token header (bypasses candidate starvation).
    * @returns {boolean} true if badge painted or queued with mount ready
@@ -10185,8 +10285,15 @@
           return true;
         }
       } else {
-        finishTokenEnterTransition();
-        return true;
+        const ent = resolveEntry(urlTok);
+        const icon = findDebotHeaderBadgeEl(urlTok);
+        if (!debotHeaderPoolBadgeIsStale(icon, ent)) {
+          finishTokenEnterTransition();
+          return true;
+        }
+        stripTokenHeaderBadge(urlTok);
+        debotHeaderBadgeOkUntil = 0;
+        debotHeaderBadgeOkEl = null;
       }
     }
 
@@ -10733,6 +10840,7 @@
       }
       if (existing.dataset.feeLoading === "1") return false;
       if (isGmgnTrenchMisplacedBadge(card, existing)) return false;
+      if (searchBadgeNeedsRemount(card, existing)) return false;
       const stableEntry = resolveEntry(marked);
       if (stableEntry && isHostFeeEntryPending(stableEntry)) return false;
       if (stableEntry && hostFeeStillNeedsModes(stableEntry)) return false;
@@ -10801,6 +10909,7 @@
       return false;
     }
     if (existing.dataset.feeLoading === "1") return false;
+    if (searchBadgeNeedsRemount(card, existing)) return false;
     const debotPending = resolveEntry(marked);
     if (debotPending && isHostFeeEntryPending(debotPending)) return false;
     if (debotPending && hostFeeStillNeedsModes(debotPending)) return false;
@@ -11243,7 +11352,10 @@
           document.contains(existing) &&
           existing.dataset.feeToken === token
         ) {
-          if (isGmgnTrenchMisplacedBadge(card, existing)) {
+          if (
+            isGmgnTrenchMisplacedBadge(card, existing) ||
+            searchBadgeNeedsRemount(card, existing)
+          ) {
             renderMode(card, token, entry, { forceRemount: true });
             rendered += 1;
             continue;
@@ -12542,6 +12654,124 @@
       return shortLeaf;
     }
     return null;
+  }
+
+  function isSearchOverlayCard(card) {
+    return (
+      card instanceof HTMLElement &&
+      (card.dataset.flapOverlayCard === "1" || isInsideOverlayDialog(card))
+    );
+  }
+
+  /**
+   * Search rows are ~72px and often overflow:hidden. Trench absolute coords
+   * (and a badge appended inside the name stack) land outside the visible box.
+   */
+  function searchBadgeNeedsRemount(card, icon) {
+    if (!isSearchOverlayCard(card) || !(icon instanceof HTMLElement)) return false;
+    if (icon.dataset.feePosMode === "absolute") return true;
+    const want = isDebotHost() ? "title" : "address";
+    if (icon.dataset.feeOverlayPos !== want) return true;
+    try {
+      const ir = icon.getBoundingClientRect();
+      const cr = card.getBoundingClientRect();
+      // Offscreen virtual rows report 0×0. Leave them until they have a box.
+      if (ir.width < 2 || ir.height < 2 || cr.width < 2) return false;
+      if (ir.top < cr.top - 2 || ir.bottom > cr.bottom + 2) return true;
+      if (ir.left < cr.left - 2 || ir.right > cr.right + 2) return true;
+      let parent = icon.parentElement;
+      while (parent && parent !== card) {
+        const st = window.getComputedStyle(parent);
+        if (st.overflowX === "hidden" || st.overflow === "hidden") {
+          const pr = parent.getBoundingClientRect();
+          if (ir.right > pr.right + 2 || ir.left < pr.left - 1) return true;
+        }
+        parent = parent.parentElement;
+      }
+    } catch (_err) {
+      return false;
+    }
+    return false;
+  }
+
+  function markGmgnOverlayAddressCard(card) {
+    if (!(card instanceof HTMLElement)) return null;
+    card.dataset.flapMount = "gmgn-overlay-address";
+    return card;
+  }
+
+  /** Pin the badge on the short-address row, as a child of the card so the name column cannot clip it. */
+  function placeOverlayBadgeOnAddress(card, icon, overlayPos) {
+    if (!(card instanceof HTMLElement) || !(icon instanceof HTMLElement)) return false;
+    clearAbsoluteBadgeStyles(icon);
+    delete icon.dataset.feeOx;
+    delete icon.dataset.feeOy;
+    icon.dataset.feePosMode = "default";
+    icon.dataset.feeOverlayPos = overlayPos;
+    if (icon.parentElement !== card) card.appendChild(icon);
+    let short = null;
+    const leaves = card.querySelectorAll("span, a, div, p");
+    const leafMax = Math.min(leaves.length, 80);
+    for (let i = 0; i < leafMax; i += 1) {
+      const el = leaves[i];
+      if (el === icon || icon.contains(el)) continue;
+      const text = (el.textContent || "").trim();
+      if (!TARGET_SHORT_TOKEN_RE.test(text) || text.length > 22) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.width <= 160 && rect.height > 0 && rect.height <= 28) {
+        short = el;
+        break;
+      }
+    }
+    if (!(short instanceof HTMLElement)) return false;
+    try {
+      if (window.getComputedStyle(card).position === "static") card.style.position = "relative";
+    } catch (_pos) {
+      card.style.position = "relative";
+    }
+    const cardRect = card.getBoundingClientRect();
+    const shortRect = short.getBoundingClientRect();
+    let right = shortRect.right;
+    const nodes = card.querySelectorAll("span, a, img, svg, div");
+    const nodeMax = Math.min(nodes.length, 80);
+    const midY = shortRect.top + shortRect.height / 2;
+    for (let i = 0; i < nodeMax; i += 1) {
+      const el = nodes[i];
+      if (el === icon || icon.contains(el) || el.contains(icon)) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 4 || rect.height < 4 || rect.height > 22 || rect.width > 90) continue;
+      if (Math.abs(rect.top + rect.height / 2 - midY) > 8) continue;
+      if (rect.left < shortRect.left - 8) continue;
+      if (rect.left > cardRect.left + cardRect.width * 0.5) continue;
+      if (rect.right > right) right = rect.right;
+    }
+    const width = Math.max(icon.offsetWidth || 0, 96);
+    let left = Math.round(right - cardRect.left + 4);
+    let top = Math.round(shortRect.top - cardRect.top);
+    const maxLeft = Math.max(4, Math.round(cardRect.width - width - 6));
+    if (left > maxLeft) left = maxLeft;
+    if (top < 0) top = 0;
+    const maxTop = Math.max(0, Math.round(cardRect.height - 18));
+    if (top > maxTop) top = maxTop;
+    icon.style.left = `${left}px`;
+    icon.style.top = `${top}px`;
+    icon.style.zIndex = "5";
+    return true;
+  }
+
+  function placeGmgnOverlayAddressBadge(card, icon) {
+    if (placeOverlayBadgeOnAddress(card, icon, "address")) return;
+    const liquidity = findGmgnOverlayLiquidityHeadMount(card);
+    if (liquidity instanceof HTMLElement && liquidity !== card) {
+      clearAbsoluteBadgeStyles(icon);
+      delete icon.dataset.feeOx;
+      delete icon.dataset.feeOy;
+      icon.dataset.feePosMode = "default";
+      icon.dataset.feeOverlayPos = "liquidity-head";
+      liquidity.insertAdjacentElement("afterbegin", icon);
+      return;
+    }
+    card.appendChild(icon);
   }
 
   /** GMGN search overlay: mount above the L/H columns without changing row width. */
@@ -14648,7 +14878,12 @@
     try {
       if (isDebotTokenPage()) {
         const urlTok = extractTokenFromUrl();
-        if (urlTok && urlTok === tok && !hasDebotTokenHeaderBadge()) {
+        const poolHost =
+          entry &&
+          (entry.__poolOnly === true ||
+            entry.platform === "brew" ||
+            entry.platform === "four_pool");
+        if (urlTok && urlTok === tok && (!hasDebotTokenHeaderBadge() || poolHost)) {
           tryPaintDebotTokenHeader("api-apply");
         }
       }
@@ -16174,6 +16409,39 @@
     );
   }
 
+  function pushDevCountVerifyToPage() {
+    try {
+      window.postMessage(
+        {
+          source: "flap-fee-info",
+          type: "dev-count-verify",
+          enabled: devCountMarkPrefs.enabled === true
+        },
+        "*"
+      );
+    } catch (_push) {
+      // ignore
+    }
+  }
+
+  function scheduleTrenchMarkRepaint() {
+    if (trenchMarkPaintRaf) return;
+    trenchMarkPaintRaf = 1;
+    const kick = () => {
+      trenchMarkPaintRaf = 0;
+      try {
+        paintTrenchCardExtras();
+      } catch (_p) {
+        // ignore
+      }
+    };
+    try {
+      window.queueMicrotask(kick);
+    } catch (_qm) {
+      window.setTimeout(kick, 0);
+    }
+  }
+
   function scheduleSymbolDupRepaint() {
     if (symbolDupPaintRaf) return;
     symbolDupPaintRaf = 1;
@@ -16742,9 +17010,15 @@
           const address = cardMarkMetaAddr(
             d.address || d.a || d.contract || d.tokenAddress || d.token_address
           );
-          const count = Math.floor(
-            Number(d.creator_created_count ?? d.d_ccc ?? (stats && stats.created_count)) || 0
-          );
+          const decision =
+            Core && typeof Core.gmgnDevCreatedCount === "function"
+              ? Core.gmgnDevCreatedCount(d, stats && stats.created_count)
+              : null;
+          const count = decision
+            ? Math.floor(Number(decision.count) || 0)
+            : Math.floor(
+                Number(d.creator_created_count ?? d.d_ccc ?? (stats && stats.created_count)) || 0
+              );
           const twitter = normalizeCardMarkHandle(
             (social && (social.twitter_screen_name || social.twitter)) ||
               d.twitter_username ||
@@ -17256,16 +17530,19 @@
     if (!isExtensionContextValid() || !chrome.storage?.local) return;
     try {
       chrome.storage.local.get(
-        [TAX_RECV_HIDE_KEY, SUFFIX_HIDE_KEY, VAULT_HIDE_KEY, SEARCH_HIDE_KEY, LICENSE_KEY, DEVICE_ID_KEY, DEV_COUNT_MARK_KEY, TW_HANDLE_MARK_KEY, SYMBOL_DUP_MARK_KEY],
+        [TAX_RECV_HIDE_KEY, SUFFIX_HIDE_KEY, VAULT_HIDE_KEY, SEARCH_HIDE_KEY, CHART_JUMP_KEY, LICENSE_KEY, DEVICE_ID_KEY, DEV_COUNT_MARK_KEY, TW_HANDLE_MARK_KEY, SYMBOL_DUP_MARK_KEY],
         (items) => {
         if (!isExtensionContextValid() || chrome.runtime.lastError) return;
         taxRecvHidePrefs = normalizeTaxRecvHidePrefs(items?.[TAX_RECV_HIDE_KEY]);
         suffixHidePrefs = normalizeSuffixHidePrefs(items?.[SUFFIX_HIDE_KEY]);
         vaultHidePrefs = normalizeVaultHidePrefs(items?.[VAULT_HIDE_KEY]);
         searchHidePrefs = normalizeSearchHidePrefs(items?.[SEARCH_HIDE_KEY]);
+        chartJumpPrefs = normalizeChartJumpPrefs(items?.[CHART_JUMP_KEY]);
+        pushChartJumpPrefsToPage();
         devCountMarkPrefs = normalizeDevCountMarkPrefs(items?.[DEV_COUNT_MARK_KEY]);
         twHandleMarkPrefs = normalizeTwHandleMarkPrefs(items?.[TW_HANDLE_MARK_KEY]);
         symbolDupMarkPrefs = normalizeSymbolDupMarkPrefs(items?.[SYMBOL_DUP_MARK_KEY]);
+        pushDevCountVerifyToPage();
         try {
           chrome.storage.session?.get([SYMBOL_DUP_SEEN_KEY], (seenItems) => {
             if (!isExtensionContextValid() || chrome.runtime.lastError) return;
@@ -17296,11 +17573,13 @@
           pushTaxRecvPrefsToPage();
           pushSuffixHidePrefsToPage();
           pushVaultHidePrefsToPage();
+          pushChartJumpPrefsToPage();
         }, 200);
         window.setTimeout(() => {
           pushTaxRecvPrefsToPage();
           pushSuffixHidePrefsToPage();
           pushVaultHidePrefsToPage();
+          pushChartJumpPrefsToPage();
         }, 1000);
         scheduleTaxRecvHideApply(0);
         try {
@@ -17541,6 +17820,37 @@
     return { enabled: raw && raw.enabled === true };
   }
 
+  function normalizeChartJumpPrefs(raw) {
+    const allowed = {
+      follow: 1,
+      "15S": 1,
+      "30S": 1,
+      "1": 1,
+      "5": 1,
+      "60": 1,
+      "240": 1,
+      "1D": 1
+    };
+    const interval = raw && typeof raw.interval === "string" ? raw.interval : "follow";
+    return {
+      enabled: !raw || raw.enabled !== false,
+      interval: Object.prototype.hasOwnProperty.call(allowed, interval) ? interval : "follow"
+    };
+  }
+
+  function pushChartJumpPrefsToPage() {
+    const prefs = normalizeChartJumpPrefs(chartJumpPrefs);
+    chartJumpPrefs = prefs;
+    try {
+      document.documentElement?.setAttribute(
+        "data-flap-chart-jump",
+        (prefs.enabled ? "1" : "0") + ":" + prefs.interval
+      );
+    } catch (_e) {
+      // ignore
+    }
+  }
+
   function isSearchHideEnabled() {
     return Boolean(
       searchHidePrefs &&
@@ -17588,6 +17898,25 @@
     return 100;
   }
 
+  /**
+   * 搜索弹层的资金接收判定。
+   * 有收款地址时走白名单；search_v4 / 徽章还没有地址时仍按百分比藏行，且不写 hideAddrSet。
+   * 已经有地址且未命中隐藏（白名单或未过阈值）时，不再用徽章百分比把行藏回去。
+   */
+  function searchTaxRecvHidden(info, card, addr) {
+    if (info && shouldHideTaxRecv(info, addr)) return true;
+    if (info && taxRecvEntryAddrs(info).length) return false;
+    if (info && info.isVault === true) return false;
+    const fromInfo = info && Number(info.recvPct) > 0 ? Number(info.recvPct) : null;
+    const pct = fromInfo != null ? fromInfo : chefPctFromBadge(card);
+    if (pct == null) return false;
+    return shouldHideTaxRecv(
+      { recvPct: pct, isVault: false, source: "search" },
+      addr,
+      { searchWithoutAddr: true }
+    );
+  }
+
   function shouldHideSearchOverlayToken(token, card) {
     if (!isSearchHideEnabled()) return false;
     const addr = String(token || "").toLowerCase();
@@ -17600,13 +17929,7 @@
         return true;
       }
       if (!taxRecvHidesGeniusTokens()) return false;
-      const info = resolveTaxRecvInfo(addr);
-      if (info && shouldHideTaxRecv(info, addr)) return true;
-      const pct = chefPctFromBadge(card);
-      if (pct != null) {
-        return shouldHideTaxRecv({ recvPct: pct, isVault: false, source: "badge" }, addr);
-      }
-      return false;
+      return searchTaxRecvHidden(resolveTaxRecvInfo(addr), card, addr);
     }
     if (!TARGET_TOKEN_RE.test(addr)) return false;
     const vk = vaultKindFromFeeOrBadge(addr, card);
@@ -17618,12 +17941,10 @@
     }
     if (taxRecvHidePrefs && taxRecvHidePrefs.enabled === true) {
       const info = resolveTaxRecvInfo(addr);
-      if (info && shouldHideTaxRecv(info)) return true;
-      if ((!info || !(Number(info.recvPct) > 0)) && vk == null) {
-        const pct = chefPctFromBadge(card);
-        if (pct != null) {
-          return shouldHideTaxRecv({ recvPct: pct, isVault: false, source: "badge" });
-        }
+      if (vk != null) {
+        if (info && info.isVault !== true && shouldHideTaxRecv(info, addr)) return true;
+      } else if (searchTaxRecvHidden(info, card, addr)) {
+        return true;
       }
     }
     return false;
@@ -17702,10 +18023,26 @@
               typeof normalizeToken === "function"
                 ? normalizeToken(el.getAttribute("href") || "")
                 : "";
-            const card =
-              el.closest?.(`[${CARD_DATA}]`) ||
-              el.closest?.('[href*="/token/"]') ||
-              el;
+            let card = el;
+            // 结果行大约 70px。内层名字链接只有约 32px，藏它藏不住整行。
+            let cur = el;
+            for (let depth = 0; cur && depth < 6; depth += 1) {
+              if (cur.matches?.('a[href*="/token/"]')) {
+                try {
+                  const r = cur.getBoundingClientRect();
+                  if (r.height >= 60 && r.width >= 240) {
+                    card = cur;
+                    break;
+                  }
+                } catch (_r) {
+                  // ignore
+                }
+              }
+              const parent = cur.parentElement;
+              if (!(parent instanceof HTMLElement)) break;
+              if (parent.matches?.('[role="dialog"], .MuiDialog-root, .MuiModal-root')) break;
+              cur = parent;
+            }
             add(card, token);
           });
       }
@@ -17821,7 +18158,31 @@
     return entry.recv_addrs;
   }
 
-  function shouldHideTaxRecv(entry, token) {
+  function pushTaxRecvAddrList(out, seen, value) {
+    if (out.length >= 16) return;
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i += 1) pushTaxRecvAddrList(out, seen, value[i]);
+      return;
+    }
+    const addr = String(value || "")
+      .trim()
+      .toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(addr) || seen.has(addr)) return;
+    seen.add(addr);
+    out.push(addr);
+  }
+
+  /** search_v4 / ranks 的 host-fee 带 recv_addrs；/modes 结果没有，用 vault_address 兜底。 */
+  function hostFeeRecvAddrsFromRaw(raw, entry) {
+    const out = [];
+    const seen = new Set();
+    pushTaxRecvAddrList(out, seen, raw && raw.recv_addrs);
+    if (!out.length) pushTaxRecvAddrList(out, seen, entry && entry.vault_address);
+    if (!out.length) pushTaxRecvAddrList(out, seen, raw && raw.vault_address);
+    return out;
+  }
+
+  function shouldHideTaxRecv(entry, token, opts) {
     if (!taxRecvHidePrefs || taxRecvHidePrefs.enabled !== true) return false;
     if (!entry || typeof entry !== "object") return false;
     const addr = String(token || entry.address || "").toLowerCase();
@@ -17834,12 +18195,15 @@
     const threshold = Number.isFinite(thr) ? thr : DEFAULT_TAX_RECV_HIDE.thresholdPct;
     const over = threshold <= 0 || pct + 1e-9 >= threshold;
     if (!over) return false;
-    // 白名单开着但这条 entry 没有收款地址（/modes、徽章百分比）时，不要把 CA 塞进 hideAddrSet。
-    // 列表行上的 s_tal / launchpad_extra 由 page-hook 判定。
+    // 白名单开着且没有收款地址时，不要把 CA 塞进 hideAddrSet。
+    // 搜索弹层可以传 searchWithoutAddr：先按百分比藏行，地址后到再按白名单放行。
     const addrs = taxRecvEntryAddrs(entry);
     if (taxRecvAllowListActive()) {
-      if (!addrs.length) return false;
-      if (Core.taxRecvAllowHit(taxRecvHidePrefs.allow, addrs)) return false;
+      if (!addrs.length) {
+        if (!opts || opts.searchWithoutAddr !== true) return false;
+      } else if (Core.taxRecvAllowHit(taxRecvHidePrefs.allow, addrs)) {
+        return false;
+      }
     }
     return true;
   }
@@ -18596,6 +18960,7 @@
     if (!isBadgeAccessAllowed()) return;
     if (!Array.isArray(entries) || !entries.length) return;
     const confirmed = [];
+    let hostFeeTaxRecvDirty = false;
     for (const raw of entries) {
       if (!raw || typeof raw !== "object") continue;
       const token = String(raw.address || "")
@@ -18704,6 +19069,12 @@
           if (basketSymbolsReady(entry.basket_assets)) entry.__needsChain = false;
         }
       }
+      entry.recv_addrs = hostFeeRecvAddrsFromRaw(raw, entry);
+      try {
+        if (ingestFeeEntryForTaxRecv(token, entry)) hostFeeTaxRecvDirty = true;
+      } catch (_recv) {
+        // ignore
+      }
       const prev = modeCache.get(token);
       if (prev && !hostFeeEntryShouldApply(prev, entry)) {
         if (
@@ -18789,7 +19160,10 @@
       confirmed.push([token, entry]);
       ingestFeeAndNotifyListHide(token, entry);
     }
-    if (!confirmed.length) return;
+    if (!confirmed.length) {
+      if (hostFeeTaxRecvDirty) scheduleTaxRecvHideApply(30);
+      return;
+    }
     broadcastBasketAddrCache(confirmed.map(([, e]) => e));
     confirmed.forEach(([token, entry]) => {
       let eff = entry;
@@ -18869,7 +19243,7 @@
         }
         if (data.type === "card-mark-meta") {
           if (mergeCardMarkMetaEntries(data.entries) && anyTrenchMarkOn()) {
-            scheduleSymbolDupRepaint();
+            scheduleTrenchMarkRepaint();
           }
           return;
         }
@@ -19726,8 +20100,13 @@
           searchHidePrefs = normalizeSearchHidePrefs(changes[SEARCH_HIDE_KEY].newValue);
           scheduleSearchOverlayHideApply(0);
         }
+        if (changes[CHART_JUMP_KEY]) {
+          chartJumpPrefs = normalizeChartJumpPrefs(changes[CHART_JUMP_KEY].newValue);
+          pushChartJumpPrefsToPage();
+        }
         if (changes[DEV_COUNT_MARK_KEY]) {
           devCountMarkPrefs = normalizeDevCountMarkPrefs(changes[DEV_COUNT_MARK_KEY].newValue);
+          pushDevCountVerifyToPage();
           syncTrenchMarksAfterPrefs();
         }
         if (changes[TW_HANDLE_MARK_KEY]) {
@@ -19852,6 +20231,7 @@
     if (
       entry &&
       (entry.platform === "four_pool" ||
+        (entry.platform === "brew" && hostFeeAllocationBps(entry) <= 0) ||
         (entry.__poolOnly === true && hostFeeAllocationBps(entry) <= 0))
     ) {
       return "";
@@ -21485,19 +21865,11 @@
     // Search overlays have their own strict mount. Never reuse/fall through to an
     // older metrics or address mount because that can place the badge over host UI.
     if (inOverlay) {
-      if (
-        cached &&
-        cached.el instanceof HTMLElement &&
-        cached.el.dataset.flapMount === "overlay-title" &&
-        card.contains(cached.el) &&
-        document.contains(cached.el) &&
-        Date.now() - cached.at < DEBOT_MOUNT_CACHE_MS
-      ) {
-        return cached.el;
-      }
-      const titleMount = findDebotOverlayTitleMount(card);
-      if (titleMount) debotMountCache.set(card, { at: Date.now(), el: titleMount });
-      return titleMount;
+      // Pin on the result row itself. The title-row sibling test misses the
+      // first hit (taller row), and renderMode then keeps a trench absolute badge.
+      const rowMount = markDebotMount(card, "overlay-title");
+      debotMountCache.set(card, { at: Date.now(), el: rowMount });
+      return rowMount;
     }
 
     if (
@@ -21566,41 +21938,6 @@
 
     if (el) debotMountCache.set(card, { at: Date.now(), el });
     return el;
-  }
-
-  /** Debot/Gungnir search overlay: append after the final token-name row item. */
-  function findDebotOverlayTitleMount(card) {
-    if (!(card instanceof HTMLElement) || !isInsideOverlayDialog(card)) return null;
-    const shortNode = findDebotShortAddressNode(card);
-    if (!(shortNode instanceof HTMLElement)) return null;
-
-    let addressRow = shortNode;
-    for (let depth = 0; addressRow && depth < 5; depth += 1) {
-      if (!(addressRow instanceof HTMLElement) || addressRow === card) break;
-      const titleRow = addressRow.previousElementSibling;
-      if (titleRow instanceof HTMLElement) {
-        const addressRect = addressRow.getBoundingClientRect();
-        const titleRect = titleRow.getBoundingClientRect();
-        const titleText = (titleRow.textContent || "").replace(/\s+/g, " ").trim();
-        const hasShortAddress = TARGET_SHORT_TOKEN_RE.test(titleText);
-        const sameStack = titleRow.parentElement === addressRow.parentElement;
-        const compactRows =
-          addressRect.width > 0 &&
-          addressRect.width <= 240 &&
-          addressRect.height >= 12 &&
-          addressRect.height <= 32 &&
-          titleRect.width > 0 &&
-          titleRect.width <= 280 &&
-          titleRect.height >= 12 &&
-          titleRect.height <= 32;
-        const titleAboveAddress = titleRect.top <= addressRect.top && titleRect.bottom <= addressRect.top + 4;
-        if (sameStack && compactRows && titleAboveAddress && titleText && !hasShortAddress) {
-          return markDebotMount(titleRow, "overlay-title");
-        }
-      }
-      addressRow = addressRow.parentElement;
-    }
-    return null;
   }
 
   function markDebotMount(el, kind, buyWrap) {
@@ -21884,7 +22221,11 @@
       return;
     }
     if (kind === "token-stats" || kind === "overlay-title") {
-      if (kind === "overlay-title") icon.dataset.feeOverlayPos = "title";
+      if (kind === "overlay-title") {
+        const row = target.closest?.('a[href*="/token/"]');
+        if (row instanceof HTMLElement && placeOverlayBadgeOnAddress(row, icon, "title")) return;
+        icon.dataset.feeOverlayPos = "title";
+      }
       target.append(icon);
       return;
     }
