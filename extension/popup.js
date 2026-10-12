@@ -1147,7 +1147,15 @@
     return code === "license_network" || code === "license_blocked";
   }
 
+  let lastLicenseApiCallAt = 0;
+  const LICENSE_API_MIN_INTERVAL_MS = 1000;
+
   async function callLicenseApi(path, key, deviceId, base) {
+    const waitMs = lastLicenseApiCallAt + LICENSE_API_MIN_INTERVAL_MS - Date.now();
+    if (waitMs > 0) {
+      await sleepMs(waitMs);
+    }
+    lastLicenseApiCallAt = Date.now();
     const res = await fetch(`${base}${path}`, {
       method: "POST",
       headers: licenseHeaders(key, deviceId),
