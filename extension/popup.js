@@ -129,7 +129,7 @@
       searchHideDesc: "默认关。开启后，已启用的资金接收/金库规则同样作用于搜索弹层",
       chartJumpSection: "K线创建跳转",
       chartJumpHint:
-        "GMGN K 线底部「✦创建」。默认跟随正在看的周期。6 小时内可留 1 秒，36 小时内最细 15 秒，3 天内最细 30 秒，3–90 天最细 1 分钟，90–180 天 5 分钟，180 天–1 年 15 分钟，超过 1 年 30 分钟。已经更粗则保持。下拉里选了更细的档也会按这个下限抬高，一年以上选 1 分钟会落到 30 分钟。创建窗里向右拖补下一页。「↩当前」回到跳之前的周期和画面。",
+        "GMGN K 线底部「✦创建」。默认跟随正在看的周期。周期取一次请求就能从创建拿到现在的最细档（GMGN 一次最多约 1 万根），从创建算起：2.5 小时内可留 1 秒，37 小时内 15 秒，3 天内 30 秒，6 天内 1 分钟，31 天内 5 分钟，93 天内 15 分钟，187 天内 30 分钟，375 天内 1 小时，更久 4 小时。已经更粗则保持。下拉里选了更细的档也会按这个下限抬高。落在代币最开始有 K 线的地方，用来看创建时的成交；后面的迁移大涨不会被当成起点。之后可以一直向右拖到现在，实时 K 线照常更新。「↩当前」回到跳之前的周期和画面。",
       chartJumpEnableTitle: "启用创建跳转",
       chartJumpEnableDesc: "关掉后不显示按钮",
       chartJumpIntervalLabel: "跳转后的周期",
@@ -361,7 +361,7 @@
       searchHideDesc: "Off by default. When on, enabled fund-recipient/vault rules also apply to the search overlay",
       chartJumpSection: "Jump to creation",
       chartJumpHint:
-        "GMGN chart buttons. Follows the interval you are viewing. 1s is kept within 6 hours; finest is 15s within 36 hours, 30s within 3 days, 1m within 90 days, 5m until 180 days, 15m until 1 year, and 30m after that. A coarser interval stays. Picking a finer preset is raised the same way, so 1m on a token older than a year lands on 30m. Right-drag in the creation view loads the next page. Back restores the previous interval and view.",
+        "GMGN chart buttons. Follows the interval you are viewing. 1s is kept within 6 hours; finest is 15s within 36 hours, 30s within 3 days, 1m within 90 days, 5m until 180 days, 15m until 1 year, and 30m after that. A coarser interval stays. Picking a finer preset is raised the same way, so 1m on a token older than a year lands on 30m. The view lands on the earliest candles, so the opening trades are visible. A later migration pump is not the start. Right-drag in the creation view loads the next page. Back restores the previous interval and view.",
       chartJumpEnableTitle: "Enable creation jump",
       chartJumpEnableDesc: "Off hides the buttons",
       chartJumpIntervalLabel: "Interval after jump",

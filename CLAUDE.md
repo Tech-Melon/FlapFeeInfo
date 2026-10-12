@@ -976,6 +976,11 @@ python tools/ctl.py watchdog-run
  - `0.8.250`：`fee-core.js` 共享纯逻辑（平台注册表 + 单位换算/纯金库/篮子/尾号规则/复用状态机），`tests/` 17 项样本+结构守护，打包前必跑；平台只在 page-hook 判定，content 以 `entry.platform` 为准；金库屏蔽「纯金库不屏蔽」选项（`keepPureTaxVault`）；Long.xyz 预留（GMGN 带 `tax_allocation` 才画，点击 app.long.xyz）；厨师/慈善/回流箭头与底池同名（`💛→MRNAB`→`💛→MRNA`）；bootstrap 发金库 prefs 不再丢 `hideGenius`
  - `0.8.251`：资金接收白名单同时认 `marketing_recipients` / Dev / founder。host-fee 与 `/modes` 的 hide-addrs 不再绕过白名单；`hideAddrSet` 在有完整税字段时按当前名单重判，名单变化清空集合。尾号与金库不豁免
  - `0.8.252`：资金接收白名单每条地址可写备注（`allow[].note`，最多 32 字）。备注只给自己看，不参与匹配；只改备注不推页面、不清 `hideAddrSet`
+ - `0.8.321`：降载 — `<html>` 传输标记值不变不写（js-mcp：Debot `data-flap-debot-transport` 每条推送重写，约 50 次/秒叫醒整页 MutationObserver）；`dev_created_tokens` 成功缓存 10min；`card-mark-meta` 同签名 30s 内不重发；content `hide-addrs` 已发地址不重发（`pageHookHideSent`，推送资金接收设置时清空）。`HOOK_VER` / `PAGE_HOOK_VER` 279
+ - `0.8.320`：`dev_created_tokens` 429 全局退避（60s 起翻倍，上限 10min）；失败 3 次缓存 10min（旧 15s 缓存被卡片刷新反复重排，js-mcp 4 分钟 52 次）。GMGN 按 IP 限流会连带 `token_mcap_candles`（K 线）失败。图表按钮 800ms 防连点（js-mcp：每次 `setResolution` GMGN 重拉 6 个接口）。粗周期创建窗一屏至少 40 根。`HOOK_VER` / `PAGE_HOOK_VER` 278
+ - `0.8.319`：创建跳转只发一次请求。`gmgnCreationResolution` 按 `(now - creation) / 周期秒数 ≤ 9000` 选最细档（`GMGN_ONE_REQUEST_BARS`），不再按开盘年龄。js-mcp 实测：GMGN `getBars` 单次上限 9991 根；SUMMER 15 分钟整段 1 次 5591 根 1.1s；只取创建后 2 小时 0.17s。TradingView 只会往左取数，没有往右补中间缺口的入口，「只加载创建附近 + 当前、中间拖到再取」做不到（0.8.286–0.8.316 已证）；要细周期只能自己用 `resetData` 做窗口模式（未做）。`HOOK_VER` / `PAGE_HOOK_VER` 277
+ - `0.8.318`：创建跳转分段往左翻（每次 ≤6000 根）。GMGN `getBars` 一次最多约 1 万根，`setVisibleTimeRange` 一次要满缺口会被截断，接着问截断点之前得到 `noData`，序列从此不再往前取（js-mcp：SUMMER `0xeeb3…7777` 1 分钟 cb=98566 只回 9991 根，停在 08-30 而非 08-01）。升档按整段 ≤约 3 万根：20 天 1m / 100 天 5m / 300 天 15m / 600 天 30m / 更久 60。`HOOK_VER` / `PAGE_HOOK_VER` 276
+ - `0.8.317`：K 线创建跳转重写。只换周期（按币龄下限抬档）、调 `setVisibleTimeRange` 让图表自己往左翻到创建时刻，再按根数 `zoomToBarsRange` 一次；不包 `getBars`、不 `bars.merge/remove`、不 `setBaseIndex`，去掉钉视口/空洞限位/隔段吸附/往后补页。0.8.286–0.8.316 把第一次取数改成创建窗，序列右端落在过去：实时柱被写进中间、终点卡住右拖、补页和吸附互相拽视口（js-mcp：`0x315c…7777` 卡在 131 分钟缺口，`0xfe0b…7777` 终点钉在第 8 根、每秒补一页 5 小时）。「↩当前」只恢复周期、柱距和视口。`HOOK_VER` / `PAGE_HOOK_VER` 275
  - `0.8.285`：「↩当前」不再借 1 小时/4 小时。周期不同直接切回；相同则拉回保存的时间窗。整段寿命不超过 9000 根时一次拉全。`HOOK_VER` / `PAGE_HOOK_VER` 233
  - `0.8.284`：创建跳转不再先用粗周期扫整段寿命。`gmgnSeekChart` 在目标周期序列出现后立刻 `modifySeries` 拉开盘窗口，左沿到达即停，不再等创建时间之前的空档探测。`HOOK_VER` / `PAGE_HOOK_VER` 232
  - `0.8.283`：创建跳转的自动升档停在能看清开盘的周期。6 小时内 1 秒，36 小时内最细 15 秒，3 天内最细 30 秒，90 天内最细 1 分钟，更久最细 5 分钟。用户已在 5 分钟或更粗则不动。请求窗口最多约 2400 根，视口最多约 480 根，不再把 40 天铺满一屏。`HOOK_VER` / `PAGE_HOOK_VER` 231
@@ -1006,8 +1011,8 @@ python tools/ctl.py watchdog-run
  - `0.8.255`：搜索弹层屏蔽。厨师行用搜索回包 `recv_addrs` 对白名单；没有地址时按 👨‍🍳 百分比先藏，命中白名单后再显示。🎁 只走金库开关。`hideAddrSet` 仍要求有收款地址
  - `0.8.254`：完整包剪切板。钱包地址 / 定链失败不再抢其它输入框焦点；同一段 GMGN 定链最多 3 次（2s / 20s），之后停住。确认钱包仍不打开 K 线
  - `0.8.253`：悬浮窗买卖税对齐 GMGN 合计税率（`total_buy_tax`，含池子费；宿主更高则保留）。战壕纤维、搜索和 K 线同一套。尾号 4444 只画底池（`🖐️`，不打 `/modes`）。brew 只用 GMGN 宿主数据，有 `s_tal` 再画分配，不打 `/modes`；无分配的后续包不盖已画出的分红。K 线先认 launchpad，裸 6666 未确认前不打 `/modes`，认出 brew 后丢掉 Genius 缓存。`CORE_VER` 4，`HOOK_VER` / `PAGE_HOOK_VER` 209
-- 插件当前版本：见 `extension/manifest.json`（**0.8.306**，公开无剪切板）
-- page-hook：`HOOK_VER` **262**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）；`content.js` / `tax-recv-bootstrap.js` 的 `PAGE_HOOK_VER` 必须相同（`_run_pack_extension.py` 会校验）
+- 插件当前版本：见 `extension/manifest.json`（**0.8.321**，公开无剪切板）
+- page-hook：`HOOK_VER` **279**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）；`content.js` / `tax-recv-bootstrap.js` 的 `PAGE_HOOK_VER` 必须相同（`_run_pack_extension.py` 会校验）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  

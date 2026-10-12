@@ -507,6 +507,8 @@
   /** Four 已迁移 4444：只画底池。 */
   const fourPoolAddrSet = new Set();
   const notGeniusAddrSet = new Set();
+  // page-hook 的 hideAddrSet 只增不减（白名单变了才清），同一地址不必重复发。
+  const pageHookHideSent = new Set();
 
   function rememberBoundedAddr(set, addr) {
     const a = String(addr || "").toLowerCase();
@@ -8648,7 +8650,7 @@
   }
 
   // 必须等于 page-hook.js HOOK_VER（打包脚本会校验），否则每页都会重复注入 page-hook。
-  const PAGE_HOOK_VER = "262";
+  const PAGE_HOOK_VER = "279";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -16048,6 +16050,7 @@
   }
 
   function pushTaxRecvPrefsToPage(extra) {
+    pageHookHideSent.clear();
     const prefs = {
       enabled: taxRecvHidePrefs.enabled === true,
       thresholdPct: taxRecvHidePrefs.thresholdPct,
@@ -18306,14 +18309,14 @@
 
   function notifyPageHookHideAddrs(addrs) {
     const list = [];
-    const seen = new Set();
     for (let i = 0; i < (addrs || []).length; i += 1) {
       const tok = String(addrs[i] || "").toLowerCase();
-      if ((!TARGET_TOKEN_RE.test(tok) && !isGeniusFunToken(tok)) || seen.has(tok)) continue;
-      seen.add(tok);
+      if ((!TARGET_TOKEN_RE.test(tok) && !isGeniusFunToken(tok)) || pageHookHideSent.has(tok)) continue;
+      pageHookHideSent.add(tok);
       list.push(tok);
     }
     if (!list.length) return;
+    if (pageHookHideSent.size > 2000) pageHookHideSent.clear();
     try {
       window.postMessage(
         { source: "flap-fee-info", type: "hide-addrs", addrs: list },

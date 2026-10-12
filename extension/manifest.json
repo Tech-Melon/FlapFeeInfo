@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.8.306",
-  "description": "FlapFeeInfo 0.8.306: timeframe switches keep chart drag native.",
+  "version": "0.8.321",
+  "description": "FlapFeeInfo 0.8.321: fewer page-wide attribute writes and duplicate messages.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",
