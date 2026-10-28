@@ -5,7 +5,7 @@
  */
 (function (root) {
   // API 变更必须 +1：插件重载不刷页时 MAIN world 里还留着旧版，同版号会跳过加载。
-  const CORE_VER = 7;
+  const CORE_VER = 8;
   if (root.__flapFeeCore && root.__flapFeeCore.ver === CORE_VER) return;
 
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
@@ -193,6 +193,22 @@
       n("binance_charity_bps") +
       (gift > 0 ? n("market_bps") : 0);
     return isPureVaultShares(Math.max(gift, n("market_bps")), others);
+  }
+
+  /**
+   * Genius 创作者份额收款人（/modes 链上 curve.deployer()）：
+   * launcher=发币人自己 / platform=归 Genius 平台 / other=发币时填的别的地址；未知 ""。
+   * 宿主（GMGN s_tal）的 Dev / 其它 标签不可信（js-mcp 2026-10：两种都标反过），不进这里。
+   */
+  function geniusCreatorRecvKind(entry) {
+    const k = String((entry && entry.creator_recv_kind) || "").trim().toLowerCase();
+    return k === "launcher" || k === "platform" || k === "other" ? k : "";
+  }
+
+  /** 链上确认 Dev 一侧（发币人或其指定地址）拿到创作者份额 → 主文案补 👨‍🍳 尾巴。 */
+  function geniusDevGetsTax(entry) {
+    const k = geniusCreatorRecvKind(entry);
+    return (k === "launcher" || k === "other") && (Number(entry.market_bps) || 0) > 0;
   }
 
   /** 币股篮子专用：保留 FXION/NVDAON 等区分度，仅剥 Flap 常见尾缀 B（NVDAB→NVDA） */
@@ -666,6 +682,8 @@
     pctToBps,
     isPureVaultShares,
     feeEntryIsPureVault,
+    geniusCreatorRecvKind,
+    geniusDevGetsTax,
     namedTaxFundKind,
     reclassNamedTaxFund,
     compactBasketSymbol,

@@ -169,6 +169,7 @@ Worker / Python **只在插件已标 `geniusfun` 时** 放行非尾号 CA，并�
 - 方法：`getTaxTokenInfoV2(address)`
 - 实现：`server/fee_mode.py` → `get_tax_allocation()` / 兼容 `get_fee_mode()`
 - Genius.fun：`get_tax_allocations()` 整批 **1 次 eth_call**（Flap Helper + Four views + GeniusSnap state-override）。Snap 失败才回退 2 次 Multicall3。主文案 `🎁→GMEB` / `👨‍🍳→BNB`（Flap 箭头，比例只在 tooltip）
+- Genius 创作者份额（税内 12.5%）收款人 = 曲线 `deployer()`，发币人 = 代币 `deployer()`（Snap 每枚 9 字）。`creator_recv_kind`：`launcher`（发币人自己）/ `platform`（`0xe7c7…fd98`，份额并进 `platform_bps`=3750，`market_bps`=0）/ `other`（发币时填的别的地址）。采样 135 枚约 56% / 30% / 13%，与工厂版本无关。GMGN `s_tal` 的「Dev / 其它」标签不可信（两种都标反过），插件只认 `/modes`。主文案链上确认 Dev 有份才在 🎁 旁并排 👨‍🍳：`🎁👨‍🍳→GENI`；归平台是 `🎁→GENI`
 
 分类规则（`build_allocation`）：
 
@@ -240,6 +241,7 @@ Flap 命名基金（`isVault=false`，收款地址在 v1 `marketingWallet`、v2 
 - 后端：内存 + SQLite `payload` JSON；**无完整 payload 的旧行当 miss**；连接按事务显式关闭，过期行默认每 6 小时清理，短批次响应缓存上限 128；HTTP 槽位满时默认短等 250ms 再决定是否返回 503
 - Worker：isolate 内存 + KV；**缺 label/bps/top_payout_* 的旧条目当 miss**；vault gift 仍 `top_payout≠dividend_token` 的旧 →BNB 行当 miss；回源结果用 `ctx.waitUntil()` 异步落 KV（**仅 miss 的 key**，已命中不重写）；25s 总预算内对瞬时 429/5xx/网络失败及部分 `missing` 做 250/750ms 温和重试，且只重试缺失 token
 - 后端 SQLite：同上 stale gift 规则强制回源
+- Genius（`platform=geniusfun`、非 unknown）缺 `creator_recv_kind` 键：后端 / Worker / 插件 `chrome.storage` 三层都当 miss（等同删除，谁看谁回源，不主动扫）
 
 - 插件：`chrome.storage` key `flapFeeInfo.modeCache.v3`
 
@@ -310,6 +312,9 @@ Debot 混合战壕按**卡 href** 认链（`/token/bsc/` vs `/token/robinhood/`�
 | GMGN Genius `0xe7f0fc2e…6666`（AMCB 池，v2 factory） | `/modes` = `🎁→AMCB`（金库 50%/Dev 12.5%/🔥12.5%）；K 线顶栏 `🪙AMCB \| 🎁→AMCB`（战壕全局选 HOOD 时也要出），禁止 `🪙WETH \| ❓️未` 或空白 |
 | Debot `0x2aaa8077…89187777`（Rat Lab） | `🦋AMZN \| 💎99%→AMZN👨‍🍳1%`（Debot `founder_pct_other:1` 是 1%，禁止 `👨‍🍳→AMZN💎99%`） |
 | Debot `0xc2cd1ee1…9fa96666`（`cheesepad_melt`） | **不画**（尾号 6666 但不是 Genius） |
+| Genius `0x58bbeed8…5e91`（创作者份额=发币人 `0x7c85…`，GMGN 误标「其它」） | `🪙GENIUS \| 🎁👨‍🍳→GENI`；tooltip 👨‍🍳 Dev（发币人）0.25% |
+| Genius `0x6c0b0084…585c`（创作者份额归平台 `0xe7c7…`，GMGN 误标「Dev」） | `🪙GENIUS \| 🎁→GENI`（无 👨‍🍳）；tooltip 平台 0.75%（含创作者份额） |
+| Genius `0x5562a7f1…25b2`（创作者收款 `0x6b77…`≠发币人） | `🪙GENIUS \| 🎁👨‍🍳→GENI`；tooltip「创作者（非发币人地址）」 |
 | GMGN Genius `0x61f5e76c…0d07` GENGO 已迁 Pancake | 主文案 `🪙BNB \| 👨‍🍳→BNB`（62.5% 最大）；`🔥12.5%` 只在 tooltip；曲线 HNSR 仍 `🪙BNCB \| 👨‍🍳→BNCB` |
 | GMGN Flap `0x7b5fba98…7777` 混选 HOOD | 空 qa 是 BSC 默认 BNB，禁止 `🦋WETH \| 💎→BNB` |
 | GMGN Flap `0xabeb19a5…7777` 人生好物 | 底池 `🦋BNCB`；分红是本币，徽章 `🦋BNCB \| 💎→人生好物`（或无发射名时 `🦋BNCB \| 💎`），禁止 `💎→BNCB` |
@@ -978,6 +983,7 @@ python tools/ctl.py watchdog-run
  - `0.8.250`：`fee-core.js` 共享纯逻辑（平台注册表 + 单位换算/纯金库/篮子/尾号规则/复用状态机），`tests/` 17 项样本+结构守护，打包前必跑；平台只在 page-hook 判定，content 以 `entry.platform` 为准；金库屏蔽「纯金库不屏蔽」选项（`keepPureTaxVault`）；Long.xyz 预留（GMGN 带 `tax_allocation` 才画，点击 app.long.xyz）；厨师/慈善/回流箭头与底池同名（`💛→MRNAB`→`💛→MRNA`）；bootstrap 发金库 prefs 不再丢 `hideGenius`
  - `0.8.251`：资金接收白名单同时认 `marketing_recipients` / Dev / founder。host-fee 与 `/modes` 的 hide-addrs 不再绕过白名单；`hideAddrSet` 在有完整税字段时按当前名单重判，名单变化清空集合。尾号与金库不豁免
  - `0.8.252`：资金接收白名单每条地址可写备注（`allow[].note`，最多 32 字）。备注只给自己看，不参与匹配；只改备注不推页面、不清 `hideAddrSet`
+ - `0.8.323`：Genius 区分 Dev 拿不拿税。GeniusSnap 每枚 9 字（+曲线 `deployer()` 创作者收款人、代币 `deployer()` 发币人）；`/modes` 加 `creator_recv` / `creator_recv_kind`，归平台时 `market_bps`=0、`platform_bps`=3750。主文案链上确认 Dev 有份才在 🎁 旁并排 👨‍🍳（`🎁👨‍🍳→GENI`），宿主数据不补。Genius 宿主齐套仍照画，但再打一次 `/modes` 拿收款人（`geniusHostNeedsRecv`，回过包即停）。旧缓存三层都回源。`CORE_VER` 8
  - `0.8.322`：Flap 命名基金收款 — giggle fund `0xc7f501…f4a4` 的 market 份额画 🎓，Binance Charity `0x8b99f3…517d` 画 💛（js-mcp：BOSS `0x21f8…7777` 与 `0x9461…7777` 都是 100% marketBps，v1 `marketingWallet` = v2 `vaultInfo.addr`，`isVault=false`；GMGN `giggle_charity=1`）。CZ `0x28816c…9307` 仍是 👨‍🍳。旧缓存 `market_bps>0` 且慈善段为 0 当 miss。资金接收不按这两只基金地址屏蔽。`CORE_VER` 7，`HOOK_VER` / `PAGE_HOOK_VER` 280
  - `0.8.321`：降载 — `<html>` 传输标记值不变不写（js-mcp：Debot `data-flap-debot-transport` 每条推送重写，约 50 次/秒叫醒整页 MutationObserver）；`dev_created_tokens` 成功缓存 10min；`card-mark-meta` 同签名 30s 内不重发；content `hide-addrs` 已发地址不重发（`pageHookHideSent`，推送资金接收设置时清空）。`HOOK_VER` / `PAGE_HOOK_VER` 279
  - `0.8.320`：`dev_created_tokens` 429 全局退避（60s 起翻倍，上限 10min）；失败 3 次缓存 10min（旧 15s 缓存被卡片刷新反复重排，js-mcp 4 分钟 52 次）。GMGN 按 IP 限流会连带 `token_mcap_candles`（K 线）失败。图表按钮 800ms 防连点（js-mcp：每次 `setResolution` GMGN 重拉 6 个接口）。粗周期创建窗一屏至少 40 根。`HOOK_VER` / `PAGE_HOOK_VER` 278
@@ -1014,7 +1020,7 @@ python tools/ctl.py watchdog-run
  - `0.8.255`：搜索弹层屏蔽。厨师行用搜索回包 `recv_addrs` 对白名单；没有地址时按 👨‍🍳 百分比先藏，命中白名单后再显示。🎁 只走金库开关。`hideAddrSet` 仍要求有收款地址
  - `0.8.254`：完整包剪切板。钱包地址 / 定链失败不再抢其它输入框焦点；同一段 GMGN 定链最多 3 次（2s / 20s），之后停住。确认钱包仍不打开 K 线
  - `0.8.253`：悬浮窗买卖税对齐 GMGN 合计税率（`total_buy_tax`，含池子费；宿主更高则保留）。战壕纤维、搜索和 K 线同一套。尾号 4444 只画底池（`🖐️`，不打 `/modes`）。brew 只用 GMGN 宿主数据，有 `s_tal` 再画分配，不打 `/modes`；无分配的后续包不盖已画出的分红。K 线先认 launchpad，裸 6666 未确认前不打 `/modes`，认出 brew 后丢掉 Genius 缓存。`CORE_VER` 4，`HOOK_VER` / `PAGE_HOOK_VER` 209
-- 插件当前版本：见 `extension/manifest.json`（**0.8.322**，公开无剪切板）
+- 插件当前版本：见 `extension/manifest.json`（**0.8.323**，公开无剪切板）
 - page-hook：`HOOK_VER` **280**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）；`content.js` / `tax-recv-bootstrap.js` 的 `PAGE_HOOK_VER` 必须相同（`_run_pack_extension.py` 会校验）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）

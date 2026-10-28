@@ -3,6 +3,7 @@
 逐版本的实现备注（原先写在 `extension/content.js` 顶部的补丁注释，0.8.250 迁出）。
 面向用户的版本说明见 GitHub Releases；开发约定与完整版本表见 `CLAUDE.md` §10。
 
+- **0.8.323**：Genius 徽章能看出 Dev 拿不拿税。税内 12.5% 的创作者份额按链上收款人（曲线 `deployer()`）分三种：发币人自己收、归 Genius 平台、发币时填的别的地址。Dev 一侧有份时主文案在 🎁 旁并排一个 👨‍🍳、共用箭头（`🎁👨‍🍳→GENI`），归平台就是 `🎁→GENI`，tooltip 写清份额给了谁（归平台时平台 0.75%）。GMGN 悬浮窗的「Dev / 其它」会标反（`0x6c0b…585c` 实际归平台却写 Dev，`0x58bb…5e91` 实际是 Dev 却写其它），所以只认 `/modes`：宿主数据照常先画，再补打一次 `/modes` 拿收款人。后端、Worker、插件本地的旧 Genius 缓存都会回源。搜索框资金接收屏蔽不把这个 👨‍🍳 当 100% 厨师。`CORE_VER` 8
 - **0.8.322**：Flap 把交易税打到命名基金时，徽章改成慈善，不再画成厨师。官网税收页的接收地址 `0xc7f5…f4a4` 是 giggle fund，`0x8b99…517d` 是 Binance Charity；链上仍是 100% `marketBps`，地址在 `marketingWallet` / `vaultInfo.addr`。BOSS（`0x21f8…7777`）和 `0x9461…7777` 因此是 `🎓→BNCB` / `🎓→GIGGLE`，不再是 `👨‍🍳`。CZ 那个地址仍是厨师。旧的厨师缓存会回源。资金接收屏蔽不把这两只基金当厨师藏掉。`CORE_VER` 7，`HOOK_VER` / `PAGE_HOOK_VER` 280
 - **0.8.321**：降载。`<html>` 上的传输标记（`data-flap-gmgn-transport` / `data-flap-debot-transport`）值没变就不写；Debot 每条推送都重写一次，同值 `setAttribute` 也会叫醒整页 MutationObserver，实测约每秒 50 次。发币次数核对成功缓存 2 分钟 → 10 分钟。`card-mark-meta` 同地址同内容 30 秒内不重发（原 2 秒）。`hide-addrs` 已发过的地址不再重发，屏蔽设置变化时清空（page-hook 的集合只在白名单变化时清）。`HOOK_VER` / `PAGE_HOOK_VER` 279
 - **0.8.320**：减少被 GMGN 限流。发币次数核对（`dev_created_tokens`）遇到 429 后全部暂停，60 秒起翻倍，最长 10 分钟；同一创作者失败 3 次后 10 分钟内不再问。此前失败缓存只有 15 秒，卡片一刷新就重新排队，4 分钟能打 52 次、大半是 429。GMGN 按 IP 限流，K 线接口 `token_mcap_candles` 会一起失败，图表停在加载中。「✦创建」「↩当前」0.8 秒内连点只算一次（每切一次周期 GMGN 要重拉 6 个接口）。粗周期整段只有几根时，一屏至少按 40 根摆，不再把几根柱摊满整屏。`HOOK_VER` / `PAGE_HOOK_VER` 278

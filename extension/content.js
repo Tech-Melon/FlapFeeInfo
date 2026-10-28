@@ -9,6 +9,8 @@
     isGeniusFunSuffix,
     isFourPoolSuffix,
     feeEntryIsPureVault,
+    geniusCreatorRecvKind,
+    geniusDevGetsTax,
     normalizeBasketAssets,
     dedupeBasketAssets,
     basketDisplaySymbols,
@@ -22,6 +24,8 @@
     "https://flap-fee-info.tech-melon.workers.dev"
   ];
   let DEFAULT_API_BASE = API_BASES[0];
+  /** /modes 已回过包的 Genius CA（geniusHostNeedsRecv 防循环用）。 */
+  const geniusRecvAnswered = new Set();
   const TOKEN_RE = /0x[a-fA-F0-9]{40}/;
   // Flap tax 8888/7777 + Four.meme tax ffff（fee-core 单一来源）
   const TARGET_TOKEN_RE = Core.TARGET_TOKEN_RE;
@@ -1690,6 +1694,19 @@
     return true;
   }
 
+  /**
+   * Genius 宿主条目（GMGN s_tal / Debot）没有链上创作者收款人：宿主数据照常先画，
+   * 但还要 /modes 一次才知道 Dev 拿不拿税（GMGN 的 Dev / 其它 标签不可信）。
+   * /modes 回包后条目不再带 source_host，这里自然变 false，不会反复打。
+   */
+  function geniusHostNeedsRecv(entry) {
+    if (!entry || !entry.source_host || !isGeniusFeeEntry(entry)) return false;
+    if (isGeniusModesSettled(entry) || geniusCreatorRecvKind(entry)) return false;
+    // /modes 已回过包（哪怕被宿主数据挡住没落盘）就不再为收款人重打，防循环。
+    const tok = String(entry.address || "").toLowerCase();
+    return Boolean(tok) && !geniusRecvAnswered.has(tok);
+  }
+
   function cancelIncompleteModes(token) {
     const tok = String(token || "").toLowerCase();
     const timerId = incompleteModesTimers.get(tok);
@@ -1717,7 +1734,7 @@
     const entry =
       modeCache.get(tok) ||
       (isPersistentCacheHit(tok) ? persistentCache.get(tok) : null);
-    if (!hostFeeCanSkipModes(entry)) return false;
+    if (!hostFeeCanSkipModes(entry) || geniusHostNeedsRecv(entry)) return false;
     requestQueue.delete(tok);
     cancelIncompleteModes(tok);
     return true;
@@ -1799,7 +1816,7 @@
         if (gEntry.platform === "geniusfun" || gEntry.__geniusfun === true) return false;
         return true;
       }
-      return !hostFeeCanSkipModes(gEntry);
+      return !hostFeeCanSkipModes(gEntry) || geniusHostNeedsRecv(gEntry);
     }
     if (!TARGET_TOKEN_RE.test(tok)) return false;
     if (shouldHideByCustomSuffix(tok)) return false;
@@ -2372,7 +2389,10 @@
       lp: "回流 LP",
       giggle: "Giggle 慈善",
       binance: "Binance 慈善",
-      platform: "平台"
+      platform: "平台",
+      creatorDev: "Dev（发币人）",
+      creatorOther: "创作者（非发币人地址）",
+      platformInclCreator: "平台（含创作者份额，Dev 不拿税）"
     },
     en: {
       taxAlloc: "Tax allocation",
@@ -2389,7 +2409,10 @@
       lp: "LP",
       giggle: "Giggle charity",
       binance: "Binance charity",
-      platform: "Platform"
+      platform: "Platform",
+      creatorDev: "Dev (launcher)",
+      creatorOther: "Creator (not the launcher)",
+      platformInclCreator: "Platform (incl. creator share, no Dev tax)"
     }
   };
 
@@ -13919,7 +13942,8 @@
     if (options.forceModes !== true && !searchOverlayModesTokens.has(tok)) {
       if (
         cachedHit &&
-        (hostFeeCanSkipModes(cachedHit) || isFreshUnknown(cachedHit, tok))
+        ((hostFeeCanSkipModes(cachedHit) && !geniusHostNeedsRecv(cachedHit)) ||
+          isFreshUnknown(cachedHit, tok))
       ) {
         requestQueue.delete(tok);
         cancelIncompleteModes(tok);
@@ -14197,6 +14221,8 @@
     const confirmed = [];
     Object.entries(data.results || {}).forEach(([rawToken, result]) => {
       const token = String(rawToken).toLowerCase();
+      if (geniusRecvAnswered.size > 5000) geniusRecvAnswered.clear();
+      geniusRecvAnswered.add(token);
       if (
         isHostOnlyPoolAddr(token) ||
         (notGeniusAddrSet.has(token) && !TARGET_TOKEN_RE.test(token))
@@ -14801,6 +14827,9 @@
       platform_bps: Number(result.platform_bps) || 0,
       platform:
         typeof result.platform === "string" ? result.platform.trim().toLowerCase() : "",
+      creator_recv:
+        typeof result.creator_recv === "string" ? result.creator_recv.toLowerCase() : "",
+      creator_recv_kind: geniusCreatorRecvKind(result),
       is_vault: Boolean(result.is_vault),
       is_stocks_vault: Boolean(result.is_stocks_vault),
       buy_tax_bps: Number(result.buy_tax_bps) || 0,
@@ -17900,6 +17929,8 @@
     if (!text.includes("👨‍🍳")) return null;
     const m = text.match(/👨‍🍳\s*(\d+)\s*%/);
     if (m) return Number(m[1]);
+    // Genius `🎁👨‍🍳→GENI`：👨‍🍳 只表示 Dev 有份，不是 100% 厨师。
+    if (text.indexOf("🎁") >= 0 && text.indexOf("🎁") < text.indexOf("👨‍🍳")) return null;
     return 100;
   }
 
@@ -19153,7 +19184,8 @@
       }
       modeCache.set(token, entry);
       // 齐套快画；缺参等 80ms 再 /modes（防同帧补齐抖动）。
-      if (!hostFeeCanSkipModes(entry)) {
+      // Genius 宿主齐套也照画，但仍要 /modes 一次拿链上创作者收款人。
+      if (!hostFeeCanSkipModes(entry) || geniusHostNeedsRecv(entry)) {
         if (searchOverlayModesTokens.has(token)) {
           queueSearchOverlayModes(token);
         } else {
@@ -20279,9 +20311,16 @@
       }
       parts.sort((a, b) => b.bps - a.bps);
       const lead = parts[0];
-      if (lead.kind === "burn") return "🔥";
-      if (prefs.payoutArrow !== false && payout) return `${lead.emoji}→${payout}`;
-      return payout ? `${lead.emoji}${payout}` : lead.emoji;
+      // 链上确认 Dev 拿创作者份额时在主段后并排 👨‍🍳（无百分比，共用箭头：都付底池币）
+      // `🎁👨‍🍳→GENI`；归平台 / 宿主未确认不补。
+      const devMark =
+        lead.kind !== "creator" && prefs.creator !== false && geniusDevGetsTax(entry)
+          ? "👨‍🍳"
+          : "";
+      if (lead.kind === "burn") return `🔥${devMark}`;
+      const head = `${lead.emoji}${devMark}`;
+      if (prefs.payoutArrow !== false && payout) return `${head}→${payout}`;
+      return payout ? `${head}${payout}` : head;
     }
     const candidates = [];
     if ((entry.dividend_bps || 0) > 0 && prefs.holder !== false) {
@@ -20539,12 +20578,21 @@
       });
     };
     if (genius) {
+      const recvKind = geniusCreatorRecvKind(entry);
       push(GIFT_EMOJI, "gift", effectiveGeniusGiftBps(entry));
-      push("👨‍🍳", "creator", entry.market_bps);
+      push(
+        "👨‍🍳",
+        recvKind === "launcher" ? "creatorDev" : recvKind === "other" ? "creatorOther" : "creator",
+        entry.market_bps
+      );
       push("🔥", "burn", entry.deflation_bps);
       push("💧", "lp", entry.lp_bps);
       const plat = Number(entry.platform_bps);
-      push("🪙", "platform", plat > 0 ? plat : 2500);
+      push(
+        "🪙",
+        recvKind === "platform" ? "platformInclCreator" : "platform",
+        plat > 0 ? plat : 2500
+      );
       return rows;
     }
     push("💎", "holder", entry.dividend_bps);
@@ -22336,13 +22384,26 @@
   }
 
   function isCompleteCacheEntry(value) {
-    return (
-      value &&
-      confirmedModes.has(value.mode) &&
-      typeof value.label === "string" &&
-      value.label &&
-      typeof value.fetchedAt === "number"
-    );
+    if (
+      !(
+        value &&
+        confirmedModes.has(value.mode) &&
+        typeof value.label === "string" &&
+        value.label &&
+        typeof value.fetchedAt === "number"
+      )
+    ) {
+      return false;
+    }
+    // 0.8.323 前的 Genius 缓存没有创作者收款人，分不出 Dev 拿不拿税：当 miss 重打 /modes。
+    if (
+      value.platform === "geniusfun" &&
+      value.mode !== "unknown" &&
+      !geniusCreatorRecvKind(value)
+    ) {
+      return false;
+    }
+    return true;
   }
 
   /** False after extension reload/update; old content scripts must stop using chrome.*. */
@@ -22430,6 +22491,10 @@
                 basket_assets: normalizeBasketAssets(value.basket_assets),
                 platform:
                   typeof value.platform === "string" ? value.platform.trim().toLowerCase() : "",
+                platform_bps: Number(value.platform_bps) || 0,
+                creator_recv:
+                  typeof value.creator_recv === "string" ? value.creator_recv.toLowerCase() : "",
+                creator_recv_kind: geniusCreatorRecvKind(value),
                 fetched_at: Math.floor(value.fetchedAt / 1000)
               });
               const loaded = persistentCache.get(token);
@@ -22526,6 +22591,9 @@
         vault_address: entry.vault_address || "",
         basket_assets: normalizeBasketAssets(entry.basket_assets),
         platform: entry.platform || (entry.__geniusfun ? "geniusfun" : ""),
+        platform_bps: entry.platform_bps || 0,
+        creator_recv: entry.creator_recv || "",
+        creator_recv_kind: entry.creator_recv_kind || "",
         __geniusfun: entry.__geniusfun === true,
         fetchedAt:
           typeof entry.fetched_at === "number" ? entry.fetched_at * 1000 : Date.now()
@@ -22589,6 +22657,9 @@
           vault_address: entry.vault_address || "",
           basket_assets: normalizeBasketAssets(entry.basket_assets),
           platform: entry.platform || (entry.__geniusfun ? "geniusfun" : ""),
+          platform_bps: entry.platform_bps || 0,
+          creator_recv: entry.creator_recv || "",
+          creator_recv_kind: entry.creator_recv_kind || "",
           fetchedAt
         };
       }
