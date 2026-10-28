@@ -5,7 +5,7 @@
  */
 (function (root) {
   // API 变更必须 +1：插件重载不刷页时 MAIN world 里还留着旧版，同版号会跳过加载。
-  const CORE_VER = 6;
+  const CORE_VER = 7;
   if (root.__flapFeeCore && root.__flapFeeCore.ver === CORE_VER) return;
 
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
@@ -128,6 +128,51 @@
     const n = Number(v);
     if (!Number.isFinite(n) || n <= 0) return 0;
     return Math.round(Math.min(100, n) * 100);
+  }
+
+  /**
+   * Flap 税收页「接收地址」名单（flap.sh 2026-10-15，js-mcp）。
+   * 链上仍是 marketBps + vaultInfo.addr / marketingWallet，不是新的 bps 字段。
+   * giggle fund → 🎓，Binance Charity → 💛。CZ 仍是厨师钱包，只是有名字。
+   */
+  const NAMED_TAX_FUNDS = {
+    "0xc7f501d25ea088aefca8b4b3ebd936aae12bf4a4": "giggle",
+    "0x8b99f3660622e21f2910ecca7fbe51d654a1517d": "binance"
+  };
+
+  function namedTaxFundKind(addr) {
+    return NAMED_TAX_FUNDS[String(addr || "").trim().toLowerCase()] || "";
+  }
+
+  /**
+   * 非金库、且收款地址是上面的基金时，把 market 份额挪到对应慈善段。
+   * 慈善段已经有数则不动，避免和 GMGN giggle_charity 叠两次。
+   * 改原对象，返回是否改过。
+   */
+  function reclassNamedTaxFund(entry) {
+    if (!entry || typeof entry !== "object" || entry.is_vault) return false;
+    const kind = namedTaxFundKind(entry.vault_address || entry.market_address);
+    if (kind !== "giggle" && kind !== "binance") return false;
+    const market = Number(entry.market_bps) || 0;
+    if (market <= 0) return false;
+    const giggle = Number(entry.giggle_charity_bps) || 0;
+    const binance = Number(entry.binance_charity_bps) || 0;
+    if (kind === "giggle" && giggle > 0) return false;
+    if (kind === "binance" && binance > 0) return false;
+    if (kind === "giggle") entry.giggle_charity_bps = giggle + market;
+    else entry.binance_charity_bps = binance + market;
+    entry.market_bps = 0;
+    const emoji = kind === "giggle" ? "🎓" : "💛";
+    const zh = kind === "giggle" ? "Giggle 慈善" : "Binance 慈善";
+    if (entry.top_segment === "creator") entry.top_segment = kind;
+    if (entry.mode === "creator") entry.mode = kind;
+    if (typeof entry.label === "string" && entry.label.indexOf("👨‍🍳") >= 0) {
+      entry.label = entry.label.split("👨‍🍳").join(emoji);
+    }
+    if (typeof entry.title === "string" && entry.title) {
+      entry.title = entry.title.split("👨‍🍳").join(emoji).split("创作者/营销").join(zh);
+    }
+    return true;
   }
 
   /** 金库份额≈100% 且其它段全 0（🎁→CYPH）；🎁50%🔥50% / 🎁96%💎4% 不算。 */
@@ -621,6 +666,8 @@
     pctToBps,
     isPureVaultShares,
     feeEntryIsPureVault,
+    namedTaxFundKind,
+    reclassNamedTaxFund,
     compactBasketSymbol,
     basketSymbolMatchesDom,
     normalizeCardMarkHandle,

@@ -10,7 +10,7 @@
  *   brew（GMGN 宿主，不打 /modes）、Four 已迁移 4444（只画底池）
  */
 (() => {
-  const HOOK_VER = 279;
+  const HOOK_VER = 280;
   // fee-core.js 必须先于本文件进 MAIN world（manifest 与所有兜底注入都按此顺序）。
   const Core = window.__flapFeeCore;
   if (!Core) return;
@@ -2250,6 +2250,8 @@
 
   function finalizeHostFeeEntry(entry) {
     if (!entry) return entry;
+    // giggle fund / Binance Charity 的 market 份额改成 🎓/💛，别画成 👨‍🍳。
+    if (typeof Core.reclassNamedTaxFund === "function") Core.reclassNamedTaxFund(entry);
     const isStockVault =
       entry.is_stocks_vault === true ||
       (Array.isArray(entry.basket_assets) && entry.basket_assets.length >= 2);
@@ -6062,6 +6064,13 @@
   function gmgnCreatorRecvPct(tal, item) {
     if (!tal || typeof tal !== "object") return null;
     if (isGmgnVaultTal(tal)) return null;
+    // 收款地址是 giggle fund / Binance Charity 时，份额属于慈善，不按厨师屏蔽。
+    if (
+      typeof Core.namedTaxFundKind === "function" &&
+      Core.namedTaxFundKind(tal.market_address || tal.vault_address)
+    ) {
+      return null;
+    }
     // Four ffff：marketing/founder 是创建税（链上 rateFounder），不是金库；按资金接收屏蔽。
     // 例 0x9dc02fbe…ffff → 👨‍🍳→BNB，不能再因 gmgnIsFourTaxWallet 整段豁免。
     const mkt = mktToPct(
@@ -6166,6 +6175,12 @@
       debotVaultKind(extra) === "stock" ||
       (vaultAddr && recvAddr && sameAddr(vaultAddr, recvAddr));
     if (isVault) return false;
+    if (
+      typeof Core.namedTaxFundKind === "function" &&
+      (Core.namedTaxFundKind(recvAddr) || Core.namedTaxFundKind(vaultAddr))
+    ) {
+      return false;
+    }
     const fp = debotChefPct(extra);
     if (!(fp > 0)) return false;
     const pct = fp >= 99.9 && fp <= 100.0001 ? 100 : fp;

@@ -8650,7 +8650,7 @@
   }
 
   // 必须等于 page-hook.js HOOK_VER（打包脚本会校验），否则每页都会重复注入 page-hook。
-  const PAGE_HOOK_VER = "279";
+  const PAGE_HOOK_VER = "280";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -14771,6 +14771,8 @@
 
   function normalizeResult(result) {
     if (!result || !confirmedModes.has(result.mode)) return null;
+    if (typeof Core.reclassNamedTaxFund === "function") Core.reclassNamedTaxFund(result);
+    if (!confirmedModes.has(result.mode)) return null;
     const label =
       typeof result.label === "string" && result.label
         ? result.label
@@ -22430,6 +22432,10 @@
                   typeof value.platform === "string" ? value.platform.trim().toLowerCase() : "",
                 fetched_at: Math.floor(value.fetchedAt / 1000)
               });
+              const loaded = persistentCache.get(token);
+              if (loaded && typeof Core.reclassNamedTaxFund === "function") {
+                Core.reclassNamedTaxFund(loaded);
+              }
               if (value.platform === "geniusfun" || value.__geniusfun === true) {
                 rememberGeniusFunAddr(token);
                 const cached = persistentCache.get(token);
