@@ -82,7 +82,7 @@ ENABLE_FLAP_PLAN=1   # 上线月再开
 
 1. `extension/manifest.json` 递增版本（建议 0.8.0）
 2. popup 补充：购买渠道 = TG Bot、0.01 BNB/月
-3. `python _run_pack_extension.py` 打包
+3. `python tools/pack_extension.py` 打包
 4. 公开仓 commit + 用户重载扩展
 
 ---

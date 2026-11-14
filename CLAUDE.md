@@ -41,38 +41,133 @@
 
 ---
 
-## 2. 三层架构
+## 2. 系统架构
+
+### 2.1 总览
 
 ```text
-浏览器插件 extension
-    POST /modes  { tokens: string[], platforms?: { [ca]: "geniusfun" } }
-        ↓  （只等缓存层，不等链）
-Cloudflare Worker  (https://taxinfo.tech-melon.top ，workers.dev 仍可用)
-    ① 立即返回 mem + KV 命中
-    ② miss → pending 标记 + waitUntil 后台回源
-        ↓  Bearer + POST /modes { wait_chain: true }  （仅后台）
-VPS Nginx  (https://api.tech-melon.top/flap-fee)
-        ↓
-Python API  (127.0.0.1:8765)
-    默认 wait_chain=false：mem+SQLite 秒回，miss 后台 inflight 上链
-    wait_chain=true（CF 后台）：阻塞到预算内链上完成，供 KV 落盘
-        ↓
-BSC RPC / NodeReal
-    冷批整表 **1 次 eth_call**：Flap Helper + Four views + GeniusSnap（state-override）打进同一个 Multicall3
-    符号走 KNOWN/缓存，插件 DOM 补 →QUOTE；币股篮子仍可由 host-fee 画 📈
-
-pending 清理：年龄 >5min 或 map 规模 >500（最旧优先淘汰）
-空 unknown 负缓存 6h；插件带 tax_hints（宿主有税）且缓存 ≥120s 时 Worker/后端当 miss 重查（0.9.2）
-插件对 missing/pending 快轮询（~300/700/1500ms）直到缓存命中
+┌──────────────────────── 浏览器（GMGN / Debot / Gungnir 页面）────────────────────────┐
+│  MAIN world                               ISOLATED world                              │
+│  fee-core.js + page-hook.js  ──postMessage──▶  fee-core.js + content.js  ──▶ 徽章 DOM  │
+│  （钩宿主数据：XHR/fetch、                  （扫卡、modeCache、请求队列、    popup.*   │
+│   SharedWorker port、WebSocket、             渲染徽章 / 悬浮窗、             （设置，  │
+│   React fiber）                              chrome.storage）               storage） │
+│  tax-recv-bootstrap.js（ISOLATED，document_start）：首个列表请求前把屏蔽设置写进 PAGE      │
+└──────────────────────────────────────────────┬───────────────────────────────────────┘
+                                               │ POST /modes  { tokens, platforms, tax_hints }
+                                               │ Authorization: Bearer <license>（有 key 时）
+                                               ▼
+Cloudflare Worker  cloudflare/worker.js   https://taxinfo.tech-melon.top（备用 *.workers.dev）
+    isolate 内存 → KV（FLAP_FEE_CACHE）→ miss：全 miss 时 wait_chain 直等；混批先回命中、waitUntil 后台补
+    路由：POST /modes · GET /health · POST /license/verify · POST /license/rebind · POST /admin/sync-license
+    限流：MODE_RATE_LIMITER（每 IP 每 colo 100 次 / 10s）；REQUIRE_LICENSE（wrangler vars，现网 "1"）
+                                               │ Bearer UPSTREAM_API_TOKEN（wrangler secret）
+                                               │ POST /modes { tokens, wait_chain:true, platforms?, recheck? }
+                                               ▼
+VPS（ssh 别名 hk0）Nginx  https://api.tech-melon.top/flap-fee  →  127.0.0.1:8765
+Python API  server/fee_mode_server.py（ThreadingHTTPServer，systemd flap-fee-info.service）
+    内存 LRU → SQLite fee_mode_cache.sqlite3 → 链上（server/fee_mode.py）
+    路由：POST /modes · GET /modes?tokens= · GET /mode?token= · GET /health
+                                               │ 限速 FLAP_FEE_RPC_RPS_LIMIT
+                                               ▼
+BSC RPC（NodeReal 主 / 公共备用）
+    冷批整表 1 次 eth_call：Multicall3 里打 Flap Helper getTaxTokenInfoV2 + Four views
+    + GeniusSnap（state-override 注入 server/_genius_snap_bin.txt 的运行时字节码）
 ```
+
+三层分工：
 
 | 层 | 目录 | 职责 | 禁止 |
 |----|------|------|------|
-| 插件 | `extension/` | 扫卡、抽地址、底池 quote 文案、批量请求、画徽章、chrome.storage | 不直连 VPS、不查链 |
-| Worker | `cloudflare/` | 公网入口、CORS、缓存、鉴权回源 | 不算 mode |
-| 后端 | `server/` | 校验 token、限流 RPC、分类、持久化 | 不碰 DOM |
+| 插件 | `extension/` | 读宿主数据、扫卡、抽地址、底池文案、批量请求、画徽章、chrome.storage | 不直连 VPS、不查链 |
+| Worker | `cloudflare/` | 公网入口、CORS、许可证、限流、缓存、鉴权回源 | 不算分配 |
+| 后端 | `server/` | 校验 token、限速 RPC、链上读取与分类、持久化 | 不碰 DOM |
 
-运维脚本：`tools/ctl.py`（ssh 默认 `hk0`，远端 `/root/workspace/FlapFeeInfo/server`）。
+数据有两条来源，插件会合并：
+
+1. **宿主数据（host-fee）**：GMGN `s_tal` / `tax_allocation`、Debot `launchpad_extra`。快、免费，但字段可能不全（例如战壕「新创建」推送没有 `marketing_recipients`，见 4.2）。Pons V2 / Long.xyz / brew / 4444 只用这条。
+2. **链上数据（`/modes`）**：Flap / Four / Genius 的权威分配。宿主数据缺字段或没有时才请求。
+
+### 2.2 插件内部
+
+脚本与执行环境（`manifest.json`，MV3，只要 `storage` 权限）：
+
+| 文件 | world / 时机 | 作用 |
+|------|--------------|------|
+| `tax-recv-bootstrap.js` | ISOLATED，`document_start` | 读 chrome.storage 的资金接收 / 尾号 / 金库屏蔽设置，写到 `<html data-flap-*>` 并 postMessage，保证宿主第一个列表请求前 page-hook 已拿到设置；兜底注入 page-hook |
+| `fee-core.js` | MAIN 与 ISOLATED 各加载一次 | 共享纯函数与平台注册表（4.0），也给 `tests/` 用 Node `require` |
+| `page-hook.js` | MAIN，`document_start` | 钩宿主传输，产出 host-fee 条目；列表过滤（资金接收 / 金库 / 尾号屏蔽）；GMGN K 线「✦创建」跳转 |
+| `content.js` | ISOLATED，`document_idle` | 站点策略、扫卡、`modeCache`、`/modes` 请求队列与退避、徽章和悬浮窗渲染、持久化缓存 |
+| `popup.html/js/css` | 扩展弹窗 | 全部用户设置（写 chrome.storage，content 监听变化） |
+| `style.css` | 随 content 注入 | 徽章与悬浮窗样式 |
+
+page-hook 钩的宿主传输（都在 `installHostFeeNetworkHooks()` 下）：
+
+| 传输 | 钩子 | 宿主 |
+|------|------|------|
+| XHR / fetch | `installHostFeeXhrTap` | GMGN `trenches_rank`、`token_fee_info`、`mutil_window_token_security_launchpad`、搜索；Debot REST |
+| SharedWorker port | `installHostFeePortTap` | GMGN 战壕实时推送（`/_next/static/workers/gmgn.*.js`，`pumpRank-mix` 插件消息，`newCreations` / `completing` / `completed` 三列的 `frame.replaces[]`）；Debot `sharedSocketWorker` |
+| WebSocket | `installHostFeeWebSocketTap` | 主线程直连（GMGN 设了 `disableShareWorker`、或 Debot portal-ws） |
+| React fiber | `installDomHostFeeReactTap` | DOM 卡片上的 `item` / `data` props，补网络钩子漏掉的卡 |
+
+解析入口：`collectHostFeesFromJson()` → GMGN `gmgnHostFeeFromItem()`（读 `gmgnTal()`，已剔除 Flap 平台抽成）/ Debot `debotHostFeeFromRow()` → `finalizeHostFeeEntry()` → 合批 postMessage（每批 ≤48 条）。
+
+page-hook ⇄ content 消息（`window.postMessage`，`source:"flap-fee-info"`）：
+
+| 方向 | type | 内容 |
+|------|------|------|
+| hook → content | `host-fee-map` | host-fee 条目（分配 bps、买卖税、底池、篮子、`platform`、`flap_platform_bps`、`recv_addrs`） |
+| hook → content | `host-fee-quote-patch` | 只补底池 / 分红名 |
+| hook → content | `genius-addr-map` / `genius-reject-map` / `pons-skip-map` | 平台判定结果 |
+| hook → content | `card-mark-meta` | Dev 发币次数、推特、代号等卡片标记 |
+| hook → content | `search-overlay-tokens` / `host-fee-ranks-done` / `spa` | 搜索弹层地址、首屏完成、SPA 路由 |
+| content → hook | `host-fee-hello` | content 就绪，请求重放已有 host-fee |
+| content → hook | `tax-recv-prefs` / `vault-hide-prefs` / `suffix-hide-prefs` / `hide-addrs` / `list-filter-refresh` | 屏蔽设置与要藏的地址 |
+| content → hook | `basket-addr-cache` / `dev-count-verify` / `nc-reseat` / `flap-inject-page-hook` | 篮子符号、发币次数核对、新创建列重排、兜底注入 |
+
+content 主流程：
+
+```text
+扫卡（SCAN_INTERVAL_MS=650，MutationObserver 触发 + 定时）
+  → 抽 CA（href / 短地址 / fiber），按「链 + 平台」判定是否目标（4.1）
+  → modeCache 有可画结果：直接画；host-fee 齐套：直接画（hostFeeCanSkipModes）
+  → 否则入 requestQueue（queueToken）→ 合批（MAX_BATCH_TOKENS=48）→ POST /modes
+  → 回包 normalizeResult → modeCache → 画徽章 + 悬浮窗模型（buildTipModel）
+  → persistConfirmedModes → chrome.storage flapFeeInfo.modeCache.v5（30 天，800 条）
+```
+
+`/modes` 请求的重试与退避（`missingRetryState`，`queueToken` 与 `tokenNeedsModesFetch` 都会检查，**任何入口都不得绕过**）：
+
+| 回包 | 早期重试 | 之后 |
+|------|----------|------|
+| `pending`（Worker 后台补链中） | GMGN 600/1400/2800ms（热区 400/900/1800ms） | 15s 起指数退避，上限 5min |
+| `missing` / 请求失败 | GMGN 1000/2200/4000ms（热区 700/1500/2800ms） | 同上 |
+| 空 unknown（❓️未，税 0） | 400/1200/2800ms 共 3 次 | 1→2→4→8min，上限 10min |
+
+宿主占位（只有 Tax、没有分配的 host-fee）不得覆盖链上的空 unknown（Genius 例外），否则每条宿主推送都会再打一次 `/modes`（0.9.2 修复的请求风暴）。
+
+### 2.3 Worker（`cloudflare/worker.js`）
+
+- **缓存**：isolate 内存（10000 条）→ KV（30 天）。空 unknown 只进内存（6h），从不写 KV。KV 只写本次 miss 的 key。
+- **回源**：全部 miss（或剩下的全是 Genius）时 `wait_chain` 直等；混批先回命中，miss 进 `pending` 并 `ctx.waitUntil` 后台补。回源总预算 18s，429/5xx/网络错误按 200/500ms 重试，只重试缺的 token。
+- **负缓存纠错**：插件 `tax_hints` 表示宿主显示有税。空 unknown 且缓存 ≥120s 时当 miss，并在回源请求里带 `recheck`（`staleNegativeByHint`）。
+- **完整性**：缺 label / bps / `top_payout_*` 的旧条目、vault gift 旧 →BNB、Genius 缺 `creator_recv_kind` 都当 miss（4.3）。
+- **许可证**：`REQUIRE_LICENSE="1"` 时 `/modes` 需要 KV `license:<key>`；运营见 `ENABLE_FLAP_MONETIZATION.md`。
+- **测试**：`cloudflare/*.test.mjs`（`node --test cloudflare/`），改 Worker 后先跑。
+
+### 2.4 后端（`server/`）
+
+| 文件 | 作用 |
+|------|------|
+| `fee_mode_server.py` | HTTP、token 校验与限额（单批 200）、HTTP 并发槽、内存 LRU + SQLite、`wait_chain` 槽位、5s 响应缓存与同批合并、负缓存与 `recheck`、定期清理 |
+| `fee_mode.py` | 链上读取：`get_tax_allocations()` 整批（Flap Helper + Four + GeniusSnap 一次 Multicall3）、`build_allocation()` 分类与 label、符号解析、篮子金库成分 |
+| `GeniusSnap.sol` → `_genius_snap_bin.txt` | Genius 批量读取合约（只用于 state-override，不上链）。改 `.sol` 后跑 `python tools/compile_genius_snap.py` 重新生成 |
+| `env_loader.py` | 读 `.env` |
+| `flap-fee-info.service` / `flap-fee-info-watchdog.*` | systemd 主服务与每 30s 健康检查 |
+| `nginx-*.conf` / `deploy-hk0.md` | 反代与部署说明 |
+| `_probe_*.py` / `_test_*_inline.py` / `_dump_raw_helper.py` | 只读调研脚本（不部署），按需 `uv run python _probe_xxx.py` |
+
+SQLite 表 `fee_modes(token, mode, fetched_at, payload)`，`payload` 存完整 JSON；无 payload 的旧行当 miss。正常结果 30 天，空 unknown 6 小时。
 
 ---
 
@@ -80,41 +175,59 @@ pending 清理：年龄 >5min 或 map 规模 >500（最旧优先淘汰）
 
 ```text
 FlapFeeInfo/
-├── CLAUDE.md                 # 本文件（开发约定）
-├── README.md                 # 用户向：插件安装
-├── .gitignore                # 公开仓默认只放行 extension + README + CLAUDE.md
-├── extension/                # ★ 浏览器插件（公开）
-│   ├── manifest.json         # MV3，当前版本见 name 旁 version
-│   ├── fee-core.js           # ★ 共享纯逻辑：平台注册表 + 纯函数（见 4.0）
-│   ├── content.js            # 站点策略 + 扫卡 + 渲染
-│   ├── page-hook.js
-│   ├── tax-recv-bootstrap.js
+├── AGENTS.md                     # Agent 入口，指向本文件            （公开）
+├── CLAUDE.md                     # 本文件：架构与开发约定            （公开）
+├── CHANGELOG.md                  # 逐版本实现备注，新版本加在顶部    （公开）
+├── README.md                     # 用户向：安装与图标说明            （公开）
+├── ENABLE_FLAP_MONETIZATION.md   # 收费启用运行手册                  （公开）
+├── .gitignore                    # 默认忽略全部，只放行上面几份文档 + extension/
+├── extension/                    # ★ 浏览器插件（公开包）
+│   ├── manifest.json             # MV3；version 即插件版本
+│   ├── fee-core.js               # 共享纯逻辑（CORE_VER）
+│   ├── page-hook.js              # MAIN world 宿主数据钩子（HOOK_VER）
+│   ├── content.js                # ISOLATED 主逻辑（PAGE_HOOK_VER 必须等于 HOOK_VER）
+│   ├── tax-recv-bootstrap.js     # document_start 推屏蔽设置（PAGE_HOOK_VER 同上）
 │   ├── popup.html / popup.js / popup.css
 │   ├── style.css
 │   └── icons/
-├── private/clip-jump/        # 本机 overlay（默认不进公开 git）
-│   ├── clip-content.js / clip-popup.js / background.js
-│   ├── clipboard-util.js / clip-spa.js / clip-search.js / offscreen.*
-│   └── overlay.json          # 打包时叠到完整包
-├── cloudflare/               # CF Worker（本地全栈，默认不进公开 git）
-│   ├── worker.js
-│   ├── wrangler.jsonc
+├── private/clip-jump/            # 完整包 overlay：剪切板跳转 / 复制即搜 / 文章重点样式（不公开）
+│   ├── overlay.json              # 叠加到 manifest 的权限、background、content_scripts、popup 脚本
+│   ├── background.js             # service worker：定链（search_v3）、标签切换
+│   ├── offscreen.* / clip-read.* / clip-focus.html / clip-offscreen-worker.js  # 后台读剪切板
+│   ├── clip-content.js / clip-relay.js / clip-spa.js / page-hook-clip.js     # 页内监听与 SPA 跳转
+│   ├── clip-search.js / clipboard-util.js / clip-popup.*                     # 复制即搜、工具、弹窗区块
+│   ├── clip-article.js / clip-highlight.js / clip-nouns.js                   # 文章重点样式
 │   └── README.md
-├── server/                   # Python API（本地全栈）
-│   ├── fee_mode.py           # 链上分配 + label
-│   ├── fee_mode_server.py    # HTTP + 缓存
-│   ├── env_loader.py
-│   ├── pyproject.toml        # uv；入口 flap-fee-server
-│   ├── fee_mode_cache.sqlite3
-│   ├── flap-fee-info.service
-│   ├── deploy-hk0.md
-│   └── nginx-*.conf
-├── tests/                    # node --test：fee-core 样本 + 结构守护（打包前自动跑，本地不进公开 git）
-├── tools/
-│   └── ctl.py                # status/deploy/test/logs...
-├── dist/                     # 打包 zip（忽略）
-└── _run_*.py                 # 临时命令封装（忽略）
+├── cloudflare/                   # Worker（不公开）
+│   ├── worker.js
+│   ├── wrangler.jsonc            # 域名、KV、限流、REQUIRE_LICENSE
+│   ├── *.test.mjs                # Worker 单测
+│   └── README.md
+├── server/                       # Python 后端（不公开），见 2.4
+│   ├── fee_mode_server.py / fee_mode.py / env_loader.py
+│   ├── GeniusSnap.sol / _genius_snap_bin.txt
+│   ├── pyproject.toml / uv.lock  # uv；入口 flap-fee-server
+│   ├── .env（本机密钥，勿提交）/ .env.example
+│   ├── fee_mode_cache.sqlite3    # 本地缓存（勿提交）
+│   ├── flap-fee-info*.service / *.timer / *-watchdog.sh
+│   ├── nginx-*.conf / deploy-hk0.md / README.md
+│   └── _probe_*.py 等            # 调研脚本
+├── tests/fee-core.test.js        # node --test：fee-core 样本 + 结构守护（打包前自动跑）
+├── tools/                        # 长期使用的工具（不公开）
+│   ├── ctl.py                    # 远端运维：status/health/test/deploy/logs/restart/watchdog-*（无参数进菜单）
+│   ├── pack_extension.py         # 打包：校验版本号 → 跑 tests → 公开包 + 完整包 + dist/unpacked-full
+│   └── compile_genius_snap.py    # solc 0.8.26 编译 GeniusSnap.sol → server/_genius_snap_bin.txt
+├── image/                        # README 用图
+├── dist/                         # 打包产物、release notes、调试导出（忽略）
+├── _archive/YYYY-MM-DD/          # 用过的一次性脚本与临时数据（忽略，需要时可找回）
+└── _run_*.py                     # 当次任务的一次性命令封装（忽略）；用完移到 _archive/
 ```
+
+脚本放置约定：
+
+- **长期复用**（打包、编译、运维）放 `tools/`，不用 `_run_` 前缀。
+- **一次性**（某次部署、发版、调研的命令封装）用根目录 `_run_*.py`；任务结束移到 `_archive/<当天日期>/`。临时数据用 `_tmp_*`，同样归档。
+- 根目录 `_*` 文件和 `_archive/` 都不进 git，所以**不要直接删除**（删了无法恢复），统一归档。
 
 ---
 
@@ -242,11 +355,11 @@ Flap 命名基金（`isVault=false`，收款地址在 v1 `marketingWallet`、v2 
 缓存：
 
 - 后端：内存 + SQLite `payload` JSON；**无完整 payload 的旧行当 miss**；连接按事务显式关闭，过期行默认每 6 小时清理，短批次响应缓存上限 128；HTTP 槽位满时默认短等 250ms 再决定是否返回 503
-- Worker：isolate 内存 + KV；**缺 label/bps/top_payout_* 的旧条目当 miss**；vault gift 仍 `top_payout≠dividend_token` 的旧 →BNB 行当 miss；回源结果用 `ctx.waitUntil()` 异步落 KV（**仅 miss 的 key**，已命中不重写）；25s 总预算内对瞬时 429/5xx/网络失败及部分 `missing` 做 250/750ms 温和重试，且只重试缺失 token
+- Worker：isolate 内存 + KV；**缺 label/bps/top_payout_* 的旧条目当 miss**；vault gift 仍 `top_payout≠dividend_token` 的旧 →BNB 行当 miss；回源结果用 `ctx.waitUntil()` 异步落 KV（**仅 miss 的 key**，已命中不重写）；18s 回源预算内对瞬时 429/5xx/网络失败及部分 `missing` 做 200/500ms 温和重试，且只重试缺失 token
 - 后端 SQLite：同上 stale gift 规则强制回源
 - Genius（`platform=geniusfun`、非 unknown）缺 `creator_recv_kind` 键：后端 / Worker / 插件 `chrome.storage` 三层都当 miss（等同删除，谁看谁回源，不主动扫）
 
-- 插件：`chrome.storage` key `flapFeeInfo.modeCache.v3`
+- 插件：`chrome.storage` key `flapFeeInfo.modeCache.v5`（30 天，最多 800 条）
 
 ### 4.4 插件站点策略
 
@@ -284,7 +397,7 @@ Debot 混合战壕按**卡 href** 认链（`/token/bsc/` vs `/token/robinhood/`�
 | **币股篮子金库** | 忽略 Tax 内篮子芯片；底池固定 `BNB`（Helper quote 空则 WBNB） |
 | **税收金库（无篮子）** | 跟 Pancake/Helper quote（如已迁池 `QQQB`），不要因为 `is_vault` 就画 BNB |
 
-- 扫卡间隔：`SCAN_INTERVAL_MS = 500`  
+- 扫卡间隔：`SCAN_INTERVAL_MS = 650`  
 - Tab 恢复：仅 in-flight ≥12s 才 force recover，避免 Abort 风暴（`0.2.7+`）  
 - 强制 recover 时用 `activeBatchTokens` 回填队列，防止丢 token  
 
@@ -430,7 +543,7 @@ wrangler deploy
 
 ```powershell
 node --test tests/fee-core.test.js                 # 打包脚本会先跑；失败不打包
-python _run_pack_extension.py
+python tools/pack_extension.py
 # → dist/FlapFeeInfo-extension-vX.Y.Z.zip          公开（仅徽章）
 # → dist/FlapFeeInfo-extension-clip-vX.Y.Z.zip     完整（叠 clip-jump）
 # → dist/unpacked-full                             本机加载用
@@ -464,7 +577,7 @@ python tools/ctl.py watchdog-run
 | 改动范围 | 动作 |
 |----------|------|
 | `server/*` | `python tools/ctl.py deploy` |
-| `cloudflare/*` | `cd cloudflare; wrangler deploy` |
+| `cloudflare/*` | `node --test cloudflare/` → `cd cloudflare; wrangler deploy` |
 | `extension/*` | 本地重载插件；需要时 commit 公开仓 + 打 zip |
 | 仅文档 | commit 即可 |
 
@@ -476,12 +589,11 @@ python tools/ctl.py watchdog-run
 
 根目录 `.gitignore`：**默认忽略全部**，仅放行：
 
-- `README.md`
-- `CLAUDE.md`
+- `README.md`、`CLAUDE.md`、`AGENTS.md`、`ENABLE_FLAP_MONETIZATION.md`
 - `CHANGELOG.md`（逐版本实现备注；新版本在顶部追加，**不要**再写回 `content.js` 头部）
 - `extension/**`
 
-因此 **server / cloudflare / tools 默认不会 push 到公开 GitHub**。全栈代码在开发者本机完整目录中维护。
+因此 **server / cloudflare / tools / tests / private / _archive 默认不会 push 到公开 GitHub**，全栈代码只在开发者本机完整目录维护（没有远端备份，删文件前先归档）。本文件是公开的，**不要写密钥、token、RPC key**。
 
 提交插件时只 stage 上述放行路径；勿提交 `.env`、sqlite、`_run_*.py`、`dist/`。
 
@@ -491,7 +603,7 @@ python tools/ctl.py watchdog-run
 
 1. **语言**：与用户交互用中文；代码注释可中英，标识符英文。  
 2. **KISS**：只改需求相关文件，禁止无关重构。  
-3. **Windows 命令**：敏感参数走 `_run_*.py` + `subprocess`（UAC 启发式），终端只跑 `python _run_xxx.py`。  
+3. **Windows 命令**：敏感参数走 `_run_*.py` + `subprocess`（UAC 启发式），终端只跑 `python _run_xxx.py`。用完移到 `_archive/<日期>/`；长期工具放 `tools/`（见第 3 节）。  
 4. **依赖**：Python 侧用 **uv**；格式化优先 **ruff**。  
 5. **异常**：禁止裸 `except:`。  
 6. **时间**：监控/限流用绝对时间，勿用 sleep 累加当授时。  
@@ -1031,7 +1143,7 @@ python tools/ctl.py watchdog-run
  - `0.8.254`：完整包剪切板。钱包地址 / 定链失败不再抢其它输入框焦点；同一段 GMGN 定链最多 3 次（2s / 20s），之后停住。确认钱包仍不打开 K 线
  - `0.8.253`：悬浮窗买卖税对齐 GMGN 合计税率（`total_buy_tax`，含池子费；宿主更高则保留）。战壕纤维、搜索和 K 线同一套。尾号 4444 只画底池（`🖐️`，不打 `/modes`）。brew 只用 GMGN 宿主数据，有 `s_tal` 再画分配，不打 `/modes`；无分配的后续包不盖已画出的分红。K 线先认 launchpad，裸 6666 未确认前不打 `/modes`，认出 brew 后丢掉 Genius 缓存。`CORE_VER` 4，`HOOK_VER` / `PAGE_HOOK_VER` 209
 - 插件当前版本：见 `extension/manifest.json`（**0.9.2**，公开无剪切板）
-- page-hook：`HOOK_VER` **280**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）；`content.js` / `tax-recv-bootstrap.js` 的 `PAGE_HOOK_VER` 必须相同（`_run_pack_extension.py` 会校验）
+- page-hook：`HOOK_VER` **281**；fee-core `CORE_VER` **9**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）；`content.js` / `tax-recv-bootstrap.js` 的 `PAGE_HOOK_VER` 必须相同（`tools/pack_extension.py` 会校验）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
@@ -1046,7 +1158,7 @@ python tools/ctl.py watchdog-run
 - 推特备注描边：`flapFeeInfo.twHandleMark.v1` = `{ enabled, rules:[{id,handle,note,color,enabled}] }`（最多 24 条 handle，备注如「何一」；默认关）
 - 新创建重复代号：`flapFeeInfo.symbolDupMark.v1` = `{ enabled, waitDup:true, windowMin:5, color:"#facc15" }`（默认关；`waitDup` 默认开；session 计数 `symbolDupSeen.v2`，按 CA 合并；同秒不靠 created）
 - 剪切板跳转：`flapFeeInfo.clipJump.v1` = `{ enabled:false, target:"gmgn"|"debot", sites:"both"|"gmgn"|"debot", activeTabOnly:true, reuseSiteTab:false, pageMarkCa:false, overrideHostCa:false }`（默认关；开启需确认 + `clipboardRead` 可选权限）
-- 许可证（可选，默认免费）：`flapFeeInfo.license.v1` = `{ key:"" }`；有 key 时 content 带 `Authorization: Bearer`；Worker `REQUIRE_LICENSE` 默认 `0`（不强制）；开启付费时设 `1` 并写入 KV `license:<key>` → `{ exp, plan:"flap", flap_perm?:1 }`；**发卡**：TG Bot `flap_fee` **0.01 BNB/月**（动态尾数 0.009501~0.010100）；详见 `ENABLE_FLAP_MONETIZATION.md`
+- 许可证（可选，默认免费）：`flapFeeInfo.license.v1` = `{ key:"" }`；有 key 时 content 带 `Authorization: Bearer`；Worker `REQUIRE_LICENSE`（`wrangler.jsonc` vars，现网 `"1"`；免费期设 `"0"`）；开启付费时设 `1` 并写入 KV `license:<key>` → `{ exp, plan:"flap", flap_perm?:1 }`；**发卡**：TG Bot `flap_fee` **0.01 BNB/月**（动态尾数 0.009501~0.010100）；详见 `ENABLE_FLAP_MONETIZATION.md`
 - 复制即搜（仅完整包 / 仅 GMGN）：`flapFeeInfo.clipSearch.v1` = `{ enabled:false, minChars:2, maxChars:8 }`（默认关；开启需确认 + `clipboardRead`；与跳转共用 `clipJump.seen.v1` 去重）
 - 文章重点样式（仅完整包）：`flapFeeInfo.articleStyle.v1` = `{ enabled:false, theme:"dark"|"light", domains, nouns, skips, styles:{ noun|caps|ticker|quote: {enabled, fg, bg} } }`（默认关；`theme` 默认 `dark`；每种高亮可单独开关并改字体色/背景色）
 
