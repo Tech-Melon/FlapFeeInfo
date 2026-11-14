@@ -10,7 +10,7 @@
  *   brew（GMGN 宿主，不打 /modes）、Four 已迁移 4444（只画底池）
  */
 (() => {
-  const HOOK_VER = 280;
+  const HOOK_VER = 281;
   // fee-core.js 必须先于本文件进 MAIN world（manifest 与所有兜底注入都按此顺序）。
   const Core = window.__flapFeeCore;
   if (!Core) return;
@@ -780,7 +780,7 @@
    * HTTP trenches_rank: token.s_tal
    * WSS trenches_delta: data.t[i] = { c, a, f: { s_tal, ... } }
    */
-  function gmgnTal(item) {
+  function gmgnRawTal(item) {
     if (!item || typeof item !== "object") return null;
     if (item.s_tal && typeof item.s_tal === "object") return item.s_tal;
     if (item.tax_allocation && typeof item.tax_allocation === "object") {
@@ -794,6 +794,32 @@
       }
     }
     return null;
+  }
+
+  /** CA → 见过的 Flap 平台抽成 bps（WSS 半包缺 marketing_recipients 时兜底）。 */
+  const flapPlatformCutByAddr = new Map();
+  const FLAP_PLATFORM_CUT_MAX = 2000;
+
+  /**
+   * 取税分配对象（已去掉 Flap 平台抽成，口径对齐链上 /modes）。
+   * 平台份额留在 flap_platform_bps，悬浮窗按总税还原展示。
+   */
+  function gmgnTal(item) {
+    const raw = gmgnRawTal(item);
+    if (!raw) return null;
+    const addr = gmgnAddr(item);
+    const known = addr ? flapPlatformCutByAddr.get(addr) || 0 : 0;
+    if (!known && !Array.isArray(raw.marketing_recipients)) return raw;
+    const tal = Core.stripFlapPlatformTal(raw, known);
+    const cut = tal && Number(tal.flap_platform_bps);
+    if (addr && cut > 0 && cut !== known) {
+      flapPlatformCutByAddr.delete(addr);
+      flapPlatformCutByAddr.set(addr, cut);
+      if (flapPlatformCutByAddr.size > FLAP_PLATFORM_CUT_MAX) {
+        flapPlatformCutByAddr.delete(flapPlatformCutByAddr.keys().next().value);
+      }
+    }
+    return tal;
   }
 
   function gmgnAddr(item) {
@@ -2320,7 +2346,8 @@
       entry.dividend_symbol || "",
       entry.tax_symbol || "",
       entry.platform || "",
-      entry.__poolOnly ? 1 : 0
+      entry.__poolOnly ? 1 : 0,
+      entry.flap_platform_bps || 0
     ].join("|");
   }
 
@@ -2776,6 +2803,7 @@
         .trim()
         .toLowerCase(),
       recv_addrs: Core.taxRecvAddresses(item, tal),
+      flap_platform_bps: Number(tal.flap_platform_bps) || 0,
       quote_symbol,
       quote_token: gmgnItemQuoteFields(item).address,
       dividend_token: divAddr,

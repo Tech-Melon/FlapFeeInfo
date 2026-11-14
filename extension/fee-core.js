@@ -5,7 +5,7 @@
  */
 (function (root) {
   // API 变更必须 +1：插件重载不刷页时 MAIN world 里还留着旧版，同版号会跳过加载。
-  const CORE_VER = 8;
+  const CORE_VER = 9;
   if (root.__flapFeeCore && root.__flapFeeCore.ver === CORE_VER) return;
 
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
@@ -579,6 +579,124 @@
     out.push(a);
   }
 
+  // ---------- Flap 平台抽成（GMGN 2026-11 起在 s_tal 里单列） ----------
+  // js-mcp：部分已迁移外盘 Flap 币 s_tal 变成 dividend 0.9 + marketing 0.1，
+  // marketing_recipients 只有一条 Flap Platform（share 1）。链上 Helper 的分配不含这份，
+  // 仍是 dividend 10000。内盘与没有该收款方的币（如真厨师 0x556f…7777）不受影响。
+  const FLAP_PLATFORM_RECV = "0x8a08d98cbb218fceb318ecf3abc1ba43d8a7ab0e";
+  const TAL_BUCKET_KEYS = [
+    ["dividend", "dvtx", "dividend_tax", "holder_tax", "holder", "dividend_pct", "dividend_rate"],
+    ["marketing", "marketing_tax", "mktx"],
+    ["dev_fee"],
+    ["burn", "burn_rate", "brtx", "deflation"],
+    ["liquidity", "lp", "lp_tax", "lqtx", "liquidity_tax"],
+    ["giggle_charity_tax", "giggle_charity", "giggle"],
+    ["binance_charity_tax", "binance_charity", "binance"]
+  ];
+  const MARKETING_KEYS = TAL_BUCKET_KEYS[1];
+
+  function recipientAliasText(row) {
+    const al = row && row.alias;
+    if (typeof al === "string") return al;
+    if (al && typeof al === "object") return String(al.en || al.zhCN || al.zhTW || "");
+    return "";
+  }
+
+  /** GMGN marketing_recipients 里的 Flap 平台收款方（地址或别名命中其一）。 */
+  function isFlapPlatformRecipient(row) {
+    if (!row) return false;
+    if (typeof row !== "object") return evmAddr40(row) === FLAP_PLATFORM_RECV;
+    if (evmAddr40(row.address || row.addr || row.wallet) === FLAP_PLATFORM_RECV) return true;
+    const alias = recipientAliasText(row).trim();
+    return /^flap\s*platform$/i.test(alias) || /^flap\s*平台$/i.test(alias);
+  }
+
+  function recipientShare(row) {
+    const n = Number(row && typeof row === "object" ? row.share : NaN);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return n > 1.0001 ? Math.min(1, n / 100) : Math.min(1, n);
+  }
+
+  function talMarketingBps(tal) {
+    for (let i = 0; i < MARKETING_KEYS.length; i += 1) {
+      const v = tal[MARKETING_KEYS[i]];
+      if (v != null && v !== "") return ratioToBps(v);
+    }
+    return 0;
+  }
+
+  /** s_tal 里 Flap 平台占总税的 bps（无该收款方 → 0）。 */
+  function flapPlatformCutBps(tal) {
+    if (!tal || typeof tal !== "object") return 0;
+    const recs = tal.marketing_recipients;
+    if (!Array.isArray(recs) || !recs.length) return 0;
+    let share = 0;
+    for (let i = 0; i < recs.length; i += 1) {
+      if (isFlapPlatformRecipient(recs[i])) share += recipientShare(recs[i]);
+    }
+    if (share <= 0) return 0;
+    return Math.round(talMarketingBps(tal) * Math.min(1, share));
+  }
+
+  const strippedTalCache = typeof WeakMap !== "undefined" ? new WeakMap() : null;
+
+  /**
+   * 去掉 Flap 平台抽成并把其余份额放大回链上口径（÷(1-平台)）。
+   * 返回新对象并带 flap_platform_bps；没有平台份额时原样返回（不复制）。
+   * knownCutBps：同 CA 之前见过的平台份额。WSS 半包只带 marketing、不带收款方时，
+   * marketing 与它一致才当平台份额，避免徽章在 💎→X 和 👨‍🍳10% 之间跳。
+   */
+  function stripFlapPlatformTal(tal, knownCutBps) {
+    if (!tal || typeof tal !== "object" || tal.flap_platform_bps != null) return tal;
+    const recs = Array.isArray(tal.marketing_recipients) ? tal.marketing_recipients : null;
+    let cut = recs && recs.length ? flapPlatformCutBps(tal) : 0;
+    const fromRecipients = cut > 0;
+    if (!fromRecipients) {
+      const known = Number(knownCutBps) || 0;
+      if (!(known > 0) || (recs && recs.length)) return tal;
+      if (Math.abs(talMarketingBps(tal) - known) > 1) return tal;
+      cut = known;
+    }
+    if (fromRecipients && strippedTalCache) {
+      const hit = strippedTalCache.get(tal);
+      if (hit) return hit;
+    }
+    const keep = 10000 - cut;
+    const out = { ...tal };
+    const oldMkt = talMarketingBps(tal);
+    for (let g = 0; g < TAL_BUCKET_KEYS.length; g += 1) {
+      const keys = TAL_BUCKET_KEYS[g];
+      for (let i = 0; i < keys.length; i += 1) {
+        const k = keys[i];
+        const v = out[k];
+        if (v == null || v === "") continue;
+        let bps = ratioToBps(v);
+        if (g === 1) bps = Math.max(0, bps - cut);
+        const scaled = keep > 0 ? Math.min(10000, Math.round((bps * 10000) / keep)) : bps;
+        out[k] = scaled / 10000;
+      }
+    }
+    if (recs) {
+      const newMkt = Math.max(0, oldMkt - cut);
+      const rest = [];
+      for (let i = 0; i < recs.length; i += 1) {
+        const row = recs[i];
+        if (isFlapPlatformRecipient(row)) continue;
+        if (row && typeof row === "object" && newMkt > 0) {
+          const s = recipientShare(row);
+          rest.push({ ...row, share: Math.min(1, (s * oldMkt) / newMkt) });
+        } else {
+          rest.push(row);
+        }
+      }
+      if (rest.length) out.marketing_recipients = rest;
+      else delete out.marketing_recipients;
+    }
+    out.flap_platform_bps = cut;
+    if (fromRecipients && strippedTalCache) strippedTalCache.set(tal, out);
+    return out;
+  }
+
   /** 收款钱包：market/fee/dev/founder/creator，以及 marketing_recipients。不收代币 CA。 */
   function collectTaxRecvFields(out, seen, obj) {
     if (!obj || typeof obj !== "object") return;
@@ -594,6 +712,8 @@
     if (!Array.isArray(recs)) return;
     for (let i = 0; i < recs.length; i += 1) {
       const row = recs[i];
+      // Flap 平台抽成不是资金接收方，不进白名单/黑名单匹配。
+      if (isFlapPlatformRecipient(row)) continue;
       if (!row || typeof row !== "object") {
         pushTaxRecvAddr(out, seen, row);
         continue;
@@ -705,6 +825,9 @@
     gmgnDevCreatedCountFromApi,
     taxRecvAddresses,
     taxRecvAllowHit,
+    isFlapPlatformRecipient,
+    flapPlatformCutBps,
+    stripFlapPlatformTal,
     taxInnerReuseStep
   });
   try {

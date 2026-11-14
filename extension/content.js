@@ -2392,7 +2392,8 @@
       platform: "平台",
       creatorDev: "Dev（发币人）",
       creatorOther: "创作者（非发币人地址）",
-      platformInclCreator: "平台（含创作者份额，Dev 不拿税）"
+      platformInclCreator: "平台（含创作者份额，Dev 不拿税）",
+      flapPlatform: "Flap 平台"
     },
     en: {
       taxAlloc: "Tax allocation",
@@ -2412,12 +2413,27 @@
       platform: "Platform",
       creatorDev: "Dev (launcher)",
       creatorOther: "Creator (not the launcher)",
-      platformInclCreator: "Platform (incl. creator share, no Dev tax)"
+      platformInclCreator: "Platform (incl. creator share, no Dev tax)",
+      flapPlatform: "Flap Platform"
     }
   };
 
   const siteStrategy = createSiteStrategy();
   if (!siteStrategy) return;
+
+  /** token → GMGN s_tal 里的 Flap 平台抽成 bps（占总税）。只给悬浮窗还原总税口径用。 */
+  const flapPlatformCutByToken = new Map();
+  const FLAP_PLATFORM_CUT_MAX = 2000;
+  function rememberFlapPlatformCut(token, bps) {
+    const n = Math.round(Number(bps) || 0);
+    if (!token || !(n > 0) || n >= 10000) return;
+    if (flapPlatformCutByToken.get(token) === n) return;
+    flapPlatformCutByToken.delete(token);
+    flapPlatformCutByToken.set(token, n);
+    if (flapPlatformCutByToken.size > FLAP_PLATFORM_CUT_MAX) {
+      flapPlatformCutByToken.delete(flapPlatformCutByToken.keys().next().value);
+    }
+  }
 
   // token -> full allocation result
   const modeCache = new Map();
@@ -8673,7 +8689,7 @@
   }
 
   // 必须等于 page-hook.js HOOK_VER（打包脚本会校验），否则每页都会重复注入 page-hook。
-  const PAGE_HOOK_VER = "280";
+  const PAGE_HOOK_VER = "281";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -19028,6 +19044,7 @@
       if (ponsHost) rememberPonsV2Addr(token);
       if (genius) rememberGeniusFunAddr(token);
       if (!isFeeTargetToken(token)) continue;
+      rememberFlapPlatformCut(token, raw.flap_platform_bps);
       const derived = deriveHostFeeMode(raw);
       const tax_symbol = String(raw.tax_symbol || "").trim();
       const top_payout_symbol =
@@ -20595,6 +20612,22 @@
       );
       return rows;
     }
+    // Flap 平台抽成：徽章按链上口径（不含平台），悬浮窗按总税还原并单列平台。
+    const flapCut = token ? flapPlatformCutByToken.get(String(token).toLowerCase()) || 0 : 0;
+    if (flapCut > 0 && flapCut < 10000) {
+      const keep = 10000 - flapCut;
+      const pushNative = push;
+      const scaled = (emoji, key, bps) =>
+        pushNative(emoji, key, Math.round(((Number(bps) || 0) * keep) / 10000));
+      pushFlapTipRows(entry, scaled);
+      pushNative("🦋", "flapPlatform", flapCut);
+      return rows;
+    }
+    pushFlapTipRows(entry, push);
+    return rows;
+  }
+
+  function pushFlapTipRows(entry, push) {
     push("💎", "holder", entry.dividend_bps);
     const gift = Number(entry.gift_bps) || 0;
     if (gift > 0) {
@@ -20609,7 +20642,6 @@
     push("💛", "binance", entry.binance_charity_bps);
     push("🔥", "burn", entry.deflation_bps);
     push("💧", "lp", entry.lp_bps);
-    return rows;
   }
 
   function buildTipModel(entry, quoteSymbol, label, token) {
