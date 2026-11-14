@@ -1114,3 +1114,58 @@ body {
   opacity: 0.45;
   cursor: default;
 }
+
+/* 按税收去向屏蔽：快速选择 / 分组 / 三选一 */
+.flow-preset,
+.flow-mode {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 4px;
+}
+.flow-preset-label,
+.flow-mode-label {
+  width: 100%;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.flow-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.flow-chip input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+.flow-chip:has(input:checked) {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.flow-group {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.flow-group-title {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.flow-sub-hint {
+  margin: 4px 0 0;
+}
+.flow-group.is-disabled {
+  opacity: 0.55;
+}

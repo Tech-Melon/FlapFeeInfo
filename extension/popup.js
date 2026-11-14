@@ -9,6 +9,8 @@
   const TAX_RECV_HIDE_KEY = "flapFeeInfo.taxRecvHide.v1";
   const SUFFIX_HIDE_KEY = "flapFeeInfo.suffixHide.v1";
   const VAULT_HIDE_KEY = "flapFeeInfo.vaultHide.v1";
+  /** 弹窗专用：总开关 + 👨‍🍳 那一项（页面只读 taxRecvHide / vaultHide 里推导出的 enabled） */
+  const FILTER_UI_KEY = "flapFeeInfo.filterUi.v1";
   const SEARCH_HIDE_KEY = "flapFeeInfo.searchHide.v1";
   const CHART_JUMP_KEY = "flapFeeInfo.chartJump.v1";
   const DEFAULT_CHART_JUMP = { enabled: true, interval: "follow" };
@@ -127,7 +129,7 @@
       symbolDupWindowLabel: "计数窗口（分钟）",
       symbolDupColorLabel: "首次颜色",
       searchHideTitle: "搜索框结果也屏蔽",
-      searchHideDesc: "默认关。开启后，已启用的资金接收/金库规则同样作用于搜索弹层",
+      searchHideDesc: "默认关。开启后，「按税收去向屏蔽」的规则同样作用于搜索弹层",
       chartJumpSection: "K线创建跳转",
       chartJumpHint:
         "GMGN K 线底部「✦创建」。默认跟随正在看的周期。周期取一次请求就能从创建拿到现在的最细档（GMGN 一次最多约 1 万根），从创建算起：2.5 小时内可留 1 秒，37 小时内 15 秒，3 天内 30 秒，6 天内 1 分钟，31 天内 5 分钟，93 天内 15 分钟，187 天内 30 分钟，375 天内 1 小时，更久 4 小时。已经更粗则保持。下拉里选了更细的档也会按这个下限抬高。落在代币最开始有 K 线的地方，用来看创建时的成交；后面的迁移大涨不会被当成起点。之后可以一直向右拖到现在，实时 K 线照常更新。「↩当前」回到跳之前的周期和画面。",
@@ -226,44 +228,43 @@
       pref_payoutArrow_desc: "最大份额 →SYMBOL",
       pref_unknown_title: "未知/未分配",
       pref_unknown_desc: "链上无有效分配时",
-      taxRecvSection: "资金接收方屏蔽",
-      taxRecvHint:
-        "BSC 首页战壕与 K 线左侧「新创建」列生效，不含 K 线顶栏。搜索弹层需另开上方「搜索框结果也屏蔽」。不额外请求；默认关闭。改开关后 GMGN / Debot 会刷新页面。金库类型见下方「金库屏蔽」。",
-      taxRecvEnableTitle: "启用屏蔽",
-      taxRecvEnableDesc: "过滤首页与 K 线左侧「新创建」（改开关会刷新页面）",
-      taxRecvThresholdLabel: "阈值 ≥",
-      taxRecvThresholdLabelGt: "阈值 >",
-      taxRecvHint2:
-        "首页/K 线左侧「新创建」：7777/8888/ffff 且 👨‍🍳 达阈值则屏蔽（含 hybrid）。0% = 严格大于 0%（有 dev 分配就挡，不挡 0%）。纯 💎 持有人分红不挡。",
-      taxRecvHideGeniusTitle: "也过滤 Genius.fun",
-      taxRecvHideGeniusDesc:
-        "默认不挡。勾选后 Genius 的 👨‍🍳 按上方阈值屏蔽；🎁 金库仍走下方「金库屏蔽」",
-      taxRecvAllowLabel: "接收地址白名单",
-      taxRecvAllowPh: "0x… 接收地址",
+      taxRecvThresholdLabel: "Dev 份额 ≥",
+      taxRecvThresholdLabelGt: "Dev 份额 >",
+      taxRecvAllowLabel: "收款地址白名单",
+      taxRecvAllowPh: "0x… 收款地址",
       taxRecvAllowHint:
-        "资金打到这些地址的代币不屏蔽（GMGN：market_address / creator / Dev 收款；Debot：fee_receiver / founder）。备注只给自己看，不参与匹配。尾号和金库仍屏蔽。最多 24 条。",
+        "税打到这些地址的币，👨‍🍳 那一项不挡（信任的项目方钱包可以放这里）。备注只给自己看。最多 24 条。",
       taxRecvAllowNotePh: "备注",
       taxRecvAllowEmpty: "还没有白名单地址。",
       taxRecvAllowInvalid: "请粘贴完整 0x 地址（40 位 hex）",
       taxRecvAllowDup: "已添加过",
-      vaultHideSection: "金库屏蔽",
-      vaultHideHint:
-        "BSC 首页战壕与 K 线左侧「新创建」列。按类型屏蔽，不看分红比例：96%🎁+4%💎 仍是税收金库。Four ffff 税收钱包不算金库。默认关闭。搜索弹层需另开「搜索框结果也屏蔽」。改开关后 GMGN 会刷新页面。",
-      vaultHideEnableTitle: "启用金库屏蔽",
-      vaultHideEnableDesc: "按下方选项过滤首页与 K 线左侧「新创建」（改开关会刷新页面）",
-      vaultHideTaxTitle: "屏蔽税收金库",
-      vaultHideTaxDesc: "🎁 税收金库（含 96%金库+4%分红；单枚 QQQB/NVDA 分红币也算）",
-      vaultKeepPureTitle: "纯金库不屏蔽",
-      vaultKeepPureDesc: "税收 100% 进金库（🎁→X）时保留展示；🎁50%🔥50% 等混合仍屏蔽。默认不勾",
-      vaultHideToWalletTitle: "屏蔽「🎁 其实给钱包」",
-    vaultHideToWalletDesc: "徽章是 🎁（金库），但 GMGN 悬浮窗写「分配税收金库」：税进去后直接转给钱包，等于给了税收钱包。只挡这种 🎁，分红 / 回购 / 礼物等真金库不挡。不勾「屏蔽税收金库」也单独生效。默认不勾",
-    vaultHideStockTitle: "屏蔽币股金库",
-      vaultHideStockDesc: "📈 Flap Stocks / Flap 币股（FXIO 等篮子）。默认不屏蔽",
-      vaultHideGeniusTitle: "屏蔽 Genius.fun",
+      vaultHideToWalletTitle: "🎁 其实给钱包",
+    vaultHideToWalletDesc: "徽章是 🎁，但 GMGN 写「分配税收金库」：税进去后马上转给钱包",
+    vaultHideStockTitle: "币股金库",
+      vaultHideStockDesc: "Flap 币股（NVDA / FXIO 等股票篮子）",
+      vaultHideGeniusTitle: "Genius.fun 全部隐藏",
+    flowHideSection: "按税收去向屏蔽",
+    flowHideHint: "看每个币的税最后流到哪里：给钱包的可以挡掉，给金库合约的可以留下。只作用于首页战壕和 K 线左侧「新创建」列；搜索框要另开上面「搜索框结果也屏蔽」。默认关闭，改设置后 GMGN 会刷新页面。",
+    flowHideEnableTitle: "启用",
+    flowHideEnableDesc: "总开关。关掉后下面的设置都保留，只是暂停生效",
+    flowPresetLabel: "快速选择",
+    flowPresetWallet: "只挡给钱包的（推荐）",
+    flowPresetAll: "金库也挡",
+    flowPresetCustom: "自定义",
+    flowWalletTitle: "税给钱包 · 建议屏蔽",
+    flowChefTitle: "税给 Dev / 营销钱包",
+    flowChefDesc: "徽章里有 👨‍🍳。下面设 Dev 份额多少才挡",
+    flowChefThresholdHint: "0% = 只要有 Dev 份额就挡；比如设 30%，Dev 拿 10% 的不挡。纯 💎 分红从来不挡。",
+    flowGeniusChefTitle: "Genius 的 👨‍🍳 也挡",
+    flowGeniusChefDesc: "Genius.fun 币的 Dev 份额也按上面的比例挡；它的 🎁 金库不受影响",
+    flowVaultTitle: "税给金库合约 · 默认不挡",
+    flowTaxVaultLabel: "🎁 税收金库（分红 / 回购 / 礼物等）",
+    flowTaxVaultNone: "不挡",
+    flowTaxVaultMixed: "只挡混合的",
+    flowTaxVaultAll: "全挡",
+    flowTaxVaultHint: "「只挡混合的」：税没有全进金库（如 🎁70%💎30%、🎁50%🔥50%）才挡；100% 进金库的（🎁→X）保留。",
       vaultHideGeniusDesc:
-        "默认不挡。勾选后隐藏全部 Genius 卡（🎁/👨‍🍳 都挡）。厨师阈值见上方资金接收",
-      vaultHideHint2:
-        "打开总开关且未勾子项时，默认屏蔽税收金库。Genius 默认保留。只勾税收 → 保留 📈 币股。可与资金接收叠加。",
+        "不管税给谁，Genius 的卡全都不显示",
       suffixHideSection: "自定义尾号屏蔽",
       suffixHideHint:
         "仅 BSC。隐藏指定十六进制尾号的 CA（可多条）。首页战壕与 K 线左侧「新创建」数据层过滤。默认关闭。改开关后 GMGN 会刷新页面。",
@@ -361,7 +362,7 @@
       symbolDupWindowLabel: "Window (minutes)",
       symbolDupColorLabel: "First-hit color",
       searchHideTitle: "Also hide in search",
-      searchHideDesc: "Off by default. When on, enabled fund-recipient/vault rules also apply to the search overlay",
+      searchHideDesc: "Off by default. When on, the \"Hide by where tax goes\" rules also apply to the search overlay",
       chartJumpSection: "Jump to creation",
       chartJumpHint:
         "GMGN chart buttons. Follows the interval you are viewing. 1s is kept within 6 hours; finest is 15s within 36 hours, 30s within 3 days, 1m within 90 days, 5m until 180 days, 15m until 1 year, and 30m after that. A coarser interval stays. Picking a finer preset is raised the same way, so 1m on a token older than a year lands on 30m. The view lands on the earliest candles, so the opening trades are visible. A later migration pump is not the start. Right-drag in the creation view loads the next page. Back restores the previous interval and view.",
@@ -462,44 +463,43 @@
       pref_payoutArrow_desc: "largest share →SYMBOL",
       pref_unknown_title: "Unknown",
       pref_unknown_desc: "no valid on-chain split",
-      taxRecvSection: "Hide fund recipients",
-      taxRecvHint:
-        "BSC home trench and K-line left New creation column. Not the K-line header. Search overlay needs “Also hide in search” above. No extra requests; off by default. GMGN / Debot reload when this changes. See Vault hide below.",
-      taxRecvEnableTitle: "Enable hide",
-      taxRecvEnableDesc: "Filter home & K-line left New creation (page reloads)",
-      taxRecvThresholdLabel: "Threshold ≥",
-      taxRecvThresholdLabelGt: "Threshold >",
-      taxRecvHint2:
-        "Home/K-line left New creation: hide 7777/8888/ffff when marketing hits threshold (incl. hybrid). 0% = strictly > 0%. Pure 💎 holder dividend kept.",
-      taxRecvHideGeniusTitle: "Also filter Genius.fun",
-      taxRecvHideGeniusDesc:
-        "Off by default. When on, Genius 👨‍🍳 uses the threshold above; 🎁 vaults still use Vault hide below",
+      taxRecvThresholdLabel: "Dev share ≥",
+      taxRecvThresholdLabelGt: "Dev share >",
       taxRecvAllowLabel: "Recipient allowlist",
       taxRecvAllowPh: "0x… recipient",
       taxRecvAllowHint:
-        "Tokens paying these wallets are not hidden (GMGN: market_address / creator / Dev; Debot: fee_receiver / founder). Notes are labels only. Suffix and vault rules still hide. Max 24.",
+        "Tokens paying tax to these addresses are not hidden for 👨‍🍳 (put trusted project wallets here). Notes are only for you. Up to 24.",
       taxRecvAllowNotePh: "note",
       taxRecvAllowEmpty: "No allowlist addresses yet.",
       taxRecvAllowInvalid: "Paste a full 0x address (40 hex chars)",
       taxRecvAllowDup: "Already added",
-      vaultHideSection: "Vault hide",
-      vaultHideHint:
-        "BSC home trench and K-line left New creation. Hide by type, not share: 96%🎁+4%💎 is still a tax vault. Four ffff tax wallet is not a vault. Off by default. Search overlay needs “Also hide in search”. GMGN reloads when this changes.",
-      vaultHideEnableTitle: "Enable vault hide",
-      vaultHideEnableDesc: "Filter home & K-line left New creation (page reloads)",
-      vaultHideTaxTitle: "Hide tax vaults",
-      vaultHideTaxDesc: "🎁 tax vaults (including 96% vault + 4% holder; single QQQB/NVDA payout)",
-      vaultKeepPureTitle: "Keep 100% vault tokens",
-      vaultKeepPureDesc: "Show tax vaults when all tax goes to the vault (🎁→X); mixed ones like 🎁50%🔥50% stay hidden. Off by default",
-      vaultHideToWalletTitle: "Hide 🎁 that pays a wallet",
-    vaultHideToWalletDesc: "The badge shows 🎁 (vault), but GMGN lists it as a Split Vault: tax is passed straight to wallets, i.e. a plain tax wallet. Only these 🎁 are hidden; dividend, buyback and gift vaults stay. Works without \"Hide tax vaults\". Off by default",
-    vaultHideStockTitle: "Hide equity vaults",
-      vaultHideStockDesc: "📈 Flap Stocks / Flap 币股 baskets (FXIO). Off by default",
-      vaultHideGeniusTitle: "Hide Genius.fun",
+      vaultHideToWalletTitle: "🎁 that pays a wallet",
+    vaultHideToWalletDesc: "Badge shows 🎁, but GMGN lists a Split Vault: tax is passed straight to a wallet",
+    vaultHideStockTitle: "Equity vaults",
+      vaultHideStockDesc: "Flap stock baskets (NVDA / FXIO etc.)",
+      vaultHideGeniusTitle: "Hide all Genius.fun",
+    flowHideSection: "Hide by where tax goes",
+    flowHideHint: "Looks at where each token's tax ends up: hide the ones paying wallets, keep the ones paying vault contracts. Applies to the home trenches and the K-line left New creation list; turn on \"Also hide in search\" above for search. Off by default; GMGN reloads after changes.",
+    flowHideEnableTitle: "Enable",
+    flowHideEnableDesc: "Master switch. Turning it off keeps the settings below and just pauses them",
+    flowPresetLabel: "Quick pick",
+    flowPresetWallet: "Only tax to wallets (recommended)",
+    flowPresetAll: "Vaults too",
+    flowPresetCustom: "Custom",
+    flowWalletTitle: "Tax to wallets · hide",
+    flowChefTitle: "Tax to Dev / marketing wallet",
+    flowChefDesc: "Badge has 👨‍🍳. Set below how big the Dev share must be",
+    flowChefThresholdHint: "0% = hide whenever Dev gets anything; e.g. 30% keeps a token where Dev gets 10%. Pure 💎 holder rewards are never hidden.",
+    flowGeniusChefTitle: "Also Genius 👨‍🍳",
+    flowGeniusChefDesc: "Genius.fun Dev shares use the same threshold; its 🎁 vaults are unaffected",
+    flowVaultTitle: "Tax to vault contracts · kept by default",
+    flowTaxVaultLabel: "🎁 Tax vaults (dividend / buyback / gift…)",
+    flowTaxVaultNone: "Keep",
+    flowTaxVaultMixed: "Hide mixed only",
+    flowTaxVaultAll: "Hide all",
+    flowTaxVaultHint: "\"Hide mixed only\": hide when not all tax goes to the vault (🎁70%💎30%, 🎁50%🔥50%); 100% vault (🎁→X) stays.",
       vaultHideGeniusDesc:
-        "Off by default. When on, hide every Genius card (🎁 and 👨‍🍳). Chef threshold is under fund-recipient hide",
-      vaultHideHint2:
-        "Master on with no subtype checked defaults to hiding tax vaults. Genius stays visible unless checked. Tax-only keeps 📈 baskets. Stacks with fund-recipient hide.",
+        "Hide every Genius card, whoever gets the tax",
       suffixHideSection: "Custom CA suffix hide",
       suffixHideHint:
         "BSC only. Hide CAs ending with a hex suffix (multi-rule). Filters home trench and K-line left New creation. Off by default. GMGN reloads when this changes.",
@@ -627,13 +627,14 @@
   const searchHideEnabled = document.getElementById("searchHideEnabled");
   const chartJumpEnabled = document.getElementById("chartJumpEnabled");
   const chartJumpInterval = document.getElementById("chartJumpInterval");
-  const vaultHideEnabled = document.getElementById("vaultHideEnabled");
-  const vaultHideTax = document.getElementById("vaultHideTax");
   const vaultHideStock = document.getElementById("vaultHideStock");
   const vaultHideGenius = document.getElementById("vaultHideGenius");
-  const vaultKeepPure = document.getElementById("vaultKeepPure");
   const vaultHideToWallet = document.getElementById("vaultHideToWallet");
-  const vaultHideOptions = document.getElementById("vaultHideOptions");
+  const flowHideEnabled = document.getElementById("flowHideEnabled");
+  const flowWalletGroup = document.getElementById("flowWalletGroup");
+  const flowVaultGroup = document.getElementById("flowVaultGroup");
+  const flowPresetInputs = [...document.querySelectorAll('input[name="flowPreset"]')];
+  const taxVaultModeInputs = [...document.querySelectorAll('input[name="taxVaultMode"]')];
   const devCountEnabled = document.getElementById("devCountEnabled");
   const devCountRulesWrap = document.getElementById("devCountRulesWrap");
   const devCountRulesList = document.getElementById("devCountRulesList");
@@ -675,13 +676,14 @@
   let prefsExpanded = false;
   let saveTimer = null;
   let taxRecvState = { ...DEFAULT_TAX_RECV_HIDE };
+  /** { set, master, chef }：set=false 表示还没在新界面保存过（按旧设置推导） */
+  let filterUiState = { set: false, master: false, chef: true };
   let taxRecvSaveTimer = null;
   let taxRecvSaveGen = 0;
   /** @type {{ enabled: boolean, rules: Array<{id:string, suffix:string, enabled:boolean}> }} */
   let suffixHideState = { enabled: false, rules: [] };
   let suffixHideSaveTimer = null;
   let vaultHideState = { ...DEFAULT_VAULT_HIDE };
-  let vaultHideSaveTimer = null;
   let searchHideState = { ...DEFAULT_SEARCH_HIDE };
   let searchHideSaveTimer = null;
   let chartJumpState = { ...DEFAULT_CHART_JUMP };
@@ -1721,6 +1723,7 @@
             TAX_RECV_HIDE_KEY,
             SUFFIX_HIDE_KEY,
             VAULT_HIDE_KEY,
+            FILTER_UI_KEY,
             SEARCH_HIDE_KEY,
             CHART_JUMP_KEY,
             LICENSE_KEY,
@@ -1771,6 +1774,7 @@
               taxRecv: normalizeTaxRecvHide(items?.[TAX_RECV_HIDE_KEY]),
               suffixHide: normalizeSuffixHide(items?.[SUFFIX_HIDE_KEY]),
               vaultHide: normalizeVaultHide(items?.[VAULT_HIDE_KEY]),
+              filterUi: items?.[FILTER_UI_KEY] || null,
               searchHide: normalizeSearchHide(items?.[SEARCH_HIDE_KEY]),
               chartJump: normalizeChartJump(items?.[CHART_JUMP_KEY]),
               license: normalizeLicense(items?.[LICENSE_KEY]) || { ...DEFAULT_LICENSE },
@@ -1835,6 +1839,7 @@
     const wait = delayMs == null ? 120 : delayMs;
     taxRecvSaveTimer = window.setTimeout(async () => {
       taxRecvSaveTimer = null;
+      taxRecvState.enabled = filterUiState.master === true && filterUiState.chef === true;
       const saved = await saveTaxRecvHide(taxRecvState);
       if (gen !== taxRecvSaveGen) return;
       if (taxRecvNoteInputFocused()) return;
@@ -1852,16 +1857,17 @@
 
   function renderTaxRecvUI(state) {
     taxRecvState = normalizeTaxRecvHide(state);
-    if (taxRecvEnabled) taxRecvEnabled.checked = taxRecvState.enabled === true;
+    if (taxRecvEnabled) taxRecvEnabled.checked = filterUiState.chef === true;
     if (taxRecvHideGenius) taxRecvHideGenius.checked = taxRecvState.hideGenius === true;
     if (taxRecvHideGeniusRow) {
-      taxRecvHideGeniusRow.classList.toggle("is-disabled", taxRecvState.enabled !== true);
+      taxRecvHideGeniusRow.classList.toggle("is-disabled", filterUiState.chef !== true);
     }
+    renderFlowCommonUI();
     const thr = String(taxRecvState.thresholdPct);
     if (taxRecvThreshold) taxRecvThreshold.value = thr;
     if (taxRecvThresholdRange) taxRecvThresholdRange.value = thr;
     if (taxRecvThresholdRow) {
-      taxRecvThresholdRow.classList.toggle("is-disabled", taxRecvState.enabled !== true);
+      taxRecvThresholdRow.classList.toggle("is-disabled", filterUiState.chef !== true);
     }
     syncTaxRecvThresholdLabel();
     if (!taxRecvAllowList) return;
@@ -1933,8 +1939,9 @@
 
   function readTaxRecvFromUI() {
     const thrRaw = Number(taxRecvThreshold?.value ?? taxRecvThresholdRange?.value ?? 100);
+    filterUiState.chef = taxRecvEnabled?.checked === true;
     return normalizeTaxRecvHide({
-      enabled: taxRecvEnabled?.checked === true,
+      enabled: filterUiState.master === true && filterUiState.chef === true,
       thresholdPct: thrRaw,
       allow: taxRecvState.allow,
       hideGenius: taxRecvHideGenius?.checked === true
@@ -1985,29 +1992,6 @@
       suffixHideSaveTimer = null;
       suffixHideState = await saveSuffixHide(suffixHideState);
       renderSuffixHideUI(suffixHideState);
-    }, 120);
-  }
-
-  function saveVaultHide(state) {
-    const normalized = normalizeVaultHide(state);
-    return new Promise((resolve) => {
-      try {
-        chrome.storage.local.set({ [VAULT_HIDE_KEY]: normalized }, () => {
-          void chrome.runtime?.lastError;
-          resolve(normalized);
-        });
-      } catch {
-        resolve(normalized);
-      }
-    });
-  }
-
-  function scheduleSaveVaultHide() {
-    if (vaultHideSaveTimer) window.clearTimeout(vaultHideSaveTimer);
-    vaultHideSaveTimer = window.setTimeout(async () => {
-      vaultHideSaveTimer = null;
-      vaultHideState = await saveVaultHide(vaultHideState);
-      renderVaultHideUI(vaultHideState);
     }, 120);
   }
 
@@ -2082,26 +2066,142 @@
 
   function renderVaultHideUI(state) {
     vaultHideState = normalizeVaultHide(state);
-    if (vaultHideEnabled) vaultHideEnabled.checked = vaultHideState.enabled === true;
-    if (vaultHideTax) vaultHideTax.checked = vaultHideState.hideTaxVault === true;
     if (vaultHideStock) vaultHideStock.checked = vaultHideState.hideStockVault === true;
     if (vaultHideGenius) vaultHideGenius.checked = vaultHideState.hideGenius === true;
-    if (vaultKeepPure) vaultKeepPure.checked = vaultHideState.keepPureTaxVault === true;
     if (vaultHideToWallet) vaultHideToWallet.checked = vaultHideState.hideVaultToWallet === true;
-    if (vaultHideOptions) {
-      vaultHideOptions.classList.toggle("is-disabled", vaultHideState.enabled !== true);
-    }
+    const mode = taxVaultModeOf(vaultHideState);
+    taxVaultModeInputs.forEach((el) => {
+      el.checked = el.value === mode;
+    });
+    renderFlowCommonUI();
   }
 
   function readVaultHideFromUI() {
-    return normalizeVaultHide({
-      enabled: vaultHideEnabled?.checked === true,
-      hideTaxVault: vaultHideTax?.checked === true,
+    const mode = (taxVaultModeInputs.find((el) => el.checked) || {}).value || "none";
+    const next = {
+      hideTaxVault: mode !== "none",
+      keepPureTaxVault: mode === "mixed",
       hideStockVault: vaultHideStock?.checked === true,
       hideGenius: vaultHideGenius?.checked === true,
-      keepPureTaxVault: vaultKeepPure?.checked === true,
       hideVaultToWallet: vaultHideToWallet?.checked === true
+    };
+    next.enabled = filterUiState.master === true && vaultHasAnyRule(next);
+    return normalizeVaultHide(next);
+  }
+
+  // ---------------- 按税收去向屏蔽：弹窗层换算 ----------------
+  // 页面只认 taxRecvHide.v1 / vaultHide.v1。这里把「总开关 + 各项」换算成两份设置：
+  //   taxRecv.enabled = 总开关 && 👨‍🍳 那一项；vault.enabled = 总开关 && 任一金库项。
+  //   税收金库三选一：不挡 = hideTaxVault 关；只挡混合 = 开 + keepPureTaxVault；全挡 = 开。
+  function taxVaultModeOf(v) {
+    if (!v || v.hideTaxVault !== true) return "none";
+    return v.keepPureTaxVault === true ? "mixed" : "all";
+  }
+
+  function vaultHasAnyRule(v) {
+    return Boolean(
+      v &&
+        (v.hideVaultToWallet === true ||
+          v.hideTaxVault === true ||
+          v.hideStockVault === true ||
+          v.hideGenius === true)
+    );
+  }
+
+  /** 还没在新界面保存过：按旧设置推导，行为保持不变。 */
+  function deriveFilterUi(raw, tax, vault) {
+    if (raw && typeof raw === "object" && raw.set === true) {
+      return { set: true, master: raw.master === true, chef: raw.chef !== false };
+    }
+    // 旧规则：金库总开关开着但子项都没勾时按「税收金库全挡」处理，换算成显式选项。
+    if (vault.enabled === true && !vaultHasAnyRule(vault)) {
+      vault.hideTaxVault = true;
+      vault.keepPureTaxVault = false;
+    }
+    // 旧金库总开关关着：子项当时都不生效，新界面里也按「都不挡」显示，免得保存后突然开始挡。
+    if (vault.enabled !== true) {
+      vault.hideTaxVault = false;
+      vault.keepPureTaxVault = false;
+      vault.hideStockVault = false;
+      vault.hideGenius = false;
+      vault.hideVaultToWallet = false;
+    }
+    const master = tax.enabled === true || vault.enabled === true;
+    return { set: false, master, chef: master ? tax.enabled === true : true };
+  }
+
+  function flowPresetOf() {
+    const v = vaultHideState;
+    const base =
+      filterUiState.chef === true &&
+      v.hideVaultToWallet === true &&
+      taxRecvState.hideGenius === true &&
+      v.hideGenius !== true;
+    if (!base) return "custom";
+    const mode = taxVaultModeOf(v);
+    if (mode === "none" && v.hideStockVault !== true) return "wallet";
+    if (mode === "all" && v.hideStockVault === true) return "all";
+    return "custom";
+  }
+
+  function applyFlowPreset(name) {
+    if (name !== "wallet" && name !== "all") return;
+    filterUiState.chef = true;
+    taxRecvState.hideGenius = true;
+    vaultHideState.hideVaultToWallet = true;
+    vaultHideState.hideGenius = false;
+    vaultHideState.hideTaxVault = name === "all";
+    vaultHideState.keepPureTaxVault = false;
+    vaultHideState.hideStockVault = name === "all";
+  }
+
+  function renderFlowCommonUI() {
+    const on = filterUiState.master === true;
+    if (flowHideEnabled) flowHideEnabled.checked = on;
+    if (flowWalletGroup) flowWalletGroup.classList.toggle("is-disabled", !on);
+    if (flowVaultGroup) flowVaultGroup.classList.toggle("is-disabled", !on);
+    const preset = flowPresetOf();
+    flowPresetInputs.forEach((el) => {
+      el.checked = el.value === preset;
     });
+  }
+
+  /** 两份设置 + 弹窗状态一次写入（GMGN 只刷新一次页面）。 */
+  let flowSaveTimer = null;
+  function scheduleSaveFlow() {
+    taxRecvState = normalizeTaxRecvHide({
+      ...taxRecvState,
+      enabled: filterUiState.master === true && filterUiState.chef === true
+    });
+    vaultHideState = normalizeVaultHide({
+      ...vaultHideState,
+      enabled: filterUiState.master === true && vaultHasAnyRule(vaultHideState)
+    });
+    filterUiState.set = true;
+    renderTaxRecvUI(taxRecvState);
+    renderVaultHideUI(vaultHideState);
+    if (flowSaveTimer) window.clearTimeout(flowSaveTimer);
+    flowSaveTimer = window.setTimeout(() => {
+      flowSaveTimer = null;
+      try {
+        chrome.storage.local.set(
+          {
+            [TAX_RECV_HIDE_KEY]: taxRecvState,
+            [VAULT_HIDE_KEY]: vaultHideState,
+            [FILTER_UI_KEY]: { ...filterUiState }
+          },
+          () => void chrome.runtime?.lastError
+        );
+      } catch {
+        // ignore
+      }
+    }, 120);
+  }
+
+  function onFlowControlChange() {
+    taxRecvState = readTaxRecvFromUI();
+    vaultHideState = readVaultHideFromUI();
+    scheduleSaveFlow();
   }
 
   function renderSuffixHideUI(state) {
@@ -2899,15 +2999,31 @@
     renderVaultHideUI(vaultHideState);
   });
 
-  taxRecvEnabled?.addEventListener("change", () => {
-    taxRecvState = readTaxRecvFromUI();
-    renderTaxRecvUI(taxRecvState);
-    scheduleSaveTaxRecv();
+  flowHideEnabled?.addEventListener("change", () => {
+    const turningOn = flowHideEnabled.checked === true;
+    filterUiState.master = turningOn;
+    // 第一次打开：什么都没设过就按「只挡给钱包的」，Dev 份额从默认 100% 改成 0%（有就挡）。
+    if (turningOn && filterUiState.set !== true && !vaultHasAnyRule(vaultHideState)) {
+      applyFlowPreset("wallet");
+      if (Number(taxRecvState.thresholdPct) === 100) taxRecvState.thresholdPct = 0;
+    }
+    scheduleSaveFlow();
   });
-  taxRecvHideGenius?.addEventListener("change", () => {
-    taxRecvState = readTaxRecvFromUI();
-    scheduleSaveTaxRecv();
+  flowPresetInputs.forEach((el) => {
+    el.addEventListener("change", () => {
+      if (!el.checked) return;
+      if (el.value === "custom") {
+        renderFlowCommonUI();
+        return;
+      }
+      applyFlowPreset(el.value);
+      if (!filterUiState.master) filterUiState.master = true;
+      scheduleSaveFlow();
+    });
   });
+  taxVaultModeInputs.forEach((el) => el.addEventListener("change", onFlowControlChange));
+  taxRecvEnabled?.addEventListener("change", onFlowControlChange);
+  taxRecvHideGenius?.addEventListener("change", onFlowControlChange);
 
   const syncTaxRecvThreshold = (fromRange) => {
     if (fromRange && taxRecvThresholdRange && taxRecvThreshold) {
@@ -2965,40 +3081,9 @@
     scheduleSaveChartJump();
   });
 
-  vaultHideEnabled?.addEventListener("change", () => {
-    vaultHideState = readVaultHideFromUI();
-    if (
-      vaultHideState.enabled &&
-      vaultHideState.hideTaxVault !== true &&
-      vaultHideState.hideStockVault !== true &&
-      vaultHideState.hideGenius !== true &&
-      vaultHideState.hideVaultToWallet !== true
-    ) {
-      vaultHideState.hideTaxVault = true;
-    }
-    renderVaultHideUI(vaultHideState);
-    scheduleSaveVaultHide();
-  });
-  vaultHideToWallet?.addEventListener("change", () => {
-    vaultHideState = readVaultHideFromUI();
-    scheduleSaveVaultHide();
-  });
-  vaultHideTax?.addEventListener("change", () => {
-    vaultHideState = readVaultHideFromUI();
-    scheduleSaveVaultHide();
-  });
-  vaultHideStock?.addEventListener("change", () => {
-    vaultHideState = readVaultHideFromUI();
-    scheduleSaveVaultHide();
-  });
-  vaultHideGenius?.addEventListener("change", () => {
-    vaultHideState = readVaultHideFromUI();
-    scheduleSaveVaultHide();
-  });
-  vaultKeepPure?.addEventListener("change", () => {
-    vaultHideState = readVaultHideFromUI();
-    scheduleSaveVaultHide();
-  });
+  vaultHideToWallet?.addEventListener("change", onFlowControlChange);
+  vaultHideStock?.addEventListener("change", onFlowControlChange);
+  vaultHideGenius?.addEventListener("change", onFlowControlChange);
 
   suffixAddBtn?.addEventListener("click", () => tryAddSuffixRule());
   suffixAddInput?.addEventListener("keydown", (ev) => {
@@ -3177,8 +3262,13 @@
         suffixHideState = normalizeSuffixHide(changes[SUFFIX_HIDE_KEY].newValue);
         renderSuffixHideUI(suffixHideState);
       }
-      if (changes[VAULT_HIDE_KEY]) {
+      if (changes[VAULT_HIDE_KEY] && !flowSaveTimer) {
         vaultHideState = normalizeVaultHide(changes[VAULT_HIDE_KEY].newValue);
+        renderVaultHideUI(vaultHideState);
+      }
+      if (changes[FILTER_UI_KEY] && !flowSaveTimer) {
+        filterUiState = deriveFilterUi(changes[FILTER_UI_KEY].newValue, taxRecvState, vaultHideState);
+        renderTaxRecvUI(taxRecvState);
         renderVaultHideUI(vaultHideState);
       }
       if (changes[SEARCH_HIDE_KEY]) {
@@ -3249,6 +3339,7 @@
       taxRecv: loadedTaxRecv,
       suffixHide: loadedSuffixHide,
       vaultHide: loadedVaultHide,
+      filterUi: loadedFilterUi,
       searchHide: loadedSearchHide,
       chartJump: loadedChartJump,
       license: loadedLicense,
@@ -3267,6 +3358,7 @@
       taxRecvState = normalizeTaxRecvHide(loadedTaxRecv);
       suffixHideState = normalizeSuffixHide(loadedSuffixHide);
       vaultHideState = normalizeVaultHide(loadedVaultHide);
+      filterUiState = deriveFilterUi(loadedFilterUi, taxRecvState, vaultHideState);
       searchHideState = normalizeSearchHide(loadedSearchHide);
       chartJumpState = normalizeChartJump(loadedChartJump);
       devCountMarkState = normalizeDevCountMark(loadedDevCount);
