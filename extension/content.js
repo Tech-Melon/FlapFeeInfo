@@ -2432,24 +2432,58 @@
   const siteStrategy = createSiteStrategy();
   if (!siteStrategy) return;
 
-  /** 「🎁 其实给钱包」的 CA：GMGN host-fee 标记（分配税收金库 / Split Vault；/modes 没有这个信息）。 */
-  const vaultToWalletAddrSet = new Set();
+  /** 「🎁 其实给钱包」：token → { v, at }（分配税收金库 / Split Vault；/modes 没有这个信息）。落 hostFacts 缓存。 */
+  const vaultToWalletByToken = new Map();
 
   /** token → GMGN s_tal 里的 Flap 平台抽成 bps（占总税）。只给悬浮窗还原总税口径用。 */
   const flapPlatformCutByToken = new Map();
   const FLAP_PLATFORM_CUT_MAX = 2000;
-  function rememberFlapPlatformCut(token, bps) {
+  /**
+   * 写入 Flap 平台份额。known=true 表示这包数据能确定（带收款方 / HTTP 完整记录）：
+   * bps>0 记份额，bps=0 记「确定没有」。值变了立刻回写浏览器缓存；值没变但缓存超过
+   * HOST_FACT_REFRESH_MS 也刷新时间，避免每条推送都写 storage。
+   */
+  function rememberFlapPlatformCut(token, bps, known = true) {
+    const tok = String(token || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(tok)) return;
     const n = Math.round(Number(bps) || 0);
-    if (!token || !(n > 0) || n >= 10000) return;
-    if (flapPlatformCutByToken.get(token) === n) return;
-    flapPlatformCutByToken.delete(token);
-    flapPlatformCutByToken.set(token, n);
-    if (flapPlatformCutByToken.size > FLAP_PLATFORM_CUT_MAX) {
-      flapPlatformCutByToken.delete(flapPlatformCutByToken.keys().next().value);
+    const now = Date.now();
+    if (n > 0 && n < 10000) {
+      const same = flapPlatformCutByToken.get(tok) === n;
+      if (same && now - (flapCutSeenAt.get(tok) || 0) < HOST_FACT_REFRESH_MS) return;
+      boundedMapSet(flapPlatformCutByToken, tok, n);
+      boundedMapSet(flapCutSeenAt, tok, now);
+      flapCutNoneAt.delete(tok);
+    } else if (n === 0 && known === true) {
+      const prev = flapCutNoneAt.get(tok) || 0;
+      if (!flapPlatformCutByToken.has(tok) && now - prev < HOST_FACT_REFRESH_MS) return;
+      flapPlatformCutByToken.delete(tok);
+      flapCutSeenAt.delete(tok);
+      boundedMapSet(flapCutNoneAt, tok, now);
+    } else {
+      return;
     }
-    flapCutNoneAt.delete(token);
+    flapCutFailAt.delete(tok);
     flapCutStoreDirty = true;
     saveFlapCutStoreSoon();
+  }
+
+  /** 写入「🎁 其实给钱包」。只收确定的 true / false，null（这包没带）不动缓存。 */
+  function rememberVaultToWallet(token, v) {
+    const tok = String(token || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(tok) || typeof v !== "boolean") return false;
+    const now = Date.now();
+    const prev = vaultToWalletByToken.get(tok);
+    if (prev && prev.v === v && now - prev.at < HOST_FACT_REFRESH_MS) return false;
+    boundedMapSet(vaultToWalletByToken, tok, { v, at: now });
+    flapCutStoreDirty = true;
+    saveFlapCutStoreSoon();
+    return !prev || prev.v !== v;
+  }
+
+  function isVaultToWallet(token) {
+    const row = vaultToWalletByToken.get(String(token || "").toLowerCase());
+    return Boolean(row && row.v === true && Date.now() - row.at < HOST_FACT_TTL_MS);
   }
 
   /**
@@ -2484,7 +2518,12 @@
    *   请求失败 → 2 分钟内不重试；429 → 全局停 60 秒
    *   同一个币请求中不重复发
    */
-  const FLAP_CUT_STORE_KEY = "flapFeeInfo.flapPlatformCut.v1";
+  // 宿主事实统一缓存：{ [ca]: { c?, ca?, n?, w?, wa? } }
+  //   c=平台份额 bps，ca=写入时间；n=确定没有平台份额的时间；w=🎁 其实给钱包(1/0)，wa=写入时间
+  const FLAP_CUT_STORE_KEY = "flapFeeInfo.hostFacts.v1";
+  const FLAP_CUT_LEGACY_KEY = "flapFeeInfo.flapPlatformCut.v1";
+  const HOST_FACT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  const HOST_FACT_REFRESH_MS = 12 * 60 * 60 * 1000;
   const FLAP_CUT_HAVE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   const FLAP_CUT_NONE_TTL_MS = 6 * 60 * 60 * 1000;
   const FLAP_CUT_FAIL_RETRY_MS = 2 * 60 * 1000;
@@ -2513,12 +2552,45 @@
     flapCutStoreReady = new Promise((resolve) => {
     try {
       if (!isExtensionContextValid() || !chrome.storage?.local) return resolve();
-      chrome.storage.local.get(FLAP_CUT_STORE_KEY, (items) => {
+      chrome.storage.local.get([FLAP_CUT_STORE_KEY, FLAP_CUT_LEGACY_KEY], (items) => {
         if (chrome.runtime?.lastError) return resolve();
-        const raw = items && items[FLAP_CUT_STORE_KEY];
-        if (!raw || typeof raw !== "object") return resolve();
         const now = Date.now();
-        for (const [token, row] of Object.entries(raw)) {
+        const facts = items && items[FLAP_CUT_STORE_KEY];
+        if (facts && typeof facts === "object") {
+          for (const [token, row] of Object.entries(facts)) {
+            if (!row || typeof row !== "object" || !/^0x[a-f0-9]{40}$/.test(token)) continue;
+            const c = Math.round(Number(row.c) || 0);
+            const cAt = Number(row.ca) || 0;
+            const nAt = Number(row.n) || 0;
+            // 内存里已有更新的数据（读缓存期间推送先到）就不盖
+            if (c > 0 && c < 10000 && now - cAt < FLAP_CUT_HAVE_TTL_MS) {
+              if (!flapPlatformCutByToken.has(token) && !flapCutNoneAt.has(token)) {
+                boundedMapSet(flapPlatformCutByToken, token, c);
+                boundedMapSet(flapCutSeenAt, token, cAt);
+              }
+            } else if (nAt && now - nAt < FLAP_CUT_NONE_TTL_MS) {
+              if (!flapPlatformCutByToken.has(token) && !flapCutNoneAt.has(token)) {
+                boundedMapSet(flapCutNoneAt, token, nAt);
+              }
+            }
+            const wAt = Number(row.wa) || 0;
+            if ((row.w === 1 || row.w === 0) && now - wAt < HOST_FACT_TTL_MS) {
+              if (!vaultToWalletByToken.has(token)) {
+                boundedMapSet(vaultToWalletByToken, token, { v: row.w === 1, at: wAt });
+              }
+            }
+          }
+        }
+        const raw = items && items[FLAP_CUT_LEGACY_KEY];
+        if (raw && typeof raw === "object") {
+          flapCutStoreDirty = true;
+          try {
+            chrome.storage.local.remove(FLAP_CUT_LEGACY_KEY, () => void chrome.runtime?.lastError);
+          } catch {
+            // ignore
+          }
+        }
+        for (const [token, row] of Object.entries(raw && typeof raw === "object" ? raw : {})) {
           if (!row || typeof row !== "object" || !/^0x[a-f0-9]{40}$/.test(token)) continue;
           const at = Number(row.at) || 0;
           const b = Math.round(Number(row.b) || 0);
@@ -2531,6 +2603,10 @@
             if (!flapPlatformCutByToken.has(token)) boundedMapSet(flapCutNoneAt, token, at);
           }
         }
+        if (vaultToWalletByToken.size && vaultHidePrefs && vaultHidePrefs.hideVaultToWallet === true) {
+          scheduleTaxRecvHideApply(40);
+        }
+        saveFlapCutStoreSoon();
         resolve();
       });
     } catch {
@@ -2551,12 +2627,16 @@
         if (!isExtensionContextValid() || !chrome.storage?.local) return;
         const now = Date.now();
         const out = {};
+        const row = (token) => (out[token] = out[token] || {});
         for (const [token, b] of flapPlatformCutByToken) {
           const at = flapCutSeenAt.get(token) || now;
-          if (now - at < FLAP_CUT_HAVE_TTL_MS) out[token] = { b, at };
+          if (now - at < FLAP_CUT_HAVE_TTL_MS) Object.assign(row(token), { c: b, ca: at });
         }
         for (const [token, at] of flapCutNoneAt) {
-          if (!out[token] && now - at < FLAP_CUT_NONE_TTL_MS) out[token] = { b: 0, at };
+          if (!flapPlatformCutByToken.has(token) && now - at < FLAP_CUT_NONE_TTL_MS) row(token).n = at;
+        }
+        for (const [token, w] of vaultToWalletByToken) {
+          if (now - w.at < HOST_FACT_TTL_MS) Object.assign(row(token), { w: w.v ? 1 : 0, wa: w.at });
         }
         chrome.storage.local.set({ [FLAP_CUT_STORE_KEY]: out }, () => {
           void chrome.runtime?.lastError;
@@ -2607,16 +2687,9 @@
         return;
       }
       const cut = Core.flapPlatformCutBps(tal);
-      if (cut > 0) {
-        boundedMapSet(flapCutSeenAt, token, Date.now());
-        rememberFlapPlatformCut(token, cut);
-        if (feeTooltipAnchor === anchor && feeTooltipEl && !feeTooltipEl.hidden) {
-          showFeeTooltip(anchor);
-        }
-      } else {
-        boundedMapSet(flapCutNoneAt, token, Date.now());
-        flapCutStoreDirty = true;
-        saveFlapCutStoreSoon();
+      rememberFlapPlatformCut(token, cut, true);
+      if (cut > 0 && feeTooltipAnchor === anchor && feeTooltipEl && !feeTooltipEl.hidden) {
+        showFeeTooltip(anchor);
       }
     } catch {
       boundedMapSet(flapCutFailAt, token, Date.now());
@@ -8879,7 +8952,7 @@
   }
 
   // 必须等于 page-hook.js HOOK_VER（打包脚本会校验），否则每页都会重复注入 page-hook。
-  const PAGE_HOOK_VER = "282";
+  const PAGE_HOOK_VER = "283";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -18075,7 +18148,7 @@
     if (!vaultHidePrefs || vaultHidePrefs.enabled !== true) return false;
     if (isGeniusFunToken(token)) return vaultHidePrefs.hideGenius === true;
     const vk = vaultKindFromFeeOrBadge(token, card);
-    if (vk === "tax" && vaultHidePrefs.hideVaultToWallet === true && vaultToWalletAddrSet.has(token)) {
+    if (vk === "tax" && vaultHidePrefs.hideVaultToWallet === true && isVaultToWallet(token)) {
       return true;
     }
     if (vk === "stock") return vaultHidePrefs.hideStockVault === true;
@@ -18207,7 +18280,7 @@
       vaultHidePrefs.enabled === true &&
       vaultHidePrefs.hideVaultToWallet === true &&
       vk === "tax" &&
-      vaultToWalletAddrSet.has(addr)
+      isVaultToWallet(addr)
     ) {
       return true;
     }
@@ -18640,7 +18713,7 @@
         hideToWallet &&
         entry.is_vault === true &&
         entry.is_stocks_vault !== true &&
-        (entry.vault_to_wallet === true || vaultToWalletAddrSet.has(addr))
+        (entry.vault_to_wallet === true || isVaultToWallet(addr))
       ) {
         return true;
       }
@@ -19292,16 +19365,15 @@
       if (ponsHost) rememberPonsV2Addr(token);
       if (genius) rememberGeniusFunAddr(token);
       if (!isFeeTargetToken(token)) continue;
-      rememberFlapPlatformCut(token, raw.flap_platform_bps);
+      rememberFlapPlatformCut(token, raw.flap_platform_bps, raw.flap_cut_known === true);
       rememberHostTaxHint(token, raw.buy_tax_bps, raw.sell_tax_bps);
-      if (raw.vault_to_wallet === true) {
-        if (!vaultToWalletAddrSet.has(token)) {
-          rememberBoundedAddr(vaultToWalletAddrSet, token);
-          // 新认出的分配金库要重跑一次 DOM 屏蔽（首屏快照可能早于 page-hook 过滤）。
-          if (vaultHidePrefs && vaultHidePrefs.hideVaultToWallet === true) hostFeeTaxRecvDirty = true;
-        }
-      } else if (raw.vault_to_wallet === false && raw.is_vault === true) {
-        vaultToWalletAddrSet.delete(token);
+      // 首屏快照可能早于 page-hook 过滤：判定变化时重跑一次 DOM 屏蔽。
+      if (
+        rememberVaultToWallet(token, raw.vault_to_wallet) &&
+        vaultHidePrefs &&
+        vaultHidePrefs.hideVaultToWallet === true
+      ) {
+        hostFeeTaxRecvDirty = true;
       }
       const derived = deriveHostFeeMode(raw);
       const tax_symbol = String(raw.tax_symbol || "").trim();

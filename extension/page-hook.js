@@ -10,7 +10,7 @@
  *   brew（GMGN 宿主，不打 /modes）、Four 已迁移 4444（只画底池）
  */
 (() => {
-  const HOOK_VER = 282;
+  const HOOK_VER = 283;
   // fee-core.js 必须先于本文件进 MAIN world（manifest 与所有兜底注入都按此顺序）。
   const Core = window.__flapFeeCore;
   if (!Core) return;
@@ -878,7 +878,16 @@
       }
       return yes;
     }
-    return a ? vaultToWalletAddrs.get(a) === true : false;
+    // HTTP token_fee_info 是完整记录（带 dev_fee）：没有 vault_factory 就确定不是。
+    if (tal && typeof tal === "object" && "dev_fee" in tal && tal.is_vault === true) {
+      if (a) {
+        vaultToWalletAddrs.delete(a);
+        vaultToWalletAddrs.set(a, false);
+      }
+      return false;
+    }
+    if (!a || !vaultToWalletAddrs.has(a)) return null;
+    return vaultToWalletAddrs.get(a) === true;
   }
 
   function gmgnAddr(item) {
@@ -2408,7 +2417,8 @@
       entry.platform || "",
       entry.__poolOnly ? 1 : 0,
       entry.flap_platform_bps || 0,
-      entry.vault_to_wallet ? 1 : 0
+      entry.flap_cut_known ? 1 : 0,
+      entry.vault_to_wallet === true ? 1 : entry.vault_to_wallet === false ? 0 : -1
     ].join("|");
   }
 
@@ -2865,7 +2875,14 @@
         .toLowerCase(),
       recv_addrs: Core.taxRecvAddresses(item, tal),
       flap_platform_bps: Number(tal.flap_platform_bps) || 0,
-      vault_to_wallet: gmgnVaultPaysWallet(tal, addr),
+      // 这包能否确定平台份额：剔过平台、带收款方列表、或 HTTP 完整记录（dev_fee）。
+      // 「新创建」推送不带收款方，不能当成「没有平台份额」。
+      flap_cut_known:
+        tal.flap_platform_bps != null ||
+        Array.isArray(gmgnRawTal(item) && gmgnRawTal(item).marketing_recipients) ||
+        "dev_fee" in tal,
+      // 只有 🎁 金库币才有这个标记；非金库给 null，不写缓存。
+      vault_to_wallet: tal.is_vault === true ? gmgnVaultPaysWallet(tal, addr) : null,
       quote_symbol,
       quote_token: gmgnItemQuoteFields(item).address,
       dividend_token: divAddr,

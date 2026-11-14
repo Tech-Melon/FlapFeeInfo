@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.9.3",
-  "description": "FlapFeeInfo 0.9.3: vault filter can hide 🎁 badges whose tax actually goes to a wallet.",
+  "version": "0.9.4",
+  "description": "FlapFeeInfo 0.9.4: host data (Flap platform cut, 🎁 that pays a wallet) is cached in the browser and refreshed whenever new data arrives.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",
