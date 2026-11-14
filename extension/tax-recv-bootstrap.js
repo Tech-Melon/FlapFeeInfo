@@ -17,6 +17,7 @@
     enabled: false,
     hideTaxVault: false,
     hideStockVault: false,
+    hideVaultToWallet: false,
     hideGenius: false,
     keepPureTaxVault: false
   };
@@ -104,6 +105,7 @@
     out.hideStockVault = raw.hideStockVault === true;
     out.hideGenius = raw.hideGenius === true;
     out.keepPureTaxVault = raw.keepPureTaxVault === true;
+    out.hideVaultToWallet = raw.hideVaultToWallet === true;
     return out;
   }
 
@@ -341,7 +343,7 @@
   /** MAIN world page-hook：manifest 为主；仅缺失时单次 script 兜底（禁止并发重试风暴） */
   const PAGE_HOOK_FILE = "page-hook.js";
   // 必须等于 page-hook.js HOOK_VER（打包脚本会校验），否则每页都会重复注入 page-hook。
-  const PAGE_HOOK_VER = "281";
+  const PAGE_HOOK_VER = "282";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
 
   function pageHookHostFeeReady() {

@@ -378,7 +378,9 @@
     hideStockVault: false,
     hideGenius: false,
     // 勾选后：税收 100% 进金库（🎁→X，无分红/销毁/回流/慈善）不屏蔽
-    keepPureTaxVault: false
+    keepPureTaxVault: false,
+    // 勾选后：徽章是 🎁、但 GMGN 显示「分配税收金库」（税直接转给钱包）的卡单独屏蔽
+    hideVaultToWallet: false
   };
   const DEFAULT_SEARCH_HIDE = { enabled: false };
   const SEARCH_HIDE_ATTR = "data-flap-search-hidden";
@@ -2430,6 +2432,9 @@
   const siteStrategy = createSiteStrategy();
   if (!siteStrategy) return;
 
+  /** 「🎁 其实给钱包」的 CA：GMGN host-fee 标记（分配税收金库 / Split Vault；/modes 没有这个信息）。 */
+  const vaultToWalletAddrSet = new Set();
+
   /** token → GMGN s_tal 里的 Flap 平台抽成 bps（占总税）。只给悬浮窗还原总税口径用。 */
   const flapPlatformCutByToken = new Map();
   const FLAP_PLATFORM_CUT_MAX = 2000;
@@ -2442,6 +2447,9 @@
     if (flapPlatformCutByToken.size > FLAP_PLATFORM_CUT_MAX) {
       flapPlatformCutByToken.delete(flapPlatformCutByToken.keys().next().value);
     }
+    flapCutNoneAt.delete(token);
+    flapCutStoreDirty = true;
+    saveFlapCutStoreSoon();
   }
 
   /**
@@ -2469,37 +2477,151 @@
   }
 
   /**
-   * GMGN 战壕「新创建」推送的 s_tal 不带 marketing_recipients（js-mcp 2026-11：
-   * newCreations 只有 dividend/market_address，同一枚币 token_fee_info 却是 0.9 + Flap 平台 0.1）。
-   * 悬浮时还不知道平台份额，就按需问一次 token_fee_info（每枚 10 分钟内最多一次）。
+   * 悬浮补查 Flap 平台份额（GMGN 战壕「新创建」推送不带 marketing_recipients）。
+   * 只在用户悬浮某个 Flap 币、且宿主推送 / 被动 XHR / 缓存里都没有它的份额时，问一次 token_fee_info。
+   * 缓存（chrome.storage，刷新页面不丢）：
+   *   有平台份额 → 7 天；确认没有 → 6 小时（份额发币时就定了，基本不会变）
+   *   请求失败 → 2 分钟内不重试；429 → 全局停 60 秒
+   *   同一个币请求中不重复发
    */
-  const flapCutProbeAt = new Map();
-  const FLAP_CUT_PROBE_TTL_MS = 10 * 60 * 1000;
+  const FLAP_CUT_STORE_KEY = "flapFeeInfo.flapPlatformCut.v1";
+  const FLAP_CUT_HAVE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  const FLAP_CUT_NONE_TTL_MS = 6 * 60 * 60 * 1000;
+  const FLAP_CUT_FAIL_RETRY_MS = 2 * 60 * 1000;
+  const FLAP_CUT_429_BACKOFF_MS = 60 * 1000;
+  /** token → 确认没有平台份额的时间 */
+  const flapCutNoneAt = new Map();
+  /** token → 最近一次失败时间（只在内存） */
+  const flapCutFailAt = new Map();
+  /** token → 份额写入时间（落盘用） */
+  const flapCutSeenAt = new Map();
+  const flapCutInflight = new Set();
+  let flapCut429Until = 0;
+  let flapCutStoreDirty = false;
+  let flapCutStoreTimer = 0;
+  /** @type {Promise<void> | null} */
+  let flapCutStoreReady = null;
+
+  function boundedMapSet(map, key, value) {
+    map.delete(key);
+    map.set(key, value);
+    if (map.size > FLAP_PLATFORM_CUT_MAX) map.delete(map.keys().next().value);
+  }
+
+  function loadFlapCutStore() {
+    if (flapCutStoreReady) return flapCutStoreReady;
+    flapCutStoreReady = new Promise((resolve) => {
+    try {
+      if (!isExtensionContextValid() || !chrome.storage?.local) return resolve();
+      chrome.storage.local.get(FLAP_CUT_STORE_KEY, (items) => {
+        if (chrome.runtime?.lastError) return resolve();
+        const raw = items && items[FLAP_CUT_STORE_KEY];
+        if (!raw || typeof raw !== "object") return resolve();
+        const now = Date.now();
+        for (const [token, row] of Object.entries(raw)) {
+          if (!row || typeof row !== "object" || !/^0x[a-f0-9]{40}$/.test(token)) continue;
+          const at = Number(row.at) || 0;
+          const b = Math.round(Number(row.b) || 0);
+          if (b > 0 && b < 10000 && now - at < FLAP_CUT_HAVE_TTL_MS) {
+            if (!flapPlatformCutByToken.has(token)) {
+              boundedMapSet(flapPlatformCutByToken, token, b);
+              boundedMapSet(flapCutSeenAt, token, at);
+            }
+          } else if (b === 0 && now - at < FLAP_CUT_NONE_TTL_MS) {
+            if (!flapPlatformCutByToken.has(token)) boundedMapSet(flapCutNoneAt, token, at);
+          }
+        }
+        resolve();
+      });
+    } catch {
+      // 扩展重载中
+      resolve();
+    }
+    });
+    return flapCutStoreReady;
+  }
+
+  function saveFlapCutStoreSoon() {
+    if (flapCutStoreTimer || !flapCutStoreDirty) return;
+    flapCutStoreTimer = window.setTimeout(() => {
+      flapCutStoreTimer = 0;
+      if (!flapCutStoreDirty) return;
+      flapCutStoreDirty = false;
+      try {
+        if (!isExtensionContextValid() || !chrome.storage?.local) return;
+        const now = Date.now();
+        const out = {};
+        for (const [token, b] of flapPlatformCutByToken) {
+          const at = flapCutSeenAt.get(token) || now;
+          if (now - at < FLAP_CUT_HAVE_TTL_MS) out[token] = { b, at };
+        }
+        for (const [token, at] of flapCutNoneAt) {
+          if (!out[token] && now - at < FLAP_CUT_NONE_TTL_MS) out[token] = { b: 0, at };
+        }
+        chrome.storage.local.set({ [FLAP_CUT_STORE_KEY]: out }, () => {
+          void chrome.runtime?.lastError;
+        });
+      } catch {
+        // 扩展重载中
+      }
+    }, 2000);
+  }
+
+  if (siteStrategy.name === "gmgn") loadFlapCutStore();
+
   async function probeFlapPlatformCut(token, anchor) {
     if (siteStrategy.name !== "gmgn") return;
-    if (!isFlapTaxToken(token) || flapPlatformCutByToken.has(token)) return;
-    const now = Date.now();
-    if (now - (flapCutProbeAt.get(token) || 0) < FLAP_CUT_PROBE_TTL_MS) return;
-    flapCutProbeAt.delete(token);
-    flapCutProbeAt.set(token, now);
-    if (flapCutProbeAt.size > FLAP_PLATFORM_CUT_MAX) {
-      flapCutProbeAt.delete(flapCutProbeAt.keys().next().value);
+    if (!isFlapTaxToken(token)) return;
+    await loadFlapCutStore();
+    if (flapPlatformCutByToken.has(token)) {
+      // 缓存里有：直接刷新正在显示的悬浮窗
+      if (feeTooltipAnchor === anchor && feeTooltipEl && !feeTooltipEl.hidden) showFeeTooltip(anchor);
+      return;
     }
+    if (flapCutInflight.has(token)) return;
+    const now = Date.now();
+    if (now < flapCut429Until) return;
+    const noneAt = flapCutNoneAt.get(token);
+    if (noneAt && now - noneAt < FLAP_CUT_NONE_TTL_MS) return;
+    const failAt = flapCutFailAt.get(token);
+    if (failAt && now - failAt < FLAP_CUT_FAIL_RETRY_MS) return;
+    flapCutInflight.add(token);
     try {
       const res = await fetch(
         `/api/v1/token_fee_info/bsc/${token}?app_lang=zh-CN&os=web`,
         { credentials: "include" }
       );
-      if (!res.ok) return;
+      if (res.status === 429) {
+        flapCut429Until = Date.now() + FLAP_CUT_429_BACKOFF_MS;
+        boundedMapSet(flapCutFailAt, token, Date.now());
+        return;
+      }
+      if (!res.ok) {
+        boundedMapSet(flapCutFailAt, token, Date.now());
+        return;
+      }
       const json = await res.json();
-      const cut = Core.flapPlatformCutBps(json?.data?.security?.tax_allocation);
-      if (!(cut > 0)) return;
-      rememberFlapPlatformCut(token, cut);
-      if (feeTooltipAnchor === anchor && feeTooltipEl && !feeTooltipEl.hidden) {
-        showFeeTooltip(anchor);
+      const tal = json?.data?.security?.tax_allocation;
+      if (!tal || typeof tal !== "object") {
+        boundedMapSet(flapCutFailAt, token, Date.now());
+        return;
+      }
+      const cut = Core.flapPlatformCutBps(tal);
+      if (cut > 0) {
+        boundedMapSet(flapCutSeenAt, token, Date.now());
+        rememberFlapPlatformCut(token, cut);
+        if (feeTooltipAnchor === anchor && feeTooltipEl && !feeTooltipEl.hidden) {
+          showFeeTooltip(anchor);
+        }
+      } else {
+        boundedMapSet(flapCutNoneAt, token, Date.now());
+        flapCutStoreDirty = true;
+        saveFlapCutStoreSoon();
       }
     } catch {
-      // 网络失败等下次悬浮再试（TTL 内不重打）
+      boundedMapSet(flapCutFailAt, token, Date.now());
+    } finally {
+      flapCutInflight.delete(token);
     }
   }
 
@@ -8757,7 +8879,7 @@
   }
 
   // 必须等于 page-hook.js HOOK_VER（打包脚本会校验），否则每页都会重复注入 page-hook。
-  const PAGE_HOOK_VER = "281";
+  const PAGE_HOOK_VER = "282";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -13694,11 +13816,9 @@
    */
   function deferTokenRetry(token, reason) {
     const normalized = String(token || "").toLowerCase();
-    if (!normalized) return;
-    // 已有链上定案才跳过退避。宿主占位（只有 Tax、等 /modes）也要记退避，
-    // 否则每条宿主推送都会立刻再打 /modes（与空 unknown 同一种死循环）。
-    const cached = modeCache.get(normalized);
-    if (cached && !cached.source_host && cached.__needsChain !== true) return;
+    // 已有条目（含宿主占位）不记退避：失败后靠下一条宿主推送 / 扫卡立刻重试（0.9.3 回到 0.8.323 行为）。
+    // 空 unknown 被宿主占位反复覆盖的请求风暴由 hostFeeEntryShouldApply 单独挡住。
+    if (!normalized || modeCache.has(normalized)) return;
     const previous = missingRetryState.get(normalized);
     const attempts = Math.min(8, (previous?.attempts || 0) + 1);
     const kind = reason === "pending" ? "pending" : reason === "fail" ? "fail" : "missing";
@@ -13743,6 +13863,10 @@
     const previous = missingRetryState.get(normalized);
     const used = Number(previous && previous.unknownAttempts) || 0;
     if (used >= UNKNOWN_RETRY_MAX) {
+      // Genius 空 unknown 不是定案（新币曲线常要几秒才读得到），不进分钟级冷却，沿用 isFreshUnknown 的短 TTL。
+      if (isGeniusFunToken(normalized) || isGeniusFeeEntry(modeCache.get(normalized), normalized)) {
+        return;
+      }
       // 快速重试用尽后仍是空 unknown：按 1/2/4/8 分钟退避（上限 10 分钟），
       // 期间任何入口都不再打 /modes（见 unknownCooldownActive）。
       const rounds = (Number(previous && previous.cooldownRounds) || 0) + 1;
@@ -16273,6 +16397,7 @@
       vault.hideTaxVault ? 1 : 0,
       vault.hideStockVault ? 1 : 0,
       vault.keepPureTaxVault ? 1 : 0,
+      vault.hideVaultToWallet ? 1 : 0,
       reason || ""
     ].join("|");
   }
@@ -17950,6 +18075,9 @@
     if (!vaultHidePrefs || vaultHidePrefs.enabled !== true) return false;
     if (isGeniusFunToken(token)) return vaultHidePrefs.hideGenius === true;
     const vk = vaultKindFromFeeOrBadge(token, card);
+    if (vk === "tax" && vaultHidePrefs.hideVaultToWallet === true && vaultToWalletAddrSet.has(token)) {
+      return true;
+    }
     if (vk === "stock") return vaultHidePrefs.hideStockVault === true;
     if (vk === "tax") return vaultHidePrefs.hideTaxVault === true && !keepPureTaxVault(token, card);
     return false;
@@ -18074,6 +18202,15 @@
     }
     if (!TARGET_TOKEN_RE.test(addr)) return false;
     const vk = vaultKindFromFeeOrBadge(addr, card);
+    if (
+      vaultHidePrefs &&
+      vaultHidePrefs.enabled === true &&
+      vaultHidePrefs.hideVaultToWallet === true &&
+      vk === "tax" &&
+      vaultToWalletAddrSet.has(addr)
+    ) {
+      return true;
+    }
     if (vaultHidePrefs && vaultHidePrefs.enabled === true && vk) {
       if (vk === "stock" && vaultHidePrefs.hideStockVault === true) return true;
       if (vk === "tax" && vaultHidePrefs.hideTaxVault === true && !keepPureTaxVault(addr, card)) {
@@ -18497,7 +18634,16 @@
       const hideTax = vaultHidePrefs.hideTaxVault === true;
       const hideStock = vaultHidePrefs.hideStockVault === true;
       const hideGenius = vaultHidePrefs.hideGenius === true;
-      const taxOn = hideTax || (!hideTax && !hideStock && !hideGenius);
+      const hideToWallet = vaultHidePrefs.hideVaultToWallet === true;
+      const taxOn = hideTax || (!hideTax && !hideStock && !hideGenius && !hideToWallet);
+      if (
+        hideToWallet &&
+        entry.is_vault === true &&
+        entry.is_stocks_vault !== true &&
+        (entry.vault_to_wallet === true || vaultToWalletAddrSet.has(addr))
+      ) {
+        return true;
+      }
       if (entry.is_stocks_vault === true && hideStock) return true;
       const keepPure = vaultHidePrefs.keepPureTaxVault === true && feeEntryIsPureVault(entry);
       if (entry.is_vault === true && entry.is_stocks_vault !== true && taxOn && !keepPure) {
@@ -19148,6 +19294,15 @@
       if (!isFeeTargetToken(token)) continue;
       rememberFlapPlatformCut(token, raw.flap_platform_bps);
       rememberHostTaxHint(token, raw.buy_tax_bps, raw.sell_tax_bps);
+      if (raw.vault_to_wallet === true) {
+        if (!vaultToWalletAddrSet.has(token)) {
+          rememberBoundedAddr(vaultToWalletAddrSet, token);
+          // 新认出的分配金库要重跑一次 DOM 屏蔽（首屏快照可能早于 page-hook 过滤）。
+          if (vaultHidePrefs && vaultHidePrefs.hideVaultToWallet === true) hostFeeTaxRecvDirty = true;
+        }
+      } else if (raw.vault_to_wallet === false && raw.is_vault === true) {
+        vaultToWalletAddrSet.delete(token);
+      }
       const derived = deriveHostFeeMode(raw);
       const tax_symbol = String(raw.tax_symbol || "").trim();
       const top_payout_symbol =
@@ -21102,7 +21257,7 @@
     const model = data.tipModel;
     if (model.entry && model.token) {
       model.segments = collectTipSegments(model.entry, model.token);
-      probeFlapPlatformCut(model.token, anchor);
+      if (!flapPlatformCutByToken.has(model.token)) probeFlapPlatformCut(model.token, anchor);
     }
     renderFeeTooltipContent(model);
     positionFeeTooltip(anchor);
@@ -21196,6 +21351,7 @@
     out.hideStockVault = raw.hideStockVault === true;
     out.hideGenius = raw.hideGenius === true;
     out.keepPureTaxVault = raw.keepPureTaxVault === true;
+    out.hideVaultToWallet = raw.hideVaultToWallet === true;
     return out;
   }
 
@@ -21205,7 +21361,8 @@
       hideTaxVault: vaultHidePrefs.hideTaxVault === true,
       hideStockVault: vaultHidePrefs.hideStockVault === true,
       hideGenius: vaultHidePrefs.hideGenius === true,
-      keepPureTaxVault: vaultHidePrefs.keepPureTaxVault === true
+      keepPureTaxVault: vaultHidePrefs.keepPureTaxVault === true,
+      hideVaultToWallet: vaultHidePrefs.hideVaultToWallet === true
     };
     const payload = JSON.stringify(prefs);
     try {

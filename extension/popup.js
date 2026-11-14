@@ -50,6 +50,7 @@
     enabled: false,
     hideTaxVault: false,
     hideStockVault: false,
+    hideVaultToWallet: false,
     hideGenius: false,
     keepPureTaxVault: false
   };
@@ -254,7 +255,9 @@
       vaultHideTaxDesc: "🎁 税收金库（含 96%金库+4%分红；单枚 QQQB/NVDA 分红币也算）",
       vaultKeepPureTitle: "纯金库不屏蔽",
       vaultKeepPureDesc: "税收 100% 进金库（🎁→X）时保留展示；🎁50%🔥50% 等混合仍屏蔽。默认不勾",
-      vaultHideStockTitle: "屏蔽币股金库",
+      vaultHideToWalletTitle: "屏蔽「🎁 其实给钱包」",
+    vaultHideToWalletDesc: "徽章是 🎁（金库），但 GMGN 悬浮窗写「分配税收金库」：税进去后直接转给钱包，等于给了税收钱包。只挡这种 🎁，分红 / 回购 / 礼物等真金库不挡。不勾「屏蔽税收金库」也单独生效。默认不勾",
+    vaultHideStockTitle: "屏蔽币股金库",
       vaultHideStockDesc: "📈 Flap Stocks / Flap 币股（FXIO 等篮子）。默认不屏蔽",
       vaultHideGeniusTitle: "屏蔽 Genius.fun",
       vaultHideGeniusDesc:
@@ -488,7 +491,9 @@
       vaultHideTaxDesc: "🎁 tax vaults (including 96% vault + 4% holder; single QQQB/NVDA payout)",
       vaultKeepPureTitle: "Keep 100% vault tokens",
       vaultKeepPureDesc: "Show tax vaults when all tax goes to the vault (🎁→X); mixed ones like 🎁50%🔥50% stay hidden. Off by default",
-      vaultHideStockTitle: "Hide equity vaults",
+      vaultHideToWalletTitle: "Hide 🎁 that pays a wallet",
+    vaultHideToWalletDesc: "The badge shows 🎁 (vault), but GMGN lists it as a Split Vault: tax is passed straight to wallets, i.e. a plain tax wallet. Only these 🎁 are hidden; dividend, buyback and gift vaults stay. Works without \"Hide tax vaults\". Off by default",
+    vaultHideStockTitle: "Hide equity vaults",
       vaultHideStockDesc: "📈 Flap Stocks / Flap 币股 baskets (FXIO). Off by default",
       vaultHideGeniusTitle: "Hide Genius.fun",
       vaultHideGeniusDesc:
@@ -627,6 +632,7 @@
   const vaultHideStock = document.getElementById("vaultHideStock");
   const vaultHideGenius = document.getElementById("vaultHideGenius");
   const vaultKeepPure = document.getElementById("vaultKeepPure");
+  const vaultHideToWallet = document.getElementById("vaultHideToWallet");
   const vaultHideOptions = document.getElementById("vaultHideOptions");
   const devCountEnabled = document.getElementById("devCountEnabled");
   const devCountRulesWrap = document.getElementById("devCountRulesWrap");
@@ -794,6 +800,7 @@
     out.hideStockVault = raw.hideStockVault === true;
     out.hideGenius = raw.hideGenius === true;
     out.keepPureTaxVault = raw.keepPureTaxVault === true;
+    out.hideVaultToWallet = raw.hideVaultToWallet === true;
     return out;
   }
 
@@ -2080,6 +2087,7 @@
     if (vaultHideStock) vaultHideStock.checked = vaultHideState.hideStockVault === true;
     if (vaultHideGenius) vaultHideGenius.checked = vaultHideState.hideGenius === true;
     if (vaultKeepPure) vaultKeepPure.checked = vaultHideState.keepPureTaxVault === true;
+    if (vaultHideToWallet) vaultHideToWallet.checked = vaultHideState.hideVaultToWallet === true;
     if (vaultHideOptions) {
       vaultHideOptions.classList.toggle("is-disabled", vaultHideState.enabled !== true);
     }
@@ -2091,7 +2099,8 @@
       hideTaxVault: vaultHideTax?.checked === true,
       hideStockVault: vaultHideStock?.checked === true,
       hideGenius: vaultHideGenius?.checked === true,
-      keepPureTaxVault: vaultKeepPure?.checked === true
+      keepPureTaxVault: vaultKeepPure?.checked === true,
+      hideVaultToWallet: vaultHideToWallet?.checked === true
     });
   }
 
@@ -2962,11 +2971,16 @@
       vaultHideState.enabled &&
       vaultHideState.hideTaxVault !== true &&
       vaultHideState.hideStockVault !== true &&
-      vaultHideState.hideGenius !== true
+      vaultHideState.hideGenius !== true &&
+      vaultHideState.hideVaultToWallet !== true
     ) {
       vaultHideState.hideTaxVault = true;
     }
     renderVaultHideUI(vaultHideState);
+    scheduleSaveVaultHide();
+  });
+  vaultHideToWallet?.addEventListener("change", () => {
+    vaultHideState = readVaultHideFromUI();
     scheduleSaveVaultHide();
   });
   vaultHideTax?.addEventListener("change", () => {

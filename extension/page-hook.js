@@ -10,7 +10,7 @@
  *   brew（GMGN 宿主，不打 /modes）、Four 已迁移 4444（只画底池）
  */
 (() => {
-  const HOOK_VER = 281;
+  const HOOK_VER = 282;
   // fee-core.js 必须先于本文件进 MAIN world（manifest 与所有兜底注入都按此顺序）。
   const Core = window.__flapFeeCore;
   if (!Core) return;
@@ -260,7 +260,8 @@
     hideTaxVault: false,
     hideStockVault: false,
     hideGenius: false,
-    keepPureTaxVault: false
+    keepPureTaxVault: false,
+    hideVaultToWallet: false
   };
   let vaultHideEnabled = false;
 
@@ -396,6 +397,14 @@
       return hostFeeChefHidden(entry);
     }
     if (vaultHideEnabled) {
+      if (
+        entry.vault_to_wallet === true &&
+        entry.is_vault === true &&
+        entry.is_stocks_vault !== true &&
+        vaultHidePrefs.hideVaultToWallet === true
+      ) {
+        return true;
+      }
       if (entry.is_stocks_vault === true && vaultHidePrefs.hideStockVault === true) {
         return true;
       }
@@ -696,7 +705,8 @@
       hideTaxVault: p?.hideTaxVault === true,
       hideStockVault: p?.hideStockVault === true,
       hideGenius: p?.hideGenius === true,
-      keepPureTaxVault: p?.keepPureTaxVault === true
+      keepPureTaxVault: p?.keepPureTaxVault === true,
+      hideVaultToWallet: p?.hideVaultToWallet === true
     };
     vaultHideEnabled = vaultHidePrefs.enabled === true;
   }
@@ -820,6 +830,55 @@
       }
     }
     return tal;
+  }
+
+  /**
+   * 「🎁 其实给钱包」：s_tal.vault_factory 是 GMGN「分配税收金库」（Split Vault），
+   * 税进这个金库后直接转给钱包，等于给了税收钱包。只看 WSS / 宿主已有字段，不发请求。
+   * 「即将打满」列部分推送不带 vault_factory，按 CA 记住见过的结果。
+   */
+  const vaultToWalletAddrs = new Map();
+  const VAULT_TO_WALLET_ADDR_MAX = 4000;
+  let splitVaultNames = new Set();
+  let splitVaultNamesAt = 0;
+  /** GMGN 自己缓存的工厂名单（flap_vault_factory_names_v1）里 en="Split Vault" 的工厂；不发请求。 */
+  function splitVaultFactoryNamesFromHost() {
+    const now = Date.now();
+    if (now - splitVaultNamesAt < 60000) return splitVaultNames;
+    splitVaultNamesAt = now;
+    const next = new Set();
+    try {
+      const raw = JSON.parse(localStorage.getItem("flap_vault_factory_names_v1") || "null");
+      const chains = raw && typeof raw === "object" ? Object.values(raw) : [];
+      for (let i = 0; i < chains.length; i += 1) {
+        const map = chains[i];
+        if (!map || typeof map !== "object") continue;
+        for (const [addr, name] of Object.entries(map)) {
+          if (name && /^split vault$/i.test(String(name.en || "").trim())) {
+            next.add(String(addr).toLowerCase());
+          }
+        }
+      }
+    } catch (_ls) {
+      // ignore
+    }
+    splitVaultNames = next;
+    return next;
+  }
+  function gmgnVaultPaysWallet(tal, addr) {
+    const a = String(addr || "").toLowerCase();
+    if (tal && typeof tal === "object" && tal.vault_factory) {
+      const yes = Core.isSplitVaultFactory(tal.vault_factory, splitVaultFactoryNamesFromHost());
+      if (a) {
+        vaultToWalletAddrs.delete(a);
+        vaultToWalletAddrs.set(a, yes);
+        if (vaultToWalletAddrs.size > VAULT_TO_WALLET_ADDR_MAX) {
+          vaultToWalletAddrs.delete(vaultToWalletAddrs.keys().next().value);
+        }
+      }
+      return yes;
+    }
+    return a ? vaultToWalletAddrs.get(a) === true : false;
   }
 
   function gmgnAddr(item) {
@@ -1320,8 +1379,9 @@
     const hideTax = vaultHidePrefs.hideTaxVault === true;
     const hideStock = vaultHidePrefs.hideStockVault === true;
     const hideGenius = vaultHidePrefs.hideGenius === true;
+    const hideToWallet = vaultHidePrefs.hideVaultToWallet === true;
     // 总开关开了但子项都没勾：默认按税收金库屏蔽（96%🎁+4%💎 也算）
-    if (!hideTax && !hideStock && !hideGenius) {
+    if (!hideTax && !hideStock && !hideGenius && !hideToWallet) {
       return kind === "tax";
     }
     if (kind === "stock") return hideStock;
@@ -2347,7 +2407,8 @@
       entry.tax_symbol || "",
       entry.platform || "",
       entry.__poolOnly ? 1 : 0,
-      entry.flap_platform_bps || 0
+      entry.flap_platform_bps || 0,
+      entry.vault_to_wallet ? 1 : 0
     ].join("|");
   }
 
@@ -2804,6 +2865,7 @@
         .toLowerCase(),
       recv_addrs: Core.taxRecvAddresses(item, tal),
       flap_platform_bps: Number(tal.flap_platform_bps) || 0,
+      vault_to_wallet: gmgnVaultPaysWallet(tal, addr),
       quote_symbol,
       quote_token: gmgnItemQuoteFields(item).address,
       dividend_token: divAddr,
@@ -6128,6 +6190,13 @@
     const tal = gmgnTal(t);
     if (vaultHideEnabled) {
       const vKind = gmgnVaultKind(tal, t);
+      if (
+        vaultHidePrefs.hideVaultToWallet === true &&
+        vKind === "tax" &&
+        gmgnVaultPaysWallet(tal, addr)
+      ) {
+        return true;
+      }
       if (shouldHideVaultKind(vKind, vKind === "tax" && gmgnTalIsPureVault(tal))) return true;
     }
     // 资金接收方：仅目标税币 + s_tal
@@ -7722,7 +7791,8 @@
               hideTaxVault: vaultHidePrefs.hideTaxVault === true,
               hideStockVault: vaultHidePrefs.hideStockVault === true,
               hideGenius: vaultHidePrefs.hideGenius === true,
-              keepPureTaxVault: vaultHidePrefs.keepPureTaxVault === true
+              keepPureTaxVault: vaultHidePrefs.keepPureTaxVault === true,
+              hideVaultToWallet: vaultHidePrefs.hideVaultToWallet === true
             });
             document.documentElement?.setAttribute(VAULT_HIDE_ATTR, payload);
             localStorage.setItem(VAULT_HIDE_LS_KEY, payload);
@@ -8445,7 +8515,9 @@
             suffixHideEnabled ? 1 : 0
           }:${suf}|v${vaultHideEnabled ? 1 : 0}:${
             vaultHidePrefs.hideTaxVault ? 1 : 0
-          }:${vaultHidePrefs.hideStockVault ? 1 : 0}:${vaultHidePrefs.keepPureTaxVault ? 1 : 0}`;
+          }:${vaultHidePrefs.hideStockVault ? 1 : 0}:${vaultHidePrefs.keepPureTaxVault ? 1 : 0}:${
+            vaultHidePrefs.hideVaultToWallet ? 1 : 0
+          }`;
         };
 
         const filteredText = (xhr) => {

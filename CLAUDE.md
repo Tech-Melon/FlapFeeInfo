@@ -142,9 +142,9 @@ content 主流程：
 |------|----------|------|
 | `pending`（Worker 后台补链中） | GMGN 600/1400/2800ms（热区 400/900/1800ms） | 15s 起指数退避，上限 5min |
 | `missing` / 请求失败 | GMGN 1000/2200/4000ms（热区 700/1500/2800ms） | 同上 |
-| 空 unknown（❓️未，税 0） | 400/1200/2800ms 共 3 次 | 1→2→4→8min，上限 10min |
+| 空 unknown（❓️未，税 0） | 400/1200/2800ms 共 3 次 | 1→2→4→8min，上限 10min（Genius 不进冷却，按 isFreshUnknown 短 TTL 重查） |
 
-宿主占位（只有 Tax、没有分配的 host-fee）不得覆盖链上的空 unknown（Genius 例外），否则每条宿主推送都会再打一次 `/modes`（0.9.2 修复的请求风暴）。
+宿主占位（只有 Tax、没有分配的 host-fee）不得覆盖链上的空 unknown（Genius 例外），否则每条宿主推送都会再打一次 `/modes`（0.9.2 修复的请求风暴）。pending / missing / 失败的退避只记给 `modeCache` 里还没有条目的币（`deferTokenRetry`）；已有宿主占位的币失败后靠下一条宿主推送或扫卡重试（0.9.3 恢复）。
 
 ### 2.3 Worker（`cloudflare/worker.js`）
 
@@ -312,7 +312,7 @@ if lpBps > 0:              💧
 
 插件侧可用 bps **本地再拼紧凑 label**（去空格）+ `top_payout_symbol` 补 `→`；后端 `label`/`title` 仍以 API 为准。
 
-Flap 平台抽成（js-mcp 2026-11）：GMGN s_tal 对部分**已迁移外盘** Flap 币单列平台 10%（`marketing` 0.1 + `marketing_recipients` 仅一条 Flap Platform `0x8a08d98c…ab0e`）。内盘未见；同样已迁移、分红 100% 的币多数没有这一条，所以按收款方识别，不按内外盘门禁。链上 Helper 不含这份（`dividend_bps=10000`）。page-hook `gmgnTal()` 统一走 `Core.stripFlapPlatformTal`：剔除平台 → 其余 ÷(1-平台) 回到链上口径，`flap_platform_bps` 随 host-fee 传给 content；悬浮窗按总税还原并单列「🦋 Flap 平台」。WSS 半包缺收款方时按同 CA 已见平台份额兜底。**战壕「新创建」列（`newCreations`）的 s_tal 永远不带 `marketing_recipients`**（内盘同样有平台 10%，HTTP `token_fee_info` 才有），所以 content 悬浮时 `probeFlapPlatformCut` 按需拉 `token_fee_info`（每枚 10min 一次，只在悬浮时），tooltip 分配行每次悬浮重算。服务端 / Worker 不改。
+Flap 平台抽成（js-mcp 2026-11）：GMGN s_tal 对部分**已迁移外盘** Flap 币单列平台 10%（`marketing` 0.1 + `marketing_recipients` 仅一条 Flap Platform `0x8a08d98c…ab0e`）。内盘未见；同样已迁移、分红 100% 的币多数没有这一条，所以按收款方识别，不按内外盘门禁。链上 Helper 不含这份（`dividend_bps=10000`）。page-hook `gmgnTal()` 统一走 `Core.stripFlapPlatformTal`：剔除平台 → 其余 ÷(1-平台) 回到链上口径，`flap_platform_bps` 随 host-fee 传给 content；悬浮窗按总税还原并单列「🦋 Flap 平台」。WSS 半包缺收款方时按同 CA 已见平台份额兜底。**战壕「新创建」列（`newCreations`）的 s_tal 永远不带 `marketing_recipients`**（内盘同样有平台 10%，HTTP `token_fee_info` 才有），所以 content 悬浮时 `probeFlapPlatformCut` 按需拉 `token_fee_info`（只在悬浮、且推送 / 被动 XHR / 缓存都没有份额时；缓存见 10 节 `flapPlatformCut.v1`），tooltip 分配行每次悬浮重算。徽章本身不按代币发 HTTP。服务端 / Worker 不改。
 
 Flap 命名基金（`isVault=false`，收款地址在 v1 `marketingWallet`、v2 `vaultInfo.addr`）：`0xc7f501…f4a4` giggle fund 把 `marketBps` 挪进 🎓；`0x8b99f3…517d` Binance Charity 挪进 💛。CZ `0x28816c…9307` 仍是 👨‍🍳。旧缓存里基金地址仍挂着 `market_bps` 且慈善段为 0 时当 miss。
 
@@ -440,6 +440,7 @@ Debot 混合战壕按**卡 href** 认链（`/token/bsc/` vs `/token/robinhood/`�
 | GMGN Flap 外盘 `0xa45823a5f8013413bfa4082e352aa65b115f7777` / `0x24da547856f292b22b5f36fa05341e85de0e7777`（WSS 数字格式） | `🦋NVDA \| 💎→NVDA` / `🦋XAUT \| 💎→XAUT`；悬浮窗同上 |
 | GMGN Flap 内盘 `0x9d49645484d909403f223bbd2da0ac7c019f7777`（一苇渡江，新创建列推送只有 `dividend 1`） | 徽章 `🦋FXIO \| 💎→FXIO`；不点进 K 线，悬浮约 0.3s 内变成 💎 90% + 🦋 Flap 平台 10% |
 | GMGN `0x74c7f7cdafc5f45f1102a9a73ebeec69c8b97777`（`flap_pool_launch`，曾被 6h 负缓存成 ❓️未） | `🦋BNB \| 🎁89.2%→BNB…`（🔥7.2% 💧3.6%）；买 2% / 卖 3%。链上仍空时 K 线页 `/modes` 不得每秒请求（加载后约 5 次，之后按分钟退避） |
+| GMGN 分配税收金库 `0x93b2f84e85b08d557fada911a62b864143be7777`（`vault_factory`=`0xfab75dc7…52345f`，HTTP split_recipients 100% → `0xad3c…1e75`） | 金库屏蔽只勾「屏蔽「🎁 其实给钱包」」时从「新创建」列删掉；自动分红金库（工厂 `0x17ca49…`）、礼物金库（`0x025549…`）不受影响 |
 | GMGN 卡片「Tax 2%」且 `buy_tax=0`、`total_buy_tax=0.02` | 悬浮窗买卖税 2% / 2%。`/modes` 代币税为 0 或更小不得盖掉宿主合计 |
 
 #### 卡片标记（Robinhood）
@@ -1102,6 +1103,7 @@ python tools/ctl.py watchdog-run
  - `0.8.250`：`fee-core.js` 共享纯逻辑（平台注册表 + 单位换算/纯金库/篮子/尾号规则/复用状态机），`tests/` 17 项样本+结构守护，打包前必跑；平台只在 page-hook 判定，content 以 `entry.platform` 为准；金库屏蔽「纯金库不屏蔽」选项（`keepPureTaxVault`）；Long.xyz 预留（GMGN 带 `tax_allocation` 才画，点击 app.long.xyz）；厨师/慈善/回流箭头与底池同名（`💛→MRNAB`→`💛→MRNA`）；bootstrap 发金库 prefs 不再丢 `hideGenius`
  - `0.8.251`：资金接收白名单同时认 `marketing_recipients` / Dev / founder。host-fee 与 `/modes` 的 hide-addrs 不再绕过白名单；`hideAddrSet` 在有完整税字段时按当前名单重判，名单变化清空集合。尾号与金库不豁免
  - `0.8.252`：资金接收白名单每条地址可写备注（`allow[].note`，最多 32 字）。备注只给自己看，不参与匹配；只改备注不推页面、不清 `hideAddrSet`
+ - `0.9.3`：金库屏蔽 `hideVaultToWallet`（「🎁 其实给钱包」）。只对 🎁 税收金库卡生效：page-hook `gmgnTokenHide` 要求 `gmgnVaultKind=tax` 且 `gmgnVaultPaysWallet(tal, addr)`（`s_tal.vault_factory` → `Core.isSplitVaultFactory`，内置 `0xfab75dc7…52345f` + GMGN localStorage `flap_vault_factory_names_v1` 里 en=Split Vault；按 CA 记住）；host-fee 条目带 `vault_to_wallet`，content `vaultToWalletAddrSet` 做 DOM / 搜索框屏蔽，同样要求徽章是 🎁。独立于 `hideTaxVault`。**徽章不得按代币发 HTTP**（只用宿主推送 / 被动 XHR + `/modes` 批量）；唯一例外是悬浮窗 `probeFlapPlatformCut`：仅悬浮且无份额时问一次 `token_fee_info`，结果存 `chrome.storage` `flapFeeInfo.flapPlatformCut.v1`（有份额 7 天 / 没有 6 小时 / 失败 2 分钟 / 429 全局 60 秒 / 请求中去重）。`deferTokenRetry` 回到「有缓存条目就不退避」；Genius 空 unknown 不进 `UNKNOWN_COOLDOWN_*`。`CORE_VER` 10，`HOOK_VER` / `PAGE_HOOK_VER` 282
  - `0.9.2`：`/modes` 请求风暴修复。空 unknown 快速重试（`UNKNOWN_RETRY_DELAYS_MS`）用完后进入 `UNKNOWN_COOLDOWN_*` 退避（1→10min），`tokenNeedsModesFetch` 先查 `unknownCooldownActive`；`hostFeeEntryShouldApply` 不让「无分配的宿主占位」盖链上空 unknown（Genius 例外）；`deferTokenRetry` 对宿主占位也记退避。插件 `/modes` 带 `tax_hints`（`hostTaxHintByToken`），Worker `staleNegativeByHint` / 后端 `_stale_negative_by_hint`：空 unknown 且宿主有税、缓存 ≥120s → 当 miss，Worker 转发 `recheck` 给后端；后端 recheck 批次跳过 5s 响应缓存（`_recheck_pending`）
  - `0.9.1`：内盘 Flap 悬浮窗补平台 10%。`newCreations` 推送不带收款方 → 悬浮时按需 `token_fee_info`（`probeFlapPlatformCut`，10min/枚）；tooltip `segments` 在 `showFeeTooltip` 里按最新 `flapPlatformCutByToken` 重算
  - `0.9.0`：GMGN Flap 平台抽成兼容。s_tal 的 `marketing_recipients` 有 Flap Platform（`0x8a08…ab0e`）时，`gmgnTal()` 经 `Core.stripFlapPlatformTal` 剔除平台并按链上口径放大，徽章不再出 `👨‍🍳10%`、资金接收不再误藏；悬浮窗按总税单列「🦋 Flap 平台」（content `flapPlatformCutByToken`）。HTTP 字符串 / WSS 数字都认，WSS 半包按同 CA 已见份额兜底。`CORE_VER` 9，`HOOK_VER` / `PAGE_HOOK_VER` 281
@@ -1142,16 +1144,17 @@ python tools/ctl.py watchdog-run
  - `0.8.255`：搜索弹层屏蔽。厨师行用搜索回包 `recv_addrs` 对白名单；没有地址时按 👨‍🍳 百分比先藏，命中白名单后再显示。🎁 只走金库开关。`hideAddrSet` 仍要求有收款地址
  - `0.8.254`：完整包剪切板。钱包地址 / 定链失败不再抢其它输入框焦点；同一段 GMGN 定链最多 3 次（2s / 20s），之后停住。确认钱包仍不打开 K 线
  - `0.8.253`：悬浮窗买卖税对齐 GMGN 合计税率（`total_buy_tax`，含池子费；宿主更高则保留）。战壕纤维、搜索和 K 线同一套。尾号 4444 只画底池（`🖐️`，不打 `/modes`）。brew 只用 GMGN 宿主数据，有 `s_tal` 再画分配，不打 `/modes`；无分配的后续包不盖已画出的分红。K 线先认 launchpad，裸 6666 未确认前不打 `/modes`，认出 brew 后丢掉 Genius 缓存。`CORE_VER` 4，`HOOK_VER` / `PAGE_HOOK_VER` 209
-- 插件当前版本：见 `extension/manifest.json`（**0.9.2**，公开无剪切板）
-- page-hook：`HOOK_VER` **281**；fee-core `CORE_VER` **9**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）；`content.js` / `tax-recv-bootstrap.js` 的 `PAGE_HOOK_VER` 必须相同（`tools/pack_extension.py` 会校验）
+- 插件当前版本：见 `extension/manifest.json`（**0.9.3**，公开无剪切板）
+- page-hook：`HOOK_VER` **282**；fee-core `CORE_VER` **10**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）；`content.js` / `tax-recv-bootstrap.js` 的 `PAGE_HOOK_VER` 必须相同（`tools/pack_extension.py` 会校验）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
-- 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）  
+- 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）
+- Flap 平台份额：`flapFeeInfo.flapPlatformCut.v1` = `{ [ca]: { b, at } }`（`b`=平台占总税 bps，0=确认没有；有份额 7 天、没有 6 小时；悬浮补查与宿主推送共用）  
 - 显示偏好：`flapFeeInfo.displayPrefs.v1`（popup + content 共享；`hoverTip` 默认 `false`；`chainBsc`/`chainRh` 默认 `true`，关则不画该链 CA 徽章）  
 - 徽章主题：`flapFeeInfo.badgeTheme.v1` = `dark`（默认）| `light`  
 - 尾号屏蔽：`flapFeeInfo.suffixHide.v1` = `{ enabled, rules:[{id,suffix,enabled}] }`（最多 24 条 hex 1–12 位）
 - 资金接收：`flapFeeInfo.taxRecvHide.v1` = `{ enabled, thresholdPct, hideGenius, allow:[{id,address,enabled,note?}] }`（`hideGenius` 默认 false；勾选后 Genius 👨‍🍳 按阈值挡，🎁 仍走金库开关。`note` 最多 32 字，只用于弹窗辨认，不参与匹配）
-- 金库屏蔽：`flapFeeInfo.vaultHide.v1` = `{ enabled, hideTaxVault, hideStockVault, hideGenius, keepPureTaxVault }`（`keepPureTaxVault` 默认 false；勾选后税收 **100% 进金库**（🎁→X，分红/销毁/回流/慈善全 0）的税收金库不屏蔽，🎁50%🔥50%、🎁96%💎4% 仍屏蔽；只作用于税收金库，不影响币股/Genius。page-hook `gmgnTalIsPureVault` / `debotExtraIsPureVault` / `hostFeeEntryIsPureVault`，content `keepPureTaxVault` 兜底 DOM）
+- 金库屏蔽：`flapFeeInfo.vaultHide.v1` = `{ enabled, hideTaxVault, hideStockVault, hideGenius, keepPureTaxVault, hideVaultToWallet }`（`hideVaultToWallet` 默认 false：徽章是 🎁 且 GMGN `s_tal.vault_factory` 是分配税收金库 / Split Vault（税直接转给钱包）时屏蔽，独立于 hideTaxVault）（`keepPureTaxVault` 默认 false；勾选后税收 **100% 进金库**（🎁→X，分红/销毁/回流/慈善全 0）的税收金库不屏蔽，🎁50%🔥50%、🎁96%💎4% 仍屏蔽；只作用于税收金库，不影响币股/Genius。page-hook `gmgnTalIsPureVault` / `debotExtraIsPureVault` / `hostFeeEntryIsPureVault`，content `keepPureTaxVault` 兜底 DOM）
 - 搜索框也屏蔽：`flapFeeInfo.searchHide.v1` = `{ enabled:false }`（默认关；开启后把已启用的资金接收/金库规则套到搜索弹层。厨师行优先用搜索回包的收款地址对白名单；没有地址时按 👨‍🍳 百分比藏行，地址命中白名单后再显示。🎁 只走金库开关）
 - K 线创建跳转：`flapFeeInfo.chartJump.v1` = `{ enabled:true, interval:"follow" }`（默认开。`interval` 为 `follow` 或 `15S|30S|1|5|60|240|1D`。旧的 1 秒/3 秒/12 小时等读出来当跟随当前。content 写到 `data-flap-chart-jump`。只影响 GMGN 图表按钮，不刷新战壕）
 - Dev 发币次数标记：`flapFeeInfo.devCountMark.v1` = `{ enabled, rules:[{id,op,min,color,enabled}] }`（`op` 为 `lt|lte|eq|gte|gt`，缺省按 `gte`；最多 12 条；默认关。GMGN 在 inner=1 且已开盘时按创作者核对 `dev_created_tokens`；Debot 仍用 `created_count`）

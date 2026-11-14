@@ -5,7 +5,7 @@
  */
 (function (root) {
   // API 变更必须 +1：插件重载不刷页时 MAIN world 里还留着旧版，同版号会跳过加载。
-  const CORE_VER = 9;
+  const CORE_VER = 10;
   if (root.__flapFeeCore && root.__flapFeeCore.ver === CORE_VER) return;
 
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
@@ -697,6 +697,21 @@
     return out;
   }
 
+  // ---------- Flap 分配税收金库（Split Vault） ----------
+  // js-mcp 2026-11：GMGN s_tal（WSS 与 HTTP 都有）带 vault_factory；GMGN 用
+  // /api/v1/flap_vault_factory_names 把它译成「分配税收金库」（en "Split Vault"）。
+  // 这种金库由管理员把税分给任意 EVM 地址（HTTP flap_tax_vault.split_recipients），
+  // 实际等于给税收钱包。分给谁只有 HTTP 有，这里只认金库类型。
+  const SPLIT_VAULT_FACTORIES = new Set(["0xfab75dc774cb9b38b91749b8833360b46a52345f"]);
+
+  /** extra：宿主名单里 en="Split Vault" 的工厂（GMGN 新增工厂时不用发版）。 */
+  function isSplitVaultFactory(addr, extra) {
+    const a = evmAddr40(addr);
+    if (!a) return false;
+    if (SPLIT_VAULT_FACTORIES.has(a)) return true;
+    return Boolean(extra && typeof extra.has === "function" && extra.has(a));
+  }
+
   /** 收款钱包：market/fee/dev/founder/creator，以及 marketing_recipients。不收代币 CA。 */
   function collectTaxRecvFields(out, seen, obj) {
     if (!obj || typeof obj !== "object") return;
@@ -828,6 +843,7 @@
     isFlapPlatformRecipient,
     flapPlatformCutBps,
     stripFlapPlatformTal,
+    isSplitVaultFactory,
     taxInnerReuseStep
   });
   try {
