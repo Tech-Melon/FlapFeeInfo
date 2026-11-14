@@ -2435,6 +2435,41 @@
     }
   }
 
+  /**
+   * GMGN 战壕「新创建」推送的 s_tal 不带 marketing_recipients（js-mcp 2026-11：
+   * newCreations 只有 dividend/market_address，同一枚币 token_fee_info 却是 0.9 + Flap 平台 0.1）。
+   * 悬浮时还不知道平台份额，就按需问一次 token_fee_info（每枚 10 分钟内最多一次）。
+   */
+  const flapCutProbeAt = new Map();
+  const FLAP_CUT_PROBE_TTL_MS = 10 * 60 * 1000;
+  async function probeFlapPlatformCut(token, anchor) {
+    if (siteStrategy.name !== "gmgn") return;
+    if (!isFlapTaxToken(token) || flapPlatformCutByToken.has(token)) return;
+    const now = Date.now();
+    if (now - (flapCutProbeAt.get(token) || 0) < FLAP_CUT_PROBE_TTL_MS) return;
+    flapCutProbeAt.delete(token);
+    flapCutProbeAt.set(token, now);
+    if (flapCutProbeAt.size > FLAP_PLATFORM_CUT_MAX) {
+      flapCutProbeAt.delete(flapCutProbeAt.keys().next().value);
+    }
+    try {
+      const res = await fetch(
+        `/api/v1/token_fee_info/bsc/${token}?app_lang=zh-CN&os=web`,
+        { credentials: "include" }
+      );
+      if (!res.ok) return;
+      const json = await res.json();
+      const cut = Core.flapPlatformCutBps(json?.data?.security?.tax_allocation);
+      if (!(cut > 0)) return;
+      rememberFlapPlatformCut(token, cut);
+      if (feeTooltipAnchor === anchor && feeTooltipEl && !feeTooltipEl.hidden) {
+        showFeeTooltip(anchor);
+      }
+    } catch {
+      // 网络失败等下次悬浮再试（TTL 内不重打）
+    }
+  }
+
   // token -> full allocation result
   const modeCache = new Map();
   const persistentCache = new Map();
@@ -20653,6 +20688,9 @@
       buyTax: bpsToPercentLabel(entry.buy_tax_bps),
       sellTax: bpsToPercentLabel(entry.sell_tax_bps),
       segments: collectTipSegments(entry, token),
+      // 悬浮时按最新的 Flap 平台份额重算分配行（徽章文案不变就不会重画）。
+      entry,
+      token: String(token || "").toLowerCase(),
       titleLines: String(entry.title || "")
         .split("\n")
         .map((s) => s.trim())
@@ -20985,7 +21023,12 @@
       feeTooltipHideTimer = 0;
     }
     feeTooltipAnchor = anchor;
-    renderFeeTooltipContent(data.tipModel);
+    const model = data.tipModel;
+    if (model.entry && model.token) {
+      model.segments = collectTipSegments(model.entry, model.token);
+      probeFlapPlatformCut(model.token, anchor);
+    }
+    renderFeeTooltipContent(model);
     positionFeeTooltip(anchor);
   }
 
