@@ -95,6 +95,8 @@
   /** 空 unknown：初回后再打 3 次（400/1200/2800ms），仍空才进入负缓存。 */
   const UNKNOWN_RETRY_DELAYS_MS = [400, 1200, 2800];
   const UNKNOWN_RETRY_MAX = 3;
+  const UNKNOWN_COOLDOWN_BASE_MS = 60 * 1000;
+  const UNKNOWN_COOLDOWN_MAX_MS = 10 * 60 * 1000;
   /** 同时挂起的 miss 重入队定时器上限（防几十个 CA 各挂一个 timer） */
   const GMGN_MISSING_REQUEUE_MAX = 24;
   /** 热档最长：连续无热工作超过此时间退回稳态扫/防抖 */
@@ -1790,8 +1792,15 @@
     return Date.now() - at < ttl;
   }
 
+  /** 空 unknown 的重试 / 退避窗口内：不管哪个入口（宿主推送、扫卡、悬浮层）都不打 /modes。 */
+  function unknownCooldownActive(token) {
+    const st = missingRetryState.get(String(token || "").toLowerCase());
+    return Boolean(st && st.kind === "unknown" && Date.now() < Number(st.retryAt || 0));
+  }
+
   function tokenNeedsModesFetch(token) {
     const tok = String(token || "").toLowerCase();
+    if (unknownCooldownActive(tok)) return false;
     const cached =
       modeCache.get(tok) ||
       (isPersistentCacheHit(tok) ? persistentCache.get(tok) : null);
@@ -2433,6 +2442,30 @@
     if (flapPlatformCutByToken.size > FLAP_PLATFORM_CUT_MAX) {
       flapPlatformCutByToken.delete(flapPlatformCutByToken.keys().next().value);
     }
+  }
+
+  /**
+   * token → 宿主显示的税率 bps（GMGN 卡片 Tax）。/modes 带上 tax_hints：
+   * 链上负缓存（空 unknown、税 0）与宿主「有税」矛盾时，Worker/后端才会提前重查。
+   */
+  const hostTaxHintByToken = new Map();
+  function rememberHostTaxHint(token, buy, sell) {
+    const n = Math.max(Number(buy) || 0, Number(sell) || 0);
+    if (!token || !(n > 0)) return;
+    if (hostTaxHintByToken.get(token) === n) return;
+    hostTaxHintByToken.delete(token);
+    hostTaxHintByToken.set(token, n);
+    if (hostTaxHintByToken.size > FLAP_PLATFORM_CUT_MAX) {
+      hostTaxHintByToken.delete(hostTaxHintByToken.keys().next().value);
+    }
+  }
+  function modesTaxHints(tokens) {
+    const out = {};
+    for (let i = 0; i < tokens.length; i += 1) {
+      const n = hostTaxHintByToken.get(tokens[i]);
+      if (n > 0) out[tokens[i]] = n;
+    }
+    return out;
   }
 
   /**
@@ -13661,7 +13694,11 @@
    */
   function deferTokenRetry(token, reason) {
     const normalized = String(token || "").toLowerCase();
-    if (!normalized || modeCache.has(normalized)) return;
+    if (!normalized) return;
+    // 已有链上定案才跳过退避。宿主占位（只有 Tax、等 /modes）也要记退避，
+    // 否则每条宿主推送都会立刻再打 /modes（与空 unknown 同一种死循环）。
+    const cached = modeCache.get(normalized);
+    if (cached && !cached.source_host && cached.__needsChain !== true) return;
     const previous = missingRetryState.get(normalized);
     const attempts = Math.min(8, (previous?.attempts || 0) + 1);
     const kind = reason === "pending" ? "pending" : reason === "fail" ? "fail" : "missing";
@@ -13705,7 +13742,23 @@
     if (!normalized) return;
     const previous = missingRetryState.get(normalized);
     const used = Number(previous && previous.unknownAttempts) || 0;
-    if (used >= UNKNOWN_RETRY_MAX) return;
+    if (used >= UNKNOWN_RETRY_MAX) {
+      // 快速重试用尽后仍是空 unknown：按 1/2/4/8 分钟退避（上限 10 分钟），
+      // 期间任何入口都不再打 /modes（见 unknownCooldownActive）。
+      const rounds = (Number(previous && previous.cooldownRounds) || 0) + 1;
+      const delayMs = Math.min(
+        UNKNOWN_COOLDOWN_MAX_MS,
+        UNKNOWN_COOLDOWN_BASE_MS * 2 ** (rounds - 1)
+      );
+      missingRetryState.set(normalized, {
+        attempts: previous?.attempts || 0,
+        unknownAttempts: used,
+        cooldownRounds: rounds,
+        retryAt: Date.now() + delayMs,
+        kind: "unknown"
+      });
+      return;
+    }
     const attempts = used + 1;
     const delayMs = UNKNOWN_RETRY_DELAYS_MS[attempts - 1] || 2800;
     missingRetryState.set(normalized, {
@@ -14715,7 +14768,8 @@
           tokens,
           platforms: Object.fromEntries(
             tokens.filter((t) => isGeniusFunToken(t)).map((t) => [t, "geniusfun"])
-          )
+          ),
+          tax_hints: modesTaxHints(tokens)
         }),
         signal: controller.signal,
         cache: "no-store"
@@ -18868,6 +18922,19 @@
     if (entry.__pons_v2 === true || prev.__pons_v2 === true) {
       return robinhoodHostFeeShouldApply(prev, entry);
     }
+    // 链上已回空 unknown，宿主又没有分配（只有 Tax 2%）：盖上去只会变回 ⏳ 并再打 /modes，
+    // js-mcp 0x74c7…7777 每 0.6s 一次死循环。Genius 例外（stub 要带 platform 去问曲线）。
+    if (
+      !prev.source_host &&
+      prev.mode === "unknown" &&
+      hostFeeAllocationBps(prev) <= 0 &&
+      entry.source_host &&
+      hostFeeAllocationBps(entry) <= 0 &&
+      entry.__geniusfun !== true &&
+      !isGeniusFunToken(entry.address || prev.address || "")
+    ) {
+      return false;
+    }
     if (
       prev.mode === "unknown" &&
       hostFeeAllocationBps(prev) <= 0 &&
@@ -19080,6 +19147,7 @@
       if (genius) rememberGeniusFunAddr(token);
       if (!isFeeTargetToken(token)) continue;
       rememberFlapPlatformCut(token, raw.flap_platform_bps);
+      rememberHostTaxHint(token, raw.buy_tax_bps, raw.sell_tax_bps);
       const derived = deriveHostFeeMode(raw);
       const tax_symbol = String(raw.tax_symbol || "").trim();
       const top_payout_symbol =
@@ -19182,6 +19250,14 @@
             modeCache.set(token, prev);
             confirmed.push([token, prev]);
           }
+        } else if (
+          prev.mode === "unknown" &&
+          !prev.source_host &&
+          absorbHigherBuySellTax(prev, entry)
+        ) {
+          // 空 unknown 不被宿主覆盖，但悬浮窗的买卖税跟宿主合计（只改一次）。
+          modeCache.set(token, prev);
+          confirmed.push([token, prev]);
         }
         continue;
       }
