@@ -10,7 +10,7 @@
  *   brew（GMGN 宿主，不打 /modes）、Four 已迁移 4444（只画底池）
  */
 (() => {
-  const HOOK_VER = 283;
+  const HOOK_VER = 284;
   // fee-core.js 必须先于本文件进 MAIN world（manifest 与所有兜底注入都按此顺序）。
   const Core = window.__flapFeeCore;
   if (!Core) return;
@@ -182,7 +182,30 @@
       } catch (_un2) {
         // ignore
       }
+      // 拆了 JSON.parse 钩子就要清标记：GMGN 重建 Worker 后又降级时才能重新装上。
+      try {
+        window.__flapFeeTaxRecvMainThread = 0;
+      } catch (_mtf) {
+        // ignore
+      }
       writeGmgnTransportAttr();
+      return;
+    }
+    // GMGN 运行中降级（js-mcp 2026-11-24，_app WorkerClient.onDegraded）：心跳每 3s 一次，
+    // 超时扣 20 分、≤30 分（约 4 次没心跳）先 workerReBuild(2s)，失败就 changeMode(MAIN_THREAD)，
+    // 之后列表 WS（ws.gmgn.ai/trs_ws）改在页面里开。卡顿 / 后台节流 / 多开的电脑常见。
+    // 旧逻辑把 shared-worker 当终态，降级后 JSON.parse 钩子已被拆、不再装，过滤和宿主数据全失效。
+    if (k === "main-thread-ws") {
+      if (gmgnLiveTransport === "main-thread") return;
+      const wasShared = gmgnLiveTransport === "shared-worker";
+      gmgnLiveTransport = "main-thread";
+      try {
+        if (wasShared) window.__flapFeeGmgnDegradedAt = Date.now();
+      } catch (_dg) {
+        // ignore
+      }
+      writeGmgnTransportAttr();
+      installMainThreadTaps();
       return;
     }
     if (
@@ -193,16 +216,24 @@
       if (gmgnLiveTransport === "shared-worker") return;
       gmgnLiveTransport = "main-thread";
       writeGmgnTransportAttr();
-      try {
-        ensureJsonParseHostFeeHook();
-      } catch (_jp) {
-        // ignore
-      }
-      try {
-        installTaxRecvMainThreadHooks();
-      } catch (_mt) {
-        // ignore
-      }
+      installMainThreadTaps();
+    }
+  }
+
+  /** MAIN_THREAD：宿主数据走 JSON.parse 钩子；开了过滤再装过滤钩子（同一个 JSON.parse 包装里也收宿主数据）。 */
+  function installMainThreadTaps() {
+    if (!isFeePageContext()) return;
+    try {
+      ensureJsonParseHostFeeHook();
+    } catch (_jp) {
+      // ignore
+    }
+    if (!anyFilterEnabled()) return;
+    taxRecvWantMainThreadHooks = true;
+    try {
+      installTaxRecvNetworkHooks();
+    } catch (_mt) {
+      // ignore
     }
   }
 
@@ -220,6 +251,11 @@
     } catch (_tr) {
       // ignore
     }
+  }
+
+  /** GMGN 战壕 WS 只在 MAIN_THREAD 模式下由页面自己开；SharedWorker 模式开在 Worker 里。 */
+  function isGmgnTrenchPageWsUrl(url) {
+    return /\/\/ws\.gmgn\.ai\/trs_ws/i.test(String(url || ""));
   }
 
   function shouldHookWsUrl(url) {
@@ -3868,6 +3904,23 @@
     if (!data || typeof data !== "object") return;
     if (pumpRankDataSeen.has(data)) return;
     pumpRankDataSeen.add(data);
+    // columns-fields-v2：{ columns:{ NewCreations|Completing|Completed:{ kind, data|additions } } }
+    if (data.columns && typeof data.columns === "object") {
+      for (const key of ["NewCreations", "Completing", "Completed"]) {
+        const col = data.columns[key];
+        if (!col || typeof col !== "object") continue;
+        if (Array.isArray(col.data)) {
+          const mode = col.data.length >= 8 ? "index" : "full";
+          for (let j = 0; j < col.data.length; j += 1) ingestGmgnTokenLike(col.data[j], mode);
+        }
+        if (Array.isArray(col.additions)) {
+          for (let j = 0; j < col.additions.length; j += 1) {
+            const a = col.additions[j];
+            if (a && a.data) ingestGmgnTokenLike(a.data, "full");
+          }
+        }
+      }
+    }
     const cols = [
       "newCreations",
       "new_creation",
@@ -4532,10 +4585,284 @@
     return 0;
   }
 
+  // ---------- GMGN pumpRank-mix「columns-fields-v2」（js-mcp 2026-11-24） ----------
+  // res.payload.data.columns.NewCreations =
+  //   { kind:"full", seq, data:[token…] }
+  //   { kind:"patch", seq, baseSeq, additions:[{mode,data}], updates:[{id,set}],
+  //     removals:[id], order:{ targetLen, replaces:[{i,id}] }, observations:[{id}] }
+  // id = `${address}-bsc`。旧版 newCreations.frame 解析认不出这层，过滤和宿主数据都失效。
+  const NC_V2_RECENT_MAX = 120;
+  const ncV2 = {
+    order: /** @type {string[]} */ [],
+    tokens: /** @type {Map<string, object>} */ new Map(),
+    /** 刚离开 order 的卡：回到 order 却不带 additions 时用它补真实数据（不留空卡）。 */
+    recent: /** @type {Map<string, object>} */ new Map(),
+    /** 宿主现在手里的 id（过滤后发给宿主的 order） */
+    hostIds: /** @type {Set<string>} */ new Set(),
+    /** 当前被藏的 id（只为新藏的记样本，避免每帧刷满 40 条样本环） */
+    hiddenIds: /** @type {Set<string>} */ new Set(),
+    ready: false
+  };
+  const ncV2Seen = new WeakSet();
+
+  function ncV2RowToken(row) {
+    return unwrapGmgnTokenRow(row) || row;
+  }
+
+  function ncV2RowId(row) {
+    const tok = ncV2RowToken(row);
+    return tok && typeof tok === "object" ? ncItemId(tok, (row && row.__key) || tok.__key) : "";
+  }
+
+  function ncV2Addr(id, tok) {
+    return gmgnAddr(tok) || addrFromPatchId(id);
+  }
+
+  function ncV2Hidden(id) {
+    const tok = ncV2.tokens.get(id);
+    const addr = ncV2Addr(id, tok);
+    if (!addr) return false;
+    if (gmgnStickyHide(addr, tok && tok.__ncV2Stub ? null : tok)) {
+      ncKeepPool.delete(addr);
+      return true;
+    }
+    return false;
+  }
+
+  function ncV2Remember(id, tok) {
+    if (!id || !tok || tok.__ncV2Stub) return;
+    ncV2.recent.delete(id);
+    ncV2.recent.set(id, tok);
+    while (ncV2.recent.size > NC_V2_RECENT_MAX) {
+      ncV2.recent.delete(ncV2.recent.keys().next().value);
+    }
+  }
+
+  function ncV2NoteHidden(hidden, channel) {
+    for (const id of hidden) {
+      if (ncV2.hiddenIds.has(id)) continue;
+      const tok = ncV2.tokens.get(id);
+      noteRemovedSample(ncV2Addr(id, tok), tok && !tok.__ncV2Stub ? gmgnTal(tok) : null, channel);
+    }
+    ncV2.hiddenIds = new Set(hidden);
+  }
+
+  function ncV2ApplyFull(col) {
+    const order = [];
+    const tokens = new Map();
+    const rows = Array.isArray(col.data) ? col.data : [];
+    for (let i = 0; i < rows.length; i += 1) {
+      const id = ncV2RowId(rows[i]);
+      if (!id || tokens.has(id)) continue;
+      order.push(id);
+      tokens.set(id, ncV2RowToken(rows[i]));
+    }
+    for (const [id, tok] of ncV2.tokens) if (!tokens.has(id)) ncV2Remember(id, tok);
+    ncV2.order = order;
+    ncV2.tokens = tokens;
+    ncV2.ready = true;
+  }
+
+  /**
+   * 按 Worker 语义喂影子；失败返回 false（调用方只按 hideAddrSet 剥这一帧）。
+   * order.replaces 是满的（实测每帧 0..targetLen-1 全给）时可从这一帧自愈；
+   * 影子里没有、最近离开表里也没有的 id 才记占位（只按 hideAddrSet 判）。
+   */
+  function ncV2ApplyPatch(col) {
+    const ord0 = col.order;
+    const dense =
+      ord0 &&
+      Array.isArray(ord0.replaces) &&
+      Number(ord0.targetLen) >= 0 &&
+      ord0.replaces.length === Number(ord0.targetLen);
+    if (!ncV2.ready && !dense) return false;
+    // 失败后自愈也保留旧 tokens：被藏的卡仍有 s_tal，白名单放行照常工作。
+    const tokens = new Map(ncV2.tokens);
+    const adds = Array.isArray(col.additions) ? col.additions : [];
+    for (let i = 0; i < adds.length; i += 1) {
+      const a = adds[i];
+      const tok = a && a.data ? ncV2RowToken(a.data) : null;
+      const id = tok ? ncV2RowId(a.data) : "";
+      if (!id) continue;
+      const prev = tokens.get(id) || ncV2.recent.get(id);
+      const full = !a.mode || a.mode === "all";
+      tokens.set(id, full || !prev || prev.__ncV2Stub ? tok : { ...prev, ...tok });
+    }
+    const ups = Array.isArray(col.updates) ? col.updates : [];
+    for (let i = 0; i < ups.length; i += 1) {
+      const u = ups[i];
+      const id = u && String(u.id || "");
+      if (!id || !u.set || typeof u.set !== "object") continue;
+      const prev = tokens.get(id);
+      if (prev && !prev.__ncV2Stub) tokens.set(id, { ...prev, ...u.set });
+    }
+    const rems = Array.isArray(col.removals) ? col.removals : [];
+    for (let i = 0; i < rems.length; i += 1) {
+      const id = String(rems[i] || "");
+      ncV2Remember(id, tokens.get(id));
+      tokens.delete(id);
+    }
+    let order = ncV2.ready ? ncV2.order.slice() : [];
+    const ord = col.order;
+    if (ord && typeof ord === "object") {
+      const tl = Number(ord.targetLen);
+      if (!Number.isFinite(tl) || tl < 0) return false;
+      if (tl < order.length) order.length = tl;
+      else for (let i = order.length; i < tl; i += 1) order[i] = "";
+      const reps = Array.isArray(ord.replaces) ? ord.replaces : [];
+      for (let i = 0; i < reps.length; i += 1) {
+        const idx = Number(reps[i] && reps[i].i);
+        const id = String((reps[i] && reps[i].id) || "");
+        if (!Number.isFinite(idx) || idx < 0 || idx >= tl || !id) return false;
+        order[idx] = id;
+      }
+    } else {
+      order = order.filter((id) => tokens.has(id));
+    }
+    for (let i = 0; i < order.length; i += 1) {
+      const id = order[i];
+      if (!id) return false;
+      if (tokens.has(id)) continue;
+      const back = ncV2.recent.get(id);
+      if (back) {
+        tokens.set(id, back);
+        continue;
+      }
+      if (!dense) return false;
+      tokens.set(id, { __ncV2Stub: true, address: addrFromPatchId(id) });
+    }
+    const keep = new Set(order);
+    for (const [id, tok] of [...tokens]) {
+      if (keep.has(id)) continue;
+      ncV2Remember(id, tok);
+      tokens.delete(id);
+    }
+    if (!ncV2.ready) ncV2.hostIds = new Set(order);
+    ncV2.order = order;
+    ncV2.tokens = tokens;
+    ncV2.ready = true;
+    return true;
+  }
+
+  /**
+   * 影子对不上的那一帧：不重写 order。新增行按自己的 s_tal 判（并记进 recent，
+   * 下一帧自愈时有真实数据，不会变成只认 hideAddrSet 的占位）；更新 / 观测只剥 hideAddrSet 命中的。
+   */
+  function ncV2StripKnownHidden(col) {
+    const isHid = (id) => {
+      const a = addrFromPatchId(id);
+      return Boolean(a) && hideAddrSet.has(a);
+    };
+    let n = 0;
+    if (Array.isArray(col.additions)) {
+      const before = col.additions.length;
+      col.additions = col.additions.filter((a) => {
+        const row = a && a.data;
+        const id = ncV2RowId(row);
+        if (!id) return true;
+        const tok = ncV2RowToken(row);
+        if (!a.mode || a.mode === "all") ncV2Remember(id, tok);
+        const addr = gmgnAddr(tok) || addrFromPatchId(id);
+        return !(addr && gmgnStickyHide(addr, tok));
+      });
+      n += before - col.additions.length;
+    }
+    if (!hideAddrSet.size) return n;
+    if (Array.isArray(col.updates)) col.updates = col.updates.filter((u) => !isHid(String(u && u.id)));
+    if (Array.isArray(col.observations)) {
+      col.observations = col.observations.filter((o) => !isHid(String(o && o.id)));
+    }
+    return n;
+  }
+
+  function filterNcColumnV2InPlace(col) {
+    if (!col || typeof col !== "object" || ncV2Seen.has(col)) return 0;
+    ncV2Seen.add(col);
+    const kind = String(col.kind || "").toLowerCase();
+    if (kind === "full" || (Array.isArray(col.data) && !col.order)) {
+      ncV2ApplyFull(col);
+      const rows = Array.isArray(col.data) ? col.data : [];
+      const hidden = new Set();
+      for (let i = 0; i < ncV2.order.length; i += 1) {
+        if (ncV2Hidden(ncV2.order[i])) hidden.add(ncV2.order[i]);
+      }
+      // 写回原始行（保持宿主期望的包装形状），只去掉被藏的。
+      const kept = rows.filter((row) => {
+        const id = ncV2RowId(row);
+        return !id || !hidden.has(id);
+      });
+      ncV2.hostIds = new Set(kept.map((row) => ncV2RowId(row)).filter(Boolean));
+      ncV2NoteHidden(hidden, "nc-v2-full");
+      if (hidden.size > 0) col.data = kept;
+      noteNcAfter("v2-full", hidden.size, { kind: 2, data: kept, targetLen: kept.length });
+      return hidden.size;
+    }
+    if (kind !== "patch") return 0;
+    if (!ncV2ApplyPatch(col)) {
+      ncV2.ready = false;
+      const stripped = ncV2StripKnownHidden(col);
+      noteNcAfter("v2-patch-unready", stripped, { kind: 1 });
+      return stripped;
+    }
+    const hidden = new Set();
+    for (let i = 0; i < ncV2.order.length; i += 1) {
+      if (ncV2Hidden(ncV2.order[i])) hidden.add(ncV2.order[i]);
+    }
+    const filtered = ncV2.order.filter((id) => !hidden.has(id));
+    const filteredSet = new Set(filtered);
+    // 只为「该藏」的卡补 removals；正常离开 order 的卡交给宿主自己的 order/removals 处理，
+    // 不然它之后只靠 order 回来时宿主没数据，会出空卡。
+    const extraRemovals = [...ncV2.hostIds].filter((id) => {
+      if (filteredSet.has(id)) return false;
+      if (hidden.has(id)) return true;
+      const a = addrFromPatchId(id);
+      return Boolean(a) && hideAddrSet.has(a);
+    });
+    // 只有完整行（mode=all）才算「宿主本帧拿到了数据」；部分字段的 addition 仍要补完整行。
+    const addIds = new Set(
+      (Array.isArray(col.additions) ? col.additions : [])
+        .filter((a) => a && (!a.mode || a.mode === "all"))
+        .map((a) => ncV2RowId(a && a.data))
+        .filter(Boolean)
+    );
+    // 宿主没拿过数据、现在要显示的（白名单放行 / 从过滤里放出来）→ 补 additions。
+    const missingData = filtered.filter((id) => !ncV2.hostIds.has(id) && !addIds.has(id));
+    const changed = hidden.size > 0 || extraRemovals.length > 0 || missingData.length > 0;
+    ncV2.hostIds = filteredSet;
+    ncV2NoteHidden(hidden, "nc-v2-patch");
+    if (!changed) return 0;
+    if (Array.isArray(col.additions)) {
+      col.additions = col.additions.filter((a) => !hidden.has(ncV2RowId(a && a.data)));
+    } else {
+      col.additions = [];
+    }
+    for (let i = 0; i < missingData.length; i += 1) {
+      const tok = ncV2.tokens.get(missingData[i]);
+      if (tok && !tok.__ncV2Stub) col.additions.push({ mode: "all", data: tok });
+    }
+    if (Array.isArray(col.updates)) col.updates = col.updates.filter((u) => !hidden.has(String(u && u.id)));
+    if (Array.isArray(col.observations)) {
+      col.observations = col.observations.filter((o) => !hidden.has(String(o && o.id)));
+    }
+    const rems = new Set(Array.isArray(col.removals) ? col.removals : []);
+    for (let i = 0; i < extraRemovals.length; i += 1) rems.add(extraRemovals[i]);
+    col.removals = [...rems];
+    col.order = {
+      ...(col.order && typeof col.order === "object" ? col.order : {}),
+      targetLen: filtered.length,
+      replaces: filtered.map((id, i) => ({ i, id }))
+    };
+    noteNcAfter("v2-patch", hidden.size, { kind: 1, replaces: col.order.replaces, targetLen: filtered.length });
+    return Math.max(1, hidden.size);
+  }
+
   /** 与 collectPumpRankData 同一套 newCreations 列；即将打满/已开盘不滤。 */
   function filterPumpRankDataInPlace(data) {
     if (!prefsOn() || !data || typeof data !== "object") return 0;
     let removed = 0;
+    if (data.columns && typeof data.columns === "object" && data.columns.NewCreations) {
+      removed += filterNcColumnV2InPlace(data.columns.NewCreations);
+    }
     const dut = data.dataUpdateType;
     if (
       (dut === 2 || dut === "SNAP_SHOT" || String(dut).toUpperCase() === "SNAP_SHOT") &&
@@ -6052,6 +6379,11 @@
           protocols !== undefined
             ? new OrigWebSocket(url, protocols)
             : new OrigWebSocket(url);
+        try {
+          if (isGmgnTrenchPageWsUrl(url)) noteGmgnTransport("main-thread-ws");
+        } catch (_mtw) {
+          // ignore
+        }
         try {
           if (shouldHookWsUrl(url)) {
             ws.__flapFeeHostFeeWs = HOOK_VER;
@@ -8205,14 +8537,32 @@
               text.indexOf("pumpRank") !== -1 ||
               text.indexOf("newCreations") !== -1 ||
               (text.indexOf("s_tal") !== -1 && text.indexOf("marketing") !== -1));
+          // 这个包装会顶掉 host-fee 的 JSON.parse 钩子，所以宿主数据也要在这里收。
+          const wantHost =
+            gmgnLiveTransport !== "shared-worker" &&
+            text.length < 800000 &&
+            textMightBeHostFeeFeed(text);
+          const ingestHost = (o) => {
+            if (!wantHost || !o || typeof o !== "object") return;
+            scheduleHostFeeIngest(() => {
+              try {
+                collectHostFeesFromJson(o);
+              } catch (_hf) {
+                // ignore
+              }
+            });
+          };
           if (!mightFilter) {
-            return NativeJSONParse(text, reviver);
+            const plain = NativeJSONParse(text, reviver);
+            ingestHost(plain);
+            return plain;
           }
           try {
             const obj = NativeJSONParse(text);
             if (!obj || typeof obj !== "object") {
               return NativeJSONParse(text, reviver);
             }
+            ingestHost(obj);
             let pumpRemoved = 0;
             try {
               pumpRemoved = filterPumpRankEnvelopeInPlace(obj);
@@ -8352,6 +8702,11 @@
             ? new NativeWebSocket(url, protocols)
             : new NativeWebSocket(url);
         try {
+          if (isGmgnTrenchPageWsUrl(url)) noteGmgnTransport("main-thread-ws");
+        } catch (_mtw) {
+          // ignore
+        }
+        try {
           const hook = shouldHookWsUrl(url);
           ws.__flapFeeFilterWs = hook ? 1 : 0;
           ws.__flapFeeWsChannel = /sgws/i.test(String(url || ""))
@@ -8374,7 +8729,15 @@
       }
       FlapWebSocket.__flapFeeTaxRecv = HOOK_VER;
 
-      if (nativeWsOm && typeof nativeWsOm.set === "function") {
+      // 主线程钩子可能因降级 / SPA 再装一次：原型只包一层，否则 onmessage getter 拿到的是包装函数。
+      const wsProtoDone = NativeWebSocket.prototype.__flapFeeTaxRecvWsProto === HOOK_VER;
+      try {
+        if (!wsProtoDone) NativeWebSocket.prototype.__flapFeeTaxRecvWsProto = HOOK_VER;
+      } catch (_mark) {
+        // ignore
+      }
+
+      if (!wsProtoDone && nativeWsOm && typeof nativeWsOm.set === "function") {
         try {
           Object.defineProperty(NativeWebSocket.prototype, "onmessage", {
             configurable: true,
@@ -8401,7 +8764,7 @@
 
       try {
         const nativeAdd = NativeWebSocket.prototype.addEventListener;
-        if (typeof nativeAdd === "function") {
+        if (!wsProtoDone && typeof nativeAdd === "function") {
           NativeWebSocket.prototype.addEventListener = function (type, fn, opt) {
             if (
               type === "message" &&
@@ -8679,11 +9042,32 @@
 
   function ensureTaxRecvRuntime(reason) {
     syncGmgnShareWorkerMode();
+    // 主线程模式：宿主数据钩子与过滤无关，SPA 从非税币页切进来也要补上（过滤关着时下面会 return）。
+    if (gmgnLiveTransport === "main-thread" && isFeePageContext()) {
+      try {
+        ensureJsonParseHostFeeHook();
+      } catch (_hostJp) {
+        // ignore
+      }
+    }
     if (!anyFilterEnabled() || !isFeePageContext()) {
       try {
         unwrapJsonParseTaxRecvHook();
       } catch (_un) {
         // ignore
+      }
+      // 拆了就清标记，之后切回税币页 / 再开过滤能重新装。
+      try {
+        window.__flapFeeTaxRecvMainThread = 0;
+      } catch (_mtf) {
+        // ignore
+      }
+      if (gmgnLiveTransport === "main-thread" && isFeePageContext()) {
+        try {
+          ensureJsonParseHostFeeHook();
+        } catch (_hostJp2) {
+          // ignore
+        }
       }
       return;
     }
@@ -8806,6 +9190,21 @@
     jsonParseHookTimer = window.setTimeout(() => {
       jsonParseHookTimer = 0;
       if (gmgnLiveTransport === "shared-worker") return;
+      // GMGN 的 SharedWorker 脚本已加载、却没经过我们的构造器：page-hook 注入晚于 Worker 创建
+      // （扩展多 / 机器慢时的兜底注入）。port 绑不上，只剩 fiber 兜底。只留诊断标记，便于用户反馈时排查。
+      try {
+        const swLoaded = performance
+          .getEntriesByType("resource")
+          .some((e) => /\/workers\/gmgn/i.test(String(e.name || "")));
+        if (swLoaded) {
+          window.__flapFeeGmgnSwUnbound = Date.now();
+          document.documentElement?.setAttribute("data-flap-gmgn-sw-unbound", "1");
+          // 列表数据在 Worker 里，页面 JSON.parse 收不到，不装无用的主线程钩子。
+          return;
+        }
+      } catch (_sw) {
+        // ignore
+      }
       noteGmgnTransport("main-thread-timeout");
     }, 1800);
   }

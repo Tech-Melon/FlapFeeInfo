@@ -106,8 +106,16 @@ page-hook 钩的宿主传输（都在 `installHostFeeNetworkHooks()` 下）：
 | 传输 | 钩子 | 宿主 |
 |------|------|------|
 | XHR / fetch | `installHostFeeXhrTap` | GMGN `trenches_rank`、`token_fee_info`、`mutil_window_token_security_launchpad`、搜索；Debot REST |
-| SharedWorker port | `installHostFeePortTap` | GMGN 战壕实时推送（`/_next/static/workers/gmgn.*.js`，`pumpRank-mix` 插件消息，`newCreations` / `completing` / `completed` 三列的 `frame.replaces[]`）；Debot `sharedSocketWorker` |
+| SharedWorker port | `installHostFeePortTap` | GMGN 战壕实时推送（`/_next/static/workers/gmgn.*.js`，`pumpRank-mix` 插件消息）。2026-11-24 起是 `columns-fields-v2`：`res.payload.data.columns.{NewCreations,Completing,Completed}`，`kind:"full"` 带 `data[]`，`kind:"patch"` 带 `additions[{mode,data}] / updates[{id,set}] / removals[id] / order{targetLen,replaces[{i,id}]}`，id=`${address}-bsc`；过滤走 `filterNcColumnV2InPlace`（v2 影子 `ncV2`）。旧格式 `newCreations.frame.replaces[]` 解析仍保留；Debot `sharedSocketWorker` |
 | WebSocket | `installHostFeeWebSocketTap` | 主线程直连（GMGN 设了 `disableShareWorker`、或 Debot portal-ws） |
+
+GMGN 列表数据的三种接收方式（js-mcp 2026-11-24，`_app` 的 `Signal.initMode` / `WorkerClient.onDegraded`）：
+
+1. **SharedWorker**（桌面默认）：WSS（`ws.gmgn.ai/trs_ws`、`/v2/ws`）开在 Worker 里，页面只收 port 消息 `pumpRank-mix`（`columns-fields-v2`）。page-hook 靠替换 `window.SharedWorker` 构造器绑 port；构造器没被替换前 Worker 已经建好时绑不上（`data-flap-gmgn-sw-unbound="1"`），只剩 fiber 兜底。
+2. **启动即主线程**：手机 UA（android/iphone/ipad/huaweibrowser…）或 `localStorage.disableShareWorker="true"`。WSS 开在页面，页面里跑同一套 Worker 代码，消息走假 port（不是 MessagePort），原始帧是 `{channel:"trenches_delta", data:{fid, v, t:[{a,c,f}]}}`，fid `bsc_nc_*` / `bsc_ncp_*` / `bsc_cp_*`；过滤和宿主数据走 JSON.parse 钩子。
+3. **运行中降级**：心跳 3s 一次，超时扣 20 分，≤30 分时先 `workerReBuild(2s)`，失败就切主线程（`disableShareWorkerDegrade="true"` 可关掉降级）。page-hook 以页面里出现 `trs_ws` 连接为准（`noteGmgnTransport("main-thread-ws")`），会覆盖 shared-worker 状态并补装主线程钩子；`window.__flapFeeGmgnDegradedAt` 记降级时间。
+
+排查用户「我这里不正常」先看 `<html data-flap-gmgn-transport>` 和 `data-flap-gmgn-sw-unbound`。
 | React fiber | `installDomHostFeeReactTap` | DOM 卡片上的 `item` / `data` props，补网络钩子漏掉的卡 |
 
 解析入口：`collectHostFeesFromJson()` → GMGN `gmgnHostFeeFromItem()`（读 `gmgnTal()`，已剔除 Flap 平台抽成）/ Debot `debotHostFeeFromRow()` → `finalizeHostFeeEntry()` → 合批 postMessage（每批 ≤48 条）。
@@ -360,6 +368,7 @@ Flap 命名基金（`isVault=false`，收款地址在 v1 `marketingWallet`、v2 
 - Worker：isolate 内存 + KV；**缺 label/bps/top_payout_* 的旧条目当 miss**；vault gift 仍 `top_payout≠dividend_token` 的旧 →BNB 行当 miss；回源结果用 `ctx.waitUntil()` 异步落 KV（**仅 miss 的 key**，已命中不重写）；18s 回源预算内对瞬时 429/5xx/网络失败及部分 `missing` 做 200/500ms 温和重试，且只重试缺失 token
 - 后端 SQLite：同上 stale gift 规则强制回源
 - Genius 空 unknown（税 0）先退避再封顶：后端第 N 次空结果距今满 `FLAP_FEE_GENIUS_EMPTY_RECHECK_DELAYS`（默认 `15,60,300` 秒）第 N 档才回源，3 次重查后仍空就按普通 6h 负缓存。计数 `genius_empty_n` 随 payload 进 SQLite（重启接着数）；`genius_rev` 是工厂白名单指纹（`fee_mode.GENIUS_RULES_REV`），加新工厂部署后旧负缓存满 15s 即重查。2026-11-24 v3 工厂未识别时没有这道闸：6 小时 5.3 万次链上重查，`wait_chain` 12 槽占满，Flap 新币跟着降级成 pending（⏳待加载）、319 次 503
+- **空结果 ≠ 请求失败**（后端）：空结果是链上确定答案（没有曲线 / 工厂不在白名单 / 合约 revert），会缓存并按上一条计次数。请求失败（RPC 超时、5xx、整批异常，以及「有曲线却读不到 `factory()` / 必需 view」「v3 `policyOf` 瞬时失败」）没有答案：不写缓存、不计空结果次数、不重置计数，只按 token 退避 `FLAP_FEE_CHAIN_FAIL_BACKOFF`（默认 `2,5,15,30,60` 秒，封顶 60s、不放弃），退避期内该 token 回 pending / missing。`/health` 的 `chain_fail_backoff_tokens` 是当前在退避里的数量
 - Genius v3 创作者税有期限（`feeDuration`，至少 1 年）：结果带 `creator_expires_at`，后端 / Worker 过期即当 miss 回源（到期后只剩平台费）。插件本地缓存不看这个字段（30 天内会随 `/modes` 刷新）
 - Genius v3 买卖税可不同：份额分母是「平台 + max(买, 卖)」，插件 `geniusShareToTokenBps` 同口径
 - Genius（`platform=geniusfun`、非 unknown）缺 `creator_recv_kind` 键：后端 / Worker / 插件 `chrome.storage` 三层都当 miss（等同删除，谁看谁回源，不主动扫）

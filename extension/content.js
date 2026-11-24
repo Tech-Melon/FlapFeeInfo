@@ -8952,7 +8952,7 @@
   }
 
   // 必须等于 page-hook.js HOOK_VER（打包脚本会校验），否则每页都会重复注入 page-hook。
-  const PAGE_HOOK_VER = "283";
+  const PAGE_HOOK_VER = "284";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -15054,7 +15054,11 @@
   }
 
   function isGeniusModesSettled(entry) {
-    if (!entry || !isGeniusFeeEntry(entry) || entry.__modesSettled !== true) return false;
+    if (!entry || !isGeniusFeeEntry(entry)) return false;
+    // 「只有平台费」只可能来自 /modes（platform_bps=10000）。chrome.storage 恢复的条目没有
+    // __modesSettled，不认它会在刷新后一直 ⏳，而缓存命中又不再打 /modes。
+    if (geniusPlatformOnly(entry)) return true;
+    if (entry.__modesSettled !== true) return false;
     // 空 unknown（含 chain revert）都不能定案，等 GMGN host-fee。
     if (isGeniusEmptyUnknown(entry)) return false;
     return true;
