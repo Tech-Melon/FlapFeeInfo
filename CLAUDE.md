@@ -273,7 +273,7 @@ Genius.fun 尾号（不进上面这条，避免走 Flap Helper）：
 
 Long.xyz 调研（js-mcp 2026-09）：地址多为 `…1e18` 靓号；Uniswap v4 hook 动态费（`pool_type: v4_rehype`，`fee_params` 从高衰减到 ~1.6%），代币本身 `buy_tax/sell_tax=0`；GMGN 列表与 `token_fee_info` **都没有 `tax_allocation`**，所以当前一律不画。手续费去向只在 Long.xyz 自家 API（`token_fee_receiver_address`，默认=创建者），按约定不用。底池名来自 GMGN `quotes.json`（如 `0xc0d6…`→META）。Long.xyz 也在 Base，只接 Robinhood。
 
-Worker / Python **只在插件已标 `geniusfun` 时** 放行非尾号 CA，并链上校验 `curve.factory()` ∈ { `0x78EAE953…8138afe31`（v1，原生 BNB/BNCB）, `0x37ee8aee…79928a37`（v2，AMCB/AGPUB 等代币报价，同 owner `0xe7c7…fd98`）}。
+Worker / Python **只在插件已标 `geniusfun` 时** 放行非尾号 CA，并链上校验 `curve.factory()` ∈ { `0x78EAE953…8138afe31`（v1，原生 BNB/BNCB）, `0x37ee8aee…79928a37`（v2，AMCB/AGPUB 等代币报价，同 owner `0xe7c7…fd98`）, `0x52609d5d…0878ab67`（v3 `GeniusConfigurableFactory`，2026-11，见 4.2）}。
 
 尾号 `6666` 只是 Genius 快路径：宿主明确给了别的 launchpad（如 Debot `cheesepad_melt`）时 page-hook 记入 not-genius 集合并通知 content，**不画、不打 `/modes`**。`launchpad=brew` 同样不当 Genius：用 GMGN 画底池/分配，**不打 `/modes`**。尾号 `4444` 与 brew **不进**上面的 Flap/Four 正则，也不进 Worker / Python。
 
@@ -283,7 +283,9 @@ Worker / Python **只在插件已标 `geniusfun` 时** 放行非尾号 CA，并�
 - 方法：`getTaxTokenInfoV2(address)`
 - 实现：`server/fee_mode.py` → `get_tax_allocation()` / 兼容 `get_fee_mode()`
 - Genius.fun：`get_tax_allocations()` 整批 **1 次 eth_call**（Flap Helper + Four views + GeniusSnap state-override）。Snap 失败才回退 2 次 Multicall3。主文案 `🎁→GMEB` / `👨‍🍳→BNB`（Flap 箭头，比例只在 tooltip）
-- Genius 创作者份额（税内 12.5%）收款人 = 曲线 `deployer()`，发币人 = 代币 `deployer()`（Snap 每枚 9 字）。`creator_recv_kind`：`launcher`（发币人自己）/ `platform`（`0xe7c7…fd98`，份额并进 `platform_bps`=3750，`market_bps`=0）/ `other`（发币时填的别的地址）。采样 135 枚约 56% / 30% / 13%，与工厂版本无关。GMGN `s_tal` 的「Dev / 其它」标签不可信（两种都标反过），插件只认 `/modes`。主文案链上确认 Dev 有份才在 🎁 旁并排 👨‍🍳：`🎁👨‍🍳→GENI`；归平台是 `🎁→GENI`
+- Genius 创作者份额（税内 12.5%）收款人 = 曲线 `deployer()`，发币人 = 代币 `deployer()`（Snap 前 9 字，v3 共 22 字）。`creator_recv_kind`：`launcher`（发币人自己）/ `platform`（`0xe7c7…fd98`，份额并进 `platform_bps`=3750，`market_bps`=0）/ `other`（发币时填的别的地址）。采样 135 枚约 56% / 30% / 13%，与工厂版本无关。GMGN `s_tal` 的「Dev / 其它」标签不可信（两种都标反过），插件只认 `/modes`。主文案链上确认 Dev 有份才在 🎁 旁并排 👨‍🍳：`🎁👨‍🍳→GENI`；归平台是 `🎁→GENI`
+- Genius v3（js-mcp 2026-11，工厂 `0x52609d5d…ab67`，源码在 Sourcify）：代币 / 曲线（`GeniusConfigurableCurve`）/ `GeniusEconomicsProcessor` 都是 EIP-1167 克隆。税 = 平台 `platformBps`（0.5%，收款 `0xe7c7…fd98`）+ 创作者 `buyBps`/`sellBps`（0–10%，发币人配）。创作者税先扣 integrator 抽成，再按 `allocation{recipient, burn, rewards, liquidity}`（和 = 10000）分：recipient → 👨‍🍳（`recipients[]` 最多 10 个钱包；有 `templateVault` / `revenueTemplate.factory` 时记 🎁），rewards → 💎（分红币 `rewardAsset`），burn → 🔥，liquidity → 💧。曲线没有 `toFoundation()`，`feeBps` 只是平台费；全量策略走 `factory.policyOf(token)`。Snap 每枚 22 字（第 9–21 字是 v3 策略），份额仍按占总税 bps，平台 + integrator 进 `platform_bps`。创作者税为 0 / `expiresAt` 已过：`mode=unknown` 但买卖税 = 平台费、`platform_bps=10000`，三层都当定案；插件只画底池。开盘 15 秒防狙击税（99% 递减）不进分配
+- GMGN 对 v3 的 `tax_allocation` 按总税拆：`dividend 0.667 + marketing 0.333`（`marketing_recipients` 仅 `Genius Platform 0xe7c7…`）。page-hook `gmgnGeniusSplitFromTal` 把平台剔掉，插件悬浮窗按「1 − 其它份额」还原平台行
 
 分类规则（`build_allocation`）：
 
@@ -357,6 +359,9 @@ Flap 命名基金（`isVault=false`，收款地址在 v1 `marketingWallet`、v2 
 - 后端：内存 + SQLite `payload` JSON；**无完整 payload 的旧行当 miss**；连接按事务显式关闭，过期行默认每 6 小时清理，短批次响应缓存上限 128；HTTP 槽位满时默认短等 250ms 再决定是否返回 503
 - Worker：isolate 内存 + KV；**缺 label/bps/top_payout_* 的旧条目当 miss**；vault gift 仍 `top_payout≠dividend_token` 的旧 →BNB 行当 miss；回源结果用 `ctx.waitUntil()` 异步落 KV（**仅 miss 的 key**，已命中不重写）；18s 回源预算内对瞬时 429/5xx/网络失败及部分 `missing` 做 200/500ms 温和重试，且只重试缺失 token
 - 后端 SQLite：同上 stale gift 规则强制回源
+- Genius 空 unknown（税 0）先退避再封顶：后端第 N 次空结果距今满 `FLAP_FEE_GENIUS_EMPTY_RECHECK_DELAYS`（默认 `15,60,300` 秒）第 N 档才回源，3 次重查后仍空就按普通 6h 负缓存。计数 `genius_empty_n` 随 payload 进 SQLite（重启接着数）；`genius_rev` 是工厂白名单指纹（`fee_mode.GENIUS_RULES_REV`），加新工厂部署后旧负缓存满 15s 即重查。2026-11-24 v3 工厂未识别时没有这道闸：6 小时 5.3 万次链上重查，`wait_chain` 12 槽占满，Flap 新币跟着降级成 pending（⏳待加载）、319 次 503
+- Genius v3 创作者税有期限（`feeDuration`，至少 1 年）：结果带 `creator_expires_at`，后端 / Worker 过期即当 miss 回源（到期后只剩平台费）。插件本地缓存不看这个字段（30 天内会随 `/modes` 刷新）
+- Genius v3 买卖税可不同：份额分母是「平台 + max(买, 卖)」，插件 `geniusShareToTokenBps` 同口径
 - Genius（`platform=geniusfun`、非 unknown）缺 `creator_recv_kind` 键：后端 / Worker / 插件 `chrome.storage` 三层都当 miss（等同删除，谁看谁回源，不主动扫）
 
 - 插件：`chrome.storage` key `flapFeeInfo.modeCache.v5`（30 天，最多 800 条）
@@ -431,6 +436,8 @@ Debot 混合战壕按**卡 href** 认链（`/token/bsc/` vs `/token/robinhood/`�
 | Genius `0x58bbeed8…5e91`（创作者份额=发币人 `0x7c85…`，GMGN 误标「其它」） | `🪙GENIUS \| 🎁👨‍🍳→GENI`；tooltip 👨‍🍳 Dev（发币人）0.25% |
 | Genius `0x6c0b0084…585c`（创作者份额归平台 `0xe7c7…`，GMGN 误标「Dev」） | `🪙GENIUS \| 🎁→GENI`（无 👨‍🍳）；tooltip 平台 0.75%（含创作者份额） |
 | Genius `0x5562a7f1…25b2`（创作者收款 `0x6b77…`≠发币人） | `🪙GENIUS \| 🎁👨‍🍳→GENI`；tooltip「创作者（非发币人地址）」 |
+| GMGN Genius v3 `0xfc6cb23ea6f3e334f416b7ef2307f8a8ee8a6666`（创作者 1% 全给持有人分红，ANTB 池） | `🪙ANTB \| 💎→ANTB`；悬浮窗 💎 1% + 平台 0.5%，买卖税 1.5% / 1.5%；`/modes` `dividend_bps=6667`、`platform_bps=3333` |
+| GMGN Genius v3 `0x846ad62ecb2e9862a95298cd4e8b09adc83b6666`（创作者税 0） | 只画 `🪙ANTB`，不画 ❓️ / ⏳；`/modes` 回 `unknown` + 买卖税 0.5%、`platform_bps=10000`，之后不再重打 |
 | GMGN Genius `0x61f5e76c…0d07` GENGO 已迁 Pancake | 主文案 `🪙BNB \| 👨‍🍳→BNB`（62.5% 最大）；`🔥12.5%` 只在 tooltip；曲线 HNSR 仍 `🪙BNCB \| 👨‍🍳→BNCB` |
 | GMGN Flap `0x7b5fba98…7777` 混选 HOOD | 空 qa 是 BSC 默认 BNB，禁止 `🦋WETH \| 💎→BNB` |
 | GMGN Flap `0xabeb19a5…7777` 人生好物 | 底池 `🦋BNCB`；分红是本币，徽章 `🦋BNCB \| 💎→人生好物`（或无发射名时 `🦋BNCB \| 💎`），禁止 `💎→BNCB` |
@@ -1103,6 +1110,7 @@ python tools/ctl.py watchdog-run
  - `0.8.250`：`fee-core.js` 共享纯逻辑（平台注册表 + 单位换算/纯金库/篮子/尾号规则/复用状态机），`tests/` 17 项样本+结构守护，打包前必跑；平台只在 page-hook 判定，content 以 `entry.platform` 为准；金库屏蔽「纯金库不屏蔽」选项（`keepPureTaxVault`）；Long.xyz 预留（GMGN 带 `tax_allocation` 才画，点击 app.long.xyz）；厨师/慈善/回流箭头与底池同名（`💛→MRNAB`→`💛→MRNA`）；bootstrap 发金库 prefs 不再丢 `hideGenius`
  - `0.8.251`：资金接收白名单同时认 `marketing_recipients` / Dev / founder。host-fee 与 `/modes` 的 hide-addrs 不再绕过白名单；`hideAddrSet` 在有完整税字段时按当前名单重判，名单变化清空集合。尾号与金库不豁免
  - `0.8.252`：资金接收白名单每条地址可写备注（`allow[].note`，最多 32 字）。备注只给自己看，不参与匹配；只改备注不推页面、不清 `hideAddrSet`
+  - `0.9.6`：Genius v3（`GeniusConfigurableFactory` `0x52609d5d…ab67`）。后端 `GENIUS_FACTORIES` 加 v3，GeniusSnap 22 字（v3 走 `policyOf`），`_build_genius_v3_alloc` 按占总税 bps 出 💎/👨‍🍳/🎁/🔥/💧，平台 + integrator 进 `platform_bps`；创作者税 0 回带税 unknown 当定案。插件 `buildFeeLabel` Genius 分支加 💎/💧，`geniusPlatformOnly` 只画底池并挡宿主全 0 占位，tooltip 平台行按 1 − 其它份额。Worker、page-hook、fee-core 未改
  - `0.9.5`：弹窗「按税收去向屏蔽」合并两区（`flowHide`）。弹窗层换算：`taxRecv.enabled = master && chef`，`vault.enabled = master && 任一金库项`；税收金库三选一 none / mixed（= hideTaxVault + keepPureTaxVault）/ all（= hideTaxVault）。新 key `flapFeeInfo.filterUi.v1` = `{ set, master, chef }`（只给弹窗用）；`set=false` 时按旧设置推导（`deriveFilterUi`）。`scheduleSaveFlow` 一次写三份 key。页面与 page-hook 不变
  - `0.9.4`：宿主事实统一缓存 `hostFacts.v1`（`rememberFlapPlatformCut(token, bps, known)` / `rememberVaultToWallet`）。page-hook 条目带 `flap_cut_known`（剔过平台 / 带收款方 / HTTP 有 `dev_fee`），`vault_to_wallet` 三态（true / false / null=这包没带）；只有确定结果回写。`HOOK_VER` / `PAGE_HOOK_VER` 283
  - `0.9.3`：金库屏蔽 `hideVaultToWallet`（「🎁 其实给钱包」）。只对 🎁 税收金库卡生效：page-hook `gmgnTokenHide` 要求 `gmgnVaultKind=tax` 且 `gmgnVaultPaysWallet(tal, addr)`（`s_tal.vault_factory` → `Core.isSplitVaultFactory`，内置 `0xfab75dc7…52345f` + GMGN localStorage `flap_vault_factory_names_v1` 里 en=Split Vault；按 CA 记住）；host-fee 条目带 `vault_to_wallet`，content `vaultToWalletAddrSet` 做 DOM / 搜索框屏蔽，同样要求徽章是 🎁。独立于 `hideTaxVault`。**徽章不得按代币发 HTTP**（只用宿主推送 / 被动 XHR + `/modes` 批量）；唯一例外是悬浮窗 `probeFlapPlatformCut`：仅悬浮且无份额时问一次 `token_fee_info`，结果存 `chrome.storage` `flapFeeInfo.hostFacts.v1`（有份额 7 天 / 没有 6 小时 / 失败 2 分钟 / 429 全局 60 秒 / 请求中去重）。`deferTokenRetry` 回到「有缓存条目就不退避」；Genius 空 unknown 不进 `UNKNOWN_COOLDOWN_*`。`CORE_VER` 10，`HOOK_VER` / `PAGE_HOOK_VER` 282

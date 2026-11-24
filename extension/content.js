@@ -11124,7 +11124,12 @@
           const headerEntry = resolveEntry(marked);
           if (headerEntry && isHostFeeEntryPending(headerEntry)) return false;
           if (headerEntry && hostFeeStillNeedsModes(headerEntry)) return false;
-          if (headerEntry && isGeniusFeeEntry(headerEntry, marked) && hostFeeAllocationBps(headerEntry) <= 0) {
+          if (
+            headerEntry &&
+            isGeniusFeeEntry(headerEntry, marked) &&
+            hostFeeAllocationBps(headerEntry) <= 0 &&
+            !geniusPlatformOnly(headerEntry)
+          ) {
             return false;
           }
           if (headerEntry && isGmgnHostFeeDomMismatch(card, headerEntry)) return false;
@@ -15069,6 +15074,8 @@
       if (isGeniusModesSettled(entry)) return false;
       if ((Number(entry.gift_bps) || 0) > 0) return false;
       if (!entry.is_vault && (Number(entry.market_bps) || 0) > 0) return false;
+      // v3 持有人分红 / 回流 LP：宿主已给份额，先画，/modes 再补定案。
+      if ((Number(entry.dividend_bps) || 0) > 0 || (Number(entry.lp_bps) || 0) > 0) return false;
       if (isGeniusEmptyUnknown(entry) && isFreshUnknown(entry, entry.address)) {
         return false;
       }
@@ -15090,6 +15097,7 @@
       return false;
     }
     if (isGeniusFeeEntry(entry) && hostFeeAllocationBps(entry) <= 0) {
+      if (geniusPlatformOnly(entry)) return false;
       if (isFreshUnknown(entry, entry.address)) return false;
       return true;
     }
@@ -19141,6 +19149,15 @@
     if (entry.__pons_v2 === true || prev.__pons_v2 === true) {
       return robinhoodHostFeeShouldApply(prev, entry);
     }
+    // Genius v3 链上已定案「只有平台费」：宿主（GMGN 把平台份额剔掉后全 0）不能盖回 ⏳ 再打 /modes。
+    if (
+      !prev.source_host &&
+      geniusPlatformOnly(prev) &&
+      entry.source_host &&
+      hostFeeAllocationBps(entry) <= 0
+    ) {
+      return false;
+    }
     // 链上已回空 unknown，宿主又没有分配（只有 Tax 2%）：盖上去只会变回 ⏳ 并再打 /modes，
     // js-mcp 0x74c7…7777 每 0.6s 一次死循环。Genius 例外（stub 要带 platform 去问曲线）。
     if (
@@ -20618,6 +20635,14 @@
     return 0;
   }
 
+  /** Genius v3 创作者税为 0（或已到期）：/modes 回 platform_bps=10000，税只剩平台费。 */
+  function geniusPlatformOnly(entry) {
+    if (!entry || !isGeniusFeeEntry(entry)) return false;
+    if (hostFeeAllocationBps(entry) > 0) return false;
+    if ((Number(entry.platform_bps) || 0) < 10000) return false;
+    return (Number(entry.buy_tax_bps) || 0) + (Number(entry.sell_tax_bps) || 0) > 0;
+  }
+
   function buildFeeLabel(entry, domQuoteSymbol, token) {
     const prefs = displayPrefs || DEFAULT_DISPLAY_PREFS;
     if (
@@ -20642,6 +20667,9 @@
       const giftBps = effectiveGeniusGiftBps(entry);
       const chefBps = Number(entry.market_bps) || 0;
       const burnBps = Number(entry.deflation_bps) || 0;
+      // Genius v3（2026-11 GeniusConfigurableFactory）：创作者可配持有人分红 / 回流 LP。
+      const holderBps = Number(entry.dividend_bps) || 0;
+      const lpBps = Number(entry.lp_bps) || 0;
       const payout = compactDisplaySymbol(
         geniusDisplayQuote(entry, null, entry.quote_symbol || "", "") ||
           entry.quote_symbol ||
@@ -20649,6 +20677,10 @@
           ""
       );
       const parts = [];
+      if (holderBps > 0 && prefs.holder !== false) {
+        const divSym = compactDisplaySymbol(entry.dividend_symbol || "") || payout;
+        parts.push({ kind: "holder", emoji: "💎", bps: holderBps, payout: divSym });
+      }
       if (giftBps > 0 && prefs.gift !== false) {
         parts.push({ kind: "gift", emoji: GIFT_EMOJI, bps: giftBps });
       }
@@ -20658,7 +20690,12 @@
       if (burnBps > 0 && prefs.burn !== false) {
         parts.push({ kind: "burn", emoji: "🔥", bps: burnBps });
       }
+      if (lpBps > 0 && prefs.lp !== false) {
+        parts.push({ kind: "lp", emoji: "💧", bps: lpBps });
+      }
       if (!parts.length) {
+        // v3 创作者税为 0：只有平台费，链上已定案，只画底池。
+        if (geniusPlatformOnly(entry)) return "";
         if (entry.mode === "unknown" && prefs.unknown !== false) {
           return modeMeta.unknown.fallback;
         }
@@ -20666,6 +20703,11 @@
       }
       parts.sort((a, b) => b.bps - a.bps);
       const lead = parts[0];
+      if (lead.kind === "holder") {
+        const arrowSym = lead.payout || payout;
+        if (prefs.payoutArrow !== false && arrowSym) return `💎→${arrowSym}`;
+        return "💎";
+      }
       // 链上确认 Dev 拿创作者份额时在主段后并排 👨‍🍳（无百分比，共用箭头：都付底池币）
       // `🎁👨‍🍳→GENI`；归平台 / 宿主未确认不补。
       const devMark =
@@ -20909,7 +20951,8 @@
   }
 
   function geniusShareToTokenBps(shareBps, entry) {
-    const tax = Number(entry && entry.buy_tax_bps) || 0;
+    // 后端份额分母是「平台 + max(买, 卖)」（v3 买卖税可不同；v1/v2 两边相等）。
+    const tax = Math.max(Number(entry && entry.buy_tax_bps) || 0, Number(entry && entry.sell_tax_bps) || 0);
     const share = Number(shareBps) || 0;
     if (share <= 0) return 0;
     if (tax <= 0) return share;
@@ -20934,7 +20977,9 @@
     };
     if (genius) {
       const recvKind = geniusCreatorRecvKind(entry);
-      push(GIFT_EMOJI, "gift", effectiveGeniusGiftBps(entry));
+      push("💎", "holder", entry.dividend_bps);
+      const giftShare = effectiveGeniusGiftBps(entry);
+      push(GIFT_EMOJI, "gift", giftShare);
       push(
         "👨‍🍳",
         recvKind === "launcher" ? "creatorDev" : recvKind === "other" ? "creatorOther" : "creator",
@@ -20942,11 +20987,15 @@
       );
       push("🔥", "burn", entry.deflation_bps);
       push("💧", "lp", entry.lp_bps);
+      // 份额都是占总税的 bps：宿主数据没有 platform_bps 时，平台 = 其余部分
+      // （v1/v2 固定 2500；v3 平台 0.5% 占比随创作者税变）。
       const plat = Number(entry.platform_bps);
+      // 金库没有 gift_bps 时 giftShare 就是 market_bps，已含在 hostFeeAllocationBps 里，不能再扣。
+      const rest = 10000 - hostFeeAllocationBps(entry);
       push(
         "🪙",
         recvKind === "platform" ? "platformInclCreator" : "platform",
-        plat > 0 ? plat : 2500
+        plat > 0 ? plat : rest > 0 && rest < 10000 ? rest : 2500
       );
       return rows;
     }
@@ -21046,7 +21095,10 @@
       const giftBps = effectiveGeniusGiftBps(entry);
       const chefBps = Number(entry.market_bps) || 0;
       const burnBps = Number(entry.deflation_bps) || 0;
-      if (giftBps > 0 && giftBps >= chefBps && giftBps >= burnBps) {
+      const holderBps = Number(entry.dividend_bps) || 0;
+      if (holderBps > 0 && holderBps >= giftBps && holderBps >= chefBps && holderBps >= burnBps) {
+        colorClass = "holder";
+      } else if (giftBps > 0 && giftBps >= chefBps && giftBps >= burnBps) {
         colorClass = "gift";
       } else if (chefBps > 0 && chefBps >= burnBps) {
         colorClass = "creator";
@@ -21062,7 +21114,8 @@
     if (
       entry.__poolOnly === true ||
       entry.platform === "four_pool" ||
-      (entry.platform === "brew" && hostFeeAllocationBps(entry) <= 0)
+      (entry.platform === "brew" && hostFeeAllocationBps(entry) <= 0) ||
+      geniusPlatformOnly(entry)
     ) {
       colorClass = "hybrid";
     }
