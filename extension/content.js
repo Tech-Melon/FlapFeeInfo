@@ -368,6 +368,25 @@
   const DEVICE_ID_KEY = "flapFeeInfo.deviceId.v1";
   /** Optional paid key; empty = free mode. Sent as Authorization when set. */
   let licenseAccessKey = "";
+  /**
+   * 0.9.15：chrome.storage 里的授权 key 读完之前不发 /modes。以前刷新时扫卡比 storage 回调快，
+   * 第一批 /modes 不带 key：早先 Worker 回 401 license_required → 整页徽章被清掉；
+   * 现在主域名 WAF 直接拦（403、无 CORS 头，控制台报错）。最多等 2.5s，读失败也放行。
+   */
+  let licensePrefsReady = false;
+  const licensePrefsWaiters = [];
+  function markLicensePrefsReady() {
+    if (licensePrefsReady) return;
+    licensePrefsReady = true;
+    licensePrefsWaiters.splice(0).forEach((resolve) => resolve());
+  }
+  function waitLicensePrefs() {
+    if (licensePrefsReady) return Promise.resolve();
+    return new Promise((resolve) => {
+      licensePrefsWaiters.push(resolve);
+      window.setTimeout(resolve, 2500);
+    });
+  }
   /** Per-install UUID; one license key binds to first device_id (Worker KV). */
   let licenseDeviceId = "";
   /** Worker REQUIRE_LICENSE=1 (from POST /license/verify). */
@@ -15281,6 +15300,7 @@
     if (!isExtensionContextValid()) {
       throw new Error("Extension context invalidated");
     }
+    if (!licensePrefsReady) await waitLicensePrefs();
     if (externalSignal?.aborted) {
       const err = new Error("signal is aborted");
       err.name = "AbortError";
@@ -18287,6 +18307,7 @@
           chrome.storage.local.set({ [DEVICE_ID_KEY]: { id: devId } });
         }
         licenseDeviceId = devId;
+        markLicensePrefsReady();
         void refreshLicenseAccessState("hydrate");
         pushTaxRecvPrefsToPage();
         pushSuffixHidePrefsToPage();
