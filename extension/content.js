@@ -36,8 +36,13 @@
     "div.flex.flex-col.flex-1.overflow-hidden, div.flex.flex-col.flex-1.border-line-100";
   // Stable GMGN surfaces from the live DOM. Prefer these over page-wide wrappers;
   // class-only fallbacks remain below for builds that omit Sentry metadata.
+  // 0.9.11：GMGN 2026-11-24 新构建去掉了全部 data-sentry-* 属性，列 / 卡片改用 data-testid
+  // （trenchesNewCreations / trenchesCompleting / trenchesCompleted、trench-token-card）。两套都认。
   const GMGN_FIXED_TRENCH_ROOT_SELECTOR =
-    '[data-sentry-source-file="PumpSubX.tsx"], [data-sentry-source-file="PumpSubAX.tsx"]';
+    '[data-sentry-source-file="PumpSubX.tsx"], [data-sentry-source-file="PumpSubAX.tsx"], ' +
+    '[data-testid="trenchesNewCreations"], [data-testid="trenchesCompleting"], [data-testid="trenchesCompleted"]';
+  const GMGN_TOKEN_ITEM_SELECTOR =
+    '[data-sentry-source-file="TokenItem.tsx"], [data-testid="trench-token-card"]';
   const GMGN_FIXED_SEARCH_ROOT_SELECTOR =
     '[data-sentry-source-file="SearchModalDetail.tsx"]';
   // GMGN TokenItem 现用 .trenches-tax 包 Tax 芯片；徽章必须 afterend 该节点，
@@ -1557,11 +1562,10 @@
     licenseGateProbePromise = (async () => {
       try {
         const wasAllowed = isBadgeAccessAllowed();
-        const headers = { "Content-Type": "application/json" };
-        if (licenseAccessKey) {
-          headers.Authorization = `Bearer ${licenseAccessKey}`;
-          if (licenseDeviceId) headers["X-Flap-Device-Id"] = licenseDeviceId;
-        }
+        // 0.9.12：简单请求（见 queryModes），key 放 body。
+        const verifyBody = licenseAccessKey
+          ? JSON.stringify({ license_key: licenseAccessKey, device_id: licenseDeviceId || "" })
+          : "{}";
         const delays = licenseAccessKey ? [0, 400, 1200] : [0];
         let res = null;
         let data = null;
@@ -1569,10 +1573,10 @@
           if (delays[i]) {
             await new Promise((resolve) => window.setTimeout(resolve, delays[i]));
           }
-          res = await fetchFlapApi("/license/verify", {
+          res = await fetchFlapApi(licenseAccessKey ? "/license/verify?lic=1" : "/license/verify", {
             method: "POST",
-            headers,
-            body: "{}",
+            headers: { "Content-Type": "text/plain;charset=UTF-8" },
+            body: verifyBody,
             cache: "no-store"
           });
           data = await res.json().catch(() => null);
@@ -2125,7 +2129,13 @@
    */
   function isGmgnTokenTrenchSidebarEl(el) {
     if (!(el instanceof HTMLElement) || !isGmgnTokenPage()) return false;
-    if (!el.closest?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR)) return false;
+    // 列容器认不出时，卡片自带的 data-trenches-token-page（NewCreations / Completed…）也算战壕卡。
+    if (
+      !el.closest?.(GMGN_FIXED_TRENCH_ROOT_SELECTOR) &&
+      !el.closest?.("[data-trenches-token-page]")
+    ) {
+      return false;
+    }
     if (isGmgnHeaderMarkedCard(el) || isGmgnTokenHeaderCard(el)) return false;
     if (el.closest?.(`[${ICON_DATA}="1"][data-fee-header="1"]`)) return false;
     return true;
@@ -2152,7 +2162,7 @@
         if (!(root instanceof HTMLElement)) continue;
         sawRoot = true;
         const cards = root.querySelectorAll(
-          '[data-sentry-source-file="TokenItem.tsx"]'
+          GMGN_TOKEN_ITEM_SELECTOR
         );
         const lim = Math.min(cards.length, 18);
         for (let i = 0; i < lim; i += 1) {
@@ -7716,7 +7726,7 @@
       return null;
     }
     if (isGmgnHost()) {
-      const item = el.closest?.('[data-sentry-source-file="TokenItem.tsx"]');
+      const item = el.closest?.(GMGN_TOKEN_ITEM_SELECTOR);
       return item instanceof HTMLElement ? item : el;
     }
     return el;
@@ -7788,7 +7798,7 @@
     if (!isGmgnHost() || !records?.length || shouldDeferGmgnTrenchResizeWork()) return 0;
     if (isGmgnScrollCooling() && !isGmgnTokenPage()) return 0;
     const hrefSelector = GMGN_FEE_TOKEN_HREF_SELECTOR;
-    const itemSelector = '[data-sentry-source-file="TokenItem.tsx"]';
+    const itemSelector = GMGN_TOKEN_ITEM_SELECTOR;
     const seen = new Set();
     let discovered = 0;
     const tokenItemHasFeeHref = (el) => {
@@ -9218,7 +9228,7 @@
   }
 
   // 必须等于 page-hook.js HOOK_VER（打包脚本会校验），否则每页都会重复注入 page-hook。
-  const PAGE_HOOK_VER = "284";
+  const PAGE_HOOK_VER = "285";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -13065,7 +13075,7 @@
           isGmgnRobinhoodPage() ||
           (isGmgnMixedChainPage() && rootHasRobinhoodTokenHref(root))
         ) {
-          root.querySelectorAll('[data-sentry-source-file="TokenItem.tsx"]').forEach((n) => {
+          root.querySelectorAll(GMGN_TOKEN_ITEM_SELECTOR).forEach((n) => {
             const href = (n.getAttribute && n.getAttribute("href")) || "";
             if (!isRobinhoodTokenRouteHref(href)) return;
             if (rhHrefLooksSkipped(href)) return;
@@ -13521,7 +13531,7 @@
         if (/flap\.sh|bscscan|etherscan/i.test(href)) return;
         let card = el;
         if (isGmgnHost()) {
-          const item = el.closest?.('[data-sentry-source-file="TokenItem.tsx"]');
+          const item = el.closest?.(GMGN_TOKEN_ITEM_SELECTOR);
           if (item instanceof HTMLElement) card = item;
         } else if (isDebotHost()) {
           const climbed = climbDebotListCard(el);
@@ -14748,7 +14758,7 @@
         // ignore
       }
       let card = isGmgnHost()
-        ? icon.closest?.('[data-sentry-source-file="TokenItem.tsx"]')
+        ? icon.closest?.(GMGN_TOKEN_ITEM_SELECTOR)
         : null;
       if (!(card instanceof HTMLElement) && isDebotHost()) {
         card = climbDebotListCard(icon);
@@ -15284,26 +15294,27 @@
     }, REQUEST_TIMEOUT_MS);
 
     try {
-      const headers = { "Content-Type": "application/json" };
-      if (licenseAccessKey) {
-        headers.Authorization = `Bearer ${licenseAccessKey}`;
-        if (licenseDeviceId) {
-          headers["X-Flap-Device-Id"] = licenseDeviceId;
-        }
-      }
       lastModesSentAt = Date.now();
-      const res = await fetchFlapApi("/modes", {
+      // 0.9.12：CORS 简单请求（text/plain、不带 Authorization / X-Flap-Device-Id），
+      // 浏览器不再每次先发 OPTIONS 预检，Worker 请求量减半。key 放 body；
+      // URL 的 lic=1 只是给 Cloudflare WAF 规则看的标记（无 key 的请求可在 Worker 之前拦掉）。
+      const body = {
+        tokens,
+        platforms: Object.fromEntries(
+          tokens.filter((t) => isGeniusFunToken(t)).map((t) => [t, "geniusfun"])
+        ),
+        tax_hints: modesTaxHints(tokens),
+        // 0.9.9+：Worker 的急停 / 降频可以只管老版本（below_ver），新版本照常
+        client_ver: EXTENSION_VERSION
+      };
+      if (licenseAccessKey) {
+        body.license_key = licenseAccessKey;
+        if (licenseDeviceId) body.device_id = licenseDeviceId;
+      }
+      const res = await fetchFlapApi(licenseAccessKey ? "/modes?lic=1" : "/modes", {
         method: "POST",
-        headers,
-        body: JSON.stringify({
-          tokens,
-          platforms: Object.fromEntries(
-            tokens.filter((t) => isGeniusFunToken(t)).map((t) => [t, "geniusfun"])
-          ),
-          tax_hints: modesTaxHints(tokens),
-          // 0.9.9+：Worker 的急停 / 降频可以只管老版本（below_ver），新版本照常
-          client_ver: EXTENSION_VERSION
-        }),
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+        body: JSON.stringify(body),
         signal: controller.signal,
         cache: "no-store"
       });
@@ -17160,7 +17171,7 @@
 
   function trenchMarkCardSelector() {
     return isGmgnHost()
-      ? '[data-sentry-source-file="TokenItem.tsx"]'
+      ? GMGN_TOKEN_ITEM_SELECTOR
       : 'a[href*="/token/bsc/"], a[href*="/token/robinhood/"]';
   }
 
@@ -17906,7 +17917,7 @@
     if (
       p instanceof HTMLElement &&
       p !== card &&
-      !p.matches?.('[data-sentry-source-file="TokenItem.tsx"]')
+      !p.matches?.(GMGN_TOKEN_ITEM_SELECTOR)
     ) {
       try {
         const r = p.getBoundingClientRect();
@@ -17974,8 +17985,8 @@
 
   function resolveGmgnMarkCard(el) {
     if (!(el instanceof HTMLElement)) return null;
-    if (el.matches?.('[data-sentry-source-file="TokenItem.tsx"]')) return el;
-    return el.closest?.('[data-sentry-source-file="TokenItem.tsx"]') || null;
+    if (el.matches?.(GMGN_TOKEN_ITEM_SELECTOR)) return el;
+    return el.closest?.(GMGN_TOKEN_ITEM_SELECTOR) || null;
   }
 
   function resolveDebotMarkCard(el) {

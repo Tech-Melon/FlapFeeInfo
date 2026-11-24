@@ -10,7 +10,10 @@
  *   brew（GMGN 宿主，不打 /modes）、Four 已迁移 4444（只画底池）
  */
 (() => {
-  const HOOK_VER = 284;
+  const HOOK_VER = 285;
+  // 0.9.11：GMGN 新构建没有 data-sentry-*，卡片认 data-testid="trench-token-card"。
+  const GMGN_TOKEN_ITEM_SEL =
+    '[data-sentry-source-file="TokenItem.tsx"], [data-testid="trench-token-card"]';
   // fee-core.js 必须先于本文件进 MAIN world（manifest 与所有兜底注入都按此顺序）。
   const Core = window.__flapFeeCore;
   if (!Core) return;
@@ -5677,9 +5680,9 @@
 
   function resolveGmgnCardElement(node) {
     if (!(node instanceof HTMLElement)) return null;
-    if (node.matches?.('[data-sentry-source-file="TokenItem.tsx"]')) return node;
+    if (node.matches?.(GMGN_TOKEN_ITEM_SEL)) return node;
     return (
-      node.closest?.('[data-sentry-source-file="TokenItem.tsx"]') ||
+      node.closest?.(GMGN_TOKEN_ITEM_SEL) ||
       node.closest?.('[href*="/bsc/token/0x"]') ||
       node.closest?.('[href*="/robinhood/token/0x"]') ||
       null
@@ -5924,7 +5927,9 @@
   }
 
   const GMGN_HOST_FEE_ROOT_SEL =
-    '[data-sentry-source-file="PumpSubX.tsx"], [data-sentry-source-file="PumpSubAX.tsx"], div.flex.flex-col.flex-1.overflow-hidden';
+    '[data-sentry-source-file="PumpSubX.tsx"], [data-sentry-source-file="PumpSubAX.tsx"], ' +
+    '[data-testid="trenchesNewCreations"], [data-testid="trenchesCompleting"], [data-testid="trenchesCompleted"], ' +
+    'div.flex.flex-col.flex-1.overflow-hidden';
   const DEBOT_HOST_FEE_ROOT_SEL =
     '.MuiStack-root, [class*="MuiGrid"], div[class*="overflow-y"], div[class*="overflow-auto"]';
   const HOST_FEE_OBSERVE_MAX_ROOTS = 8;
@@ -6207,7 +6212,7 @@
             if (
               n instanceof HTMLElement &&
               n.matches?.(
-                '[data-sentry-source-file="TokenItem.tsx"], [href*="/bsc/token/0x"], [href*="/token/bsc/"], [href*="/token/robinhood/"], [data-contract]'
+                '[data-sentry-source-file="TokenItem.tsx"], [data-testid="trench-token-card"], [href*="/bsc/token/0x"], [href*="/token/bsc/"], [href*="/token/robinhood/"], [data-contract]'
               )
             ) {
               scanRoot(n);
