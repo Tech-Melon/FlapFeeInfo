@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.9.12",
-  "description": "FlapFeeInfo 0.9.12: works with GMGN's new page build; half the API requests (no CORS preflight).",
+  "version": "0.9.13",
+  "description": "FlapFeeInfo 0.9.13: uses the main API domain only (backup domain retired).",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",
@@ -20,8 +20,7 @@
     }
   },
   "host_permissions": [
-    "https://taxinfo.tech-melon.top/*",
-    "https://flap-fee-info.tech-melon.workers.dev/*"
+    "https://taxinfo.tech-melon.top/*"
   ],
   "permissions": ["storage"],
   "content_scripts": [

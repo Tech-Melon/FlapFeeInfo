@@ -57,7 +57,7 @@
                                                │ POST /modes  { tokens, platforms, tax_hints }
                                                │ Authorization: Bearer <license>（有 key 时）
                                                ▼
-Cloudflare Worker  cloudflare/worker.js   https://taxinfo.tech-melon.top（备用 *.workers.dev）
+Cloudflare Worker  cloudflare/worker.js   https://taxinfo.tech-melon.top（workers.dev 已关，2026-11-24）
     isolate 内存 → KV（FLAP_FEE_CACHE）→ miss：全 miss 时 wait_chain 直等；混批先回命中、waitUntil 后台补
     路由：POST /modes · GET /health · POST /license/verify · POST /license/rebind · POST /admin/sync-license
     限流：MODE_RATE_LIMITER（每 IP 每 colo 100 次 / 10s）；REQUIRE_LICENSE（wrangler vars，现网 "1"）
@@ -165,6 +165,8 @@ content 主流程：
 - **插件限流 / 急停（0.9.8）**：`loadClientConfig` 读 KV `config:client`（键存在即为准，`{}` 可放开 env 急停），没有则用 var `CLIENT_THROTTLE`（JSON）；isolate 缓存 60s，KV 失败沿用上一份、10s 后重试。字段 `disabled`（/modes 最先返回 503 `service_paused` + `Retry-After`，不查授权 / 限流 / KV / 后端）、`retry_after_sec`（10–3600，默认 300）、`min_interval_ms`（≤60000）、`max_batch`（8–48）、`hot_lane:false`、`below_ver`（0.9.9：只管 body `client_ver` < 它的插件和不报版本的 ≤0.9.8；不填 = 所有版本；`tools/client_throttle.py` 默认填当前 manifest 版本，`--all` 全量）。命中版本的 200 / 429 回包带 `client`（不含 `below_ver`），没命中的不带。body 在急停判断前解析（≤64KB）。CORS `Access-Control-Expose-Headers: Retry-After`。急停后插件仍会在每段暂停结束时各发 1 次请求（Worker 请求照样计费，但不读 KV、不回源）。操作：`python tools/client_throttle.py show|pause|slow|release|clear`（见 `cloudflare/README.md`）
 - **授权位置（0.9.12）**：`Authorization: Bearer` + `X-Flap-Device-Id` 头（≤0.9.11、弹窗）或 body `license_key` + `device_id`（0.9.12+ 插件，简单请求免 OPTIONS 预检）。头优先。
 - **无 key 请求省计费**：Worker 一旦被调用就计费，401 也算；只有 Worker 之前的 WAF / 限速规则拦掉的请求不计（[Workers 指标文档](https://developers.cloudflare.com/workers/observability/metrics-and-analytics)）。无 key 的 `/modes` 来自 0.7.99 之前的老插件（不认授权，401 后 0.9–12s 重试，`wrangler tail` 2026-11-24 约占全部 Worker 请求一半）。zone `tech-melon.top` → Security → WAF → Custom rules 加 Block 规则：`(http.host eq "taxinfo.tech-melon.top" and http.request.uri.path eq "/modes" and ((http.request.method eq "POST" and not any(http.request.headers.names[*] eq "authorization") and not http.request.uri.query contains "lic=1") or (http.request.method eq "OPTIONS" and not any(lower(http.request.headers["access-control-request-headers"][*])[*] contains "authorization"))))`。老插件遇到 403 会改走 `*.workers.dev`（WAF 管不到），所以要同时在 `wrangler.jsonc` 关 `workers_dev`（0.9.12+ 只在主域名网络失败时才会用它）
+- **WAF 规则现状（2026-11-24 已上线）**：zone `tech-melon.top`（`49459d41…1655`，Free）自定义规则 ref `flap_block_nokey_modes`（rule id `c46135b4ce864f31803463826a2ec6e2`，ruleset `259489c8…ad22`），动作 Block，表达式同上。操作脚本 `_archive/2026-11-24/_run_cf_waf.py show|enable|disable`（Token 读 `cloudflare/.cf-waf-token`，权限 Zone WAF Edit + Zone Read + Analytics Read，只限这个 zone，不进 git）。回退：`disable`，或后台 Security → WAF → Custom rules 关掉。上线前用 `wrangler tail` 按同一逻辑模拟：付费请求 0 命中。
+- **workers.dev 已关（2026-11-24）**：`wrangler.jsonc` `workers_dev: false`，请求在边缘回 404 / 1042，不调用 Worker。关之前 tail 90 秒：35 个付费设备里 3 个只走 workers.dev（≤0.9.8），无 key 的老插件大多也在打它。≤0.8.233 的插件只认 workers.dev，必须升级。WAF 表达式里头名、预检头列表都按 `lower()` 比较（HTTP/1.1 客户端可能发大写 `Authorization`）。Cloudflare 的 Browser Integrity Check 会拦没有浏览器 UA 的脚本请求（403 / 1010），用脚本测主域名要带浏览器 UA
 - **测试**：`cloudflare/*.test.mjs`（`node --test cloudflare/`），改 Worker 后先跑。
 
 ### 2.4 后端（`server/`）
@@ -1123,6 +1125,7 @@ python tools/ctl.py watchdog-run
  - `0.8.250`：`fee-core.js` 共享纯逻辑（平台注册表 + 单位换算/纯金库/篮子/尾号规则/复用状态机），`tests/` 17 项样本+结构守护，打包前必跑；平台只在 page-hook 判定，content 以 `entry.platform` 为准；金库屏蔽「纯金库不屏蔽」选项（`keepPureTaxVault`）；Long.xyz 预留（GMGN 带 `tax_allocation` 才画，点击 app.long.xyz）；厨师/慈善/回流箭头与底池同名（`💛→MRNAB`→`💛→MRNA`）；bootstrap 发金库 prefs 不再丢 `hideGenius`
  - `0.8.251`：资金接收白名单同时认 `marketing_recipients` / Dev / founder。host-fee 与 `/modes` 的 hide-addrs 不再绕过白名单；`hideAddrSet` 在有完整税字段时按当前名单重判，名单变化清空集合。尾号与金库不豁免
  - `0.8.252`：资金接收白名单每条地址可写备注（`allow[].note`，最多 32 字）。备注只给自己看，不参与匹配；只改备注不推页面、不清 `hideAddrSet`
+ - `0.9.13`：`API_BASES` / `LICENSE_API_BASES` 只剩主域名，manifest 去掉 workers.dev host 权限；Worker `workers_dev: false`；主域名 WAF `flap_block_nokey_modes`（只管 `/modes`，登录 / 换绑不拦）
  - `0.9.12`：`/modes`、`/license/verify` 改 CORS 简单请求（`text/plain`，无自定义头，key / 设备 id 放 body `license_key` / `device_id`，有 key 时 `?lic=1`），省掉每次 OPTIONS 预检；Worker `extractClientLicenseKey(request, body)` / `extractDeviceId(request, body)` 头优先、body 兜底。`isGmgnTokenTrenchSidebarEl` 兜底认 `[data-trenches-token-page]`
  - `0.9.11`（并入 0.9.12）：GMGN 新构建去掉了全部 `data-sentry-*` 属性。`GMGN_FIXED_TRENCH_ROOT_SELECTOR` 加 `[data-testid="trenchesNewCreations|trenchesCompleting|trenchesCompleted"]`，卡片用 `GMGN_TOKEN_ITEM_SELECTOR`（content）/ `GMGN_TOKEN_ITEM_SEL`（page-hook）= sentry `TokenItem.tsx` 或 `[data-testid="trench-token-card"]`。卡片属性 `data-trenches-token-address` / `data-trenches-token-page` 也可用。新增 GMGN 选择器优先用 `data-testid`，sentry 属性随构建可能消失
  - `0.9.10`：刷新后徽章及时出。宿主占位不再遮住 chrome.storage 里的链上结果（`applyHostFeeEntries` 先 `resolveEntry`，读完缓存后 `reconcileHostPlaceholdersWithPersistent` 换回）；主批 Genius / Flap 轮流（`lastMainBatchKind`、`pickGeniusForMainBatch`），主批在发 Genius 时热通道不限视口发 Flap/Four；宿主半截徽章（有分配、无底池名、还要 `/modes`）画 ⏳（`hostPartialAwaitingModes`）；`/license/verify` 429/5xx/403/读 KV 失败不再当拒绝（`scheduleLicenseReverify` 5s/15s/60s/5min）。展示名：服务端 `compact_display_symbol` 截 4 字 → 与插件同规则（剥 Flap 尾缀 B，最多 6 字）；`STOCK_CHIP_ALIASES` 去掉 `FXION→FXIO`，旧缓存 `FXIO` 还原成 `FXION`。`CORE_VER` 11
@@ -1173,7 +1176,7 @@ python tools/ctl.py watchdog-run
  - `0.8.255`：搜索弹层屏蔽。厨师行用搜索回包 `recv_addrs` 对白名单；没有地址时按 👨‍🍳 百分比先藏，命中白名单后再显示。🎁 只走金库开关。`hideAddrSet` 仍要求有收款地址
  - `0.8.254`：完整包剪切板。钱包地址 / 定链失败不再抢其它输入框焦点；同一段 GMGN 定链最多 3 次（2s / 20s），之后停住。确认钱包仍不打开 K 线
  - `0.8.253`：悬浮窗买卖税对齐 GMGN 合计税率（`total_buy_tax`，含池子费；宿主更高则保留）。战壕纤维、搜索和 K 线同一套。尾号 4444 只画底池（`🖐️`，不打 `/modes`）。brew 只用 GMGN 宿主数据，有 `s_tal` 再画分配，不打 `/modes`；无分配的后续包不盖已画出的分红。K 线先认 launchpad，裸 6666 未确认前不打 `/modes`，认出 brew 后丢掉 Genius 缓存。`CORE_VER` 4，`HOOK_VER` / `PAGE_HOOK_VER` 209
-- 插件当前版本：见 `extension/manifest.json`（**0.9.12**，公开无剪切板）
+- 插件当前版本：见 `extension/manifest.json`（**0.9.13**，公开无剪切板）
 - page-hook：`HOOK_VER` **285**；fee-core `CORE_VER` **11**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）；`content.js` / `tax-recv-bootstrap.js` 的 `PAGE_HOOK_VER` 必须相同（`tools/pack_extension.py` 会校验）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）

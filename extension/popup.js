@@ -32,10 +32,8 @@
   const SYMBOL_STYLE_KEY = "flapFeeInfo.symbolStyle.v1";
   const LICENSE_KEY = "flapFeeInfo.license.v1";
   const DEVICE_ID_KEY = "flapFeeInfo.deviceId.v1";
-  const LICENSE_API_BASES = [
-    "https://taxinfo.tech-melon.top",
-    "https://flap-fee-info.tech-melon.workers.dev"
-  ];
+  // 0.9.13：workers.dev 已关，只用主域名（见 content.js API_BASES）。
+  const LICENSE_API_BASES = ["https://taxinfo.tech-melon.top"];
   let licenseApiBase = LICENSE_API_BASES[0];
   const LICENSE_PURCHASE_URL = "https://t.me/TechMelon_Pay_bot?start=flap";
   const DEFAULT_THEME = "dark";

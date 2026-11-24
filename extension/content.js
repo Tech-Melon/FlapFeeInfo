@@ -19,10 +19,9 @@
     isSingleAssetStockVault,
     mergeBasketWithTaxDomSymbols
   } = Core;
-  const API_BASES = [
-    "https://taxinfo.tech-melon.top",
-    "https://flap-fee-info.tech-melon.workers.dev"
-  ];
+  // 0.9.13：只用主域名。workers.dev 已关（WAF 管不到那里，无授权的老插件在上面白耗 Worker 请求）；
+  // 留着它当备用反而会在主域名偶发失败时切过去，拿到 404 后整页卡在死地址上。
+  const API_BASES = ["https://taxinfo.tech-melon.top"];
   let DEFAULT_API_BASE = API_BASES[0];
   /** /modes 已回过包的 Genius CA（geniusHostNeedsRecv 防循环用）。 */
   const geniusRecvAnswered = new Set();
