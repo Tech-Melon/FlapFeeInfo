@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.9.13",
-  "description": "FlapFeeInfo 0.9.13: uses the main API domain only (backup domain retired).",
+  "version": "0.9.14",
+  "description": "FlapFeeInfo 0.9.14: Debot columns no longer miss badges at the bottom.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

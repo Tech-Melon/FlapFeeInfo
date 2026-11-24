@@ -3046,6 +3046,8 @@
   /** GMGN home: next visible row index for three-column round-robin hole filling. */
   let gmgnSteadyRoundRobinRow = 0;
   let debotSteadyRoundRobinRow = 0;
+  /** collectListReturnAnchorsRoundRobin 上一次是否因 cap 没走完所有行。 */
+  let roundRobinLastTruncated = false;
   /** Last bound observer roots (skip rebind when identity unchanged). */
   let lastObserverRoots = [];
   let gmgnObserverRefreshTimer = null;
@@ -8591,9 +8593,16 @@
         for (let i = 0; i < found.length; i += 1) {
           const a = found[i];
           if (isDebotTickerChip(a)) continue;
-          const row = a.closest?.('a[href*="/token/"]');
-          const seed =
-            row instanceof HTMLElement && isDebotTrenchRowCard(row) ? row : a;
+          // 0.9.14：Debot 每张卡里有 2–3 个 /token/ 链接（整卡、头像、底池币 WBNB/USDT 图标），
+          // 以前每个都占一个候选名额，30 个名额只覆盖十来张卡；Debot 稳定后不再触发扫描，
+          // 列底部的卡就一直没有徽章（js-mcp 2026-11-24：已迁移列底部 4 张）。
+          // 现在内部链接归到所在的整卡上，一张卡一个名额。
+          let row = a.closest?.('a[href*="/token/"]');
+          if (!(row instanceof HTMLElement && isDebotTrenchRowCard(row))) {
+            const up = a.parentElement?.closest?.('a[href*="/token/"]');
+            row = up instanceof HTMLElement && isDebotTrenchRowCard(up) ? up : null;
+          }
+          const seed = row || a;
           if (isDebotTickerChip(seed)) continue;
           pushSeed(seed, seed);
         }
@@ -8641,6 +8650,7 @@
       if (!added) break;
       visitedRows += 1;
     }
+    roundRobinLastTruncated = visitedRows < maxRows;
     return out;
   }
 
@@ -12986,6 +12996,11 @@
       debotSteadyRoundRobinRow =
         (debotSteadyRoundRobinRow + Math.max(1, Math.floor(DEBOT_STEADY_CARDS_BUDGET / 3))) %
         1000000;
+      // 0.9.14：这一轮没覆盖完所有可见行（高屏 / 行多）→ 主动再扫一轮，
+      // Debot 稳定后不会再有触发扫描的 DOM 变化，不补这一下底部的卡永远轮不到。
+      if (roundRobinLastTruncated) {
+        scheduleScan(400, { force: false, immediate: false });
+      }
       if (anchors.length) return anchors;
     }
 
