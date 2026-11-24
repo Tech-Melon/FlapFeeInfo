@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.9.9",
-  "description": "FlapFeeInfo 0.9.9: server-side request throttling targets only older plugin versions.",
+  "version": "0.9.10",
+  "description": "FlapFeeInfo 0.9.10: badges show right after refresh; pool / payout names up to 6 characters.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

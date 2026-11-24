@@ -423,9 +423,9 @@ Debot 混合战壕按**卡 href** 认链（`/token/bsc/` vs `/token/robinhood/`�
 |-----------|------|
 | `0x556f0944357fb9a789c4a374095d3ce9ffba7777` | fee `💎90%👨‍🍳10%` hybrid；有报价时 `🪙… \| 💎90%👨‍🍳10%` |
 | `0x789476401ce0df8805f6e8a9a1e7439aac117777` | `🎁100%` gift（币股 vault） |
-| `0x7f048908f1fcc57d836c258143004c4597937777` | 币股 `🦋BNB \| 📈NVDA&FXIO`（底池是 BNB，不是 NVDAB） |
+| `0x7f048908f1fcc57d836c258143004c4597937777` | 币股 `🦋BNB \| 📈NVDA&FXION`（底池是 BNB，不是 NVDAB） |
 | `0x78471d87a30d2b073d1a775eccee299393157777` | 非 vault SPCX 底池 `🦋SPCX \| 💎→SPCX`（`Glorb/SPCXB`，禁止回退 BNB） |
-| `0x28e9053bd9c4057da73e99282818cc5c4bc07777` | 币股 `🦋BNB \| 📈FXIO`（底池是 BNB，不是 FXION） |
+| `0x28e9053bd9c4057da73e99282818cc5c4bc07777` | 币股 `🦋BNB \| 📈FXION`（底池是 BNB；0.9.9 及以前是截 4 字的 `FXIO`） |
 | `0x83f2a3e66396a5489ecc9c1cbc67aee524af7777` | 税收金库已迁 Pancake `🦋QQQB \| 🎁→QQQB`（不要画成 `🦋BNB`） |
 | `0xbd6bfe956474f156ad4545bbe83b33cf767c7777` | SPCXB 底池税收金库 `🦋SPCX \| 🎁70%→SPCX💎30%`（不要 `🦋BNB` / `📈SPCX`） |
 | `0x28b8aa38bbcb083a481383151c03074463ceffff` | Four v2 慈善 `🎓50%💛50%` hybrid；有报价时 `🖐️GMEB \| 🎓50%→GMEB💛50%` |
@@ -454,9 +454,9 @@ Debot 混合战壕按**卡 href** 认链（`/token/bsc/` vs `/token/robinhood/`�
 | GMGN Flap `0xabeb19a5…7777` 人生好物 | 底池 `🦋BNCB`；分红是本币，徽章 `🦋BNCB \| 💎→人生好物`（或无发射名时 `🦋BNCB \| 💎`），禁止 `💎→BNCB` |
 | GMGN Four 已迁移 `0x366385bbfb24bd6e58ebd486d150cdaff4114444` | 只画 `🖐️BNCB`，不打 `/modes`，不画 ❓️ / ⏳；tooltip 买卖税 0.25% / 0.25%；点击 four.meme |
 | GMGN brew `0xb1b798c76a9f7bc6f5002dd72c23cf0d64b76666` | `🪙BNB`。无 `s_tal` 不画分红、不打 `/modes`、不跳转；尾号 6666 且 `launchpad=brew`，不是 Genius |
-| GMGN Flap 外盘 `0x1501ee216eed4470ae89d0ae6310954c1e617777`（s_tal `dividend 0.9 / marketing 0.1` + `marketing_recipients`=Flap Platform `0x8a08…ab0e`） | `🦋FXIO \| 💎→FXIO`（对齐链上 10000）；悬浮窗 💎 90% + 🦋 Flap 平台 10%；禁止 `👨‍🍳10%`，资金接收屏蔽不得藏 |
+| GMGN Flap 外盘 `0x1501ee216eed4470ae89d0ae6310954c1e617777`（s_tal `dividend 0.9 / marketing 0.1` + `marketing_recipients`=Flap Platform `0x8a08…ab0e`） | `🦋FXION \| 💎→FXION`（对齐链上 10000）；悬浮窗 💎 90% + 🦋 Flap 平台 10%；禁止 `👨‍🍳10%`，资金接收屏蔽不得藏 |
 | GMGN Flap 外盘 `0xa45823a5f8013413bfa4082e352aa65b115f7777` / `0x24da547856f292b22b5f36fa05341e85de0e7777`（WSS 数字格式） | `🦋NVDA \| 💎→NVDA` / `🦋XAUT \| 💎→XAUT`；悬浮窗同上 |
-| GMGN Flap 内盘 `0x9d49645484d909403f223bbd2da0ac7c019f7777`（一苇渡江，新创建列推送只有 `dividend 1`） | 徽章 `🦋FXIO \| 💎→FXIO`；不点进 K 线，悬浮约 0.3s 内变成 💎 90% + 🦋 Flap 平台 10% |
+| GMGN Flap 内盘 `0x9d49645484d909403f223bbd2da0ac7c019f7777`（一苇渡江，新创建列推送只有 `dividend 1`） | 徽章 `🦋FXION \| 💎→FXION`；不点进 K 线，悬浮约 0.3s 内变成 💎 90% + 🦋 Flap 平台 10% |
 | GMGN `0x74c7f7cdafc5f45f1102a9a73ebeec69c8b97777`（`flap_pool_launch`，曾被 6h 负缓存成 ❓️未） | `🦋BNB \| 🎁89.2%→BNB…`（🔥7.2% 💧3.6%）；买 2% / 卖 3%。链上仍空时 K 线页 `/modes` 不得每秒请求（加载后约 5 次，之后按分钟退避） |
 | GMGN 分配税收金库 `0x93b2f84e85b08d557fada911a62b864143be7777`（`vault_factory`=`0xfab75dc7…52345f`，HTTP split_recipients 100% → `0xad3c…1e75`） | 金库屏蔽只勾「屏蔽「🎁 其实给钱包」」时从「新创建」列删掉；自动分红金库（工厂 `0x17ca49…`）、礼物金库（`0x025549…`）不受影响 |
 | GMGN 卡片「Tax 2%」且 `buy_tax=0`、`total_buy_tax=0.02` | 悬浮窗买卖税 2% / 2%。`/modes` 代币税为 0 或更小不得盖掉宿主合计 |
@@ -1121,6 +1121,7 @@ python tools/ctl.py watchdog-run
  - `0.8.250`：`fee-core.js` 共享纯逻辑（平台注册表 + 单位换算/纯金库/篮子/尾号规则/复用状态机），`tests/` 17 项样本+结构守护，打包前必跑；平台只在 page-hook 判定，content 以 `entry.platform` 为准；金库屏蔽「纯金库不屏蔽」选项（`keepPureTaxVault`）；Long.xyz 预留（GMGN 带 `tax_allocation` 才画，点击 app.long.xyz）；厨师/慈善/回流箭头与底池同名（`💛→MRNAB`→`💛→MRNA`）；bootstrap 发金库 prefs 不再丢 `hideGenius`
  - `0.8.251`：资金接收白名单同时认 `marketing_recipients` / Dev / founder。host-fee 与 `/modes` 的 hide-addrs 不再绕过白名单；`hideAddrSet` 在有完整税字段时按当前名单重判，名单变化清空集合。尾号与金库不豁免
  - `0.8.252`：资金接收白名单每条地址可写备注（`allow[].note`，最多 32 字）。备注只给自己看，不参与匹配；只改备注不推页面、不清 `hideAddrSet`
+ - `0.9.10`：刷新后徽章及时出。宿主占位不再遮住 chrome.storage 里的链上结果（`applyHostFeeEntries` 先 `resolveEntry`，读完缓存后 `reconcileHostPlaceholdersWithPersistent` 换回）；主批 Genius / Flap 轮流（`lastMainBatchKind`、`pickGeniusForMainBatch`），主批在发 Genius 时热通道不限视口发 Flap/Four；宿主半截徽章（有分配、无底池名、还要 `/modes`）画 ⏳（`hostPartialAwaitingModes`）；`/license/verify` 429/5xx/403/读 KV 失败不再当拒绝（`scheduleLicenseReverify` 5s/15s/60s/5min）。展示名：服务端 `compact_display_symbol` 截 4 字 → 与插件同规则（剥 Flap 尾缀 B，最多 6 字）；`STOCK_CHIP_ALIASES` 去掉 `FXION→FXIO`，旧缓存 `FXIO` 还原成 `FXION`。`CORE_VER` 11
  - `0.9.9`：`/modes` body 带 `client_ver`（`EXTENSION_VERSION` = manifest 版本）。Worker 急停 / 降频按 `below_ver` 只管老版本，新版本不受限。page-hook / fee-core 未改
  - `0.9.8`：GMGN 滚动中缓存补画 `gmgnScrollFastPaint`（`noteGmgnScrollActivity` 里 rAF 调度，140ms 一轮、≤8 张、≤4ms；按 `data-trenches-token-address` 取 CA，先查 `modeCache` / `persistentCache`，无缓存不碰 DOM，不发请求；已挂 ⏳ 且缓存仍待定 `isCacheEntryStillLoading` 跳过）。服务端限流客户端：`noteServerClientConfig`（200 回包 `client`，没带即恢复默认）、`noteServerPause`（429 / 503 `service_paused`，`Retry-After` 或 `retry_after_sec`，5s–1h）、`serverThrottleWaitMs`（暂停 + `min_interval_ms`），`flushTokenBatch` 到点重排（暂停到期加 0–2s 抖动）、`flushHotLane` 让路；`max_batch` 压单批；状态存 `flapFeeInfo.serverThrottle.v1`，跨标签页 `pauseUntil` 取大，超过「现在 + 1h」视为时钟回拨作废。Worker 见 2.3「插件限流」。page-hook / fee-core 未改
  - `0.9.7`：GMGN `columns-fields-v2` 影子（`ncV2`：full / patch 合并、`filterNcColumnV2InPlace`、重写 `order`）；SharedWorker 运行中降级主线程（`trs_ws` 出现即 `noteGmgnTransport("main-thread-ws")` 并装主线程钩子）；`data-flap-gmgn-sw-unbound` 诊断。`HOOK_VER` / `PAGE_HOOK_VER` 284
@@ -1168,8 +1169,8 @@ python tools/ctl.py watchdog-run
  - `0.8.255`：搜索弹层屏蔽。厨师行用搜索回包 `recv_addrs` 对白名单；没有地址时按 👨‍🍳 百分比先藏，命中白名单后再显示。🎁 只走金库开关。`hideAddrSet` 仍要求有收款地址
  - `0.8.254`：完整包剪切板。钱包地址 / 定链失败不再抢其它输入框焦点；同一段 GMGN 定链最多 3 次（2s / 20s），之后停住。确认钱包仍不打开 K 线
  - `0.8.253`：悬浮窗买卖税对齐 GMGN 合计税率（`total_buy_tax`，含池子费；宿主更高则保留）。战壕纤维、搜索和 K 线同一套。尾号 4444 只画底池（`🖐️`，不打 `/modes`）。brew 只用 GMGN 宿主数据，有 `s_tal` 再画分配，不打 `/modes`；无分配的后续包不盖已画出的分红。K 线先认 launchpad，裸 6666 未确认前不打 `/modes`，认出 brew 后丢掉 Genius 缓存。`CORE_VER` 4，`HOOK_VER` / `PAGE_HOOK_VER` 209
-- 插件当前版本：见 `extension/manifest.json`（**0.9.9**，公开无剪切板）
-- page-hook：`HOOK_VER` **283**；fee-core `CORE_VER` **10**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）；`content.js` / `tax-recv-bootstrap.js` 的 `PAGE_HOOK_VER` 必须相同（`tools/pack_extension.py` 会校验）
+- 插件当前版本：见 `extension/manifest.json`（**0.9.10**，公开无剪切板）
+- page-hook：`HOOK_VER` **284**；fee-core `CORE_VER` **11**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）；`content.js` / `tax-recv-bootstrap.js` 的 `PAGE_HOOK_VER` 必须相同（`tools/pack_extension.py` 会校验）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
 - 缓存 key 升级：改持久化字段时 bump `flapFeeInfo.modeCache.vN`（当前 `v5`）

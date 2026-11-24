@@ -5,7 +5,7 @@
  */
 (function (root) {
   // API 变更必须 +1：插件重载不刷页时 MAIN world 里还留着旧版，同版号会跳过加载。
-  const CORE_VER = 10;
+  const CORE_VER = 11;
   if (root.__flapFeeCore && root.__flapFeeCore.ver === CORE_VER) return;
 
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
@@ -211,9 +211,13 @@
     return (k === "launcher" || k === "other") && (Number(entry.market_bps) || 0) > 0;
   }
 
-  /** 币股篮子专用：保留 FXION/NVDAON 等区分度，仅剥 Flap 常见尾缀 B（NVDAB→NVDA） */
+  /**
+   * 币股篮子专用别名。Flap 尾缀 B（NVDAB→NVDA）由 compactBasketSymbol 统一剥。
+   * FXIO：0.9.9 及以前服务端一律截 4 字留下的 FXION 残名（KV / SQLite / 本地缓存最长 30 天），
+   * 还原成 GMGN 卡上显示的 FXION。0.9.10 起 FXION 不再缩成 FXIO。
+   */
   const STOCK_CHIP_ALIASES = {
-    FXION: "FXIO",
+    FXIO: "FXION",
     NVDAON: "NVDA"
   };
 

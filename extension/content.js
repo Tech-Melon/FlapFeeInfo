@@ -1536,6 +1536,21 @@
     throw new Error("flap-api-unreachable");
   }
 
+  let licenseVerifyRetryN = 0;
+  let licenseVerifyRetryTimer = 0;
+  /** 授权校验临时失败：5s / 15s / 60s，之后每 5 分钟再验一次（不改当前授权状态）。 */
+  function scheduleLicenseReverify(reason) {
+    if (licenseVerifyRetryTimer) return;
+    const delays = [5000, 15000, 60000, 300000];
+    const delayMs = delays[Math.min(licenseVerifyRetryN, delays.length - 1)];
+    licenseVerifyRetryN += 1;
+    licenseVerifyRetryTimer = window.setTimeout(() => {
+      licenseVerifyRetryTimer = 0;
+      if (!isExtensionContextValid()) return;
+      void refreshLicenseAccessState(`retry:${reason || ""}`);
+    }, delayMs);
+  }
+
   async function refreshLicenseAccessState(reason) {
     if (!isExtensionContextValid()) return;
     if (licenseGateProbePromise) return licenseGateProbePromise;
@@ -1571,13 +1586,33 @@
             break;
           }
         }
+        const errCode = String(data?.error || "");
+        // 0.9.10：429 / 5xx / CF 403 / 读 KV 失败不是「授权无效」，保持原状态稍后重验。
+        // 以前一律当拒绝，整页徽章被清掉，直到改设置才恢复（服务端 /modes 自己也会验授权）。
+        const transient =
+          !data ||
+          res.status === 429 ||
+          res.status === 403 ||
+          res.status >= 500 ||
+          errCode === "license_check_failed" ||
+          errCode === "license_store_unavailable" ||
+          errCode === "license_device_bind_failed";
         if (!licenseAccessKey) {
-          licenseEnforcedByServer = data?.enforced === true;
-          licenseAccessGranted = !licenseEnforcedByServer;
+          if (transient) {
+            scheduleLicenseReverify(reason);
+          } else {
+            licenseVerifyRetryN = 0;
+            licenseEnforcedByServer = data?.enforced === true;
+            licenseAccessGranted = !licenseEnforcedByServer;
+          }
         } else if (res.ok && data?.ok && data?.valid && data.device_match !== false) {
+          licenseVerifyRetryN = 0;
           licenseEnforcedByServer = data?.enforced === true;
           licenseAccessGranted = true;
+        } else if (transient) {
+          scheduleLicenseReverify(reason);
         } else {
+          licenseVerifyRetryN = 0;
           if (data?.enforced === true) licenseEnforcedByServer = true;
           licenseAccessGranted = false;
         }
@@ -1596,6 +1631,7 @@
         });
       } catch (_probe) {
         debugInfo("license:gate-probe-failed", { reason });
+        scheduleLicenseReverify(reason);
       } finally {
         licenseGateProbePromise = null;
       }
@@ -2746,6 +2782,19 @@
   let activeAbortController = null;
   /** Tokens currently inside an in-flight /modes request (re-queue on force recover). */
   let activeBatchTokens = [];
+  /**
+   * 0.9.10：主批这一轮发的是哪类（"genius" / "other"）。Genius 必须单独成批，
+   * 但不能每轮都抢主批：上一轮发过 Genius、队列里还有 Flap/Four 时，下一轮先发 Flap/Four，
+   * 热通道同时发另一类（js-mcp：慢回包时 48 枚 Flap 被 3 轮单枚 Genius 压了 24s）。
+   */
+  let lastMainBatchKind = "";
+  let activeMainBatchKind = "";
+  /** 连续几轮主批发的都是 Flap/Four（Genius 在排队时用来防饿死）。 */
+  let mainOtherStreak = 0;
+  /** 宿主半截徽章（有分配、无底池名）画 ⏳ 的起点 / 已被 /modes 明确回答的币（hostPartialAwaitingModes）。 */
+  const HOST_PARTIAL_LOADING_MAX_MS = 8000;
+  const hostPartialSince = new Map();
+  const hostPartialAnswered = new Set();
   // 0.7.57 热通道：主批在途时，视口/新创建热 token 走独立并行 /modes，
   // 不再被单飞 batchActive 锁压在大批后面（竞态：新币撞上冷大批要等好几秒）。
   let hotLaneActive = false;
@@ -14438,7 +14487,17 @@
     }
     const minTok = geniusQueued ? GENIUS_BATCH_MIN_TOKENS : hot ? HOT_BATCH_MIN_TOKENS : BATCH_MIN_TOKENS;
     const flushMs = geniusQueued ? GENIUS_BATCH_FLUSH_MS : hot ? HOT_BATCH_FLUSH_MS : BATCH_FLUSH_MS;
-    if (hot && batchActive && !hotLaneActive) {
+    // 主批在发 Genius 时，队列里的 Flap/Four 不必是「视口热」也走热通道（两类不互相排队）。
+    let otherBehindGenius = false;
+    if (batchActive && activeMainBatchKind === "genius") {
+      for (const t of requestQueue) {
+        if (!isGeniusFunToken(t)) {
+          otherBehindGenius = true;
+          break;
+        }
+      }
+    }
+    if ((hot || otherBehindGenius) && batchActive && !hotLaneActive) {
       const mainAgeMs = batchStartedAt ? Date.now() - batchStartedAt : BATCH_STUCK_MS + 1;
       if (mainAgeMs < BATCH_STUCK_MS) void flushHotLane();
     }
@@ -14804,6 +14863,7 @@
         emptyUnknownIncoming
       ) {
         // GMGN 已有 🔥/💎，空 unknown（旧负缓存）不得盖掉。
+        noteHostPartialAnswered(token);
         return;
       }
       takeStockBasket(prev, entry);
@@ -14980,20 +15040,30 @@
     // 服务端关了热通道 / 急停 / 间隔未到：等主批回来再走正常 flush
     if (serverHotLaneOff || serverThrottleWaitMs() > 0) return;
     const hotCap = serverMaxBatch > 0 ? Math.min(HOT_LANE_MAX_TOKENS, serverMaxBatch) : HOT_LANE_MAX_TOKENS;
+    // 主批在发 Genius（wait_chain 常要好几秒）：热通道只发 Flap/Four，且不限视口，
+    // 两类互不排队。主批在发 Flap/Four：热通道照旧优先 Genius，其次视口热 token。
+    const mainGenius = activeMainBatchKind === "genius";
     const hotTokens = [];
     for (const token of requestQueue) {
       // 主批已带上的 token 不重复请求（CF/后端虽会合并，但省一份带宽）。
       if (activeBatchTokens.includes(token)) continue;
+      const genius = isGeniusFunToken(token);
+      if (mainGenius) {
+        if (genius || !tokenNeedsModesFetch(token)) continue;
+        hotTokens.push(token);
+        if (hotTokens.length >= hotCap) break;
+        continue;
+      }
       if (
         isGmgnHotUnpaintedToken(token) ||
         isDebotHotUnpaintedToken(token) ||
-        (isGeniusFunToken(token) && tokenNeedsModesFetch(token))
+        (genius && tokenNeedsModesFetch(token))
       ) {
         hotTokens.push(token);
         if (hotTokens.length >= hotCap) break;
       }
     }
-    const geniusHot = hotTokens.filter((t) => isGeniusFunToken(t));
+    const geniusHot = mainGenius ? [] : hotTokens.filter((t) => isGeniusFunToken(t));
     const sendHot = geniusHot.length ? geniusHot : hotTokens;
     if (sendHot.length === 0) return;
     sendHot.forEach((token) => {
@@ -15032,6 +15102,27 @@
         hotLaneStartedAt = 0;
       }
     }
+  }
+
+  /**
+   * 主批发 Genius 还是 Flap/Four（两类不混批）。
+   * - 只有一类：发那一类。
+   * - 两类都有：视口里有未画的 Flap/Four，或上一轮主批已经发过 Genius → 先发 Flap/Four；
+   *   否则发 Genius。主批在途时热通道发另一类（flushHotLane）。
+   */
+  function pickGeniusForMainBatch(geniusTokens, otherTokens) {
+    if (!geniusTokens.length) return false;
+    if (!otherTokens.length) return true;
+    if (lastMainBatchKind === "genius") return false;
+    // 热通道关闭 / 节流时 Genius 只能走主批：严格轮流。
+    if (serverHotLaneOff || serverThrottleWaitMs() > 0) return true;
+    // 防饿死：Genius 在排队且已连续 2 轮发 Flap/Four，这轮给 Genius。
+    if (mainOtherStreak >= 2) return true;
+    for (let i = 0; i < otherTokens.length; i += 1) {
+      const t = otherTokens[i];
+      if (isGmgnHotUnpaintedToken(t) || isDebotHotUnpaintedToken(t)) return false;
+    }
+    return true;
   }
 
   async function flushTokenBatch() {
@@ -15076,12 +15167,18 @@
     }
 
     // Genius 单独成批：和 Flap 混打时 Worker 会把 Genius miss 丢 waitUntil，预览卡 1min。
+    // 但 Genius 不能每轮都抢主批（见 lastMainBatchKind）。
     const ordered = orderTokensForBatch(Array.from(requestQueue));
     const geniusOnly = ordered.filter((t) => isGeniusFunToken(t));
-    const pick = geniusOnly.length ? geniusOnly : ordered;
+    const others = ordered.filter((t) => !isGeniusFunToken(t));
+    const useGenius = pickGeniusForMainBatch(geniusOnly, others);
+    const pick = useGenius ? geniusOnly : others;
     const capBase = serverMaxBatch > 0 ? serverMaxBatch : MAX_BATCH_TOKENS;
-    const cap = geniusOnly.length ? Math.min(24, capBase) : capBase;
+    const cap = useGenius ? Math.min(24, capBase) : capBase;
     const tokens = pick.slice(0, cap);
+    lastMainBatchKind = useGenius ? "genius" : "other";
+    activeMainBatchKind = lastMainBatchKind;
+    mainOtherStreak = useGenius || !geniusOnly.length ? 0 : mainOtherStreak + 1;
     tokens.forEach((token) => {
       requestQueue.delete(token);
     });
@@ -15142,6 +15239,7 @@
       if (generation === batchGeneration) {
         if (activeAbortController === controller) activeAbortController = null;
         activeBatchTokens = [];
+        activeMainBatchKind = "";
         batchActive = false;
         batchStartedAt = 0;
         if (isExtensionContextValid() && isTabVisible() && requestQueue.size > 0) {
@@ -15220,7 +15318,17 @@
           data?.error &&
           String(data.error).startsWith("license_")
         ) {
-          noteLicenseDeniedFromApi(data.error);
+          // Worker 读 KV 失败也回 401 license_*：不是授权无效，按普通失败退避并稍后重验。
+          const code = String(data.error);
+          if (
+            code === "license_check_failed" ||
+            code === "license_store_unavailable" ||
+            code === "license_device_bind_failed"
+          ) {
+            scheduleLicenseReverify("modes-401-transient");
+          } else {
+            noteLicenseDeniedFromApi(data.error);
+          }
         }
         const err = new Error(`batch query failed status=${res.status}`);
         if (res.status === 429) {
@@ -19720,7 +19828,11 @@
       } catch (_recv) {
         // ignore
       }
-      const prev = modeCache.get(token);
+      // 0.9.10：刷新后本地缓存（chrome.storage）里已有链上结果时，宿主占位不能先占 modeCache，
+      // 否则已知的币又画 ⏳、再打一次 /modes（js-mcp：首批 44 枚大多是这种）。Genius 照旧。
+      const prev =
+        modeCache.get(token) ||
+        (!genius && !isGeniusFunToken(token) ? resolveEntry(token) : null);
       if (prev && !hostFeeEntryShouldApply(prev, entry)) {
         if (
           entry.platform === "brew" &&
@@ -21297,13 +21409,57 @@
     };
   }
 
+  /**
+   * 0.9.10：宿主条目有分配、但底池名还没有、且还要等 /modes（Four RYDE 池、WTTWOX 池这类）：
+   * 以前画成光秃秃的「💎」，看着像出错，等 /modes 回来才变成「🖐️RYDE | 💎→RYDE」。
+   * 改画 ⏳待加载。/modes 退避 / 冷却中（不会马上有结果）时仍画宿主的半截徽章。
+   */
+  function hostPartialAwaitingModes(entry, quoteSymbol, tok) {
+    if (!entry || !entry.source_host || quoteSymbol) return false;
+    if (entry.__pons_v2 === true || entry.__poolOnly === true) return false;
+    if (isGeniusFeeEntry(entry, tok)) return false;
+    if (hostFeeAllocationBps(entry) <= 0) return false;
+    if (!hostFeeStillNeedsModes(entry)) return false;
+    const t = String(tok || entry.address || "").toLowerCase();
+    if (!t || hostPartialAnswered.has(t)) return false;
+    // 急停 / 限流 / 授权被拒：短时间内不会有结果，直接画宿主徽章。
+    if (!isBadgeAccessAllowed() || serverThrottleWaitMs() > 0) return false;
+    if (!tokenNeedsModesFetch(t)) return false;
+    // 已有条目的币不记 missingRetryState（deferTokenRetry），所以按时间封顶：
+    // 首次判定起 HOST_PARTIAL_LOADING_MAX_MS 内画 ⏳，之后退回宿主徽章，不会一直 ⏳。
+    const now = Date.now();
+    let since = hostPartialSince.get(t);
+    if (!since) {
+      since = now;
+      hostPartialSince.set(t, since);
+      if (hostPartialSince.size > 600) {
+        hostPartialSince.delete(hostPartialSince.keys().next().value);
+      }
+    }
+    return now - since < HOST_PARTIAL_LOADING_MAX_MS;
+  }
+
+  /** /modes 已明确回过（例如链上空 unknown 被宿主分配挡住）：不再为宿主半截徽章画 ⏳。 */
+  function noteHostPartialAnswered(token) {
+    const t = String(token || "").toLowerCase();
+    if (!t) return;
+    hostPartialAnswered.add(t);
+    if (hostPartialAnswered.size > 600) {
+      hostPartialAnswered.delete(hostPartialAnswered.values().next().value);
+    }
+  }
+
   function computeBadgePresentation(entry, quoteSymbol, token) {
     const theme = badgeTheme === "light" ? "light" : "dark";
     const solidDarkClass =
       theme === "dark" && badgeSolidDark ? "gmgn-fee-mode-icon--solid-dark" : "";
     const tok = String(token || "").toLowerCase();
     // 未就绪：固定 emoji + 待加载（不拼半截 fee / 错篮子，避免突变）
-    if (isFeeLoadingEntry(entry) || isHostFeeEntryPending(entry)) {
+    if (
+      isFeeLoadingEntry(entry) ||
+      isHostFeeEntryPending(entry) ||
+      hostPartialAwaitingModes(entry, quoteSymbol, tok)
+    ) {
       const label = loadingBadgeLabel();
       const title = loadingBadgeTitle();
       const className = [
@@ -23199,6 +23355,7 @@
               }
             });
             broadcastBasketAddrCache([...persistentCache.values()]);
+            reconcileHostPlaceholdersWithPersistent();
           }
         } catch (error) {
           if (!String(error?.message || error).includes("Extension context invalidated")) {
@@ -23213,6 +23370,41 @@
       }
       markPersistentCacheReady();
     }
+  }
+
+  /**
+   * 0.9.10：宿主推送比 chrome.storage 先到时，modeCache 里是宿主占位（常是 ⏳ / 半截 💎），
+   * 本地缓存的链上结果被挡住，刷新后已知的币又要等一次 /modes。读完缓存后按
+   * applyHostFeeEntries 的同一规则把链上结果换回来：链上优先，例外是链上空 unknown 而宿主有分配、
+   * 空篮子金库等宿主补篮子、只看宿主的底池平台。Genius 不动（要 /modes 拿收款人）。
+   */
+  function reconcileHostPlaceholdersWithPersistent() {
+    let n = 0;
+    modeCache.forEach((host, tok) => {
+      if (!host || !host.source_host) return;
+      if (isGeniusFunToken(tok) || isGeniusFeeEntry(host, tok)) return;
+      if (host.__pons_v2 === true || host.__poolOnly === true) return;
+      if (host.platform === "brew" || host.platform === "four_pool") return;
+      if (!isPersistentCacheHit(tok)) return;
+      const chain = persistentCache.get(tok);
+      if (!chain || isGeniusFeeEntry(chain, tok)) return;
+      const chainEmpty = chain.mode === "unknown" && hostFeeAllocationBps(chain) <= 0;
+      if (chainEmpty && hostFeeAllocationBps(host) > 0) return;
+      const chainBag = normalizeBasketAssets(chain.basket_assets).length;
+      const hostBag = normalizeBasketAssets(host.basket_assets).length;
+      if (chain.is_vault && chainBag < 2 && (host.is_stocks_vault === true || hostBag >= 2)) return;
+      absorbHigherBuySellTax(chain, host);
+      modeCache.set(tok, chain);
+      // 仍要重试的（例如空 unknown 的快速重试）留在队列里。
+      if (!tokenNeedsModesFetch(tok)) {
+        requestQueue.delete(tok);
+        cancelIncompleteModes(tok);
+      }
+      // 屏蔽（资金接收 / 金库）按链上结果重新判定。
+      ingestFeeAndNotifyListHide(tok, chain);
+      n += 1;
+    });
+    return n;
   }
 
   function waitForPersistentCache() {
