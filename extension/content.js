@@ -2756,6 +2756,15 @@
   let hotLaneTokens = [];
   let consecutiveFails = 0;
 
+  /** manifest 版本，随 /modes 上报（Worker 按版本决定限流是否适用） */
+  const EXTENSION_VERSION = (() => {
+    try {
+      return String(chrome.runtime.getManifest().version || "");
+    } catch (_err) {
+      return "";
+    }
+  })();
+
   // ---- 服务端限流 / 急停（0.9.8） ----
   // Worker 在 /modes 回包里带 client:{min_interval_ms,max_batch,hot_lane}；急停时回 503 service_paused，
   // 限流时回 429，都带 Retry-After。暂停截止时间写进 storage，所有标签页共享、重开页面也认。
@@ -15193,7 +15202,9 @@
           platforms: Object.fromEntries(
             tokens.filter((t) => isGeniusFunToken(t)).map((t) => [t, "geniusfun"])
           ),
-          tax_hints: modesTaxHints(tokens)
+          tax_hints: modesTaxHints(tokens),
+          // 0.9.9+：Worker 的急停 / 降频可以只管老版本（below_ver），新版本照常
+          client_ver: EXTENSION_VERSION
         }),
         signal: controller.signal,
         cache: "no-store"
