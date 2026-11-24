@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "技术瓜FlapFeeInfo",
-  "version": "0.9.7",
-  "description": "FlapFeeInfo 0.9.7: hide-by-tax filters work with GMGN's new trenches data format again.",
+  "version": "0.9.8",
+  "description": "FlapFeeInfo 0.9.8: GMGN badges paint during scrolling; server can throttle plugin requests.",
   "icons": {
     "16": "icons/flap-16.png",
     "32": "icons/flap-32.png",

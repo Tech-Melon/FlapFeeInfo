@@ -2755,6 +2755,135 @@
   /** Tokens inside the in-flight hot-lane request (re-queue on reset). */
   let hotLaneTokens = [];
   let consecutiveFails = 0;
+
+  // ---- 服务端限流 / 急停（0.9.8） ----
+  // Worker 在 /modes 回包里带 client:{min_interval_ms,max_batch,hot_lane}；急停时回 503 service_paused，
+  // 限流时回 429，都带 Retry-After。暂停截止时间写进 storage，所有标签页共享、重开页面也认。
+  const SERVER_THROTTLE_STORE_KEY = "flapFeeInfo.serverThrottle.v1";
+  const SERVER_PAUSE_MIN_SEC = 5;
+  const SERVER_PAUSE_MAX_SEC = 3600;
+  let serverPauseUntil = 0;
+  let serverMinIntervalMs = 0;
+  /** 0 = 用本地上限 */
+  let serverMaxBatch = 0;
+  let serverHotLaneOff = false;
+  /** 本标签页最近一次发出 /modes 的时间（主批 + 热通道共用，配合 min_interval_ms） */
+  let lastModesSentAt = 0;
+
+  /** @returns {boolean} 存的 pauseUntil 超过「现在 + 1h」（时钟回拨 / 脏数据），已清零，需要写回 */
+  function applyServerThrottleState(st) {
+    if (!st || typeof st !== "object") return false;
+    const until = Number(st.pauseUntil) || 0;
+    // 本地时钟往回调过：存的截止时间远在 1h 之后，不可信，直接作废并写回，否则每次开页都停 1h
+    const bogus = until > Date.now() + SERVER_PAUSE_MAX_SEC * 1000;
+    serverPauseUntil = bogus ? 0 : until;
+    const gap = Number(st.minIntervalMs) || 0;
+    serverMinIntervalMs = gap > 0 ? Math.min(60000, gap) : 0;
+    const mb = Math.floor(Number(st.maxBatch) || 0);
+    serverMaxBatch = mb > 0 ? Math.min(MAX_BATCH_TOKENS, mb) : 0;
+    serverHotLaneOff = st.hotLaneOff === true;
+    return bogus;
+  }
+
+  /**
+   * 写回 storage。pauseUntil 与已存值取大（另一个标签页刚收到的暂停不被本页盖掉）；
+   * clearPause=true 只用于作废时钟回拨留下的脏值。配置字段以最新收到的回包为准。
+   */
+  function persistServerThrottleState(clearPause = false) {
+    try {
+      chrome.storage.local.get(SERVER_THROTTLE_STORE_KEY, (got) => {
+        void chrome.runtime?.lastError;
+        const prev = got?.[SERVER_THROTTLE_STORE_KEY];
+        const prevUntil = Number(prev?.pauseUntil) || 0;
+        const capUntil = Date.now() + SERVER_PAUSE_MAX_SEC * 1000;
+        const keepPrev = !clearPause && prevUntil > serverPauseUntil && prevUntil <= capUntil;
+        const pauseUntil = keepPrev ? prevUntil : serverPauseUntil;
+        if (pauseUntil > serverPauseUntil) serverPauseUntil = pauseUntil;
+        try {
+          chrome.storage.local.set(
+            {
+              [SERVER_THROTTLE_STORE_KEY]: {
+                pauseUntil,
+                minIntervalMs: serverMinIntervalMs,
+                maxBatch: serverMaxBatch,
+                hotLaneOff: serverHotLaneOff
+              }
+            },
+            () => {
+              void chrome.runtime?.lastError;
+            }
+          );
+        } catch (_setErr) {
+          // 扩展重载中
+        }
+      });
+    } catch (_err) {
+      // 扩展重载中
+    }
+  }
+
+  /** 200 回包：按 client 更新（没带 = 服务端已撤销限流，恢复默认）。 */
+  function noteServerClientConfig(cfg) {
+    const c = cfg && typeof cfg === "object" ? cfg : {};
+    const gap = Math.floor(Number(c.min_interval_ms) || 0);
+    const nextGap = gap > 0 ? Math.min(60000, gap) : 0;
+    const mb = Math.floor(Number(c.max_batch) || 0);
+    const nextBatch = mb > 0 ? Math.min(MAX_BATCH_TOKENS, mb) : 0;
+    const nextHotOff = c.hot_lane === false;
+    if (
+      nextGap === serverMinIntervalMs &&
+      nextBatch === serverMaxBatch &&
+      nextHotOff === serverHotLaneOff
+    ) {
+      return;
+    }
+    serverMinIntervalMs = nextGap;
+    serverMaxBatch = nextBatch;
+    serverHotLaneOff = nextHotOff;
+    debugInfo("server-throttle:config", { nextGap, nextBatch, nextHotOff });
+    persistServerThrottleState();
+  }
+
+  /** 429 / 503：按 Retry-After（或 body.retry_after_sec）全局暂停 /modes。 */
+  function noteServerPause(res, data) {
+    let sec = Number(res?.headers?.get?.("Retry-After"));
+    if (!Number.isFinite(sec) || sec <= 0) sec = Number(data?.retry_after_sec);
+    if (!Number.isFinite(sec) || sec <= 0) sec = res?.status === 429 ? 10 : 60;
+    sec = Math.min(SERVER_PAUSE_MAX_SEC, Math.max(SERVER_PAUSE_MIN_SEC, sec));
+    const until = Date.now() + sec * 1000;
+    if (data?.client) noteServerClientConfig(data.client);
+    if (until <= serverPauseUntil) return;
+    serverPauseUntil = until;
+    debugInfo("server-throttle:pause", { status: res?.status, sec });
+    persistServerThrottleState();
+  }
+
+  /** 还要等多久才能发下一个 /modes（暂停期 + 最小间隔），0 = 现在就能发。 */
+  function serverThrottleWaitMs() {
+    const now = Date.now();
+    const pauseMs = serverPauseUntil > now ? serverPauseUntil - now : 0;
+    const gapMs =
+      serverMinIntervalMs > 0 && lastModesSentAt
+        ? Math.max(0, lastModesSentAt + serverMinIntervalMs - now)
+        : 0;
+    return Math.max(pauseMs, gapMs);
+  }
+
+  try {
+    chrome.storage.local.get(SERVER_THROTTLE_STORE_KEY, (got) => {
+      void chrome.runtime?.lastError;
+      if (applyServerThrottleState(got?.[SERVER_THROTTLE_STORE_KEY])) {
+        persistServerThrottleState(true);
+      }
+    });
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== "local" || !changes[SERVER_THROTTLE_STORE_KEY]) return;
+      applyServerThrottleState(changes[SERVER_THROTTLE_STORE_KEY].newValue);
+    });
+  } catch (_err) {
+    // 扩展重载中
+  }
+
   /** Per-token backoff for API soft misses; prevents a zero-delay /modes loop. */
   const missingRetryState = new Map();
   /** GMGN only: one deferred requeue timer per token after miss/fail. */
@@ -6924,6 +7053,78 @@
     );
   }
 
+  // ---- 滚动中只用缓存补画（0.9.8，js-mcp 2026-11-24） ----
+  // 滚动冷却期（屏蔽开着时 600ms）原本完全不画，新滑进视口的卡要等停滚，实测约 10% 卡晚 0.5s+，
+  // 机器慢、连续滑动时更久。GMGN 卡片现在自带 data-trenches-token-address / -page：
+  // 读属性就知道 CA，不扒 fiber、不发请求，只画 modeCache 里已有结果的卡；每 140ms 最多一轮、≤8 张、≤4ms。
+  const GMGN_SCROLL_FAST_PAINT_GAP_MS = 140;
+  const GMGN_SCROLL_FAST_PAINT_CARDS = 8;
+  const GMGN_SCROLL_FAST_PAINT_BUDGET_MS = 4;
+  let gmgnScrollFastPaintAt = 0;
+  let gmgnScrollFastPaintRaf = 0;
+
+  function scheduleGmgnScrollFastPaint(scrollTarget) {
+    if (gmgnScrollFastPaintRaf) return;
+    const now = performance.now();
+    if (now - gmgnScrollFastPaintAt < GMGN_SCROLL_FAST_PAINT_GAP_MS) return;
+    gmgnScrollFastPaintRaf = window.requestAnimationFrame(() => {
+      gmgnScrollFastPaintRaf = 0;
+      gmgnScrollFastPaintAt = performance.now();
+      try {
+        gmgnScrollFastPaint(scrollTarget);
+      } catch (_fp) {
+        // ignore
+      }
+    });
+  }
+
+  function gmgnScrollFastPaint(scrollTarget) {
+    if (!isGmgnHost() || isTokenDetailRoute()) return 0;
+    if (!isExtensionContextValid() || !isTabVisible() || !isBadgeAccessAllowed()) return 0;
+    const root =
+      scrollTarget instanceof HTMLElement && document.contains(scrollTarget) ? scrollTarget : document;
+    let rootRect = null;
+    try {
+      rootRect = root === document ? null : root.getBoundingClientRect();
+    } catch (_rr) {
+      rootRect = null;
+    }
+    const top = rootRect ? rootRect.top : 0;
+    const bottom = rootRect ? rootRect.bottom : window.innerHeight;
+    const t0 = performance.now();
+    let painted = 0;
+    const cards = root.querySelectorAll("[data-trenches-token-address]");
+    for (let i = 0; i < cards.length; i += 1) {
+      if (painted >= GMGN_SCROLL_FAST_PAINT_CARDS) break;
+      if (performance.now() - t0 > GMGN_SCROLL_FAST_PAINT_BUDGET_MS) break;
+      const card = cards[i];
+      if (!(card instanceof HTMLElement)) continue;
+      const tok = String(card.getAttribute("data-trenches-token-address") || "").toLowerCase();
+      if (!/^0x[a-f0-9]{40}$/.test(tok)) continue;
+      // 先查缓存（两次 Map 查找），没结果的卡不做 DOM 抓取 / 量尺寸
+      if (!modeCache.has(tok) && !isPersistentCacheHit(tok)) continue;
+      const icon = card.querySelector(`[${ICON_DATA}="1"]`);
+      const iconMatches =
+        icon instanceof HTMLElement && String(icon.dataset.feeToken || "").toLowerCase() === tok;
+      if (iconMatches && icon.dataset.feeLoading !== "1") continue;
+      const cached = modeCache.get(tok) || persistentCache.get(tok);
+      // 已挂 ⏳ 且缓存仍是待定：重画还是 ⏳，跳过且不占 8 张名额
+      if (iconMatches && isCacheEntryStillLoading(cached)) continue;
+      let r = null;
+      try {
+        r = card.getBoundingClientRect();
+      } catch (_cr) {
+        continue;
+      }
+      if (r.bottom < top || r.top > bottom || r.height < 8) continue;
+      if (!isFeeTargetToken(tok, card)) continue;
+      const entry = resolveEntry(tok);
+      if (!entry) continue;
+      if (paintListCardFromCacheFast(card, tok, entry)) painted += 1;
+    }
+    return painted;
+  }
+
   /**
    * GMGN only: mark scroll activity. Does NOT scan on every scroll (0.4.5 lesson).
    * After settle, schedule one non-force scan to fill new virtual-list rows.
@@ -6972,6 +7173,7 @@
       gmgnForbiddenScrollTarget = scrollTarget;
     }
     gmgnScrollQuietUntil = Date.now() + settleMs;
+    if (!isGmgnForbiddenScrollTarget(scrollTarget)) scheduleGmgnScrollFastPaint(scrollTarget);
     // Follow one moving deadline instead of allocating and cancelling a timer
     // for every wheel/scroll event.
     if (gmgnScrollResumeTimer) return;
@@ -8556,6 +8758,16 @@
     trenchBadgeRaf.set(card, id);
   }
 
+  /** 缓存条目还画不出定案（⏳ / 预览，仍等 /modes 或 host-fee）。 */
+  function isCacheEntryStillLoading(entry) {
+    if (!entry) return true;
+    return (
+      isFeeLoadingEntry(entry) ||
+      isHostFeeEntryPending(entry) ||
+      (entry.__pons_v2 !== true && !hostFeeCanSkipModes(entry))
+    );
+  }
+
   /**
    * Paint list badge from in-memory fee entry.
    * MUST use site natural mount (Debot metrics / GMGN Tax) — blind card.append 会位置乱飞.
@@ -8580,11 +8792,7 @@
       return false;
     }
     // 加载占位 / 未齐套：⏳。Genius 底池预览、Flap/Four 已有分配可先画，但仍 loading 等 /modes。
-    if (
-      isFeeLoadingEntry(entry) ||
-      isHostFeeEntryPending(entry) ||
-      (entry.__pons_v2 !== true && !hostFeeCanSkipModes(entry))
-    ) {
+    if (isCacheEntryStillLoading(entry)) {
       if (
         entry.__pons_v2 !== true &&
         (hostFeeAllocationBps(entry) > 0 || isGeniusFeeEntry(entry, token))
@@ -14760,6 +14968,9 @@
     }
     // 主批空闲 → 正常 flush 路径即可，热通道只做在途兜底。
     if (!batchActive) return;
+    // 服务端关了热通道 / 急停 / 间隔未到：等主批回来再走正常 flush
+    if (serverHotLaneOff || serverThrottleWaitMs() > 0) return;
+    const hotCap = serverMaxBatch > 0 ? Math.min(HOT_LANE_MAX_TOKENS, serverMaxBatch) : HOT_LANE_MAX_TOKENS;
     const hotTokens = [];
     for (const token of requestQueue) {
       // 主批已带上的 token 不重复请求（CF/后端虽会合并，但省一份带宽）。
@@ -14770,7 +14981,7 @@
         (isGeniusFunToken(token) && tokenNeedsModesFetch(token))
       ) {
         hotTokens.push(token);
-        if (hotTokens.length >= HOT_LANE_MAX_TOKENS) break;
+        if (hotTokens.length >= hotCap) break;
       }
     }
     const geniusHot = hotTokens.filter((t) => isGeniusFunToken(t));
@@ -14846,11 +15057,21 @@
       return;
     }
 
+    // 服务端急停 / 最小间隔：队列留着，到点再发（不丢 token、不空转）
+    const throttleWaitMs = serverThrottleWaitMs();
+    if (throttleWaitMs > 0) {
+      // 暂停到期时各标签页错开 0–2s，别在同一秒一起打到 Worker
+      const jitterMs = serverPauseUntil > Date.now() ? Math.floor(Math.random() * 2000) : 0;
+      scheduleBatchFlush({ delayMs: throttleWaitMs + 50 + jitterMs });
+      return;
+    }
+
     // Genius 单独成批：和 Flap 混打时 Worker 会把 Genius miss 丢 waitUntil，预览卡 1min。
     const ordered = orderTokensForBatch(Array.from(requestQueue));
     const geniusOnly = ordered.filter((t) => isGeniusFunToken(t));
     const pick = geniusOnly.length ? geniusOnly : ordered;
-    const cap = geniusOnly.length ? Math.min(24, MAX_BATCH_TOKENS) : MAX_BATCH_TOKENS;
+    const capBase = serverMaxBatch > 0 ? serverMaxBatch : MAX_BATCH_TOKENS;
+    const cap = geniusOnly.length ? Math.min(24, capBase) : capBase;
     const tokens = pick.slice(0, cap);
     tokens.forEach((token) => {
       requestQueue.delete(token);
@@ -14963,6 +15184,7 @@
           headers["X-Flap-Device-Id"] = licenseDeviceId;
         }
       }
+      lastModesSentAt = Date.now();
       const res = await fetchFlapApi("/modes", {
         method: "POST",
         headers,
@@ -14994,9 +15216,17 @@
           err.name = "RateLimitError";
           // Push fail backoff up so a single 429 doesn't hammer the edge.
           consecutiveFails = Math.max(consecutiveFails, 3);
+          noteServerPause(res, data);
+        } else if (
+          res.status === 503 &&
+          (data?.error === "service_paused" || res.headers.get("Retry-After"))
+        ) {
+          err.name = "ServicePausedError";
+          noteServerPause(res, data);
         }
         throw err;
       }
+      noteServerClientConfig(data.client);
       return data;
     } catch (error) {
       // Badge lookup is optional. The batch owner applies quiet backoff; never surface an

@@ -61,6 +61,7 @@ Cloudflare Worker  cloudflare/worker.js   https://taxinfo.tech-melon.top（备�
     isolate 内存 → KV（FLAP_FEE_CACHE）→ miss：全 miss 时 wait_chain 直等；混批先回命中、waitUntil 后台补
     路由：POST /modes · GET /health · POST /license/verify · POST /license/rebind · POST /admin/sync-license
     限流：MODE_RATE_LIMITER（每 IP 每 colo 100 次 / 10s）；REQUIRE_LICENSE（wrangler vars，现网 "1"）
+    插件急停 / 限流：KV config:client 或 var CLIENT_THROTTLE → 503 service_paused / 回包 client（0.9.8）
                                                │ Bearer UPSTREAM_API_TOKEN（wrangler secret）
                                                │ POST /modes { tokens, wait_chain:true, platforms?, recheck? }
                                                ▼
@@ -161,6 +162,7 @@ content 主流程：
 - **负缓存纠错**：插件 `tax_hints` 表示宿主显示有税。空 unknown 且缓存 ≥120s 时当 miss，并在回源请求里带 `recheck`（`staleNegativeByHint`）。
 - **完整性**：缺 label / bps / `top_payout_*` 的旧条目、vault gift 旧 →BNB、Genius 缺 `creator_recv_kind` 都当 miss（4.3）。
 - **许可证**：`REQUIRE_LICENSE="1"` 时 `/modes` 需要 KV `license:<key>`；运营见 `ENABLE_FLAP_MONETIZATION.md`。
+- **插件限流 / 急停（0.9.8）**：`loadClientConfig` 读 KV `config:client`（键存在即为准，`{}` 可放开 env 急停），没有则用 var `CLIENT_THROTTLE`（JSON）；isolate 缓存 60s，KV 失败沿用上一份、10s 后重试。字段 `disabled`（/modes 最先返回 503 `service_paused` + `Retry-After`，不查授权 / 限流 / KV / 后端）、`retry_after_sec`（10–3600，默认 300）、`min_interval_ms`（≤60000）、`max_batch`（8–48）、`hot_lane:false`。200 / 429 回包带 `client`。CORS `Access-Control-Expose-Headers: Retry-After`。急停后插件仍会在每段暂停结束时各发 1 次请求（Worker 请求照样计费，但不读 KV、不回源）。操作：`python tools/client_throttle.py show|pause|slow|release|clear`（见 `cloudflare/README.md`）
 - **测试**：`cloudflare/*.test.mjs`（`node --test cloudflare/`），改 Worker 后先跑。
 
 ### 2.4 后端（`server/`）
@@ -1119,6 +1121,8 @@ python tools/ctl.py watchdog-run
  - `0.8.250`：`fee-core.js` 共享纯逻辑（平台注册表 + 单位换算/纯金库/篮子/尾号规则/复用状态机），`tests/` 17 项样本+结构守护，打包前必跑；平台只在 page-hook 判定，content 以 `entry.platform` 为准；金库屏蔽「纯金库不屏蔽」选项（`keepPureTaxVault`）；Long.xyz 预留（GMGN 带 `tax_allocation` 才画，点击 app.long.xyz）；厨师/慈善/回流箭头与底池同名（`💛→MRNAB`→`💛→MRNA`）；bootstrap 发金库 prefs 不再丢 `hideGenius`
  - `0.8.251`：资金接收白名单同时认 `marketing_recipients` / Dev / founder。host-fee 与 `/modes` 的 hide-addrs 不再绕过白名单；`hideAddrSet` 在有完整税字段时按当前名单重判，名单变化清空集合。尾号与金库不豁免
  - `0.8.252`：资金接收白名单每条地址可写备注（`allow[].note`，最多 32 字）。备注只给自己看，不参与匹配；只改备注不推页面、不清 `hideAddrSet`
+ - `0.9.8`：GMGN 滚动中缓存补画 `gmgnScrollFastPaint`（`noteGmgnScrollActivity` 里 rAF 调度，140ms 一轮、≤8 张、≤4ms；按 `data-trenches-token-address` 取 CA，先查 `modeCache` / `persistentCache`，无缓存不碰 DOM，不发请求；已挂 ⏳ 且缓存仍待定 `isCacheEntryStillLoading` 跳过）。服务端限流客户端：`noteServerClientConfig`（200 回包 `client`，没带即恢复默认）、`noteServerPause`（429 / 503 `service_paused`，`Retry-After` 或 `retry_after_sec`，5s–1h）、`serverThrottleWaitMs`（暂停 + `min_interval_ms`），`flushTokenBatch` 到点重排（暂停到期加 0–2s 抖动）、`flushHotLane` 让路；`max_batch` 压单批；状态存 `flapFeeInfo.serverThrottle.v1`，跨标签页 `pauseUntil` 取大，超过「现在 + 1h」视为时钟回拨作废。Worker 见 2.3「插件限流」。page-hook / fee-core 未改
+ - `0.9.7`：GMGN `columns-fields-v2` 影子（`ncV2`：full / patch 合并、`filterNcColumnV2InPlace`、重写 `order`）；SharedWorker 运行中降级主线程（`trs_ws` 出现即 `noteGmgnTransport("main-thread-ws")` 并装主线程钩子）；`data-flap-gmgn-sw-unbound` 诊断。`HOOK_VER` / `PAGE_HOOK_VER` 284
   - `0.9.6`：Genius v3（`GeniusConfigurableFactory` `0x52609d5d…ab67`）。后端 `GENIUS_FACTORIES` 加 v3，GeniusSnap 22 字（v3 走 `policyOf`），`_build_genius_v3_alloc` 按占总税 bps 出 💎/👨‍🍳/🎁/🔥/💧，平台 + integrator 进 `platform_bps`；创作者税 0 回带税 unknown 当定案。插件 `buildFeeLabel` Genius 分支加 💎/💧，`geniusPlatformOnly` 只画底池并挡宿主全 0 占位，tooltip 平台行按 1 − 其它份额。Worker、page-hook、fee-core 未改
  - `0.9.5`：弹窗「按税收去向屏蔽」合并两区（`flowHide`）。弹窗层换算：`taxRecv.enabled = master && chef`，`vault.enabled = master && 任一金库项`；税收金库三选一 none / mixed（= hideTaxVault + keepPureTaxVault）/ all（= hideTaxVault）。新 key `flapFeeInfo.filterUi.v1` = `{ set, master, chef }`（只给弹窗用）；`set=false` 时按旧设置推导（`deriveFilterUi`）。`scheduleSaveFlow` 一次写三份 key。页面与 page-hook 不变
  - `0.9.4`：宿主事实统一缓存 `hostFacts.v1`（`rememberFlapPlatformCut(token, bps, known)` / `rememberVaultToWallet`）。page-hook 条目带 `flap_cut_known`（剔过平台 / 带收款方 / HTTP 有 `dev_fee`），`vault_to_wallet` 三态（true / false / null=这包没带）；只有确定结果回写。`HOOK_VER` / `PAGE_HOOK_VER` 283
@@ -1163,7 +1167,7 @@ python tools/ctl.py watchdog-run
  - `0.8.255`：搜索弹层屏蔽。厨师行用搜索回包 `recv_addrs` 对白名单；没有地址时按 👨‍🍳 百分比先藏，命中白名单后再显示。🎁 只走金库开关。`hideAddrSet` 仍要求有收款地址
  - `0.8.254`：完整包剪切板。钱包地址 / 定链失败不再抢其它输入框焦点；同一段 GMGN 定链最多 3 次（2s / 20s），之后停住。确认钱包仍不打开 K 线
  - `0.8.253`：悬浮窗买卖税对齐 GMGN 合计税率（`total_buy_tax`，含池子费；宿主更高则保留）。战壕纤维、搜索和 K 线同一套。尾号 4444 只画底池（`🖐️`，不打 `/modes`）。brew 只用 GMGN 宿主数据，有 `s_tal` 再画分配，不打 `/modes`；无分配的后续包不盖已画出的分红。K 线先认 launchpad，裸 6666 未确认前不打 `/modes`，认出 brew 后丢掉 Genius 缓存。`CORE_VER` 4，`HOOK_VER` / `PAGE_HOOK_VER` 209
-- 插件当前版本：见 `extension/manifest.json`（**0.9.5**，公开无剪切板）
+- 插件当前版本：见 `extension/manifest.json`（**0.9.8**，公开无剪切板）
 - page-hook：`HOOK_VER` **283**；fee-core `CORE_VER` **10**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）；`content.js` / `tax-recv-bootstrap.js` 的 `PAGE_HOOK_VER` 必须相同（`tools/pack_extension.py` 会校验）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）
