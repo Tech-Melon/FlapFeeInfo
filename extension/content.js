@@ -538,6 +538,12 @@
   /** Four 已迁移 4444：只画底池。 */
   const fourPoolAddrSet = new Set();
   const notGeniusAddrSet = new Set();
+  /** 尾号是 8888/7777/ffff，但 page-hook 认出宿主说是普通 DEX 池 / 别的平台：不是税币目标。 */
+  const suffixMismatchAddrSet = new Set();
+
+  function isSuffixMismatchAddr(addr) {
+    return suffixMismatchAddrSet.has(String(addr || "").toLowerCase());
+  }
   // page-hook 的 hideAddrSet 只增不减（白名单变了才清），同一地址不必重复发。
   const pageHookHideSent = new Set();
 
@@ -1797,6 +1803,11 @@
       modeCache.get(tok) ||
       (isPersistentCacheHit(tok) ? persistentCache.get(tok) : null);
     if (!hostFeeCanSkipModes(entry) || geniusHostNeedsRecv(entry)) return false;
+    // 搜索行：只有 GMGN 搜索齐套才放掉；Debot 搜索仍等 /modes。
+    if (searchOverlayModesTokens.has(tok)) {
+      if (!searchOverlayHostReady(entry)) return false;
+      searchOverlayModesTokens.delete(tok);
+    }
     requestQueue.delete(tok);
     cancelIncompleteModes(tok);
     return true;
@@ -1805,6 +1816,7 @@
   function isModesQueueToken(tok) {
     const t = String(tok || "").toLowerCase();
     if (isHostOnlyPoolAddr(t)) return false;
+    if (suffixMismatchAddrSet.has(t)) return false;
     if (notGeniusAddrSet.has(t) && !TARGET_TOKEN_RE.test(t)) return false;
     return TARGET_TOKEN_RE.test(t) || isGeniusFunToken(t);
   }
@@ -1860,6 +1872,7 @@
 
   function tokenNeedsModesFetch(token) {
     const tok = String(token || "").toLowerCase();
+    if (suffixMismatchAddrSet.has(tok)) return false;
     if (unknownCooldownActive(tok)) return false;
     const cached =
       modeCache.get(tok) ||
@@ -1870,7 +1883,7 @@
     if (notGeniusAddrSet.has(tok) && !TARGET_TOKEN_RE.test(tok)) return false;
     if (isGeniusFunToken(tok)) {
       if (shouldHideByCustomSuffix(tok)) return false;
-      if (searchOverlayModesTokens.has(tok)) return true;
+      if (searchOverlayModesTokens.has(tok)) return !searchOverlayHostReady(cached);
       const gEntry = cached;
       if (!gEntry || isFeeLoadingEntry(gEntry)) return true;
       if (isGeniusModesSettled(gEntry)) return !hostFeeCanSkipModes(gEntry);
@@ -1889,7 +1902,7 @@
     }
     if (!TARGET_TOKEN_RE.test(tok)) return false;
     if (shouldHideByCustomSuffix(tok)) return false;
-    if (searchOverlayModesTokens.has(tok)) return true;
+    if (searchOverlayModesTokens.has(tok)) return !searchOverlayHostReady(cached);
     const entry = cached;
     if (!entry || isFeeLoadingEntry(entry)) return true;
     if (isEmptyUnknownEntry(entry) && unknownRetryCount(tok) < UNKNOWN_RETRY_MAX) {
@@ -1899,9 +1912,20 @@
     return !hostFeeCanSkipModes(entry);
   }
 
+  /**
+   * GMGN 搜索回包（search_v4 / search_v3 的 tax_allocation）已经齐套：直接用宿主数据，不打 /modes。
+   * 齐套口径与战壕相同（hostFeeCanSkipModes）：金库、缺底池名 / 分红名、Genius 待收款人仍走 /modes。
+   * Debot 搜索仍只认 /modes（0.8.78）。
+   */
+  function searchOverlayHostReady(entry) {
+    if (!entry || entry.source_host !== "gmgn") return false;
+    if (isFeeLoadingEntry(entry) || isHostFeeEntryPending(entry)) return false;
+    return hostFeeCanSkipModes(entry) && !geniusHostNeedsRecv(entry);
+  }
+
   function overlayHasModesResult(entry) {
     if (!entry || isFeeLoadingEntry(entry) || isHostFeeEntryPending(entry)) return false;
-    if (entry.source_host) return false;
+    if (entry.source_host) return searchOverlayHostReady(entry);
     return true;
   }
 
@@ -1916,6 +1940,7 @@
   function queueSearchOverlayModes(token, href) {
     const tok = String(token || "").toLowerCase();
     if (isHostOnlyPoolAddr(tok)) return;
+    if (suffixMismatchAddrSet.has(tok)) return;
     if (notGeniusAddrSet.has(tok) && !TARGET_TOKEN_RE.test(tok)) return;
     if (
       (!TARGET_TOKEN_RE.test(tok) && !isGeniusFunToken(tok)) ||
@@ -1926,6 +1951,14 @@
     if (!isBadgeAccessAllowed() || !isAllowedScanChain()) return;
     if (href && !isBscTaxTokenHref(href) && !isGeniusFunToken(tok)) return;
     if (shouldHideByCustomSuffix(tok)) return;
+    const cachedHost =
+      modeCache.get(tok) || (isPersistentCacheHit(tok) ? persistentCache.get(tok) : null);
+    if (searchOverlayHostReady(cachedHost)) {
+      searchOverlayModesTokens.delete(tok);
+      requestQueue.delete(tok);
+      cancelIncompleteModes(tok);
+      return;
+    }
     if (searchOverlayModesTokens.size >= 48) {
       const oldest = searchOverlayModesTokens.keys().next().value;
       if (oldest) searchOverlayModesTokens.delete(oldest);
@@ -3244,7 +3277,10 @@
           return findGmgnHeaderAddressMount();
         }
         if (isInsideOverlayDialog(card)) {
-          return markGmgnOverlayAddressCard(card);
+          // 普通扫卡在弹层里可能爬到行内的「头像+名称」块（约 261×56，也含短地址），
+          // 挂进去会落在 overflow:hidden 名称列里、压住短地址。统一挂到整行 TokenItem 上。
+          const row = card.closest?.("[href*='/token/']");
+          return markGmgnOverlayAddressCard(row instanceof HTMLElement ? row : card);
         }
         // K-line trench default placement is strict: only the card's real Tax chip.
         // Falling back to the short-CA row can escape into avatar/trade-control columns.
@@ -4178,6 +4214,35 @@
 
   /** page-hook 见过宿主 launchpad≠geniusfun 的 6666（Debot cheesepad_melt、brew 等）。 */
 
+  /** page-hook：尾号像税币、宿主说不是（普通 DEX 池等）。丢掉排队 / 缓存 / 已画的 ⏳ 或 ❓。 */
+  function applySuffixMismatchAddrs(addrs) {
+    if (!Array.isArray(addrs)) return;
+    for (let i = 0; i < addrs.length; i += 1) {
+      const a = String(addrs[i] || "").toLowerCase();
+      if (!/^0x[a-f0-9]{40}$/.test(a)) continue;
+      suffixMismatchAddrSet.add(a);
+      requestQueue.delete(a);
+      cancelIncompleteModes(a);
+      searchOverlayModesTokens.delete(a);
+      missingRetryState.delete(a);
+      modeCache.delete(a);
+      if (persistentCache.has(a)) {
+        persistentCache.delete(a);
+        persistCacheSoon();
+      }
+      try {
+        document.querySelectorAll(`[${ICON_DATA}="1"][data-fee-token="${a}"]`).forEach((icon) => {
+          icon.remove();
+        });
+      } catch (_rm) {
+        // ignore
+      }
+    }
+    while (suffixMismatchAddrSet.size > 400) {
+      suffixMismatchAddrSet.delete(suffixMismatchAddrSet.keys().next().value);
+    }
+  }
+
   function applyNotGeniusAddrs(addrs) {
     if (!Array.isArray(addrs)) return;
     for (let i = 0; i < addrs.length; i += 1) {
@@ -4695,6 +4760,7 @@
     if (!/^0x[a-f0-9]{40}$/.test(a)) return false;
     if (!isFeeBadgeChainPrefOn(feeBadgeChainKind(a, card))) return false;
     if (isPonsSkipAddr(a)) return false;
+    if (suffixMismatchAddrSet.has(a)) return false;
     if (ponsV2AddrSet.has(a)) return true;
     if (isHostOnlyPoolAddr(a)) {
       const hrefEarly = card ? readCardTokenHref(card) : "";
@@ -4942,6 +5008,15 @@
     // Search results always use their natural short-address row. Besides keeping
     // placement stable, this avoids probing the K-line header during overlay paint.
     if (card?.dataset?.flapOverlayCard === "1") return false;
+    // GMGN 搜索弹层（pi-modal role=dialog）：首帧常由宿主推送 / 普通扫卡先画，那时还没有
+    // overlay 标记，会套上战壕坐标（如 93,61），72px 行里被裁掉半截（js-mcp 2026-11-25）。
+    if (
+      card &&
+      isGmgnHost() &&
+      card.closest?.('[role="dialog"], [role="alertdialog"]')
+    ) {
+      return false;
+    }
     // Debot search rows sit in a dialog on the trench page. Without the overlay
     // mark, isTrenchListPage() would stamp the saved trench offset onto them.
     if (
@@ -9256,7 +9331,7 @@
   }
 
   // 必须等于 page-hook.js HOOK_VER（打包脚本会校验），否则每页都会重复注入 page-hook。
-  const PAGE_HOOK_VER = "285";
+  const PAGE_HOOK_VER = "286";
   const PAGE_HOOK_INJECT_LOCK_ATTR = "data-flap-page-hook-inject-at";
   let pageHookBgInjectSent = false;
 
@@ -13289,7 +13364,17 @@
     if (!isSearchOverlayCard(card) || !(icon instanceof HTMLElement)) return false;
     if (icon.dataset.feePosMode === "absolute") return true;
     const want = isDebotHost() ? "title" : "address";
-    if (icon.dataset.feeOverlayPos !== want) return true;
+    const havePos = icon.dataset.feeOverlayPos || "";
+    // GMGN：MC 上方（默认）或短地址行（找不到 MC 列时的退路）都算挂对了。
+    if (havePos !== want && !(want === "address" && havePos === "mc-head")) return true;
+    // GMGN：徽章必须是整行的直接子节点（挂在行内名称块里会压住短地址）。
+    if (
+      want === "address" &&
+      icon.parentElement !== card &&
+      String(card.getAttribute?.("href") || "").indexOf("/token/") !== -1
+    ) {
+      return true;
+    }
     try {
       const ir = icon.getBoundingClientRect();
       const cr = card.getBoundingClientRect();
@@ -13297,6 +13382,11 @@
       if (ir.width < 2 || ir.height < 2 || cr.width < 2) return false;
       if (ir.top < cr.top - 2 || ir.bottom > cr.bottom + 2) return true;
       if (ir.left < cr.left - 2 || ir.right > cr.right + 2) return true;
+      // ⏳ → 正式文案后变宽：重新避让 MC/ATH 列。
+      if (havePos === "address") {
+        const placedW = Number(icon.dataset.feeOverlayW) || 0;
+        if (Math.abs((icon.offsetWidth || 0) - placedW) > 2) return true;
+      }
       let parent = icon.parentElement;
       while (parent && parent !== card) {
         const st = window.getComputedStyle(parent);
@@ -13326,6 +13416,12 @@
     delete icon.dataset.feeOy;
     icon.dataset.feePosMode = "default";
     icon.dataset.feeOverlayPos = overlayPos;
+    if (overlayPos === "address") {
+      // 一行只留一枚（行内名称块里可能还残留旧挂载）。
+      card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
+        if (n !== icon) n.remove();
+      });
+    }
     if (icon.parentElement !== card) card.appendChild(icon);
     let short = null;
     const leaves = card.querySelectorAll("span, a, div, p");
@@ -13353,9 +13449,17 @@
     const nodes = card.querySelectorAll("span, a, img, svg, div");
     const nodeMax = Math.min(nodes.length, 80);
     const midY = shortRect.top + shortRect.height / 2;
+    // GMGN：只认短地址所在的名称列。没有 Tax 行的币，短地址和 MC 列的 ATH 同高，
+    // 以前会把 ATH 当成地址行图标，徽章被推到 MC 列下面（js-mcp 2026-11-25，龙之队 …4444）。
+    let addrCol = null;
+    if (overlayPos === "address") {
+      addrCol = short;
+      while (addrCol && addrCol.parentElement !== card) addrCol = addrCol.parentElement;
+    }
     for (let i = 0; i < nodeMax; i += 1) {
       const el = nodes[i];
       if (el === icon || icon.contains(el) || el.contains(icon)) continue;
+      if (addrCol && !addrCol.contains(el)) continue;
       const rect = el.getBoundingClientRect();
       if (rect.width < 4 || rect.height < 4 || rect.height > 22 || rect.width > 90) continue;
       if (Math.abs(rect.top + rect.height / 2 - midY) > 8) continue;
@@ -13369,8 +13473,131 @@
     const maxLeft = Math.max(4, Math.round(cardRect.width - width - 6));
     if (left > maxLeft) left = maxLeft;
     if (top < 0) top = 0;
-    const maxTop = Math.max(0, Math.round(cardRect.height - 18));
+    const iconH = Math.max(icon.offsetHeight || 0, 18);
+    const maxTop = Math.max(0, Math.round(cardRect.height - iconH));
     if (top > maxTop) top = maxTop;
+    if (overlayPos === "address") {
+      const realW = Math.max(icon.offsetWidth || 0, 28);
+      top = gmgnOverlayBadgeFreeTop(card, short, icon, left, top, realW, iconH, maxTop);
+    }
+    icon.style.left = `${left}px`;
+    icon.style.top = `${top}px`;
+    icon.style.zIndex = "5";
+    icon.dataset.feeOverlayW = String(icon.offsetWidth || 0);
+    return true;
+  }
+
+  /**
+   * GMGN 搜索行（72px）：短地址那一行右边只剩名称列的宽度，长徽章会盖住右边 MC/ATH、V/Fees。
+   * 盖到别的列文字时，把徽章下移到这些文字下方（ATH / Fees 行底约 52px，徽章 18px 正好放下）。
+   * 只按文字实际包围盒算，不改行宽、不进 flex 流。
+   */
+  function gmgnOverlayBadgeFreeTop(card, short, icon, left, top, width, iconH, maxTop) {
+    try {
+      const cardRect = card.getBoundingClientRect();
+      let infoCol = short;
+      while (infoCol && infoCol.parentElement !== card) infoCol = infoCol.parentElement;
+      const x0 = left;
+      const x1 = left + width;
+      const boxes = [];
+      const children = card.children;
+      for (let i = 0; i < children.length && boxes.length < 80; i += 1) {
+        const col = children[i];
+        if (!(col instanceof HTMLElement) || col === icon || col === infoCol) continue;
+        if (col.dataset?.[ICON_MARK] === "1") continue;
+        const cr = col.getBoundingClientRect();
+        if (cr.width < 1 || cr.right - cardRect.left <= x0 || cr.left - cardRect.left >= x1) {
+          continue;
+        }
+        const walker = document.createTreeWalker(col, NodeFilter.SHOW_TEXT);
+        let n = walker.nextNode();
+        while (n && boxes.length < 80) {
+          if ((n.textContent || "").trim()) {
+            const range = document.createRange();
+            range.selectNodeContents(n);
+            const r = range.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0) boxes.push(r);
+          }
+          n = walker.nextNode();
+        }
+        col.querySelectorAll("svg, img, button").forEach((el) => {
+          if (boxes.length >= 80) return;
+          const r = el.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) boxes.push(r);
+        });
+      }
+      const hits = (t) =>
+        boxes.some((r) => {
+          const l = r.left - cardRect.left;
+          const rr = r.right - cardRect.left;
+          const tp = r.top - cardRect.top;
+          const bt = r.bottom - cardRect.top;
+          return rr > x0 && l < x1 && bt > t + 1 && tp < t + iconH - 1;
+        });
+      if (!hits(top)) return top;
+      let below = top;
+      for (const r of boxes) {
+        const l = r.left - cardRect.left;
+        const rr = r.right - cardRect.left;
+        const bt = Math.ceil(r.bottom - cardRect.top);
+        if (rr > x0 && l < x1 && bt > below) below = bt;
+      }
+      // 下面放得下就下移；放不下保持在短地址行（宁可压住一点也不要被行裁掉）。
+      if (below <= maxTop && !hits(below)) return below;
+      return top;
+    } catch (_free) {
+      return top;
+    }
+  }
+
+  /**
+   * GMGN 搜索行：徽章放在 MC 列上方，与 MC 左对齐（每行同一列，看起来整齐）。
+   * MC 行顶约 17px，徽章压成 16px 高放在它上面；从 MC 左边到行右边约 430px，
+   * 6 段的长徽章（~300px）也放得下，买入按钮从 20px 才开始，不会挡。
+   * 找不到 MC 列（例如以后改版）时返回 false，退回短地址行。
+   */
+  function placeGmgnOverlayBadgeAboveMc(card, icon) {
+    if (!(card instanceof HTMLElement) || !(icon instanceof HTMLElement)) return false;
+    let mcLeaf = null;
+    const spans = card.querySelectorAll("span, div");
+    const max = Math.min(spans.length, 120);
+    for (let i = 0; i < max; i += 1) {
+      const el = spans[i];
+      if (el === icon || icon.contains(el) || el.childElementCount !== 0) continue;
+      if ((el.textContent || "").trim() === "MC") {
+        mcLeaf = el;
+        break;
+      }
+    }
+    if (!(mcLeaf instanceof HTMLElement)) return false;
+    let col = mcLeaf;
+    while (col && col.parentElement !== card) col = col.parentElement;
+    if (!(col instanceof HTMLElement)) return false;
+    const line = mcLeaf.parentElement instanceof HTMLElement ? mcLeaf.parentElement : mcLeaf;
+    const cardRect = card.getBoundingClientRect();
+    const colRect = col.getBoundingClientRect();
+    const lineRect = line.getBoundingClientRect();
+    if (cardRect.width < 2 || colRect.width < 2 || lineRect.height < 2) return false;
+    clearAbsoluteBadgeStyles(icon);
+    delete icon.dataset.feeOx;
+    delete icon.dataset.feeOy;
+    icon.dataset.feePosMode = "default";
+    icon.dataset.feeOverlayPos = "mc-head";
+    card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
+      if (n !== icon) n.remove();
+    });
+    if (icon.parentElement !== card) card.appendChild(icon);
+    try {
+      if (window.getComputedStyle(card).position === "static") card.style.position = "relative";
+    } catch (_pos) {
+      card.style.position = "relative";
+    }
+    const iconH = Math.max(icon.offsetHeight || 0, 14);
+    const width = icon.offsetWidth || 0;
+    let left = Math.round(colRect.left - cardRect.left);
+    const maxLeft = Math.max(4, Math.round(cardRect.width - width - 6));
+    if (left > maxLeft) left = maxLeft;
+    const top = Math.max(0, Math.round(lineRect.top - cardRect.top - iconH - 1));
     icon.style.left = `${left}px`;
     icon.style.top = `${top}px`;
     icon.style.zIndex = "5";
@@ -13378,6 +13605,7 @@
   }
 
   function placeGmgnOverlayAddressBadge(card, icon) {
+    if (placeGmgnOverlayBadgeAboveMc(card, icon)) return;
     if (placeOverlayBadgeOnAddress(card, icon, "address")) return;
     const liquidity = findGmgnOverlayLiquidityHeadMount(card);
     if (liquidity instanceof HTMLElement && liquidity !== card) {
@@ -20067,6 +20295,10 @@
           applyNotGeniusAddrs(data.addrs);
           return;
         }
+        if (data.type === "suffix-reject-map") {
+          applySuffixMismatchAddrs(data.addrs);
+          return;
+        }
         if (data.type !== "host-fee-map") return;
         applyHostFeeEntries(data.entries);
       } catch (_err) {
@@ -22212,6 +22444,21 @@
       else hideFeeTooltip();
     } else if (feeTooltipAnchor && !document.contains(feeTooltipAnchor)) {
       hideFeeTooltip();
+    }
+    // GMGN 搜索行：⏳ 换成正式文案后宽度变了，原地重新避让右侧列（不重建徽章）。
+    if (icon.dataset.feeOverlayPos === "address") {
+      const row = icon.parentElement;
+      const placedW = Number(icon.dataset.feeOverlayW) || 0;
+      if (row instanceof HTMLElement && Math.abs((icon.offsetWidth || 0) - placedW) > 2) {
+        const keepLeft = icon.style.left;
+        const keepTop = icon.style.top;
+        if (!placeOverlayBadgeOnAddress(row, icon, "address")) {
+          icon.style.left = keepLeft;
+          icon.style.top = keepTop;
+          icon.style.zIndex = "5";
+          icon.dataset.feeOverlayPos = "address";
+        }
+      }
     }
   }
 

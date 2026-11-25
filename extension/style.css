@@ -131,6 +131,20 @@
   pointer-events: auto;
 }
 
+/* GMGN search rows: above the MC column, left-aligned on every row. 16px tall to fit the
+   ~17px gap above the MC line; height stays auto so Apple emoji are not clipped. */
+.gmgn-fee-mode-icon--gmgn[data-fee-overlay-pos="mc-head"] {
+  position: absolute !important;
+  margin: 0 !important;
+  z-index: 5 !important;
+  max-width: none !important;
+  min-height: 16px !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  pointer-events: auto;
+  flex: 0 0 auto !important;
+}
+
 /* Search rows: sit on the short-address line. left/top come from the card, not the clipped name stack. */
 .gmgn-fee-mode-icon--gmgn[data-fee-overlay-pos="address"],
 .gmgn-fee-mode-icon--debot[data-fee-overlay-pos="title"] {

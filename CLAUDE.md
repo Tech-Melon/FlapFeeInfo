@@ -127,7 +127,7 @@ page-hook ⇄ content 消息（`window.postMessage`，`source:"flap-fee-info"`�
 |------|------|------|
 | hook → content | `host-fee-map` | host-fee 条目（分配 bps、买卖税、底池、篮子、`platform`、`flap_platform_bps`、`recv_addrs`） |
 | hook → content | `host-fee-quote-patch` | 只补底池 / 分红名 |
-| hook → content | `genius-addr-map` / `genius-reject-map` / `pons-skip-map` | 平台判定结果 |
+| hook → content | `genius-addr-map` / `genius-reject-map` / `pons-skip-map` / `suffix-reject-map` | 平台判定结果（`suffix-reject-map`：尾号像 Flap/Four、宿主说是普通 DEX 池或别的平台，0.9.16） |
 | hook → content | `card-mark-meta` | Dev 发币次数、推特、代号等卡片标记 |
 | hook → content | `search-overlay-tokens` / `host-fee-ranks-done` / `spa` | 搜索弹层地址、首屏完成、SPA 路由 |
 | content → hook | `host-fee-hello` | content 就绪，请求重放已有 host-fee |
@@ -289,6 +289,8 @@ Long.xyz 调研（js-mcp 2026-09）：地址多为 `…1e18` 靓号；Uniswap v4
 
 Worker / Python **只在插件已标 `geniusfun` 时** 放行非尾号 CA，并链上校验 `curve.factory()` ∈ { `0x78EAE953…8138afe31`（v1，原生 BNB/BNCB）, `0x37ee8aee…79928a37`（v2，AMCB/AGPUB 等代币报价，同 owner `0xe7c7…fd98`）, `0x52609d5d…0878ab67`（v3 `GeniusConfigurableFactory`，2026-11，见 4.2）}。
 
+尾号 `8888` / `7777` / `ffff` 同样只是快路径（0.9.16，`Core.suffixLaunchpadMismatch`）：GMGN 的 launchpad 字段（`launchpad` / `launchpad_platform` / `lpp` / `lp`）里没有对应平台，却明确是普通 DEX 池（`pool_*` / `pancake*` / `uniswap*` / `thena*`）或别的已登记平台时，page-hook 记入 suffix-reject 集合并通知 content，**不画、不打 `/modes`**。迁移过的 Flap / Four 币 launchpad 仍是 flap / fourmeme；字段全空或是没见过的 launchpad（gang、binance_agent…）照旧当目标。Robinhood 不归这条。Debot 暂不套用。
+
 尾号 `6666` 只是 Genius 快路径：宿主明确给了别的 launchpad（如 Debot `cheesepad_melt`）时 page-hook 记入 not-genius 集合并通知 content，**不画、不打 `/modes`**。`launchpad=brew` 同样不当 Genius：用 GMGN 画底池/分配，**不打 `/modes`**。尾号 `4444` 与 brew **不进**上面的 Flap/Four 正则，也不进 Worker / Python。
 
 ### 4.2 链上 Helper
@@ -405,7 +407,7 @@ Debot 混合战壕按**卡 href** 认链（`/token/bsc/` vs `/token/robinhood/`�
 
 | 站点 | 识别方式 |
 |------|----------|
-| Debot / Gungnir | 战壕 `[aria-label*="流动池"]` / `img[alt]`（如 `BNB 流动池`）；**搜索弹层不走 host-fee / tokenPair 快路径，只等 `/modes`**。已画出的非 BNB 底池不得被空 DOM 默认 BNB 回退 |
+| Debot / Gungnir | 战壕 `[aria-label*="流动池"]` / `img[alt]`（如 `BNB 流动池`）；**搜索弹层不走 host-fee / tokenPair 快路径，只等 `/modes`**（GMGN 搜索 0.9.16 起相反：`search_v4` 的 `tax_allocation` 齐套就不打 `/modes`）。已画出的非 BNB 底池不得被空 DOM 默认 BNB 回退 |
 | GMGN RWA/美股 | `img[alt$=" quote icon"]` 或 `/static/quotes/{sym}.png` |
 | GMGN 特殊报价 | `data-icon` / `/static/icons/icon_usd1_*` 等 → `USD1` / `USDT` / `USDC` / `WETH`；Robinhood `icon_robinhoodeth` → `ETH` |
 | GMGN 默认 BNB 池 | **常无图标**（`quote_address=0x0`）；BSC 上无特殊报价时默认 `BNB` |
@@ -1125,6 +1127,7 @@ python tools/ctl.py watchdog-run
  - `0.8.250`：`fee-core.js` 共享纯逻辑（平台注册表 + 单位换算/纯金库/篮子/尾号规则/复用状态机），`tests/` 17 项样本+结构守护，打包前必跑；平台只在 page-hook 判定，content 以 `entry.platform` 为准；金库屏蔽「纯金库不屏蔽」选项（`keepPureTaxVault`）；Long.xyz 预留（GMGN 带 `tax_allocation` 才画，点击 app.long.xyz）；厨师/慈善/回流箭头与底池同名（`💛→MRNAB`→`💛→MRNA`）；bootstrap 发金库 prefs 不再丢 `hideGenius`
  - `0.8.251`：资金接收白名单同时认 `marketing_recipients` / Dev / founder。host-fee 与 `/modes` 的 hide-addrs 不再绕过白名单；`hideAddrSet` 在有完整税字段时按当前名单重判，名单变化清空集合。尾号与金库不豁免
  - `0.8.252`：资金接收白名单每条地址可写备注（`allow[].note`，最多 32 字）。备注只给自己看，不参与匹配；只改备注不推页面、不清 `hideAddrSet`
+ - `0.9.16`：识别规则补上「launchpad 有则须对应平台」（`suffixLaunchpadMismatch`，见 4.1；CORE_VER 12、HOOK_VER 286）。GMGN 搜索弹层先用宿主数据：`search_v4` 的 coin 带 `tax_allocation`（与战壕 s_tal 同口径），`searchOverlayHostReady`（`source_host=gmgn` 且 `hostFeeCanSkipModes`、Genius 不缺收款人）为真就直接画、不打 `/modes`；没有 `tax_allocation`、金库、缺分红币 / 底池名时照旧 `/modes`。Debot 搜索仍只认 `/modes`。位置：`canUseTrenchAbsoluteCoords` 对 GMGN `role=dialog` 内的卡不用战壕坐标；弹层里的挂点统一是整行 TokenItem（不挂行内「头像+名称」块）；徽章放 MC 列上方、与 MC 左对齐（`placeGmgnOverlayBadgeAboveMc`，`data-fee-overlay-pos="mc-head"`，16px 高）。没有 MC 列时退回短地址行：地址行右侧图标只在名称列里找，盖到 MC/ATH、V/Fees 文字时下移（`gmgnOverlayBadgeFreeTop`），⏳ 变正式文案后按新宽度重排（`data-fee-overlay-w`）。0.8.243 的 L/H 上方（`liquidity-head`）只剩约 184px 宽，长徽章压买入按钮 / 被裁，不再用
  - `0.9.15`：`queryModes` 等 `licensePrefsReady`（storage 授权 key 读完，最多 2.5s）再发，避免首批无 key 被 WAF 拦；完整包 `clip-article.js` 的 GMGN 推文根改认 `div.whitespace-pre-line.break-words.overflow-wrap.cursor-text`（sentry 属性已没了）
  - `0.9.14`：Debot 轮转候选里卡内小链接（头像 / 底池币图标）归到所在整卡 `a[href*=/token/]`（`isDebotTrenchRowCard`），一卡一个名额；`roundRobinLastTruncated` 为真时 Debot 稳定扫描 400ms 后补扫一轮
  - `0.9.13`：`API_BASES` / `LICENSE_API_BASES` 只剩主域名，manifest 去掉 workers.dev host 权限；Worker `workers_dev: false`；主域名 WAF `flap_block_nokey_modes`（只管 `/modes`，登录 / 换绑不拦）
@@ -1178,7 +1181,7 @@ python tools/ctl.py watchdog-run
  - `0.8.255`：搜索弹层屏蔽。厨师行用搜索回包 `recv_addrs` 对白名单；没有地址时按 👨‍🍳 百分比先藏，命中白名单后再显示。🎁 只走金库开关。`hideAddrSet` 仍要求有收款地址
  - `0.8.254`：完整包剪切板。钱包地址 / 定链失败不再抢其它输入框焦点；同一段 GMGN 定链最多 3 次（2s / 20s），之后停住。确认钱包仍不打开 K 线
  - `0.8.253`：悬浮窗买卖税对齐 GMGN 合计税率（`total_buy_tax`，含池子费；宿主更高则保留）。战壕纤维、搜索和 K 线同一套。尾号 4444 只画底池（`🖐️`，不打 `/modes`）。brew 只用 GMGN 宿主数据，有 `s_tal` 再画分配，不打 `/modes`；无分配的后续包不盖已画出的分红。K 线先认 launchpad，裸 6666 未确认前不打 `/modes`，认出 brew 后丢掉 Genius 缓存。`CORE_VER` 4，`HOOK_VER` / `PAGE_HOOK_VER` 209
-- 插件当前版本：见 `extension/manifest.json`（**0.9.15**，公开无剪切板）
+- 插件当前版本：见 `extension/manifest.json`（**0.9.16**，公开无剪切板）
 - page-hook：`HOOK_VER` **285**；fee-core `CORE_VER` **11**（公开无 writeText 钩；完整包另注 `page-hook-clip.js`）；`content.js` / `tax-recv-bootstrap.js` 的 `PAGE_HOOK_VER` 必须相同（`tools/pack_extension.py` 会校验）
 - 底池与分红着色：`flapFeeInfo.symbolStyle.v1` = `{ enabled, syncBorder, rules:[{id,match,label,color,enabled}] }`（最多 24；match 对展示名，label 可选如纳指；左右半边文字上色；`syncBorder` 默认关，开则边框跟代币色、底色仍跟 💎/👨‍🍳；同 ticker 分红复用底池规则；**BNB/ETH/USD* 底池且分红是别的代币时整枚跟分红色，分红未设色则回退底池色**。读时合并旧 `poolColor.v1` / `divColor.v1`）
 - 定链缓存：`flapFeeInfo.clipJump.chainCache.v2` = `{ [ca]: { chain, kind:"token", at } }`（仅完整包；只存已确认代币）

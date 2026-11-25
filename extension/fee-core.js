@@ -5,7 +5,7 @@
  */
 (function (root) {
   // API 变更必须 +1：插件重载不刷页时 MAIN world 里还留着旧版，同版号会跳过加载。
-  const CORE_VER = 11;
+  const CORE_VER = 12;
   if (root.__flapFeeCore && root.__flapFeeCore.ver === CORE_VER) return;
 
   const TARGET_TOKEN_RE = /^0x[a-fA-F0-9]{36}(8888|7777|ffff)$/i;
@@ -104,6 +104,28 @@
       if (re && re.test(a)) return PLATFORMS[i].id;
     }
     return "";
+  }
+
+  const DEX_POOL_LAUNCHPAD_RE = /^pool_|^pancake|^uniswap|^thena/;
+
+  /**
+   * 尾号 8888/7777（Flap）、ffff（Four）只是快路径：宿主给的 launchpad 串里没有对应平台，
+   * 却明确是普通 DEX 池（pool_pancake…）或别的已登记平台时，返回 true（不是税币目标）。
+   * 没见过的 launchpad（gang、binance_agent…）不下结论，返回 false。
+   */
+  function suffixLaunchpadMismatch(addr, launchpads) {
+    const want = platformFromSuffix(addr);
+    if (want !== "flap" && want !== "four") return false;
+    const raws = Array.isArray(launchpads) ? launchpads : [];
+    let other = false;
+    for (let i = 0; i < raws.length; i += 1) {
+      const lp = String(raws[i] || "").trim().toLowerCase();
+      if (!lp) continue;
+      const plat = platformFromLaunchpad(lp);
+      if (plat === want) return false;
+      if (plat || DEX_POOL_LAUNCHPAD_RE.test(lp)) other = true;
+    }
+    return other;
   }
 
   function taxDetailUrl(platformId, ca, lang) {
@@ -816,6 +838,7 @@
     platformFromLaunchpad,
     platformSpec,
     platformFromSuffix,
+    suffixLaunchpadMismatch,
     taxDetailUrl,
     ratioToBps,
     pctToBps,

@@ -10,7 +10,7 @@
  *   brew（GMGN 宿主，不打 /modes）、Four 已迁移 4444（只画底池）
  */
 (() => {
-  const HOOK_VER = 285;
+  const HOOK_VER = 286;
   // 0.9.11：GMGN 新构建没有 data-sentry-*，卡片认 data-testid="trench-token-card"。
   const GMGN_TOKEN_ITEM_SEL =
     '[data-sentry-source-file="TokenItem.tsx"], [data-testid="trench-token-card"]';
@@ -1053,6 +1053,88 @@
     }
   }
 
+  /**
+   * 尾号 8888/7777（Flap）、ffff（Four）只是快路径。宿主明确说是普通 DEX 池子（pool_pancake / pool_uniswap…）
+   * 或别的已登记平台（Genius / brew / pons…）时，不是税币目标：不画、不打 /modes。
+   * js-mcp 2026-11-25：GMGN 搜索「龙」里 `0xfc92…4c8888` 是 pool_pancake（launchpad 空），Tax 99%，
+   * 链上 ❓未，插件一直 ⏳ 并每 ~20s 重打 /modes。迁移过的 Flap / Four 币 launchpad 仍是 flap / fourmeme，不受影响；
+   * 没见过的 launchpad（gang、binance_agent…）不知道底细，照旧当目标。
+   */
+  const suffixMismatchAddrSet = new Set();
+  const suffixMismatchPending = [];
+  let suffixMismatchFlushTimer = 0;
+
+  function gmgnLaunchpadRaws(item) {
+    if (!item || typeof item !== "object") return [];
+    const f = item.f && typeof item.f === "object" ? item.f : null;
+    const out = [];
+    const push = (v) => {
+      if (typeof v !== "string") return;
+      const s = v.trim().toLowerCase();
+      if (s && out.indexOf(s) === -1) out.push(s);
+    };
+    for (const src of [item, f]) {
+      if (!src) continue;
+      push(src.launchpad);
+      push(src.launchpad_platform);
+      push(src.lpp);
+      push(src.launchpad_platform_name);
+      push(src.lp);
+    }
+    return out;
+  }
+
+  function gmgnSuffixPlatformMismatch(item, addr) {
+    const a = String(addr || "").toLowerCase();
+    if (!TARGET_TOKEN_RE.test(a)) return false;
+    // Robinhood（pons_v2 / longxyz）尾号随机，可能碰巧是 7777，不归这条规则管。
+    if (gmgnItemIsRobinhood(item)) return false;
+    return Core.suffixLaunchpadMismatch(a, gmgnLaunchpadRaws(item));
+  }
+
+  function flushSuffixMismatchPending() {
+    suffixMismatchFlushTimer = 0;
+    if (!suffixMismatchPending.length) return;
+    const addrs = suffixMismatchPending.splice(0, 64);
+    try {
+      window.postMessage({ source: "flap-fee-info", type: "suffix-reject-map", addrs }, "*");
+    } catch (_pm) {
+      // ignore
+    }
+    if (suffixMismatchPending.length) {
+      suffixMismatchFlushTimer = window.setTimeout(flushSuffixMismatchPending, 0);
+    }
+  }
+
+  function rememberSuffixMismatchAddr(addr) {
+    const a = String(addr || "").toLowerCase();
+    if (!TARGET_TOKEN_RE.test(a) || suffixMismatchAddrSet.has(a)) return;
+    suffixMismatchAddrSet.add(a);
+    if (suffixMismatchAddrSet.size > 400) {
+      const first = suffixMismatchAddrSet.keys().next().value;
+      if (first) suffixMismatchAddrSet.delete(first);
+    }
+    suffixMismatchPending.push(a);
+    // 同步发：搜索回包后紧接着就是 search-overlay-tokens / 结果行 DOM，要赶在它们前面。
+    flushSuffixMismatchPending();
+  }
+
+  function replaySuffixMismatchAddrs() {
+    if (!suffixMismatchAddrSet.size) return;
+    const addrs = [];
+    suffixMismatchAddrSet.forEach((a) => addrs.push(a));
+    for (let i = 0; i < addrs.length; i += 64) {
+      try {
+        window.postMessage(
+          { source: "flap-fee-info", type: "suffix-reject-map", addrs: addrs.slice(i, i + 64) },
+          "*"
+        );
+      } catch (_pm) {
+        // ignore
+      }
+    }
+  }
+
   function isGeniusFunAddr(addr) {
     const a = String(addr || "").toLowerCase();
     if (notGeniusAddrSet.has(a) || brewAddrSet.has(a)) return false;
@@ -1489,6 +1571,7 @@
       hostFeeFlushTimer = 0;
     }
     replayNotGeniusAddrs();
+    replaySuffixMismatchAddrs();
     flushHostFeeReplayToContent();
     flushGeniusAddrIndex();
   }
@@ -2054,6 +2137,11 @@
         return;
       }
       if (lp && !genius) rememberNotGeniusAddr(addr);
+      if (!hostFeeItemIsDebotRow(c) && gmgnSuffixPlatformMismatch(c, addr)) {
+        rememberSuffixMismatchAddr(addr);
+        seen.add(addr);
+        return;
+      }
       const suffixGenius = !lp && !brewAddrSet.has(addr) && isGeniusFunAddr(addr);
       if (!TARGET_TOKEN_RE.test(addr) && !genius && !suffixGenius) return;
       if (genius || suffixGenius) rememberGeniusFunAddr(addr);
@@ -2695,6 +2783,10 @@
 
   function gmgnHostFeeFromItem(item) {
     const addr = gmgnAddr(item);
+    if (addr && gmgnSuffixPlatformMismatch(item, addr)) {
+      rememberSuffixMismatchAddr(addr);
+      return null;
+    }
     const pons = gmgnIsPonsV2(item);
     const plat = gmgnNormalizePlatform(item);
     const knownBrew = Boolean(addr) && (plat === "brew" || brewAddrSet.has(addr));
