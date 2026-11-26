@@ -2,6 +2,11 @@
 
 逐版本的实现备注（原先写在 `extension/content.js` 顶部的补丁注释，0.8.250 迁出）。
 面向用户的版本说明见 GitHub Releases；开发约定与完整版本表见 `CLAUDE.md` §10。
+- **0.9.17**：GMGN 搜索框徽章换位置；「深色背景」实心底按类型着色。
+  - 快路径不变：搜「龙」画出 15 枚，只有 5 枚打了 `/modes`（没有 `tax_allocation`、金库、缺分红币），其余直接用 `search_v4` 数据。币股金库 `0x28e9…7777` 走 `/modes`，显示 `🦋BNB | 📈FXION`。
+  - 深色背景：以前勾上后所有类型都是纯 `#0d1110`，只剩边框有颜色。现在仍是 100% 不透明，但底色按类型混入 22% 的强调色（`--flap-solid-tint` + `color-mix`）：持币深绿、金库深琥珀、币股深青、厨师深蓝等；开「边框颜色一起变更」时底色跟代币色。不支持 `color-mix` 的浏览器退回纯 `#0d1110`。浅色主题不变。
+  - 分红币颜色统一：`💎→FXION` 以前是青色（币股篮子样式），`💎→XAUT` 是绿色。原因是 page-hook 把 `dividend_tokens` 都填进 `basket_assets`，插件认得 FXION 地址（股票芯片）就留下了这一条，`basketCount > 0` 就加了 `--basket`。现在 `--basket` / `--has-count` 只给真正的币股金库（`is_vault` 且 `is_stocks_vault` 或 `isTrustedStockVault`）；`📈FXION`、`📈NVDA&FXION` 仍是青色。同一原因的 Four `👨‍🍳98%→TQQQ💎2%` 也不再带青色光圈。
+  - 位置：从 MC 列上方改到 L（流动性）行上方，与「L」左对齐。徽章是整行的直接子节点、按行坐标绝对定位，不进 L 格的 flex 流；长徽章超出行右边时整体左移，不被裁掉。恢复正常 18px 高（MC 上方为了塞进 17px 的空隙压成了 16px、上下 padding 为 0）。找不到「L」时退回短地址行。
 - **0.9.16**：GMGN 搜索框徽章。js-mcp 2026-11-25（gmgn.ai 搜索弹层，780px 宽、结果行 72px、`overflow:hidden`）：
   - 数据来源：GMGN 搜索接口 `/vas/api/v1/search_v4` 每个 coin 带 `tax_allocation`（`dividend` / `dividend_tokens` / `marketing` / `burn_rate` / `liquidity` / `giggle_charity` / `binance_charity` / `is_vault` / `vault_factory` / `market_address`），抽样 30 多枚与 `/modes` 结果一致。以前搜索行一律打 `/modes`（0.8.78）。现在宿主数据齐套（与战壕同一套 `hostFeeCanSkipModes`）就直接画，不打 `/modes`；没有 `tax_allocation`、税收金库、缺分红币或底池名、Genius 还没拿到链上收款人时照旧打 `/modes`。实测搜「龙」：10 枚税币里 5 枚带齐套 `tax_allocation`，没有打 `/modes`；另外 5 枚打了 `/modes`，分别是 3 枚没有 `tax_allocation`、1 枚金库、1 枚缺 `dividend_tokens`。Debot 搜索不变（仍只用 `/modes`）。
   - 位置：开了「使用卡片坐标」时，搜索行首帧会先套战壕坐标（left 93 / top 61），18px 的徽章在 72px 行里被裁掉一半，约 0.5 秒后才挪回短地址旁。现在 GMGN 弹层（`role=dialog`）里的卡一律不用战壕坐标。滚动后普通扫卡会爬到行内的「头像+名称」块并把徽章挂进去，压住短地址；现在统一挂在整行上，一行只留一枚。

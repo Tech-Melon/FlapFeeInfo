@@ -131,21 +131,9 @@
   pointer-events: auto;
 }
 
-/* GMGN search rows: above the MC column, left-aligned on every row. 16px tall to fit the
-   ~17px gap above the MC line; height stays auto so Apple emoji are not clipped. */
-.gmgn-fee-mode-icon--gmgn[data-fee-overlay-pos="mc-head"] {
-  position: absolute !important;
-  margin: 0 !important;
-  z-index: 5 !important;
-  max-width: none !important;
-  min-height: 16px !important;
-  padding-top: 0 !important;
-  padding-bottom: 0 !important;
-  pointer-events: auto;
-  flex: 0 0 auto !important;
-}
-
-/* Search rows: sit on the short-address line. left/top come from the card, not the clipped name stack. */
+/* Search rows: above the L line (l-head, default) or on the short-address line (fallback).
+   left/top come from the card, not the clipped name stack. Normal 18px chip, no padding squeeze. */
+.gmgn-fee-mode-icon--gmgn[data-fee-overlay-pos="l-head"],
 .gmgn-fee-mode-icon--gmgn[data-fee-overlay-pos="address"],
 .gmgn-fee-mode-icon--debot[data-fee-overlay-pos="title"] {
   position: absolute !important;
@@ -321,16 +309,24 @@ body .gmgn-fee-mode-icon {
 }
 
 /*
- * Dark + 深色背景 (popup checked): solid card-like fill.
- * Matches Debot/GMGN trench card surface (~#0d1110 / pure black).
+ * Dark + 深色背景 (popup checked): opaque fill (100%), tinted by the badge kind.
+ * 0.9.17: was pure #0d1110 for every kind; now --flap-solid-tint mixed into the card surface
+ * (green border → dark-green fill), so busy cards cannot bleed through but the kind still reads.
  */
 .gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark {
+  --flap-solid-tint: #0d1110;
   background-color: #0d1110 !important;
+  background-color: color-mix(in srgb, var(--flap-solid-tint) 22%, #0d1110) !important;
   background-image: none !important;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
 }
 
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--loading {
+  --flap-solid-tint: #64748b;
+}
+
 .gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--holder {
+  --flap-solid-tint: #25d366;
   border-color: rgba(39, 233, 132, 0.55);
   box-shadow:
     0 1px 3px rgba(0, 0, 0, 0.55),
@@ -339,6 +335,7 @@ body .gmgn-fee-mode-icon {
 }
 
 .gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--gift {
+  --flap-solid-tint: #ffb834;
   border-color: rgba(255, 202, 69, 0.55);
   box-shadow:
     0 1px 3px rgba(0, 0, 0, 0.55),
@@ -348,6 +345,7 @@ body .gmgn-fee-mode-icon {
 
 /* A · Nasdaq Teal — 币股篮子（覆盖 gift/hybrid 琥珀） */
 .gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--basket {
+  --flap-solid-tint: #00d4a8;
   border-color: rgba(0, 212, 168, 0.58);
   box-shadow:
     0 1px 3px rgba(0, 0, 0, 0.55),
@@ -356,6 +354,7 @@ body .gmgn-fee-mode-icon {
 }
 
 .gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--creator {
+  --flap-solid-tint: #4a9dff;
   border-color: rgba(98, 173, 255, 0.55);
   box-shadow:
     0 1px 3px rgba(0, 0, 0, 0.55),
@@ -364,6 +363,7 @@ body .gmgn-fee-mode-icon {
 }
 
 .gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--burn {
+  --flap-solid-tint: #ff6347;
   border-color: rgba(255, 122, 89, 0.55);
   box-shadow:
     0 1px 3px rgba(0, 0, 0, 0.55),
@@ -372,6 +372,7 @@ body .gmgn-fee-mode-icon {
 }
 
 .gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--lp {
+  --flap-solid-tint: #38bdf8;
   border-color: rgba(56, 189, 248, 0.55);
   box-shadow:
     0 1px 3px rgba(0, 0, 0, 0.55),
@@ -380,6 +381,7 @@ body .gmgn-fee-mode-icon {
 }
 
 .gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--giggle {
+  --flap-solid-tint: #3ecf8e;
   border-color: rgba(62, 207, 142, 0.55);
   box-shadow:
     0 1px 3px rgba(0, 0, 0, 0.55),
@@ -388,6 +390,7 @@ body .gmgn-fee-mode-icon {
 }
 
 .gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--binance {
+  --flap-solid-tint: #f0b90b;
   border-color: rgba(240, 185, 11, 0.55);
   box-shadow:
     0 1px 3px rgba(0, 0, 0, 0.55),
@@ -396,13 +399,20 @@ body .gmgn-fee-mode-icon {
 }
 
 .gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--hybrid {
+  --flap-solid-tint: #94a3b8;
   border-color: rgba(243, 246, 251, 0.35);
   color: #f3f6fb;
 }
 
 .gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--unknown {
+  --flap-solid-tint: #9ca3af;
   border-color: rgba(208, 213, 221, 0.4);
   color: #d0d5dd;
+}
+
+/* 「边框颜色一起变更」：实心底纹也跟代币色（排在各类型规则之后，同权重后者生效）。 */
+.gmgn-fee-mode-icon--theme-dark.gmgn-fee-mode-icon--solid-dark.gmgn-fee-mode-icon--border-tint {
+  --flap-solid-tint: var(--flap-border-fg);
 }
 
 /*

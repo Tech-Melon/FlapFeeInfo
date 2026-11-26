@@ -13365,8 +13365,8 @@
     if (icon.dataset.feePosMode === "absolute") return true;
     const want = isDebotHost() ? "title" : "address";
     const havePos = icon.dataset.feeOverlayPos || "";
-    // GMGN：MC 上方（默认）或短地址行（找不到 MC 列时的退路）都算挂对了。
-    if (havePos !== want && !(want === "address" && havePos === "mc-head")) return true;
+    // GMGN：L 上方（默认）或短地址行（找不到 L 行时的退路）都算挂对了。
+    if (havePos !== want && !(want === "address" && havePos === "l-head")) return true;
     // GMGN：徽章必须是整行的直接子节点（挂在行内名称块里会压住短地址）。
     if (
       want === "address" &&
@@ -13551,38 +13551,37 @@
   }
 
   /**
-   * GMGN 搜索行：徽章放在 MC 列上方，与 MC 左对齐（每行同一列，看起来整齐）。
-   * MC 行顶约 17px，徽章压成 16px 高放在它上面；从 MC 左边到行右边约 430px，
-   * 6 段的长徽章（~300px）也放得下，买入按钮从 20px 才开始，不会挡。
-   * 找不到 MC 列（例如以后改版）时返回 false，退回短地址行。
+   * GMGN 搜索行：徽章放在 L（流动性）行上方，与「L」左对齐（每行同一列）。
+   * 0.9.17 起替代 0.9.16 的 MC 上方。徽章是整行的直接子节点、按行坐标绝对定位，
+   * 不进 L 格的 flex 流；长徽章超出行右边时整体左移，不会被行裁掉。
+   * 徽章保持正常 18px 高（不像 MC 上方那样压成 16px）。
+   * 找不到 L 行（例如以后改版）时返回 false，退回短地址行。
    */
-  function placeGmgnOverlayBadgeAboveMc(card, icon) {
+  function placeGmgnOverlayBadgeAboveL(card, icon) {
     if (!(card instanceof HTMLElement) || !(icon instanceof HTMLElement)) return false;
-    let mcLeaf = null;
-    const spans = card.querySelectorAll("span, div");
-    const max = Math.min(spans.length, 120);
+    let lLeaf = null;
+    const spans = card.querySelectorAll("span, div, p");
+    const max = Math.min(spans.length, 160);
     for (let i = 0; i < max; i += 1) {
       const el = spans[i];
       if (el === icon || icon.contains(el) || el.childElementCount !== 0) continue;
-      if ((el.textContent || "").trim() === "MC") {
-        mcLeaf = el;
+      if ((el.textContent || "").trim() === "L") {
+        lLeaf = el;
         break;
       }
     }
-    if (!(mcLeaf instanceof HTMLElement)) return false;
-    let col = mcLeaf;
+    if (!(lLeaf instanceof HTMLElement)) return false;
+    let col = lLeaf;
     while (col && col.parentElement !== card) col = col.parentElement;
     if (!(col instanceof HTMLElement)) return false;
-    const line = mcLeaf.parentElement instanceof HTMLElement ? mcLeaf.parentElement : mcLeaf;
     const cardRect = card.getBoundingClientRect();
-    const colRect = col.getBoundingClientRect();
-    const lineRect = line.getBoundingClientRect();
-    if (cardRect.width < 2 || colRect.width < 2 || lineRect.height < 2) return false;
+    const leafRect = lLeaf.getBoundingClientRect();
+    if (cardRect.width < 2 || leafRect.width < 1 || leafRect.height < 2) return false;
     clearAbsoluteBadgeStyles(icon);
     delete icon.dataset.feeOx;
     delete icon.dataset.feeOy;
     icon.dataset.feePosMode = "default";
-    icon.dataset.feeOverlayPos = "mc-head";
+    icon.dataset.feeOverlayPos = "l-head";
     card.querySelectorAll(`[${ICON_DATA}="1"]`).forEach((n) => {
       if (n !== icon) n.remove();
     });
@@ -13592,12 +13591,13 @@
     } catch (_pos) {
       card.style.position = "relative";
     }
-    const iconH = Math.max(icon.offsetHeight || 0, 14);
+    const iconH = Math.max(icon.offsetHeight || 0, 18);
     const width = icon.offsetWidth || 0;
-    let left = Math.round(colRect.left - cardRect.left);
+    // 按「L」文字本身的左边 / 顶边算（父节点可能是整格，含按钮，不能拿来算高度）。
+    let left = Math.round(leafRect.left - cardRect.left);
     const maxLeft = Math.max(4, Math.round(cardRect.width - width - 6));
     if (left > maxLeft) left = maxLeft;
-    const top = Math.max(0, Math.round(lineRect.top - cardRect.top - iconH - 1));
+    const top = Math.max(0, Math.round(leafRect.top - cardRect.top - iconH - 2));
     icon.style.left = `${left}px`;
     icon.style.top = `${top}px`;
     icon.style.zIndex = "5";
@@ -13605,7 +13605,7 @@
   }
 
   function placeGmgnOverlayAddressBadge(card, icon) {
-    if (placeGmgnOverlayBadgeAboveMc(card, icon)) return;
+    if (placeGmgnOverlayBadgeAboveL(card, icon)) return;
     if (placeOverlayBadgeOnAddress(card, icon, "address")) return;
     const liquidity = findGmgnOverlayLiquidityHeadMount(card);
     if (liquidity instanceof HTMLElement && liquidity !== card) {
@@ -21802,6 +21802,12 @@
     const label = parts.label;
     const basketAssets = getBasketAssetsForDisplay(entry);
     const basketCount = basketAssets.length;
+    // 0.9.17：青色篮子样式只给真正的币股金库（📈）。直接分红币（💎→FXION）的 dividend_tokens
+    // 也会填进 basket_assets（插件认得 FXION 地址），以前因此被染成青色，和 💎→XAUT 的绿色不一致。
+    const stockBadge =
+      basketCount > 0 &&
+      entry.is_vault === true &&
+      (entry.is_stocks_vault === true || isTrustedStockVault(entry));
     // For muted "&" between first two symbols (e.g. SPCX&TSLA).
     const pairSyms = basketDisplaySymbols(basketAssets);
     const basketPair =
@@ -21828,8 +21834,8 @@
       segmentCount >= 3 ? "gmgn-fee-mode-icon--wide" : "",
       segmentCount >= 2 ? "gmgn-fee-mode-icon--multi" : "",
       quoteSymbol && displayPrefs.pool !== false ? "gmgn-fee-mode-icon--with-pool" : "",
-      basketCount >= 3 ? "gmgn-fee-mode-icon--has-count" : "",
-      basketCount > 0 ? "gmgn-fee-mode-icon--basket" : "",
+      stockBadge && basketCount >= 3 ? "gmgn-fee-mode-icon--has-count" : "",
+      stockBadge ? "gmgn-fee-mode-icon--basket" : "",
       poolColor ? "gmgn-fee-mode-icon--pool-tint" : "",
       divColor ? "gmgn-fee-mode-icon--div-tint" : "",
       symbolStylePrefs.syncBorder && borderColor
